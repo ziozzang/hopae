@@ -214,7 +214,6 @@ pub(crate) mod kit {
             txn: &TransactionRow,
             callback: &CallbackQuery,
             _redirect_uri: &Url,
-            _now: Timestamp,
         ) -> Result<ProviderIdentity, ProviderError> {
             self.completes.fetch_add(1, Ordering::SeqCst);
             let d = *self.delay.lock().unwrap();
@@ -308,6 +307,7 @@ pub(crate) mod kit {
         pub provider_auto_link: bool,
         pub authoritative_domains: Vec<String>,
         pub allowed_domains: Vec<String>,
+        pub hooks: Option<Arc<hopae::store::StoreHooks>>,
     }
 
     impl Default for Opts {
@@ -322,6 +322,7 @@ pub(crate) mod kit {
                 provider_auto_link: false,
                 authoritative_domains: vec![],
                 allowed_domains: vec![],
+                hooks: None,
             }
         }
     }
@@ -398,7 +399,7 @@ pub(crate) mod kit {
                 &dir.path().join("hopae.db"),
                 clock.clone(),
                 vec!["log".into()],
-                None,
+                opts.hooks.clone(),
             )
             .unwrap();
             let rng: Arc<dyn Rng> = Arc::new(OsRng);
@@ -1640,4 +1641,309 @@ async fn s002_a9_userinfo_subject_mismatch_rejected() {
         Some("userinfo_subject_mismatch")
     );
     let _ = victim;
+}
+
+/// One portal visit (a login transaction for `OTHER`) presenting `portal_handle`.
+async fn g7_portal_visit(k: &Kit, portal_handle: &Secret) -> LoginEntry {
+    let b = hopae::crypto::random_token(&hopae::crypto::OsRng, 16);
+    let t = k.start(OTHER, "/", Some(&b)).await;
+    k.svc
+        .sso_or_chooser(&k.ctx(), &t.transaction, Some(portal_handle), None, false)
+        .await
+        .unwrap()
+}
+
+fn g7_portal_handle_state(k: &Kit, h: &Secret) -> (Option<String>, i64) {
+    k.store
+        .conn()
+        .query_row(
+            "SELECT revoked_reason, last_seen_at FROM session_handles WHERE handle_sha256 = ?1",
+            [h.digest().0.to_vec()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// G7-C03 / G7-IDP-06: portal visits keep the portal handle alive (activity
+/// is recorded and coalesced to 30 s), so continuous SSO never lapses.
+#[tokio::test]
+async fn g7_c03_portal_activity_keeps_the_portal_handle_alive() {
+    let k = Kit::new().await;
+    let first = k.login().await;
+    let t0 = T0 / 1000;
+    // Every 8 h, inside the default 12 h portal idle: each visit must SSO.
+    for i in 1..=4u64 {
+        k.advance(8 * 3600);
+        let entry = g7_portal_visit(&k, &first.portal_handle).await;
+        assert!(
+            matches!(entry, LoginEntry::Sso { .. }),
+            "visit {i} at +{}h must still be single sign-on, got {entry:?}",
+            8 * i
+        );
+        assert_eq!(
+            g7_portal_handle_state(&k, &first.portal_handle).1,
+            t0 + (8 * 3600 * i) as i64,
+            "the portal handle records the activity"
+        );
+    }
+    // Coalescing: a second visit within 30 s writes nothing.
+    let seen = g7_portal_handle_state(&k, &first.portal_handle).1;
+    k.advance(10);
+    assert!(matches!(
+        g7_portal_visit(&k, &first.portal_handle).await,
+        LoginEntry::Sso { .. }
+    ));
+    assert_eq!(g7_portal_handle_state(&k, &first.portal_handle).1, seen);
+}
+
+/// G7-C03 / G7-IDP-06: an expired portal handle is revoked (idle), an expired
+/// session is terminated, each with its event; the provider is consulted again.
+#[tokio::test]
+async fn g7_c03_portal_expiry_applies_state_transitions() {
+    // Handle idle (12 h) while the session (24 h) runs on.
+    let k = Kit::new().await;
+    let first = k.login().await;
+    k.advance(13 * 3600);
+    let entry = g7_portal_visit(&k, &first.portal_handle).await;
+    assert!(matches!(entry, LoginEntry::Chooser { .. }), "{entry:?}");
+    assert_eq!(
+        g7_portal_handle_state(&k, &first.portal_handle)
+            .0
+            .as_deref(),
+        Some("idle")
+    );
+    let ev = k.events(EventKind::HandleRevoked).await;
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].reason, Some(reasons::IDLE));
+    assert_eq!(
+        k.count("SELECT COUNT(*) FROM sessions WHERE terminated_at IS NOT NULL"),
+        0
+    );
+
+    // Session idle (24 h): the session is terminated.
+    let k = Kit::new().await;
+    let first = k.login().await;
+    k.advance(25 * 3600);
+    let entry = g7_portal_visit(&k, &first.portal_handle).await;
+    assert!(matches!(entry, LoginEntry::Chooser { .. }), "{entry:?}");
+    assert_eq!(
+        k.text("SELECT terminated_reason FROM sessions").as_deref(),
+        Some("idle")
+    );
+    let ev = k.events(EventKind::SessionTerminated).await;
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].reason, Some(reasons::IDLE));
+}
+
+/// G7-C07: portal retries are counted against the transaction's application
+/// IP (the provenance every replacement is inserted with), so a split
+/// portal/application IP cannot dodge `txn.per_ip_per_minute`.
+#[tokio::test]
+async fn g7_c07_retries_count_against_the_application_ip() {
+    const PORTAL_IP: &str = "198.51.100.77";
+    let k = Kit::with(Opts {
+        txn_per_ip: 5,
+        ..Opts::default()
+    })
+    .await;
+    // binding.ip=off: the portal may complete from another address.
+    let mut snap = (**k.verify.snapshot.load()).clone();
+    for a in snap.apps.iter_mut() {
+        a.binding.ip = hopae::policy::types::IpBinding::Off;
+    }
+    k.verify.snapshot.store(Arc::new(snap));
+
+    let p2 = hopae::crypto::random_token(&hopae::crypto::OsRng, 16);
+    let mut refs = Vec::new();
+    // Two batches a minute apart: each within the creation cap, ten live
+    // transactions in all, each interrupted by a portal-cookie change.
+    for batch in 0..2 {
+        if batch == 1 {
+            k.advance(61);
+        }
+        for i in 0..5 {
+            let t = k.start(APP, &format!("/p{batch}{i}"), Some(&k.b1)).await;
+            let state = k.redirect(&t.transaction, &k.p1).await;
+            let out = k
+                .svc
+                .complete_callback(
+                    &k.ctx_ip(PORTAL_IP),
+                    &k.mock_id(),
+                    CallbackQuery {
+                        code: Some("AC1".into()),
+                        state: Some(state.expose().to_string()),
+                        error: None,
+                        error_description: None,
+                    },
+                    Some(&p2),
+                    None,
+                )
+                .await
+                .unwrap();
+            let CallbackOutcome::Interrupted { retry_ref, .. } = out else {
+                panic!("expected Interrupted, got {out:?}")
+            };
+            refs.push(retry_ref);
+        }
+    }
+    // A minute later no transaction of the application IP is inside the window.
+    k.advance(61);
+    let mut admitted = 0;
+    let mut limited = 0;
+    for r in &refs {
+        match k.svc.retry(&k.ctx_ip(PORTAL_IP), r, Some(&p2)).await {
+            Ok(_) => admitted += 1,
+            Err(SessionError::RateLimited { .. }) => limited += 1,
+            Err(e) => panic!("unexpected retry error: {e:?}"),
+        }
+    }
+    assert_eq!(
+        (admitted, limited),
+        (5, 5),
+        "the cap of 5 per minute applies to the application IP of the replacements"
+    );
+}
+
+fn g7_set_provider_row(k: &Kit, sql_set: &str) {
+    k.store
+        .conn()
+        .execute(
+            &format!("UPDATE providers SET {sql_set} WHERE provider_id = 'mock'"),
+            [],
+        )
+        .unwrap();
+}
+
+/// G7-IDP-01: a provider disabled (or tombstoned) in the database while
+/// Hopae keeps running stops authenticating: no flow begins, no token
+/// exchange happens, no identity or session is written.
+#[tokio::test]
+async fn g7_idp01_live_provider_disable_stops_authentication() {
+    for set in ["enabled = 0", "deleted_at = 1"] {
+        // Disabled before the callback.
+        let k = Kit::new().await;
+        let t = k.start(APP, "/admin/x", Some(&k.b1)).await;
+        let state = k.redirect(&t.transaction, &k.p1).await;
+        g7_set_provider_row(&k, set);
+        let completes = k.mock.completes();
+        let e = k.callback(&state, Some(&k.p1), None).await.unwrap_err();
+        assert_eq!(e.reason().0, "provider_disabled", "{set}");
+        assert_eq!(k.mock.completes(), completes, "{set}: no token exchange");
+        assert_eq!(k.count("SELECT COUNT(*) FROM sessions"), 0);
+        assert_eq!(k.count("SELECT COUNT(*) FROM users"), 0);
+        assert_eq!(k.count("SELECT COUNT(*) FROM identities"), 0);
+
+        // A new flow does not begin either.
+        let t2 = k.start(APP, "/admin/y", Some(&k.b1)).await;
+        let e = k
+            .svc
+            .begin_provider(&k.ctx(), &t2.transaction, &k.mock_id(), Some(&k.p1))
+            .await
+            .unwrap_err();
+        assert_eq!(e.reason().0, "provider_disabled", "{set}: begin");
+    }
+
+    // Disabled while the token exchange is in flight.
+    let k = Arc::new(Kit::new().await);
+    let t = k.start(APP, "/admin/x", Some(&k.b1)).await;
+    let state = k.redirect(&t.transaction, &k.p1).await;
+    *k.mock.delay.lock().unwrap() = std::time::Duration::from_millis(300);
+    let kk = k.clone();
+    let p1 = k.p1.clone();
+    let st = state.clone();
+    let cb = tokio::spawn(async move { kk.callback(&st, Some(&p1), None).await });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    g7_set_provider_row(&k, "enabled = 0");
+    let e = cb.await.unwrap().unwrap_err();
+    assert_eq!(e.reason().0, "provider_disabled", "during the exchange");
+    assert_eq!(k.count("SELECT COUNT(*) FROM sessions"), 0);
+    assert_eq!(k.count("SELECT COUNT(*) FROM users"), 0);
+    assert_eq!(k.count("SELECT COUNT(*) FROM identities"), 0);
+}
+
+/// G7-IDP-02: a non-empty `allowed_email_domains` admits only a verified
+/// address; an unverified claim for an allowed domain creates nothing.
+#[tokio::test]
+async fn g7_idp02_unverified_email_does_not_pass_the_domain_allowlist() {
+    let k = Kit::with(Opts {
+        allowed_domains: vec!["corp.test".into()],
+        ..Opts::default()
+    })
+    .await;
+    k.mock
+        .set_identity("attacker", "chosen@corp.test", false, false, "Mallory");
+    let t = k.start(APP, "/admin/x", Some(&k.b1)).await;
+    let state = k.redirect(&t.transaction, &k.p1).await;
+    let e = k.callback(&state, Some(&k.p1), None).await.unwrap_err();
+    assert_eq!(e.reason().0, "email_domain_not_allowed");
+    assert_eq!(k.count("SELECT COUNT(*) FROM users"), 0);
+    assert_eq!(k.count("SELECT COUNT(*) FROM identities"), 0);
+    assert_eq!(k.count("SELECT COUNT(*) FROM sessions"), 0);
+
+    // The same address, verified by the provider, is admitted.
+    k.mock
+        .set_identity("alice", "chosen@corp.test", true, false, "Alice");
+    let t = k.start(APP, "/admin/y", Some(&k.b1)).await;
+    let state = k.redirect(&t.transaction, &k.p1).await;
+    assert!(k.callback(&state, Some(&k.p1), None).await.is_ok());
+}
+
+/// G7-IDP-04: two concurrent callbacks for distinct subjects asserting the
+/// same verified email produce one user; the loser meets `link_required`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn g7_idp04_concurrent_same_email_distinct_subjects_link_required() {
+    let hooks = Arc::new(hopae::store::StoreHooks::new());
+    let k = Arc::new(
+        Kit::with(Opts {
+            hooks: Some(hooks.clone()),
+            ..Opts::default()
+        })
+        .await,
+    );
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c = calls.clone();
+    k.mock.set(move || {
+        let n = c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(ident(
+            &format!("sub-race-{n}"),
+            "dup@example.test",
+            true,
+            false,
+            "Dup",
+        ))
+    });
+    let mut states = Vec::new();
+    for path in ["/a", "/b"] {
+        let t = k.start(APP, path, Some(&k.b1)).await;
+        states.push(k.redirect(&t.transaction, &k.p1).await);
+    }
+    // Hold the first user-creating commit so that both callbacks resolve
+    // against an empty directory before either user exists.
+    hooks.set_gate("create_user", true);
+    let handles: Vec<_> = states
+        .into_iter()
+        .map(|st| {
+            let k = k.clone();
+            let p1 = k.p1.clone();
+            tokio::spawn(async move { k.callback(&st, Some(&p1), None).await })
+        })
+        .collect();
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    hooks.set_gate("create_user", false);
+    let mut logged_in = 0;
+    let mut link_required = 0;
+    for h in handles {
+        match h.await.unwrap() {
+            Ok(CallbackOutcome::LoggedIn { .. }) => logged_in += 1,
+            Ok(CallbackOutcome::LinkRequired { .. }) => link_required += 1,
+            other => panic!("unexpected outcome: {other:?}"),
+        }
+    }
+    assert_eq!(
+        k.count("SELECT COUNT(*) FROM users WHERE primary_email = 'dup@example.test'"),
+        1,
+        "one owner of the address"
+    );
+    assert_eq!((logged_in, link_required), (1, 1));
+    assert_eq!(k.count("SELECT COUNT(*) FROM sessions"), 1);
 }

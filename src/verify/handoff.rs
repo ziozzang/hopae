@@ -79,6 +79,10 @@ pub(super) async fn redeem(cx: &Cx<'_>, app: &AppPolicy, target: &Url, code: &Se
         .event(EventKind::HandoffRejected, Outcome::Failure, app)
         .attr("host", input.host.as_str())
         .build();
+    let expired = cx
+        .event(EventKind::SessionTerminated, Outcome::Info, app)
+        .attr("host", input.host.as_str())
+        .build();
     let req = RedeemRequest {
         code_sha256: code.digest(),
         host: input.host.clone(),
@@ -89,6 +93,9 @@ pub(super) async fn redeem(cx: &Cx<'_>, app: &AppPolicy, target: &Url, code: &Se
         new_handle,
         now: cx.now,
         max_recoveries: ctx.limits.max_recoveries,
+        session_policy: ctx.limits.session,
+        app_lifetimes: app.session,
+        expiry_events: vec![expired],
     };
     let outcome = ctx
         .sessions
@@ -311,6 +318,7 @@ mod tests {
                 absolute_expires_at: now.add(Duration::from_secs(30 * 86400)),
                 terminated_at: None,
                 terminated_reason: None,
+                authz_version_at_auth: user.authz_version,
             };
             let portal = handle_value(&*self.rng);
             let h = self.handle_row(&row, "auth.example.test", &portal);

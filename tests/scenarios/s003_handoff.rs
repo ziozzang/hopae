@@ -876,6 +876,15 @@ pub(crate) struct Switching {
     pub ts: Secret,
 }
 
+/// The incoming account's browser opens `GET /switch`: the transaction is
+/// bound to its portal cookie (`k.p1`).
+pub(crate) async fn open_switch(k: &Kit, s: &Switching) {
+    k.svc
+        .switch_view(&k.ctx(), &s.ts, Some(&k.p1), Some(&s.a.portal_handle))
+        .await
+        .expect("the incoming browser opens the switch page");
+}
+
 /// User V holds a valid application handle; the portal session now belongs to
 /// user A, whose code reaches the application: `session_conflict`.
 pub(crate) async fn switch_setup(k: &Kit) -> Switching {
@@ -937,7 +946,11 @@ async fn s003_a10_other_users_handle_requires_explicit_switch() {
     assert_eq!(ts.bind_sha256, Some(k.b1.digest()));
 
     // GET /switch shows host, user V and user A and changes nothing
-    let view = k.svc.switch_view(&s.ts).await.unwrap();
+    let view = k
+        .svc
+        .switch_view(&k.ctx(), &s.ts, Some(&k.p1), Some(&s.a.portal_handle))
+        .await
+        .unwrap();
     assert_eq!(view.host.as_str(), APP);
     assert_eq!(
         view.current
@@ -962,7 +975,7 @@ async fn s003_a10_other_users_handle_requires_explicit_switch() {
     // confirming needs the portal session of A, and only A
     let e = k
         .svc
-        .switch_confirm(&k.ctx(), &s.ts, SwitchChoice::Switch, None)
+        .switch_confirm(&k.ctx(), &s.ts, SwitchChoice::Switch, None, Some(&k.p1))
         .await
         .unwrap_err();
     assert_eq!(e.reason().0, "login_required");
@@ -973,6 +986,7 @@ async fn s003_a10_other_users_handle_requires_explicit_switch() {
             &s.ts,
             SwitchChoice::Switch,
             Some(&s.v.portal_handle),
+            Some(&k.p1),
         )
         .await
         .unwrap_err();
@@ -1001,6 +1015,7 @@ async fn s003_a10_other_users_handle_requires_explicit_switch() {
             &s.ts,
             SwitchChoice::Switch,
             Some(&s.a.portal_handle),
+            Some(&k.p1),
         )
         .await
         .unwrap();
@@ -1039,6 +1054,7 @@ async fn s003_a10_other_users_handle_requires_explicit_switch() {
             &s.ts,
             SwitchChoice::Switch,
             Some(&s.a.portal_handle),
+            Some(&k.p1),
         )
         .await
         .unwrap_err();
@@ -1060,9 +1076,10 @@ async fn s003_a10_other_users_handle_requires_explicit_switch() {
     // choice=keep: back to the clean target as the existing user, nothing revoked
     let k = Kit::new().await;
     let s = switch_setup(&k).await;
+    open_switch(&k, &s).await;
     let out = k
         .svc
-        .switch_confirm(&k.ctx(), &s.ts, SwitchChoice::Keep, None)
+        .switch_confirm(&k.ctx(), &s.ts, SwitchChoice::Keep, None, Some(&k.p1))
         .await
         .unwrap();
     let SwitchOutcome::Kept { location } = out else {
@@ -1233,4 +1250,90 @@ async fn s003_a12_ambiguous_parameter_refused() {
     assert!(rejected.iter().all(|e| e["reason"] == "handoff_ambiguous") && rejected.len() == 3);
     // TODO(W2-A): with an HTTP login helper, also assert that a real K1 stays
     // unconsumed and that the later well-formed navigation redeems it.
+}
+
+/// G7-C06: an unrelated browser that learned a live switch transaction must
+/// not consume it (neither choice) with a portal cookie that is not the one
+/// the transaction was bound to; the legitimate browser still can.
+#[tokio::test]
+async fn g7_c06_switch_transaction_is_bound_to_the_incoming_browser() {
+    let k = Kit::new().await;
+    let s = switch_setup(&k).await;
+    let evil = random_token(&OsRng, 16);
+    let consumed = || {
+        k.count(
+            "SELECT COUNT(*) FROM login_txns WHERE consumed_at IS NOT NULL AND purpose='switch'",
+        )
+    };
+
+    // Nobody has opened the page yet: no submission is accepted.
+    let e = k
+        .svc
+        .switch_confirm(&k.ctx(), &s.ts, SwitchChoice::Keep, None, Some(&evil))
+        .await
+        .unwrap_err();
+    assert_eq!(e.reason().0, "portal_bind_mismatch");
+    // A stranger cannot open the page and so cannot bind it.
+    let e = k
+        .svc
+        .switch_view(&k.ctx(), &s.ts, Some(&evil), None)
+        .await
+        .unwrap_err();
+    assert_eq!(e.reason().0, "login_required");
+    let e = k
+        .svc
+        .switch_view(&k.ctx(), &s.ts, Some(&evil), Some(&s.v.portal_handle))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        e.reason().0,
+        "session_conflict",
+        "another account's handle does not bind it"
+    );
+
+    // The incoming browser binds it with its portal cookie.
+    open_switch(&k, &s).await;
+    // The binding is immutable: nobody else can rebind or view it.
+    for e in [
+        k.svc
+            .switch_view(&k.ctx(), &s.ts, Some(&evil), Some(&s.a.portal_handle))
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+        k.svc
+            .switch_confirm(&k.ctx(), &s.ts, SwitchChoice::Keep, None, Some(&evil))
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+        k.svc
+            .switch_confirm(
+                &k.ctx(),
+                &s.ts,
+                SwitchChoice::Switch,
+                Some(&s.a.portal_handle),
+                Some(&evil),
+            )
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+        k.svc
+            .switch_confirm(&k.ctx(), &s.ts, SwitchChoice::Keep, None, None)
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+    ] {
+        assert_eq!(e.reason().0, "portal_bind_mismatch");
+    }
+    assert_eq!(
+        consumed(),
+        0,
+        "no foreign submission consumed the transaction"
+    );
+    // The legitimate browser is unharmed.
+    let out = k
+        .svc
+        .switch_confirm(&k.ctx(), &s.ts, SwitchChoice::Keep, None, Some(&k.p1))
+        .await
+        .unwrap();
+    assert!(matches!(out, SwitchOutcome::Kept { .. }));
 }

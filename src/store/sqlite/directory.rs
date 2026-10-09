@@ -151,7 +151,7 @@ impl Directory for Store {
             )?;
             insert_identity(&tx, &id, &identity, now)?;
             insert_events(&tx, &shared, &events)?;
-            commit(tx, &shared, None)?;
+            commit(tx, &shared, Some("create_user"))?;
             Ok(User {
                 user_id: id,
                 primary_email: user.primary_email,

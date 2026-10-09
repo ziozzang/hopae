@@ -1100,3 +1100,23 @@ async fn adapter_s004_11_denials_have_the_contract_bodies() {
 fn adapter_s004_11_only_allow_renders_to_a_2xx() {
     super::walk::assert_only_allow_is_2xx();
 }
+
+#[test]
+fn return_target_limit_applies_to_the_cleaned_url_with_bounded_handoff_overhead() {
+    let code = "c".repeat(43);
+    let prefix = "https://app.example.test/p?q=";
+    let target = |n: usize| format!("{prefix}{}", "a".repeat(n - prefix.len()));
+    // 2048 bytes plus the appended handoff pair: accepted, and cleaned.
+    let t = target(2048);
+    let with_code = format!("{t}&_hopae_handoff={code}");
+    let p = ok(&base(&with_code));
+    assert_eq!(p.input.original_url.as_str(), t);
+    // 2049 bytes once the pair is removed: refused.
+    let t = target(2049);
+    let with_code = format!("{t}&_hopae_handoff={code}");
+    assert_eq!(reason_of(&cfg(), &base(&with_code)).0, "contract_violation");
+    // A pair longer than the code Hopae mints does not widen the wire bound.
+    let t = target(2048);
+    let long_pair = format!("{t}&_hopae_handoff={}", "c".repeat(44));
+    assert_eq!(reason_of(&cfg(), &base(&long_pair)).0, "contract_violation");
+}

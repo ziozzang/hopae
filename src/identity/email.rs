@@ -8,7 +8,7 @@ use crate::store::types::NewIdentity;
 /// `providers[].allowed_email_domains` (ADR-0011: evaluated before any linking
 /// decision). An empty list allows everything. A non-empty list requires an
 /// email whose domain is listed; a missing email is refused rather than
-/// guessed at. Entries are compared case-insensitively.
+/// guessed at; callers pass only a verified address. Entries are compared case-insensitively.
 pub fn domain_allowed(email: Option<&NormalizedEmail>, allowed: &[String]) -> bool {
     if allowed.is_empty() {
         return true;

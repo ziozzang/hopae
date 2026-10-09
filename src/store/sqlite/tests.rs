@@ -141,6 +141,7 @@ impl Fx {
             absolute_expires_at: now.add(Duration::from_secs(30 * 86400)),
             terminated_at: None,
             terminated_reason: None,
+            authz_version_at_auth: user.authz_version,
         }
     }
 
@@ -221,6 +222,9 @@ impl Fx {
                 new_handle: handle,
                 now: self.now(),
                 max_recoveries: 3,
+                session_policy: Default::default(),
+                app_lifetimes: Default::default(),
+                expiry_events: vec![],
             },
             new,
         )

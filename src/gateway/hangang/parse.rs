@@ -26,12 +26,14 @@ const H_FOR: &str = "x-forwarded-for";
 const H_REAL_IP: &str = "x-real-ip";
 const H_METHOD: &str = "x-original-method";
 
-/// `x-original-url` upper bound in bytes.
+/// Upper bound in bytes of the requested URL once the handoff pair is removed
+/// (the return-target limit of ADR-0004).
 const MAX_URL: usize = 2048;
+/// Bytes of the handoff pair Hopae appends to a return target: `&`, the
+/// reserved name, `=` and a 43-character code (32 random bytes, base64url).
+const HANDOFF_OVERHEAD: usize = 1 + recognition::HANDOFF_PARAM.len() + 1 + 43;
 /// All `cookie` header bytes together.
 const MAX_COOKIE: usize = 8 * 1024;
-/// `user-agent` bytes kept.
-const MAX_UA: usize = 1024;
 /// `x-hangang-route-id` bytes kept.
 const MAX_ROUTE: usize = 128;
 
@@ -274,10 +276,16 @@ pub fn parse(
         Ok(Some(v)) => v.to_str().map_err(|_| violation(H_URL))?,
         _ => return Err(violation(H_URL)),
     };
-    if raw_url.len() > MAX_URL || raw_url.contains('#') {
+    // On the wire the URL may carry Hopae's own handoff pair on top of the
+    // limit; the limit itself applies to the cleaned target below.
+    if raw_url.len() > MAX_URL + HANDOFF_OVERHEAD || raw_url.contains('#') {
         return Err(violation(H_URL));
     }
     let original_url = url::Url::parse(raw_url).map_err(|_| violation(H_URL))?;
+    let clean_url = recognition::clean_target(&original_url);
+    if clean_url.as_str().len() > MAX_URL {
+        return Err(violation(H_URL));
+    }
     if !matches!(original_url.scheme(), "http" | "https")
         || !original_url.username().is_empty()
         || original_url.password().is_some()
@@ -386,10 +394,9 @@ pub fn parse(
             None,
         )
     })?;
-    let user_agent = h.get("user-agent").map(|v| {
-        let s = String::from_utf8_lossy(v.as_bytes());
-        truncate_utf8(&s, MAX_UA).to_string()
-    });
+    let user_agent = h
+        .get("user-agent")
+        .map(|v| crate::policy::binding::normalize_user_agent(v.as_bytes()));
 
     // 9. Reserved parameter, from the query exactly as written.
     let handoff = recognition::find_handoff(raw_query(raw_url));
@@ -405,7 +412,7 @@ pub fn parse(
     let input = VerifyInput {
         // The core never looks at the query: it gets the URL with every
         // handoff pair removed (ADR-0013); `env` keeps the URL as received.
-        original_url: recognition::clean_target(&original_url),
+        original_url: clean_url,
         canonical_path,
         client_ip,
         host,

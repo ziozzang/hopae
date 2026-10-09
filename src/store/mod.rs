@@ -163,6 +163,14 @@ pub trait Sessions: Send + Sync {
         txn_sha256: &Digest,
         binding: TransactionBinding,
     ) -> StoreResult<()>;
+    /// Record the portal binding of a `switch` transaction, once: true when
+    /// this call set it, false when one was already recorded (or the
+    /// transaction is consumed or not a switch).
+    async fn bind_switch_transaction(
+        &self,
+        txn_sha256: &Digest,
+        portal_bind_sha256: Digest,
+    ) -> StoreResult<bool>;
     /// `POST /login/retry` is single-use per consumed transaction: true for
     /// the first call, false afterwards (`UPDATE … WHERE retry_used_at IS NULL`).
     async fn use_retry(&self, txn_sha256: &Digest, at: Timestamp) -> StoreResult<bool>;

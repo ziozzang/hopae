@@ -9,7 +9,7 @@ use std::time::Duration;
 use jsonwebtoken::Algorithm;
 use serde_json::Value;
 
-use super::http::endpoint_allowed;
+use super::http::EndpointPolicy;
 use super::jwks::{SUPPORTED_ALGS, parse_alg};
 use crate::crypto::Timestamp;
 use crate::provider::types::ProviderError;
@@ -42,22 +42,22 @@ pub struct Discovery {
 }
 
 /// `<issuer>/.well-known/openid-configuration` (OpenID Connect Discovery 4).
-pub fn discovery_url(issuer: &str) -> Option<url::Url> {
+pub fn discovery_url(issuer: &str, policy: &EndpointPolicy) -> Option<url::Url> {
     let u = url::Url::parse(&format!(
         "{}/.well-known/openid-configuration",
         issuer.trim_end_matches('/')
     ))
     .ok()?;
-    endpoint_allowed(&u).then_some(u)
+    policy.url_ok(&u).then_some(u)
 }
 
-fn endpoint(doc: &Value, key: &str) -> Result<url::Url, ProviderError> {
+fn endpoint(doc: &Value, key: &str, policy: &EndpointPolicy) -> Result<url::Url, ProviderError> {
     let s = doc
         .get(key)
         .and_then(Value::as_str)
         .ok_or(ProviderError::ProviderResponseInvalid)?;
     let u = url::Url::parse(s).map_err(|_| ProviderError::ProviderResponseInvalid)?;
-    if endpoint_allowed(&u) {
+    if policy.endpoint_ok(&u) {
         Ok(u)
     } else {
         Err(ProviderError::ProviderResponseInvalid)
@@ -66,8 +66,13 @@ fn endpoint(doc: &Value, key: &str) -> Result<url::Url, ProviderError> {
 
 impl Discovery {
     /// Parse a discovery document. `issuer` must equal the configured issuer
-    /// exactly (OpenID Connect Discovery 4.3).
-    pub fn parse(bytes: &[u8], configured_issuer: &str) -> Result<Discovery, ProviderError> {
+    /// exactly (OpenID Connect Discovery 4.3). Every endpoint must satisfy
+    /// `policy` (https, the issuer's host or an operator-listed host).
+    pub fn parse(
+        bytes: &[u8],
+        configured_issuer: &str,
+        policy: &EndpointPolicy,
+    ) -> Result<Discovery, ProviderError> {
         let doc: Value =
             serde_json::from_slice(bytes).map_err(|_| ProviderError::ProviderResponseInvalid)?;
         if !doc.is_object() {
@@ -112,13 +117,13 @@ impl Discovery {
         };
         let userinfo_endpoint = match doc.get("userinfo_endpoint") {
             None | Some(Value::Null) => None,
-            Some(_) => Some(endpoint(&doc, "userinfo_endpoint")?),
+            Some(_) => Some(endpoint(&doc, "userinfo_endpoint", policy)?),
         };
         Ok(Discovery {
             issuer: configured_issuer.to_string(),
-            authorization_endpoint: endpoint(&doc, "authorization_endpoint")?,
-            token_endpoint: endpoint(&doc, "token_endpoint")?,
-            jwks_uri: endpoint(&doc, "jwks_uri")?,
+            authorization_endpoint: endpoint(&doc, "authorization_endpoint", policy)?,
+            token_endpoint: endpoint(&doc, "token_endpoint", policy)?,
+            jwks_uri: endpoint(&doc, "jwks_uri", policy)?,
             userinfo_endpoint,
             algs,
             token_auth,
@@ -225,8 +230,76 @@ mod tests {
         })
     }
 
+    fn policy(hosts: &[&str]) -> EndpointPolicy {
+        let hosts: Vec<String> = hosts.iter().map(|h| h.to_string()).collect();
+        EndpointPolicy::new(ISS, &hosts, false)
+    }
+
     fn parse(v: &Value) -> Result<Discovery, ProviderError> {
-        Discovery::parse(v.to_string().as_bytes(), ISS)
+        Discovery::parse(v.to_string().as_bytes(), ISS, &policy(&[]))
+    }
+
+    #[test]
+    fn endpoints_stay_on_the_issuers_host_or_the_allowlist() {
+        // Another host, plain http, a loopback or private literal: refused,
+        // whichever endpoint carries them.
+        for key in [
+            "authorization_endpoint",
+            "token_endpoint",
+            "jwks_uri",
+            "userinfo_endpoint",
+        ] {
+            for bad in [
+                "https://other.example.test/x",
+                "http://idp.example.test/x",
+                "http://127.0.0.1:9000/internal",
+                "https://127.0.0.1/internal",
+                "https://169.254.169.254/latest/meta-data",
+                "https://10.0.0.5/x",
+                "https://[::1]/x",
+            ] {
+                let mut d = doc();
+                d[key] = json!(bad);
+                assert!(
+                    matches!(parse(&d), Err(ProviderError::ProviderResponseInvalid)),
+                    "{key} = {bad}"
+                );
+            }
+        }
+        // An operator-listed host is accepted on any endpoint, and only that host.
+        let mut d = doc();
+        d["token_endpoint"] = json!("https://oauth2.example.test/token");
+        d["jwks_uri"] = json!("https://keys.example.test/certs");
+        let ok = Discovery::parse(
+            d.to_string().as_bytes(),
+            ISS,
+            &policy(&["oauth2.example.test", "keys.example.test"]),
+        );
+        assert!(ok.is_ok());
+        let partial = Discovery::parse(
+            d.to_string().as_bytes(),
+            ISS,
+            &policy(&["oauth2.example.test"]),
+        );
+        assert!(partial.is_err(), "each foreign host must be listed");
+    }
+
+    #[test]
+    fn the_google_preset_lists_its_endpoint_hosts() {
+        let g = &crate::provider::presets::GOOGLE;
+        let hosts: Vec<String> = g.endpoint_hosts.iter().map(|h| h.to_string()).collect();
+        let policy = EndpointPolicy::new(g.issuer, &hosts, false);
+        let doc = json!({
+            "issuer": g.issuer,
+            "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_endpoint": "https://oauth2.googleapis.com/token",
+            "jwks_uri": "https://www.googleapis.com/oauth2/v3/certs",
+            "userinfo_endpoint": "https://openidconnect.googleapis.com/v1/userinfo",
+        });
+        assert!(Discovery::parse(doc.to_string().as_bytes(), g.issuer, &policy).is_ok());
+        // Without the preset's list the same document is refused.
+        let bare = EndpointPolicy::new(g.issuer, &[], false);
+        assert!(Discovery::parse(doc.to_string().as_bytes(), g.issuer, &bare).is_err());
     }
 
     #[test]
@@ -341,17 +414,20 @@ mod tests {
     #[test]
     fn discovery_url_appends_the_well_known_path() {
         assert_eq!(
-            discovery_url("https://accounts.google.com")
+            discovery_url("https://accounts.google.com", &policy(&[]))
                 .unwrap()
                 .as_str(),
             "https://accounts.google.com/.well-known/openid-configuration"
         );
         assert_eq!(
-            discovery_url("https://idp.example.test/tenant/")
+            discovery_url("https://idp.example.test/tenant/", &policy(&[]))
                 .unwrap()
                 .as_str(),
             "https://idp.example.test/tenant/.well-known/openid-configuration"
         );
-        assert!(discovery_url("http://example.org").is_none());
+        assert!(discovery_url("http://example.org", &policy(&[])).is_none());
+        assert!(discovery_url("http://127.0.0.1:9", &policy(&[])).is_none());
+        let dev = EndpointPolicy::new("http://127.0.0.1:9", &[], true);
+        assert!(discovery_url("http://127.0.0.1:9", &dev).is_some());
     }
 }

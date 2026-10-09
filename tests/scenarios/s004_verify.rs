@@ -188,8 +188,13 @@ pub(crate) mod fx {
                 absolute_expires_at: now.add(self.cfg.session_policy().absolute),
                 terminated_at: None,
                 terminated_reason: None,
+                authz_version_at_auth: user.authz_version,
             };
+            let before = row.authz_version;
             f(&mut row);
+            if row.authz_version != before && row.authz_version_at_auth == before {
+                row.authz_version_at_auth = row.authz_version;
+            }
             let portal = handle_value(&*self.rng);
             let handle = self.handle_row(&row.session_id, PORTAL_HOST, &portal, |_| {});
             let digest = handle.handle_sha256;
@@ -1001,4 +1006,56 @@ fn s004_a8_caller_key_required() {
     assert!(hopae::crypto::ct_eq(b"abcdefgh", b"abcdefgh"));
     assert!(!hopae::crypto::ct_eq(b"abcdefgh", b"abcdefgx"));
     assert!(!hopae::crypto::ct_eq(b"abcdefgh", b"abcdefg"));
+}
+
+/// G7-C02: one session spanning a `refresh` app and a `terminate` app. The
+/// refresh app's snapshot update must not hide the authorization change from
+/// the terminate app, whichever is visited first.
+#[tokio::test]
+async fn g7_c02_refresh_app_does_not_defeat_terminate_app() {
+    for refresh_first in [true, false] {
+        let f = Fx::with("m1-basic", |v| {
+            v["apps"].as_array_mut().unwrap().insert(
+                1,
+                serde_json::json!({
+                    "app_id": "strict",
+                    "display_name": "strict",
+                    "hosts": ["strict.example.test"],
+                    "ports": [443],
+                    "on_authz_change": "terminate",
+                    "verify_cache_seconds": 0
+                }),
+            );
+        });
+        let u = f.user("a@example.test", Some("alice"), None).await;
+        f.exec(&format!(
+            "UPDATE users SET authz_version = 3 WHERE user_id = '{}'",
+            u.user_id
+        ));
+        let s = f.session_with(&u, |r| r.authz_version = 3).await;
+        let ha = f.handle(&s, "app.example.test").await;
+        let hb = f.handle(&s, "strict.example.test").await;
+        f.at(60);
+        f.exec(&format!(
+            "UPDATE users SET authz_version = 4 WHERE user_id = '{}'",
+            u.user_id
+        ));
+        let a_url = APP_URL;
+        let b_url = "https://strict.example.test/x";
+        if refresh_first {
+            allow(f.decide(f.req(a_url).cookie(&ha)).await);
+            let (_, _, clear) = login(f.decide(f.req(b_url).cookie(&hb)).await);
+            assert!(
+                clear,
+                "refresh_first: the terminate app must force re-authentication"
+            );
+            assert_eq!(f.session_state(&s).0.as_deref(), Some("authz_change"));
+        } else {
+            let (_, _, clear) = login(f.decide(f.req(b_url).cookie(&hb)).await);
+            assert!(clear);
+            assert_eq!(f.session_state(&s).0.as_deref(), Some("authz_change"));
+            let (_, _, clear) = login(f.decide(f.req(a_url).cookie(&ha)).await);
+            assert!(clear, "a terminated session serves no app");
+        }
+    }
 }

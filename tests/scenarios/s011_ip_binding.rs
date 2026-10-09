@@ -290,3 +290,91 @@ async fn s011_a6_policy_not_relaxable_by_request() {
     assert!(!matches!(d, Decision::Allow { .. }));
     assert_eq!(b.f.session_state(&b.s).0.as_deref(), Some("binding_ip"));
 }
+
+/// Drive a whole login through the real process for `url` (every request
+/// carrying `ua`, when given), then redeem the handoff and make the clean
+/// request. Returns the handoff redirect, the redemption response and the
+/// clean response.
+pub(crate) fn full_login_flow(
+    overrides: serde_json::Value,
+    url: &str,
+    ua: Option<&str>,
+) -> (String, Response, Response) {
+    let app_host = url::Url::parse(url)
+        .unwrap()
+        .host_str()
+        .unwrap()
+        .to_string();
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(Fixture::with("m1-basic", overrides), &idp, &[]);
+    let ip = "203.0.113.9";
+    let base = h.config()["cookie"]["name"].as_str().unwrap().to_string();
+    let secure = h.config()["cookie"]["secure"].as_bool().unwrap_or(true);
+    let app_jar = Jar::new();
+    let verify = |url: &str| -> Response {
+        let hj = app_jar.for_host(&app_host);
+        let mut req = VerifyRequest::document(url).ip(ip);
+        if let Some(ua) = ua {
+            req = req.ua(ua);
+        }
+        for n in [base.clone(), format!("{base}_bind")] {
+            if let Some(v) = hj.value(&n) {
+                req = req.cookie(&n, &v);
+            }
+        }
+        let r = h.verify(req);
+        for c in r.set_cookies() {
+            app_jar.store(&app_host, "/", secure, c);
+        }
+        r
+    };
+    let path_of = |u: &str| {
+        let u = url::Url::parse(u).unwrap();
+        match u.query() {
+            Some(q) => format!("{}?{q}", u.path()),
+            None => u.path().to_string(),
+        }
+    };
+    let with_ua = |r: crate::support::Req| match ua {
+        Some(ua) => r.header("user-agent", ua),
+        None => r,
+    };
+    let r = verify(url);
+    assert_eq!(r.status, 302, "{r:?}");
+    let portal = h.portal_with(Jar::new()).with_ip(ip);
+    let r = portal.send(with_ua(crate::support::Req::get(&path_of(
+        r.location().unwrap(),
+    ))));
+    assert_eq!(r.status, 302, "{r:?}");
+    let cb_path = idp.follow_authorization(r.location().unwrap());
+    let back = portal.send(with_ua(
+        crate::support::Req::get(&cb_path).cross_site_navigation(),
+    ));
+    assert_eq!(back.status, 302, "{back:?}");
+    let handoff = back.location().unwrap().to_string();
+    let redeem = verify(&handoff);
+    let clean_url = redeem.location().unwrap_or(url).to_string();
+    let clean = verify(&clean_url);
+    (handoff, redeem, clean)
+}
+
+/// G7-C04: the portal and the gateway adapter must hash the same bytes of an
+/// unchanged User-Agent. 513 ASCII bytes and a multibyte UA beyond 1 KiB both
+/// bind at login and verify without a spurious `binding_ua` termination.
+#[test]
+fn g7_c04_unchanged_long_user_agent_survives_login_and_verify() {
+    for ua in ["u".repeat(513), "한".repeat(600)] {
+        let (_, redeem, clean) = full_login_flow(
+            serde_json::json!({"apps": [{"app_id": "app", "binding": {"ua": "strict"}}]}),
+            "https://app.example.test/admin/x",
+            Some(&ua),
+        );
+        assert_eq!(
+            redeem.status,
+            302,
+            "handoff redemption ({} bytes)",
+            ua.len()
+        );
+        assert_eq!(clean.status, 200, "the clean request ({} bytes)", ua.len());
+    }
+}

@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=2 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=3 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -45,7 +45,8 @@
 | `apps[]` (`app_id`, `display_name`, `hosts`, `ports`, `enabled`, `session.idle`, `session.absolute`, `binding.ip`, `binding.ua`, `binding.on_mismatch`, `on_authz_change`, `verify_cache_seconds`) | M1 | ADR 참조 | 애플리케이션 등록부. 정확한 호스트 이름만 허용합니다([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md), [ADR-0007](../adr/0007-context-binding-policy.md)) |
 | `session.idle`, `session.absolute` | M1 | `24h`, `30d` | 세션 전체 타이머([ADR-0007](../adr/0007-context-binding-policy.md)) |
 | `cookie.name`, `cookie.secure` | M1 | `__Host-hopae`, `true` | 쿠키 이름은 `cookie.name`에서 파생됩니다. `secure=false`는 개발 전용입니다([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)) |
-| `providers[]` (`provider_id`, `kind`, `display_name`, `enabled`, `client_id`, `client_secret_env`, `issuer`, `scope`, `allowed_email_domains`, `authoritative_domains`, `auto_link`, `trust_email`) | M1(Google), M3(그 외) | ADR 참조 | 저장소에 미러링되는 제공자 정의([ADR-0010](../adr/0010-provider-abstraction.md)) |
+| `providers[]` (`provider_id`, `kind`, `display_name`, `enabled`, `client_id`, `client_secret_env`, `issuer`, `scope`, `endpoint_hosts`, `allow_private_endpoints`, `allowed_email_domains`, `authoritative_domains`, `auto_link`, `trust_email`) | M1(Google), M3(그 외) | ADR 참조 | 저장소에 미러링되는 제공자 정의([ADR-0010](../adr/0010-provider-abstraction.md)) |
+| `providers[].endpoint_hosts`, `providers[].allow_private_endpoints` | M1 | `[]`, 미설정(`false`) | 제공자의 디스커버리 문서가 클라이언트를 어디로 보낼 수 있는지(외부 요청 위조 방어, [ADR-0010](../adr/0010-provider-abstraction.md)). 문서가 게시하는 모든 엔드포인트(인가, 토큰, 사용자 정보, 키)는 `https`여야 하고 발급자의 호스트이거나 `endpoint_hosts`에 나열된 호스트(스킴과 포트 없는 호스트 이름 또는 IP 주소)여야 합니다. `google` 프리셋은 자신의 목록을 가집니다. 해석된 주소가 루프백, 사설, 링크 로컬, CGNAT, 멀티캐스트이면 연결 시점에 거부하며 연결은 검증된 주소로만 갑니다. `allow_private_endpoints: true`는 주소 규칙을 해제하고 루프백 발급자에 대한 `http`를 허용합니다. 개발용 및 사설 인증 제공자 전용입니다. 미설정은 `false`입니다(`test-hooks` 빌드는 `true`로 취급하며 명시적 `false`가 항상 우선합니다). |
 | `linking.on_conflict`, `linking.mode` | M1 | `link_required`, `verified_email` | 계정 연결 정책([ADR-0011](../adr/0011-account-linking-policy.md)) |
 | `txn.max_rows`, `txn.per_ip_per_minute`, `handoff.per_ip_failures_per_minute`, `handoff.max_recoveries` | M1 | `1000`, `30`, `10`, `3` | 트랜잭션과 핸드오프 상한([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)) |
 | `portal.sso_confirm_new_host` | M1 | `false` | 세션을 어떤 호스트로 처음 핸드오프하기 전에 한 번 클릭하는 확인([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)) |

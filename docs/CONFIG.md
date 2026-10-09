@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 3 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -46,7 +46,8 @@ the milestone shown. Until then `hopae --check` rejects them as unknown.
 | `apps[]` (`app_id`, `display_name`, `hosts`, `ports`, `enabled`, `session.idle`, `session.absolute`, `binding.ip`, `binding.ua`, `binding.on_mismatch`, `on_authz_change`, `verify_cache_seconds`) | M1 | see ADRs | Application registry; exact host names only ([ADR-0004](adr/0004-session-model-and-cross-domain-handoff.md), [ADR-0007](adr/0007-context-binding-policy.md)) |
 | `session.idle`, `session.absolute` | M1 | `24h`, `30d` | Session-wide timers ([ADR-0007](adr/0007-context-binding-policy.md)) |
 | `cookie.name`, `cookie.secure` | M1 | `__Host-hopae`, `true` | Cookie names derive from `cookie.name`; `secure=false` is development only ([ADR-0004](adr/0004-session-model-and-cross-domain-handoff.md)) |
-| `providers[]` (`provider_id`, `kind`, `display_name`, `enabled`, `client_id`, `client_secret_env`, `issuer`, `scope`, `allowed_email_domains`, `authoritative_domains`, `auto_link`, `trust_email`) | M1 (Google), M3 (others) | see ADR | Provider definitions mirrored into the store ([ADR-0010](adr/0010-provider-abstraction.md)) |
+| `providers[]` (`provider_id`, `kind`, `display_name`, `enabled`, `client_id`, `client_secret_env`, `issuer`, `scope`, `endpoint_hosts`, `allow_private_endpoints`, `allowed_email_domains`, `authoritative_domains`, `auto_link`, `trust_email`) | M1 (Google), M3 (others) | see ADR | Provider definitions mirrored into the store ([ADR-0010](adr/0010-provider-abstraction.md)) |
+| `providers[].endpoint_hosts`, `providers[].allow_private_endpoints` | M1 | `[]`, unset (`false`) | Where a provider's discovery document may send the client (outbound request forgery control, [ADR-0010](adr/0010-provider-abstraction.md)). Every endpoint it publishes (authorization, token, user info, keys) must use `https` and name the issuer's host or a host listed in `endpoint_hosts` (host names or IP addresses, no scheme or port; the `google` preset lists its own). Resolved addresses that are loopback, private, link-local, CGNAT or multicast are refused at connect time, and the connection goes only to a vetted address. `allow_private_endpoints: true` lifts the address rule and permits `http` to a loopback issuer; development and private identity providers only. An unset value is `false` (a `test-hooks` build treats it as `true`; an explicit `false` always wins). |
 | `linking.on_conflict`, `linking.mode` | M1 | `link_required`, `verified_email` | Account linking policy ([ADR-0011](adr/0011-account-linking-policy.md)) |
 | `txn.max_rows`, `txn.per_ip_per_minute`, `handoff.per_ip_failures_per_minute`, `handoff.max_recoveries` | M1 | `1000`, `30`, `10`, `3` | Transaction and handoff bounds ([ADR-0004](adr/0004-session-model-and-cross-domain-handoff.md)) |
 | `portal.sso_confirm_new_host` | M1 | `false` | One-click confirmation before the first handoff of a session to a host ([ADR-0004](adr/0004-session-model-and-cross-domain-handoff.md)) |

@@ -214,3 +214,27 @@ async fn s005_a6_no_host_enumeration() {
     assert_eq!(disabled.0, reasons::APP_DISABLED);
     assert_eq!(f.txn_rows(), 0);
 }
+
+/// G7-C05: a return target within the 2048-byte limit stays valid when Hopae
+/// appends its handoff parameter. Complete flows at 1990 and exactly 2048 bytes.
+#[test]
+fn g7_c05_targets_near_the_limit_complete_the_handoff() {
+    for len in [1990usize, 2048] {
+        let prefix = "https://app.example.test/p?q=";
+        let url = format!("{prefix}{}", "a".repeat(len - prefix.len()));
+        assert_eq!(url.len(), len);
+        let (handoff, redeem, clean) =
+            super::s011_ip_binding::full_login_flow(serde_json::json!({}), &url, None);
+        assert!(
+            handoff.len() > len,
+            "the code is appended: {}",
+            handoff.len()
+        );
+        assert_eq!(
+            redeem.status, 302,
+            "redemption of a {len}-byte target: {redeem:?}"
+        );
+        assert_eq!(redeem.location(), Some(url.as_str()));
+        assert_eq!(clean.status, 200, "the clean {len}-byte request");
+    }
+}

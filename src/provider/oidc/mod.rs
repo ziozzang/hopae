@@ -24,7 +24,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde_json::Value;
 
 use self::discovery::{Cache, Discovery, TokenAuth, discovery_url};
-use self::http::{Fetcher, Response, endpoint_allowed};
+use self::http::{EndpointPolicy, Fetcher, Response};
 use self::jwks::{KeySet, Selection};
 use crate::crypto::{Clock, Rng, Secret, Timestamp, ct_eq, random_token, sha256};
 use crate::event::types::Reason;
@@ -71,6 +71,8 @@ pub struct OidcSettings {
     pub userinfo: bool,
     /// Required `typ` header of the ID token, when the provider sets one.
     pub id_token_typ: Option<String>,
+    /// Where the client may send requests (G7-IDP-03).
+    pub endpoints: EndpointPolicy,
 }
 
 fn cfg_str(cfg: &Value, key: &str) -> Option<String> {
@@ -108,8 +110,22 @@ impl OidcSettings {
             .and_then(Value::as_bool)
             .unwrap_or_else(|| preset.is_none_or(|p| p.userinfo));
 
+        // Private and loopback destinations (and `http` to a loopback issuer)
+        // only when the provider opts in; `test-hooks` builds default to it so
+        // the loopback mock provider works. An explicit `false` always wins.
+        let allow_private = cfg
+            .get("allow_private_endpoints")
+            .and_then(Value::as_bool)
+            .unwrap_or(cfg!(feature = "test-hooks"));
+        let mut hosts: Vec<String> = preset
+            .map(|p| p.endpoint_hosts.iter().map(|h| h.to_string()).collect())
+            .unwrap_or_default();
+        if let Some(list) = cfg.get("endpoint_hosts").and_then(Value::as_array) {
+            hosts.extend(list.iter().filter_map(Value::as_str).map(str::to_string));
+        }
+        let endpoints = EndpointPolicy::new(&issuer, &hosts, allow_private);
         let issuer_ok =
-            url::Url::parse(&issuer).is_ok_and(|u| endpoint_allowed(&u) && u.query().is_none());
+            url::Url::parse(&issuer).is_ok_and(|u| endpoints.url_ok(&u) && u.query().is_none());
         let mut client_secret = None;
         let mut disabled_reason = None;
         if row.deleted_at.is_some() {
@@ -140,6 +156,7 @@ impl OidcSettings {
             trust_email: row.trust_email,
             userinfo,
             id_token_typ: cfg_str(cfg, "id_token_typ"),
+            endpoints,
         }
     }
 }
@@ -175,8 +192,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 impl OidcProvider {
     pub fn new(s: OidcSettings, clock: Arc<dyn Clock>, reporter: Option<Reporter>) -> Arc<Self> {
         Arc::new(OidcProvider {
+            fetcher: Fetcher::new(s.endpoints.allow_private()),
             s,
-            fetcher: Fetcher::new(),
             clock,
             reporter,
             disc: Mutex::new(Cache::empty()),
@@ -275,7 +292,8 @@ impl OidcProvider {
     }
 
     async fn fetch_discovery_inner(&self) -> Result<Discovery, ProviderError> {
-        let url = discovery_url(&self.s.issuer).ok_or(ProviderError::ProviderUnavailable)?;
+        let url = discovery_url(&self.s.issuer, &self.s.endpoints)
+            .ok_or(ProviderError::ProviderUnavailable)?;
         let resp = self
             .fetcher
             .send(self.fetcher.get(&url).header("accept", "application/json"))
@@ -285,7 +303,7 @@ impl OidcProvider {
             300..=399 => return Err(ProviderError::ProviderResponseInvalid),
             _ => return Err(ProviderError::ProviderUnavailable),
         }
-        Discovery::parse(&resp.body, &self.s.issuer)
+        Discovery::parse(&resp.body, &self.s.issuer, &self.s.endpoints)
     }
 
     /// Refresh the discovery document if it is missing, expired or past
@@ -579,7 +597,6 @@ impl OidcProvider {
         disc: &Discovery,
         token: &str,
         nonce: &str,
-        now: Timestamp,
     ) -> Result<Value, ProviderError> {
         let header = idtoken::parse_header(token, &disc.algs, self.s.id_token_typ.as_deref())?;
         // A token from another issuer is reported as such even though its
@@ -614,13 +631,15 @@ impl OidcProvider {
                 Selection::Ambiguous => return Err(ProviderError::InvalidTokenHeader),
             }
         };
+        // The clock is read here, after the token exchange and the key
+        // retrieval, not when the callback began (G7-IDP-05).
         idtoken::validate_claims(
             &payload,
             &idtoken::Expect {
                 issuer: &disc.issuer,
                 client_id: &self.s.client_id,
                 nonce,
-                now,
+                now: self.clock.now(),
             },
         )?;
         Ok(payload)
@@ -707,7 +726,6 @@ impl Provider for OidcProvider {
         txn: &TransactionRow,
         callback: &CallbackQuery,
         redirect_uri: &url::Url,
-        now: Timestamp,
     ) -> Result<ProviderIdentity, ProviderError> {
         if !self.usable() {
             return Err(ProviderError::ProviderDisabled);
@@ -746,7 +764,7 @@ impl Provider for OidcProvider {
             Some(Value::String(t)) => t.as_str(),
             Some(_) => return Err(ProviderError::ProviderResponseInvalid),
         };
-        let claims = self.validate_id_token(&disc, id_token, nonce, now).await?;
+        let claims = self.validate_id_token(&disc, id_token, nonce).await?;
 
         let mut userinfo = None;
         if self.s.userinfo

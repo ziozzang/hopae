@@ -12,6 +12,10 @@ pub struct Preset {
     /// ID token already carries every claim Hopae uses, so the extra round
     /// trip (and failure point) is off.
     pub userinfo: bool,
+    /// Hosts, besides the issuer's own, that the provider's discovery document
+    /// legitimately points to (token, keys, user info). Anything else it
+    /// names is refused (G7-IDP-03).
+    pub endpoint_hosts: &'static [&'static str],
 }
 
 pub const GOOGLE: Preset = Preset {
@@ -19,6 +23,12 @@ pub const GOOGLE: Preset = Preset {
     issuer: "https://accounts.google.com",
     scope: "openid email profile",
     userinfo: false,
+    endpoint_hosts: &[
+        "accounts.google.com",
+        "oauth2.googleapis.com",
+        "www.googleapis.com",
+        "openidconnect.googleapis.com",
+    ],
 };
 
 // M3: KAKAO (issuer https://kauth.kakao.com, user-info mapping, secret required)

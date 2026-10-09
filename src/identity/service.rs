@@ -125,7 +125,10 @@ impl Service {
         ident: &ProviderIdentity,
         provider: &ProviderRow,
     ) -> StoreResult<Resolution> {
-        if !domain_allowed(ident.email.as_ref(), &provider.allowed_email_domains) {
+        // A non-empty allowlist is an admission policy on a mailbox the user
+        // owns: an address the provider did not verify proves nothing (G7-IDP-02).
+        let admitted_email = ident.email.as_ref().filter(|_| ident.email_verified);
+        if !domain_allowed(admitted_email, &provider.allowed_email_domains) {
             return Ok(Resolution::Denied(reasons::EMAIL_DOMAIN_NOT_ALLOWED));
         }
         if let Some(row) = self

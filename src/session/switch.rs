@@ -5,7 +5,7 @@
 
 use url::Url;
 
-use crate::crypto::{Secret, is_well_formed_bind};
+use crate::crypto::{Secret, ct_eq, is_well_formed_bind};
 use crate::event::types::{EventKind, Outcome, reasons};
 use crate::identity::types::{NormalizedEmail, UserId};
 use crate::policy::types::Host;
@@ -56,9 +56,74 @@ fn summary(s: &SessionRow) -> AccountSummary {
 }
 
 impl Service {
-    /// `GET /switch?txn=`: names the host and both accounts. No state change.
-    pub async fn switch_view(&self, txn: &Secret) -> Result<SwitchView, SessionError> {
+    /// Bind the switch transaction to the browser that opened it, or check
+    /// the browser against the recorded binding (ADR-0004: the portal cookie
+    /// of the incoming session's browser). The first visit that holds the
+    /// incoming session's portal handle records the digest of its portal
+    /// cookie, once; every later visit and every submission must present
+    /// that cookie. Nothing is consumed here.
+    async fn check_switch_binding(
+        &self,
+        ctx: &RequestCtx,
+        row: &TransactionRow,
+        portal_bind: Option<&Secret>,
+        portal_handle: Option<&Secret>,
+        establish: bool,
+    ) -> Result<(), SessionError> {
+        let bind = portal_bind
+            .filter(|b| is_well_formed_bind(b.expose()))
+            .ok_or(SessionError::Refused(reasons::PORTAL_BIND_MISMATCH))?;
+        let digest = bind.digest();
+        let matches = |recorded: &crate::crypto::Digest| ct_eq(&recorded.0, &digest.0);
+        if let Some(recorded) = &row.portal_bind_sha256 {
+            return if matches(recorded) {
+                Ok(())
+            } else {
+                Err(SessionError::Refused(reasons::PORTAL_BIND_MISMATCH))
+            };
+        }
+        if !establish {
+            // Never bound: no browser has opened the confirmation page.
+            return Err(SessionError::Refused(reasons::PORTAL_BIND_MISMATCH));
+        }
+        let view = self
+            .portal_session(ctx, portal_handle)
+            .await?
+            .ok_or(SessionError::Refused(reasons::LOGIN_REQUIRED))?;
+        if Some(&view.session.session_id) != row.portal_session_id.as_ref() {
+            return Err(SessionError::Refused(reasons::SESSION_CONFLICT));
+        }
+        if self
+            .sessions
+            .bind_switch_transaction(&row.txn_sha256, digest)
+            .await?
+        {
+            return Ok(());
+        }
+        // Lost a race with another visit: the recorded binding decides.
+        let now = self
+            .sessions
+            .transaction(&row.txn_sha256)
+            .await?
+            .ok_or(SessionError::Refused(reasons::TXN_EXPIRED))?;
+        match &now.portal_bind_sha256 {
+            Some(recorded) if matches(recorded) => Ok(()),
+            _ => Err(SessionError::Refused(reasons::PORTAL_BIND_MISMATCH)),
+        }
+    }
+
+    /// `GET /switch?txn=`: names the host and both accounts. The only state
+    /// change is recording the browser binding of the transaction.
+    pub async fn switch_view(
+        &self,
+        ctx: &RequestCtx,
+        txn: &Secret,
+        portal_bind: Option<&Secret>,
+        portal_handle: Option<&Secret>,
+    ) -> Result<SwitchView, SessionError> {
         let row = self.load_switch_txn(txn).await?;
+        self.check_switch_binding(ctx, &row, portal_bind, portal_handle, true)
+            .await?;
         let host = host_of(&row.return_target)?;
         let incoming = self.incoming_session(&row).await?;
         let current = match row.conflicting_handle_sha256 {
@@ -90,8 +155,13 @@ impl Service {
         txn: &Secret,
         choice: SwitchChoice,
         portal_handle: Option<&Secret>,
+        portal_bind: Option<&Secret>,
     ) -> Result<SwitchOutcome, SessionError> {
         let row = self.load_switch_txn(txn).await?;
+        // Before either choice can consume the transaction: the submission
+        // must come from the browser the transaction was bound to.
+        self.check_switch_binding(ctx, &row, portal_bind, portal_handle, false)
+            .await?;
         let host = host_of(&row.return_target)?;
         let now = self.clock.now();
 

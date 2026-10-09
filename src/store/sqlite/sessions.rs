@@ -19,6 +19,7 @@ use crate::policy::types::Host;
 use crate::session::types::{Aal, SessionId};
 use crate::store::types::*;
 use crate::store::{Sessions, StoreError, StoreResult};
+use crate::verify::lifetimes::{self, LifetimeVerdict};
 
 const CODE_BURN_REASON_REDEEMED: &str = "redeemed";
 const CODE_BURN_REASON_CONFLICT: &str = "session_conflict";
@@ -109,7 +110,7 @@ impl Sessions for Store {
             let s = &req.session;
             let tx = env.begin()?;
             tx.execute(
-                "INSERT INTO sessions (session_id, user_id, provider_id, auth_time, factors, aal, authz_version, cred_gen, snapshot, bound_ip, bound_ua_sha256, created_at, last_seen_at, absolute_expires_at, terminated_at, terminated_reason) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL)",
+                "INSERT INTO sessions (session_id, user_id, provider_id, auth_time, factors, aal, authz_version, cred_gen, snapshot, bound_ip, bound_ua_sha256, created_at, last_seen_at, absolute_expires_at, terminated_at, terminated_reason, authz_version_at_auth) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL,?15)",
                 params![
                     s.session_id.as_str(),
                     s.user_id.as_str(),
@@ -125,6 +126,7 @@ impl Sessions for Store {
                     s.created_at.secs(),
                     s.last_seen_at.secs(),
                     s.absolute_expires_at.secs(),
+                    i64::try_from(s.authz_version_at_auth).unwrap_or(i64::MAX),
                 ],
             )?;
             insert_handle(&tx, &req.portal_handle)?;
@@ -448,6 +450,22 @@ impl Sessions for Store {
         .await
     }
 
+    async fn bind_switch_transaction(
+        &self,
+        txn_sha256: &Digest,
+        portal_bind_sha256: Digest,
+    ) -> StoreResult<bool> {
+        let d = *txn_sha256;
+        self.write("bind_switch_transaction", move |env| {
+            let n = env.conn.execute(
+                "UPDATE login_txns SET portal_bind_sha256=?2 WHERE txn_sha256=?1 AND purpose='switch' AND portal_bind_sha256 IS NULL AND consumed_at IS NULL",
+                params![blob(&d), blob(&portal_bind_sha256)],
+            )?;
+            Ok(n == 1)
+        })
+        .await
+    }
+
     async fn use_retry(&self, txn_sha256: &Digest, at: Timestamp) -> StoreResult<bool> {
         let d = *txn_sha256;
         self.write("use_retry", move |env| {
@@ -713,6 +731,47 @@ fn redeem(
             RedeemOutcome::Rejected {
                 reason: reasons::CODE_CONSUMED,
                 code: Some(code),
+            },
+        );
+    }
+
+    // ADR-0007: the session's own timers are evaluated in this transaction,
+    // before anything is minted or touched. An expired session is terminated
+    // here and the code is rejected (G7-C01).
+    if let Some(s) = session.as_ref().filter(|s| s.terminated_at.is_none())
+        && let LifetimeVerdict::SessionExpired(reason) = lifetimes::evaluate(
+            &req.new_handle,
+            s,
+            &req.app_lifetimes,
+            &req.session_policy,
+            req.now,
+        )
+    {
+        tx.execute(
+            "UPDATE sessions SET terminated_at=?2, terminated_reason=?3, cred_gen = cred_gen + 1 WHERE session_id=?1 AND terminated_at IS NULL",
+            params![s.session_id.as_str(), now, reason.0],
+        )?;
+        revoke_session_handles(&tx, &s.session_id, reasons::SESSION_TERMINATED.0, req.now)?;
+        consume_session_codes(&tx, &s.session_id, reason.0, req.now)?;
+        let events: Vec<Event> = req
+            .expiry_events
+            .iter()
+            .cloned()
+            .map(|mut e| {
+                e.reason = Some(reason);
+                e.session_id = Some(s.session_id.clone());
+                e.user_id = Some(s.user_id.clone());
+                e.provider_id = Some(s.provider_id.clone());
+                e
+            })
+            .collect();
+        insert_events(&tx, &shared, &events)?;
+        let burned = code_by_digest(&tx, &req.code_sha256)?;
+        return fail(
+            tx,
+            RedeemOutcome::Rejected {
+                reason,
+                code: burned,
             },
         );
     }

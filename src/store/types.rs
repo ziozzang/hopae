@@ -144,11 +144,20 @@ impl ProviderRow {
             managed_by: ManagedBy::File,
             deleted_at: None,
             sort_order: c.sort_order,
-            config: serde_json::json!({
-                "client_id": c.client_id,
-                "issuer": c.issuer,
-                "scope": c.scope,
-            }),
+            config: {
+                let mut config = serde_json::json!({
+                    "client_id": c.client_id,
+                    "issuer": c.issuer,
+                    "scope": c.scope,
+                });
+                if !c.endpoint_hosts.is_empty() {
+                    config["endpoint_hosts"] = serde_json::json!(c.endpoint_hosts);
+                }
+                if let Some(allow) = c.allow_private_endpoints {
+                    config["allow_private_endpoints"] = serde_json::json!(allow);
+                }
+                config
+            },
             client_secret_env: c.client_secret_env.clone(),
             allowed_email_domains: c.allowed_email_domains.clone(),
             authoritative_domains: c.authoritative_domains.clone(),
@@ -197,6 +206,9 @@ pub struct SessionRow {
     pub absolute_expires_at: Timestamp,
     pub terminated_at: Option<Timestamp>,
     pub terminated_reason: Option<String>,
+    /// The user `authz_version` when the session was authenticated. Never
+    /// changes; `authz_version` is the mutable snapshot version.
+    pub authz_version_at_auth: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -350,6 +362,14 @@ pub struct RedeemRequest {
     /// `handoff.max_recoveries`: a rejected known code at this depth is
     /// recorded as `handoff_recovery_exhausted` (the engine decides the answer).
     pub max_recoveries: u32,
+    /// The session-wide and the application's timers: the store evaluates
+    /// them inside the redemption transaction (G7-C01) with the shared
+    /// lifetime evaluator, so a code never revives an expired session.
+    pub session_policy: crate::policy::types::SessionPolicy,
+    pub app_lifetimes: crate::policy::types::Lifetimes,
+    /// Recorded (with the verdict's reason) when the session turns out to
+    /// have expired and is terminated by the redemption.
+    pub expiry_events: Vec<Event>,
 }
 
 pub enum RedeemOutcome {

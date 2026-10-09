@@ -48,6 +48,8 @@ const PROVIDER: Node = Obj(&[
     ("client_secret_env", Leaf),
     ("issuer", Leaf),
     ("scope", Leaf),
+    ("endpoint_hosts", Leaf),
+    ("allow_private_endpoints", Leaf),
     ("allowed_email_domains", Leaf),
     ("authoritative_domains", Leaf),
     ("auto_link", Leaf),

@@ -10,7 +10,7 @@ use hopae::event::types::{EventKind, reasons};
 use hopae::session::{LoginEntry, LogoutOutcome, SwitchChoice, SwitchOutcome};
 
 use super::s002_oidc_login::kit::*;
-use super::s003_handoff::switch_setup;
+use super::s003_handoff::{open_switch, switch_setup};
 use crate::support::{Fixture, Hopae, Jar, MockIdp, VerifyRequest};
 
 /// Session `s_1` with handles on the portal, `app` and `other`.
@@ -301,6 +301,7 @@ async fn s006_5_switch_page_signs_out_other_account() {
     // a fresh code for A is minted and the next redemption is A
     let k = Kit::new().await;
     let s = switch_setup(&k).await;
+    open_switch(&k, &s).await;
     let SwitchOutcome::Switched { location } = k
         .svc
         .switch_confirm(
@@ -308,6 +309,7 @@ async fn s006_5_switch_page_signs_out_other_account() {
             &s.ts,
             SwitchChoice::Switch,
             Some(&s.a.portal_handle),
+            Some(&k.p1),
         )
         .await
         .unwrap()
@@ -352,9 +354,10 @@ async fn s006_5_switch_page_signs_out_other_account() {
     // choice=keep: nothing is revoked, the next verify is still V
     let k = Kit::new().await;
     let s = switch_setup(&k).await;
+    open_switch(&k, &s).await;
     let SwitchOutcome::Kept { location } = k
         .svc
-        .switch_confirm(&k.ctx(), &s.ts, SwitchChoice::Keep, None)
+        .switch_confirm(&k.ctx(), &s.ts, SwitchChoice::Keep, None, Some(&k.p1))
         .await
         .unwrap()
     else {
@@ -375,9 +378,10 @@ async fn s006_5_switch_page_signs_out_other_account() {
     // without the incoming account's portal session (what a forged request has) nothing is revoked
     let k = Kit::new().await;
     let s = switch_setup(&k).await;
+    open_switch(&k, &s).await;
     assert!(
         k.svc
-            .switch_confirm(&k.ctx(), &s.ts, SwitchChoice::Switch, None)
+            .switch_confirm(&k.ctx(), &s.ts, SwitchChoice::Switch, None, Some(&k.p1))
             .await
             .is_err()
     );

@@ -90,6 +90,7 @@ pub(super) const SESSION_COLS: &[&str] = &[
     "absolute_expires_at",
     "terminated_at",
     "terminated_reason",
+    "authz_version_at_auth",
 ];
 pub(super) const HANDLE_COLS: &[&str] = &[
     "handle_sha256",
@@ -347,6 +348,7 @@ pub(super) fn session(row: &Row<'_>, o: usize) -> StoreResult<SessionRow> {
         absolute_expires_at: ts(row, o + 13, "sessions.absolute_expires_at")?,
         terminated_at: opt_ts(row, o + 14)?,
         terminated_reason: row.get(o + 15)?,
+        authz_version_at_auth: u64_of(row, o + 16, "sessions.authz_version_at_auth")?,
     })
 }
 

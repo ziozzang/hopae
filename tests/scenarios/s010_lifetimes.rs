@@ -414,3 +414,43 @@ async fn s010_a4_keepalive_flood_no_growth() {
     );
     let _ = &l.user;
 }
+
+/// G7-C01: a handoff code must not revive a session whose idle deadline has
+/// passed while `terminated_at` is still NULL.
+#[tokio::test]
+async fn g7_c01_code_does_not_revive_idle_expired_session() {
+    let f = Fx::with("m1-lifetimes", |v| v["session"]["idle"] = "30s".into());
+    let user = f.user("a@example.test", Some("alice"), None).await;
+    let s = f.session(&user).await;
+    let l = Life {
+        f,
+        user,
+        h1: Secret::new("x".into()),
+        h2: Secret::new("y".into()),
+        s,
+    };
+    let (code, bind) = mint_code(&l, "https://app.example.test/admin/x").await;
+    l.f.at(31);
+    let handles_before: i64 = l.f.sql("SELECT COUNT(*) FROM session_handles");
+    let d =
+        l.f.decide(
+            l.f.req("https://app.example.test/admin/x")
+                .code(&code)
+                .bind(&bind),
+        )
+        .await;
+    let (txn, _, _) = login(d);
+    assert!(
+        txn.is_some(),
+        "an expired session sends the browser to log in again"
+    );
+    assert_eq!(
+        l.f.sql::<i64>("SELECT COUNT(*) FROM session_handles"),
+        handles_before,
+        "no handle is minted for an expired session"
+    );
+    assert_eq!(l.f.session_state(&l.s).0.as_deref(), Some("idle"));
+    let ev = l.f.events(EventKind::SessionTerminated).await;
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].reason, Some(reasons::IDLE));
+}

@@ -8,6 +8,25 @@ use crate::crypto::{Digest, sha256};
 use crate::event::types::{Reason, reasons};
 use crate::policy::types::{BindingPolicy, IpBinding, OnMismatch, UaBinding};
 
+/// User-agent bytes kept before hashing or recording (one KiB).
+pub const MAX_USER_AGENT_BYTES: usize = 1024;
+
+/// The one User-Agent normalization every entry point applies before the
+/// value is hashed, bound or recorded: lossy UTF-8, then at most
+/// [`MAX_USER_AGENT_BYTES`] bytes cut at a character boundary. The portal and
+/// the gateway adapter must agree on these bytes (G7-C04).
+pub fn normalize_user_agent(raw: &[u8]) -> String {
+    let s = String::from_utf8_lossy(raw);
+    if s.len() <= MAX_USER_AGENT_BYTES {
+        return s.into_owned();
+    }
+    let mut end = MAX_USER_AGENT_BYTES;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 /// Which signal disagreed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BindSignal {

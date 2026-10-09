@@ -117,6 +117,7 @@ mod tests {
             absolute_expires_at: at(30 * 24 * H),
             terminated_at: None,
             terminated_reason: None,
+            authz_version_at_auth: 1,
         };
         let handle = HandleRow {
             handle_sha256: Digest([0; 32]),

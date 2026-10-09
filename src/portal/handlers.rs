@@ -186,8 +186,10 @@ fn prepare(st: &PortalState, parts: &Parts) -> Result<Rq, Response> {
         Ok(p) => p,
         Err(_) => return Err(error_response(strings(lang), &rid, ErrorPage::BadRequest)),
     };
-    let user_agent =
-        header_str(&parts.headers, header::USER_AGENT).map(|s| s.chars().take(512).collect());
+    let user_agent = parts
+        .headers
+        .get(header::USER_AGENT)
+        .map(|v| crate::policy::binding::normalize_user_agent(v.as_bytes()));
     Ok(Rq {
         ctx: RequestCtx {
             request_id: rid,

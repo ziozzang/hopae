@@ -121,9 +121,11 @@ impl Service {
             .clone()
             .ok_or(SessionError::Refused(reasons::INVALID_STATE))?;
 
+        // Counted against the same address the replacement is inserted with:
+        // the transaction's application IP (ADR-0014), not the portal's.
         let recent = self
             .sessions
-            .count_transactions_since(ctx.client_ip, now.sub(COUNTER_WINDOW))
+            .count_transactions_since(old.client_ip, now.sub(COUNTER_WINDOW))
             .await?;
         if recent >= self.cfg.txn_per_ip_per_minute {
             return Err(SessionError::RateLimited {

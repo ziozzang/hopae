@@ -55,6 +55,7 @@
       "client_id": "hopae-test",
       "client_secret_env": "HOPAE_TEST_MOCK_SECRET",
       "issuer": "http://127.0.0.1:0",
+      "allow_private_endpoints": true,
       "scope": "openid email profile",
       "auto_link": false
     }

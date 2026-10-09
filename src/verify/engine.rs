@@ -324,38 +324,40 @@ async fn flow(cx: &Cx<'_>) -> Flow {
         return login(cx, app, &target, Some(reasons::USER_DISABLED), 0).await;
     }
     let mut snapshot = view.session.snapshot.clone();
-    if view.user.authz_version != view.session.authz_version {
-        match app.on_authz_change {
-            AuthzChange::Terminate => {
-                terminate(cx, app, &view, reasons::AUTHZ_CHANGE, vec![]).await?;
-                return login(cx, app, &target, Some(reasons::AUTHZ_CHANGE), 0).await;
-            }
-            AuthzChange::Refresh => {
-                let Some(user) = ctx
-                    .directory
-                    .user(&view.session.user_id)
-                    .await
-                    .map_err(|e| cx.store_err(e))?
-                else {
-                    terminate(cx, app, &view, reasons::USER_DISABLED, vec![]).await?;
-                    return login(cx, app, &target, Some(reasons::USER_DISABLED), 0).await;
-                };
-                snapshot = IdentitySnapshot {
-                    email: user.primary_email,
-                    display_name: user.display_name,
-                    username: user.username,
-                    groups: view.user.groups.clone(),
-                };
-                ctx.sessions
-                    .refresh_snapshot(
-                        &view.session.session_id,
-                        snapshot.clone(),
-                        view.user.authz_version,
-                    )
-                    .await
-                    .map_err(|e| cx.store_err(e))?;
-            }
+    match app.on_authz_change {
+        // Compared against the version at authentication, which a refresh
+        // application never advances (G7-C02).
+        AuthzChange::Terminate if view.user.authz_version != view.session.authz_version_at_auth => {
+            terminate(cx, app, &view, reasons::AUTHZ_CHANGE, vec![]).await?;
+            return login(cx, app, &target, Some(reasons::AUTHZ_CHANGE), 0).await;
         }
+        AuthzChange::Terminate => {}
+        AuthzChange::Refresh if view.user.authz_version != view.session.authz_version => {
+            let Some(user) = ctx
+                .directory
+                .user(&view.session.user_id)
+                .await
+                .map_err(|e| cx.store_err(e))?
+            else {
+                terminate(cx, app, &view, reasons::USER_DISABLED, vec![]).await?;
+                return login(cx, app, &target, Some(reasons::USER_DISABLED), 0).await;
+            };
+            snapshot = IdentitySnapshot {
+                email: user.primary_email,
+                display_name: user.display_name,
+                username: user.username,
+                groups: view.user.groups.clone(),
+            };
+            ctx.sessions
+                .refresh_snapshot(
+                    &view.session.session_id,
+                    snapshot.clone(),
+                    view.user.authz_version,
+                )
+                .await
+                .map_err(|e| cx.store_err(e))?;
+        }
+        AuthzChange::Refresh => {}
     }
 
     // Application policy is `enabled` (checked with the host); step-up rules

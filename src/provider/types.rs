@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::crypto::{Rng, Secret, Timestamp};
+use crate::crypto::{Rng, Secret};
 use crate::event::types::{Reason, reasons};
 use crate::identity::types::NormalizedEmail;
 use crate::store::types::TransactionRow;
@@ -153,7 +153,6 @@ pub trait Provider: Send + Sync {
         txn: &TransactionRow,
         callback: &CallbackQuery,
         redirect_uri: &url::Url,
-        now: Timestamp,
     ) -> Result<ProviderIdentity, ProviderError>;
     async fn health(&self) -> ProviderHealth;
     /// Health after giving a provider that has not completed discovery yet a

@@ -369,6 +369,14 @@ pub struct ProviderEntry {
     pub issuer: Option<String>,
     #[serde(default = "default_scope")]
     pub scope: String,
+    /// Hosts, besides the issuer's own, that the provider's discovery document
+    /// may point to (G7-IDP-03). The `google` preset carries its own.
+    #[serde(default)]
+    pub endpoint_hosts: Vec<String>,
+    /// Allow loopback and private destinations (and `http` to a loopback
+    /// issuer). Unset is `false`; development only.
+    #[serde(default)]
+    pub allow_private_endpoints: Option<bool>,
     #[serde(default)]
     pub allowed_email_domains: Vec<String>,
     #[serde(default)]
@@ -847,6 +855,24 @@ impl Config {
             if p.scope.trim().is_empty() {
                 errs.push(format!("{at}.scope must not be empty"));
             }
+            if let Some(issuer) = &p.issuer
+                && issuer.starts_with("http://")
+                && p.allow_private_endpoints != Some(true)
+                && !cfg!(feature = "test-hooks")
+            {
+                errs.push(format!(
+                    "{at}.issuer uses http://: set {at}.allow_private_endpoints to true (development only)"
+                ));
+            }
+            for h in &p.endpoint_hosts {
+                let h = h.to_ascii_lowercase();
+                if !valid_domain(&h) && h.parse::<std::net::IpAddr>().is_err() {
+                    errs.push(format!(
+                        "{at}.endpoint_hosts entries must be host names or IP addresses without scheme or port"
+                    ));
+                    break;
+                }
+            }
             for (name, list) in [
                 ("allowed_email_domains", &p.allowed_email_domains),
                 ("authoritative_domains", &p.authoritative_domains),
@@ -1005,6 +1031,8 @@ impl Config {
                 client_secret_env: p.client_secret_env.clone(),
                 issuer: p.issuer.clone(),
                 scope: p.scope.clone(),
+                endpoint_hosts: lowered(&p.endpoint_hosts),
+                allow_private_endpoints: p.allow_private_endpoints,
                 allowed_email_domains: lowered(&p.allowed_email_domains),
                 authoritative_domains: lowered(&p.authoritative_domains),
                 auto_link: p.auto_link,
@@ -1358,7 +1386,7 @@ mod tests {
     fn env_checks_name_variables_only() {
         let c = with(
             r#"{"gateway": {"kind": "hangang", "caller_key_env": "A", "caller_key_next_env": "B"},
-                "providers": [{"provider_id": "mock", "kind": "oidc", "client_id": "c", "client_secret_env": "S", "issuer": "http://127.0.0.1:9"}]}"#,
+                "providers": [{"provider_id": "mock", "kind": "oidc", "client_id": "c", "client_secret_env": "S", "issuer": "http://127.0.0.1:9", "allow_private_endpoints": true}]}"#,
         )
         .unwrap();
         let env = |n: &str| (n == "A").then(|| "value-a".to_string());

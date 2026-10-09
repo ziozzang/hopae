@@ -82,7 +82,11 @@ fn failure(e: &SessionError) -> Failure {
         }
         SessionError::AlreadyBound => FailKind::Expired,
         SessionError::Provider(pe) => match pe {
-            ProviderError::ProviderError { .. }
+            // A provider server error (5xx), timeout or outage is a
+            // server-error page; a refusal the provider reports about the
+            // user (4xx, for example a declined consent) is not.
+            ProviderError::ProviderError { status } if *status >= 500 => FailKind::Unavailable,
+            ProviderError::ProviderTimeout
             | ProviderError::ProviderUnavailable
             | ProviderError::ProviderDisabled
             | ProviderError::DiscoveryIssuerMismatch => FailKind::Unavailable,
@@ -292,11 +296,20 @@ impl PortalServices for Adapter {
 
     async fn switch_view(
         &self,
-        _ctx: &RequestCtx,
+        ctx: &RequestCtx,
         txn: &Secret,
-        _cookies: &Cookies,
+        cookies: &Cookies,
     ) -> Result<SwitchView, Failure> {
-        let v = self.svc.switch_view(txn).await.map_err(|e| failure(&e))?;
+        let v = self
+            .svc
+            .switch_view(
+                &Self::sctx(ctx),
+                txn,
+                cookies.bind.as_ref(),
+                cookies.handle.as_ref(),
+            )
+            .await
+            .map_err(|e| failure(&e))?;
         Ok(SwitchView {
             host: v.host.to_string(),
             current_account: v.current.as_ref().map(account_label).unwrap_or_default(),
@@ -318,7 +331,13 @@ impl PortalServices for Adapter {
         };
         match self
             .svc
-            .switch_confirm(&Self::sctx(ctx), txn, choice, cookies.handle.as_ref())
+            .switch_confirm(
+                &Self::sctx(ctx),
+                txn,
+                choice,
+                cookies.handle.as_ref(),
+                cookies.bind.as_ref(),
+            )
             .await
         {
             Ok(SwitchOutcome::Switched { location } | SwitchOutcome::Kept { location }) => {

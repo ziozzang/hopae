@@ -202,6 +202,10 @@ pub struct ProviderConfig {
     pub client_secret_env: Option<String>,
     pub issuer: Option<String>,
     pub scope: String,
+    /// Extra hosts the discovery document may point to (lower-case).
+    pub endpoint_hosts: Vec<String>,
+    /// `None` = unset (the build default applies).
+    pub allow_private_endpoints: Option<bool>,
     pub allowed_email_domains: Vec<String>,
     pub authoritative_domains: Vec<String>,
     pub auto_link: bool,

@@ -54,8 +54,8 @@ fn now_ms() -> i64 {
 }
 
 fn row_for(issuer: &str, id: &str, extra: Value) -> ProviderRow {
-    let mut config =
-        json!({"client_id": "hopae-test", "issuer": issuer, "scope": "openid email profile"});
+    let mut config = json!({"client_id": "hopae-test", "issuer": issuer, "scope": "openid email profile",
+               "allow_private_endpoints": true});
     for (k, v) in extra.as_object().cloned().unwrap_or_default() {
         config[k] = v;
     }
@@ -137,7 +137,7 @@ impl Rig {
 
     async fn login(&self) -> Result<ProviderIdentity, ProviderError> {
         let (txn, cb) = self.authorize().await;
-        self.p.complete(&txn, &cb, &redirect(), self.now()).await
+        self.p.complete(&txn, &cb, &redirect()).await
     }
 
     fn last_report(&self) -> Option<ProviderReport> {
@@ -301,6 +301,11 @@ struct FakeState {
     token: Mutex<TokenAnswer>,
     advertise_methods: bool,
     log: Log,
+    /// Moves a test clock forward when the token endpoint is called: time
+    /// that passes during the network wait.
+    on_token: Mutex<Option<(Arc<TestClock>, Duration)>>,
+    /// Published as `token_endpoint` instead of `<base>/token`.
+    token_endpoint: Mutex<Option<String>>,
 }
 
 struct Fake {
@@ -315,6 +320,8 @@ impl Fake {
             token: Mutex::new((200, vec![], "{}".into())),
             advertise_methods,
             log: Arc::new(Mutex::new(Vec::new())),
+            on_token: Mutex::new(None),
+            token_endpoint: Mutex::new(None),
         });
         let router = Router::new().fallback(fake_handle).with_state(st.clone());
         Fake {
@@ -338,6 +345,10 @@ impl Fake {
             json!({"access_token": "at-fake", "token_type": "Bearer", "id_token": id_token})
                 .to_string(),
         );
+    }
+
+    fn advance_clock_on_token(&self, clock: &Arc<TestClock>, d: Duration) {
+        *self.st.on_token.lock().unwrap() = Some((clock.clone(), d));
     }
 
     fn set_jwks(&self, idx: &[usize]) {
@@ -381,7 +392,12 @@ async fn fake_handle(State(st): State<Arc<FakeState>>, req: Request) -> AxRespon
             let mut d = json!({
                 "issuer": base,
                 "authorization_endpoint": format!("{base}/authorize"),
-                "token_endpoint": format!("{base}/token"),
+                "token_endpoint": st
+                    .token_endpoint
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| format!("{base}/token")),
                 "jwks_uri": format!("{base}/jwks"),
                 "response_types_supported": ["code"],
                 "id_token_signing_alg_values_supported": ["RS256"],
@@ -393,6 +409,9 @@ async fn fake_handle(State(st): State<Arc<FakeState>>, req: Request) -> AxRespon
         }
         ("GET", "/jwks") => json_resp(200, st.jwks.lock().unwrap().clone()),
         ("POST", "/token") => {
+            if let Some((clock, d)) = st.on_token.lock().unwrap().clone() {
+                clock.advance(d);
+            }
             let (status, headers, body) = st.token.lock().unwrap().clone();
             let mut r = json_resp(status, body);
             for (k, v) in headers {
@@ -414,12 +433,25 @@ async fn fake_login_parts(
     clock: &Arc<TestClock>,
     extra: Value,
 ) -> (Arc<OidcProvider>, TransactionRow, CallbackQuery) {
-    let row = row_for(&fake.issuer(), "mock", extra);
+    fake_login_parts_at(fake, &fake.issuer(), clock, extra)
+        .await
+        .expect("begin against fake")
+}
+
+/// As [`fake_login_parts`] with the configured issuer spelled `issuer`;
+/// `Err` when `begin` is refused.
+async fn fake_login_parts_at(
+    fake: &Fake,
+    issuer: &str,
+    clock: &Arc<TestClock>,
+    extra: Value,
+) -> Result<(Arc<OidcProvider>, TransactionRow, CallbackQuery), ProviderError> {
+    let _ = fake;
+    let row = row_for(issuer, "mock", extra);
     let (p, _) = build(&row, clock);
     let req = p
         .begin(&placeholder_txn("mock", clock.now()), &redirect(), &OsRng)
-        .await
-        .expect("begin against fake");
+        .await?;
     let txn = txn_for("mock", &req, clock.now());
     let cb = CallbackQuery {
         code: Some("fake-code".into()),
@@ -427,7 +459,7 @@ async fn fake_login_parts(
         error: None,
         error_description: None,
     };
-    (p, txn, cb)
+    Ok((p, txn, cb))
 }
 
 fn claims_for(iss: &str, nonce: &str, now: Timestamp) -> Value {
@@ -541,7 +573,7 @@ async fn provider_s012_1_portal_shows_provider_unavailable() {
 async fn s012_2_token_error_fails_cleanly() {
     let rig = Rig::new("token_500");
     let (txn, cb) = rig.authorize().await;
-    let e = err_of(rig.p.complete(&txn, &cb, &redirect(), rig.now()).await);
+    let e = err_of(rig.p.complete(&txn, &cb, &redirect()).await);
     assert!(
         matches!(e, ProviderError::ProviderError { status: 500 }),
         "{e:?}"
@@ -555,7 +587,7 @@ async fn s012_2_token_error_fails_cleanly() {
     rig.idp.set_profile("default");
     let id = rig
         .p
-        .complete(&txn, &cb, &redirect(), rig.now())
+        .complete(&txn, &cb, &redirect())
         .await
         .expect("retry succeeds");
     assert_eq!(id.subject, "sub-1");
@@ -566,7 +598,7 @@ async fn s012_3_slow_token_bounded() {
     let rig = Rig::new("token_slow");
     let (txn, cb) = rig.authorize().await;
     let t0 = Instant::now();
-    let e = err_of(rig.p.complete(&txn, &cb, &redirect(), rig.now()).await);
+    let e = err_of(rig.p.complete(&txn, &cb, &redirect()).await);
     let took = t0.elapsed();
     assert!(matches!(e, ProviderError::ProviderTimeout), "{e:?}");
     assert!(
@@ -681,6 +713,18 @@ async fn s012_7_sessions_unaffected_by_provider() {
     // mock's request log does not grow during verify.
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
+    // Start-up discovery runs in the background: let it finish so that it is
+    // not mistaken for a call made by verify.
+    for _ in 0..100 {
+        if !idp
+            .requests_to("/.well-known/openid-configuration")
+            .is_empty()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(200));
     idp.set_profile("token_500");
     let before = idp.requests().len();
     let r = h.verify(VerifyRequest::document("https://app.example.test/admin/x"));
@@ -788,7 +832,7 @@ async fn s012_a2_hard_deadline_on_caches() {
     rig.idp.set_profile("discovery_down");
     rig.advance(Duration::from_secs(24 * 3600 + 1));
     let calls = rig.idp.token_calls();
-    let e = err_of(rig.p.complete(&txn, &cb, &redirect(), rig.now()).await);
+    let e = err_of(rig.p.complete(&txn, &cb, &redirect()).await);
     assert!(matches!(e, ProviderError::ProviderUnavailable), "{e:?}");
     assert_eq!(
         rig.idp.token_calls(),
@@ -814,7 +858,7 @@ async fn s012_a2_hard_deadline_on_caches() {
         rig.advance(Duration::from_secs(61));
         rig.authorize().await
     };
-    let id = rig.p.complete(&txn, &cb, &redirect(), rig.now()).await;
+    let id = rig.p.complete(&txn, &cb, &redirect()).await;
     assert!(
         id.is_ok(),
         "fresh fetches work after recovery: {:?}",
@@ -863,7 +907,7 @@ async fn s012_a4_token_redirect_not_followed() {
     );
     let clock = Arc::new(TestClock::new(Timestamp(now_ms())));
     let (p, txn, cb) = fake_login_parts(&fake, &clock, json!({})).await;
-    let e = err_of(p.complete(&txn, &cb, &redirect(), clock.now()).await);
+    let e = err_of(p.complete(&txn, &cb, &redirect()).await);
     assert!(matches!(e, ProviderError::ProviderResponseInvalid), "{e:?}");
     assert!(
         target.requests().is_empty(),
@@ -894,7 +938,7 @@ async fn s012_a5_algorithm_downgrade_rejected() {
         let (p, txn, cb) = fake_login_parts(fake, clock, extra).await;
         let token = make(&fake.issuer(), txn.nonce.as_deref().unwrap(), clock.now());
         fake.set_id_token(&token);
-        p.complete(&txn, &cb, &redirect(), clock.now()).await
+        p.complete(&txn, &cb, &redirect()).await
     }
 
     // Control: a correctly signed RS256 token with a kid is accepted.
@@ -1059,11 +1103,7 @@ async fn s012_a5_algorithm_downgrade_rejected() {
 async fn provider_s002_success_path_and_client_authentication() {
     let rig = Rig::new("default");
     let (txn, cb) = rig.authorize().await;
-    let id = rig
-        .p
-        .complete(&txn, &cb, &redirect(), rig.now())
-        .await
-        .expect("login");
+    let id = rig.p.complete(&txn, &cb, &redirect()).await.expect("login");
     assert_eq!(id.subject, "sub-1");
     assert_eq!(
         id.email.as_ref().map(|e| e.as_str()),
@@ -1135,11 +1175,11 @@ async fn provider_s002_state_and_transaction_checks() {
     // Another provider's transaction, a consumed transaction, a different state.
     let mut other = txn.clone();
     other.provider_id = Some(ProviderId::new("mock2"));
-    let e = err_of(rig.p.complete(&other, &cb, &redirect(), rig.now()).await);
+    let e = err_of(rig.p.complete(&other, &cb, &redirect()).await);
     assert!(matches!(e, ProviderError::InvalidState), "{e:?}");
     let mut consumed = txn.clone();
     consumed.consumed_at = Some(rig.now());
-    let e = err_of(rig.p.complete(&consumed, &cb, &redirect(), rig.now()).await);
+    let e = err_of(rig.p.complete(&consumed, &cb, &redirect()).await);
     assert!(matches!(e, ProviderError::InvalidState), "{e:?}");
     let mut bad = CallbackQuery {
         code: cb.code.clone(),
@@ -1147,10 +1187,10 @@ async fn provider_s002_state_and_transaction_checks() {
         error: None,
         error_description: None,
     };
-    let e = err_of(rig.p.complete(&txn, &bad, &redirect(), rig.now()).await);
+    let e = err_of(rig.p.complete(&txn, &bad, &redirect()).await);
     assert!(matches!(e, ProviderError::InvalidState), "{e:?}");
     bad.state = None;
-    let e = err_of(rig.p.complete(&txn, &bad, &redirect(), rig.now()).await);
+    let e = err_of(rig.p.complete(&txn, &bad, &redirect()).await);
     assert!(matches!(e, ProviderError::InvalidState), "{e:?}");
     // The provider reporting an error is a failed attempt, not a login.
     let declined = CallbackQuery {
@@ -1159,20 +1199,11 @@ async fn provider_s002_state_and_transaction_checks() {
         error: Some("access_denied".into()),
         error_description: None,
     };
-    let e = err_of(
-        rig.p
-            .complete(&txn, &declined, &redirect(), rig.now())
-            .await,
-    );
+    let e = err_of(rig.p.complete(&txn, &declined, &redirect()).await);
     assert!(matches!(e, ProviderError::ProviderError { .. }), "{e:?}");
     // None of that reached the token endpoint, and the real callback still works.
     assert_eq!(rig.idp.token_calls(), 0);
-    assert!(
-        rig.p
-            .complete(&txn, &cb, &redirect(), rig.now())
-            .await
-            .is_ok()
-    );
+    assert!(rig.p.complete(&txn, &cb, &redirect()).await.is_ok());
 }
 
 #[tokio::test]
@@ -1181,7 +1212,7 @@ async fn provider_s002_a4_oversized_and_slow_bounded() {
     let rig = Rig::new("default");
     let (txn, cb) = rig.authorize().await;
     rig.idp.set_profile("oversized");
-    let e = err_of(rig.p.complete(&txn, &cb, &redirect(), rig.now()).await);
+    let e = err_of(rig.p.complete(&txn, &cb, &redirect()).await);
     assert!(
         matches!(e, ProviderError::ProviderResponseTooLarge),
         "{e:?}"
@@ -1219,7 +1250,7 @@ async fn provider_s002_a6_mixup_rejected() {
     let a = Rig::new("default");
     let b = Rig::with("default", "mock2", json!({}), |_| {});
     let (txn, cb) = a.authorize().await;
-    let e = err_of(b.p.complete(&txn, &cb, &redirect(), b.now()).await);
+    let e = err_of(b.p.complete(&txn, &cb, &redirect()).await);
     assert!(matches!(e, ProviderError::InvalidState), "{e:?}");
     assert_eq!(a.idp.token_calls() + b.idp.token_calls(), 0);
 
@@ -1251,7 +1282,7 @@ async fn provider_s002_a6_mixup_rejected() {
     b.idp.set_now_ms(None);
     let (p, mut txn3, cb3) = fake_login_parts(&relay, &clock, json!({})).await;
     txn3.nonce = txn2.nonce.clone();
-    let e = err_of(p.complete(&txn3, &cb3, &redirect(), clock.now()).await);
+    let e = err_of(p.complete(&txn3, &cb3, &redirect()).await);
     assert!(matches!(e, ProviderError::InvalidIssuer), "{e:?}");
 }
 
@@ -1390,3 +1421,138 @@ async fn provider_google_preset_fills_issuer_and_skips_userinfo() {
 // Keep a reference so the helper is not reported unused when tests are filtered.
 #[allow(dead_code)]
 fn _uses(_: &Fake, _: Option<&Echo>) {}
+
+/// G7-IDP-05: the token time checks use the clock at validation time, after
+/// the network waits. A token that was inside the 60 s leeway when the
+/// callback began, but is outside it once the token endpoint has answered, is
+/// rejected.
+#[tokio::test]
+async fn g7_idp05_token_time_is_checked_after_the_network_wait() {
+    let keys = rsa_pairs();
+    let clock = Arc::new(TestClock::new(Timestamp(now_ms())));
+    let fake = Fake::start(true);
+    fake.set_jwks(&[0]);
+    let (p, txn, cb) = fake_login_parts(&fake, &clock, json!({})).await;
+    let t0 = clock.now();
+    // Expired 55 s before the callback began: inside the leeway then.
+    let claims = json!({"iss": fake.issuer(), "aud": "hopae-test", "sub": "sub-9",
+        "exp": t0.secs() - 55, "iat": t0.secs() - 400, "nonce": txn.nonce,
+        "email": "z@example.test", "email_verified": true});
+    fake.set_id_token(&sign(
+        Algorithm::RS256,
+        Some("fk-1"),
+        Some("JWT"),
+        &keys[0].enc,
+        &claims,
+    ));
+    // The token endpoint answers nine seconds later: expired 64 s ago.
+    fake.advance_clock_on_token(&clock, Duration::from_secs(9));
+    let e = err_of(p.complete(&txn, &cb, &redirect()).await);
+    assert!(matches!(e, ProviderError::TokenExpired), "{e:?}");
+
+    // Control: with no wait the same token is still inside the leeway.
+    let (p, txn, cb) = fake_login_parts(&fake, &clock, json!({})).await;
+    let t1 = clock.now();
+    let claims = json!({"iss": fake.issuer(), "aud": "hopae-test", "sub": "sub-9",
+        "exp": t1.secs() - 55, "iat": t1.secs() - 400, "nonce": txn.nonce,
+        "email": "z@example.test", "email_verified": true});
+    fake.set_id_token(&sign(
+        Algorithm::RS256,
+        Some("fk-1"),
+        Some("JWT"),
+        &keys[0].enc,
+        &claims,
+    ));
+    *fake.st.on_token.lock().unwrap() = None;
+    assert!(p.complete(&txn, &cb, &redirect()).await.is_ok());
+}
+
+/// G7-IDP-07: a provider 5xx at the token endpoint reaches the browser as a
+/// server-error page (503), `login.failed` carries the provider status, and
+/// the transaction stays retryable (S012-2, S002-A4). Through the real
+/// callback orchestration and portal, not `OidcProvider::complete` alone.
+#[test]
+fn g7_idp07_provider_5xx_is_a_503_with_status_and_retryable() {
+    let idp = MockIdp::start("token_500");
+    let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
+    let ip = "203.0.113.9";
+    let r = h.verify(VerifyRequest::document("https://app.example.test/admin/x").ip(ip));
+    assert_eq!(r.status, 302, "{r:?}");
+    let loc = r.location().expect("login redirect").to_string();
+    let path = loc.split("auth.example.test").nth(1).expect("portal path");
+    let portal = h.portal().with_ip(ip);
+    let go = portal.get(path);
+    assert_eq!(go.status, 302, "{go:?}");
+    let callback = idp.follow_authorization(go.location().expect("provider redirect"));
+
+    let failed = portal.get(&callback);
+    assert_eq!(failed.status, 503, "server-error page: {failed:?}");
+    let mut rows = vec![];
+    for _ in 0..100 {
+        rows = h.hooks.events(Some("login.failed"), Some(100));
+        if !rows.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["reason"], "provider_error");
+    assert_eq!(rows[0]["attrs"]["status"], 500, "{:?}", rows[0]);
+
+    // The transaction was not consumed: once the provider recovers the same
+    // callback completes the login.
+    idp.set_profile("default");
+    let ok = portal.get(&callback);
+    assert_eq!(ok.status, 302, "retry after recovery: {ok:?}");
+    assert!(
+        ok.location().is_some_and(|l| l.contains("_hopae_handoff=")),
+        "{ok:?}"
+    );
+}
+
+/// G7-IDP-03: discovery may not send the client to endpoints on other hosts
+/// (here an "internal service" on another loopback host name) unless the
+/// operator lists them; nothing is requested from the destination.
+#[tokio::test]
+async fn g7_idp03_discovery_endpoints_are_confined_to_the_issuer_or_the_allowlist() {
+    let clock = Arc::new(TestClock::new(Timestamp(now_ms())));
+    let idp = Fake::start(true);
+    let victim = Fake::start(false);
+    let issuer = format!("http://localhost:{}", idp.served.addr.port());
+    *idp.st.token_endpoint.lock().unwrap() = Some(format!(
+        "http://127.0.0.1:{}/internal",
+        victim.served.addr.port()
+    ));
+    let private_ok = json!({"allow_private_endpoints": true});
+
+    // The issuer's own host is trusted; 127.0.0.1 is another host.
+    let r = fake_login_parts_at(&idp, &issuer, &clock, private_ok.clone()).await;
+    assert!(r.is_err(), "a token endpoint on another host is refused");
+    assert!(
+        victim.requests().is_empty(),
+        "no request reached the destination"
+    );
+
+    // The operator may list the host explicitly.
+    let listed = json!({"allow_private_endpoints": true, "endpoint_hosts": ["127.0.0.1"]});
+    let (p, txn, cb) = fake_login_parts_at(&idp, &issuer, &clock, listed)
+        .await
+        .expect("a listed endpoint host is accepted");
+    let _ = p.complete(&txn, &cb, &redirect()).await;
+    assert!(
+        victim.requests().iter().any(|r| r.path() == "/internal"),
+        "the listed destination is the one called"
+    );
+
+    // Without the private-endpoint opt-in a loopback issuer is not used at
+    // all, under any build.
+    let off = json!({"allow_private_endpoints": false});
+    let before = idp.requests().len();
+    let r = fake_login_parts_at(&idp, &issuer, &clock, off).await;
+    assert!(r.is_err());
+    assert_eq!(
+        idp.requests().len(),
+        before,
+        "no connection to a loopback address"
+    );
+}

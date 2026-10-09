@@ -41,6 +41,7 @@ use crate::store::types::{
     TransactionBinding, TransactionRow, TxnPurpose, User, UserStatus,
 };
 use crate::store::{Directory, Events, Sessions, StoreError};
+use crate::verify::lifetimes::{self, LifetimeVerdict};
 
 /// `consumed_reason` of a transaction that completed a login (text column).
 pub(crate) const CONSUMED_COMPLETED: Reason = Reason("completed");
@@ -51,6 +52,8 @@ pub(crate) const CONSUMED_SSO: Reason = Reason("sso");
 pub const TXN_LIFETIME: Duration = Duration::from_secs(10 * 60);
 /// Lifetime of a handoff code (ADR-0004).
 pub const CODE_LIFETIME: Duration = Duration::from_secs(60);
+/// Window of last-seen write coalescing for portal activity (as verify's).
+pub(crate) const TOUCH_COALESCE: Duration = Duration::from_secs(30);
 /// Window of the per-IP counters.
 pub(crate) const COUNTER_WINDOW: Duration = Duration::from_secs(60);
 
@@ -244,7 +247,10 @@ pub(crate) enum HandleState {
     Usable,
     /// Revoked, terminated session or disabled user.
     Dead,
-    Expired,
+    /// The handle's own idle or absolute timer ran out (revoke the handle).
+    HandleExpired(Reason),
+    /// The session's idle or absolute timer ran out (terminate the session).
+    SessionExpired(Reason),
     Mismatch(Reason),
 }
 
@@ -395,6 +401,28 @@ impl Service {
         SessionError::Refused(reason)
     }
 
+    /// Record `login.failed` for a provider failure that leaves the
+    /// transaction usable, carrying the provider's HTTP status when it had
+    /// one, and return the typed error.
+    async fn refuse_provider(
+        &self,
+        ctx: &RequestCtx,
+        txn: &TransactionRow,
+        provider: &ProviderId,
+        error: ProviderError,
+    ) -> SessionError {
+        let mut b = self
+            .ev(ctx, EventKind::LoginFailed, Outcome::Failure)
+            .app(&txn.app_id)
+            .provider(provider)
+            .reason(error.reason());
+        if let ProviderError::ProviderError { status } = &error {
+            b = b.attr("status", *status);
+        }
+        self.append_unattached(b.build()).await;
+        SessionError::Provider(error)
+    }
+
     /// Consume the transaction with a `login.failed` event in the same
     /// transaction, then refuse. A lost consume race reports `txn_consumed`.
     async fn refuse_consuming(
@@ -453,17 +481,21 @@ impl Service {
         {
             return HandleState::Dead;
         }
-        if now >= view.session.absolute_expires_at {
-            return HandleState::Expired;
-        }
-        if now.since(view.session.last_seen_at) >= self.cfg.session.idle {
-            return HandleState::Expired;
-        }
-        if now >= view.handle.absolute_expires_at {
-            return HandleState::Expired;
-        }
-        if now.since(view.handle.last_seen_at) >= app.session.idle {
-            return HandleState::Expired;
+        // The one lifetime state machine of ADR-0007, shared with verify.
+        match lifetimes::evaluate(
+            &view.handle,
+            &view.session,
+            &app.session,
+            &self.cfg.session,
+            now,
+        ) {
+            LifetimeVerdict::Live { .. } => {}
+            // A stored time from the future is never trusted: no portal session.
+            LifetimeVerdict::ClockSkew => return HandleState::Dead,
+            LifetimeVerdict::HandleExpired(reason) => return HandleState::HandleExpired(reason),
+            LifetimeVerdict::SessionExpired(reason) => {
+                return HandleState::SessionExpired(reason);
+            }
         }
         if !ip_matches(app.binding.ip, view.session.bound_ip, ctx.client_ip) {
             return HandleState::Mismatch(reasons::BINDING_IP);
@@ -496,14 +528,98 @@ impl Service {
         };
         let snap = self.snapshot.load_full();
         match self.evaluate_handle(&view, &snap.default_app, ctx) {
-            HandleState::Usable => Ok(Some(view)),
-            HandleState::Dead | HandleState::Expired => Ok(None),
+            HandleState::Usable => {
+                self.touch_portal_handle(&view).await;
+                Ok(Some(view))
+            }
+            HandleState::Dead => Ok(None),
+            HandleState::HandleExpired(reason) => {
+                self.expire(ctx, &view, &snap.default_app, reason, false)
+                    .await?;
+                Ok(None)
+            }
+            HandleState::SessionExpired(reason) => {
+                self.expire(ctx, &view, &snap.default_app, reason, true)
+                    .await?;
+                Ok(None)
+            }
             HandleState::Mismatch(reason) => {
                 self.apply_mismatch(ctx, &view, &snap.default_app, reason)
                     .await?;
                 Ok(None)
             }
         }
+    }
+
+    /// Record portal activity on the handle and its session, coalesced like
+    /// verify's touches (at most one write per `touch_coalesce`). Best effort:
+    /// a lost touch only makes the next visit retry it.
+    async fn touch_portal_handle(&self, view: &HandleView) {
+        let now = self.clock.now();
+        if now.since(view.handle.last_seen_at) < TOUCH_COALESCE {
+            return;
+        }
+        if let Err(e) = self
+            .sessions
+            .touch_handle(&view.handle.handle_sha256, now)
+            .await
+        {
+            tracing::warn!(error = %e, "portal handle activity could not be recorded");
+        }
+    }
+
+    /// Apply the lifetime verdict's transition for an expired portal handle:
+    /// revoke the handle (`terminate=false`) or terminate the session, each
+    /// with its event (ADR-0007).
+    async fn expire(
+        &self,
+        ctx: &RequestCtx,
+        view: &HandleView,
+        app: &AppPolicy,
+        reason: Reason,
+        terminate: bool,
+    ) -> Result<(), SessionError> {
+        let now = self.clock.now();
+        let build = |kind| {
+            self.ev(ctx, kind, Outcome::Info)
+                .user(&view.session.user_id)
+                .session(&view.session.session_id)
+                .provider(&view.session.provider_id)
+                .app(&app.app_id)
+                .reason(reason)
+                .attr("host", view.handle.host.as_str())
+                .build()
+        };
+        if terminate {
+            self.sessions
+                .terminate_session(
+                    &view.session.session_id,
+                    reason,
+                    now,
+                    vec![build(EventKind::SessionTerminated)],
+                )
+                .await?;
+        } else {
+            self.sessions
+                .revoke_handle(
+                    &view.handle.handle_sha256,
+                    reason,
+                    now,
+                    vec![build(EventKind::HandleRevoked)],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The provider's stored row exists, is enabled and is not tombstoned.
+    async fn provider_row_live(&self, id: &ProviderId) -> Result<bool, SessionError> {
+        Ok(self
+            .directory
+            .providers()
+            .await?
+            .iter()
+            .any(|r| &r.provider_id == id && r.deleted_at.is_none() && r.enabled))
     }
 
     async fn apply_mismatch(
@@ -593,7 +709,7 @@ impl Service {
             .providers
             .get(provider_id)
             .ok_or(SessionError::Refused(reasons::PROVIDER_UNAVAILABLE))?;
-        if !provider.enabled() {
+        if !provider.enabled() || !self.provider_row_live(provider_id).await? {
             return Err(SessionError::Refused(reasons::PROVIDER_DISABLED));
         }
         let redirect_uri = self.redirect_uri(provider_id)?;
@@ -848,7 +964,9 @@ impl Service {
                 )
                 .await);
         };
-        if !provider.enabled() {
+        // The database row is authoritative (a live `providers import` can
+        // disable or tombstone a provider without a restart).
+        if !provider.enabled() || !self.provider_row_live(provider_id).await? {
             return Err(self
                 .refuse(
                     ctx,
@@ -859,89 +977,93 @@ impl Service {
                 .await);
         }
         let redirect_uri = self.redirect_uri(provider_id)?;
-        let ident = match provider.complete(&txn, &query, &redirect_uri, now).await {
+        let ident = match provider.complete(&txn, &query, &redirect_uri).await {
             Ok(i) => i,
             Err(e) => {
                 if transient(&e) {
-                    // The user may retry until the transaction expires.
-                    return Err(self
-                        .refuse(ctx, Some(&txn), Some(provider_id), e.reason())
-                        .await);
+                    // The user may retry until the transaction expires. The
+                    // typed error (and with it the provider status) is kept
+                    // for the page and recorded on `login.failed`.
+                    return Err(self.refuse_provider(ctx, &txn, provider_id, e).await);
                 }
                 let _ = self.refuse_consuming(ctx, &txn, e.reason()).await;
                 return Err(SessionError::Provider(e));
             }
         };
 
+        // Read again after the network round trips: the provider may have
+        // been disabled while the token exchange was in flight.
         let row = self
             .directory
             .providers()
             .await?
             .into_iter()
-            .find(|r| &r.provider_id == provider_id && r.deleted_at.is_none())
-            .ok_or(SessionError::Refused(reasons::PROVIDER_UNAVAILABLE))?;
-        let resolution = self.identity.resolve(&ident, &row).await?;
+            .find(|r| &r.provider_id == provider_id && r.deleted_at.is_none() && r.enabled);
+        let Some(row) = row else {
+            return Err(self
+                .refuse(
+                    ctx,
+                    Some(&txn),
+                    Some(provider_id),
+                    reasons::PROVIDER_DISABLED,
+                )
+                .await);
+        };
+        let mut resolution = self.identity.resolve(&ident, &row).await?;
         let ectx = self.event_ctx(ctx, Some(&txn));
-
-        match resolution {
-            Resolution::Denied(reason) => {
-                let mut events = vec![
-                    self.ev(ctx, EventKind::LoginFailed, Outcome::Failure)
-                        .app(&txn.app_id)
-                        .provider(provider_id)
-                        .reason(reason)
-                        .build(),
-                ];
-                if reason == reasons::EMAIL_IN_USE {
-                    events.push(self.identity.conflict_event(provider_id, reason, &ectx));
-                }
-                if self
-                    .sessions
-                    .consume_transaction(&txn.txn_sha256, reason, now, events)
-                    .await?
-                {
-                    return Err(SessionError::Refused(reason));
-                }
-                return Err(SessionError::Refused(reasons::TXN_CONSUMED));
-            }
-            Resolution::LinkRequired { pending } => {
-                return self
-                    .link_required(ctx, &txn, provider_id, pending, &ectx)
-                    .await;
-            }
-            _ => {}
-        }
 
         // The user and identity are created (or found) in their own call,
         // idempotent on (provider, subject); a crash after it leaves an
         // orphan user and an unconsumed transaction (S014-6). The transaction
         // is consumed in the same store call that creates the session, so two
         // racing callbacks produce one session.
-        let resolved = match self.identity.apply(resolution, &row, &ident, &ectx).await {
-            Ok(Some(r)) => r,
-            Ok(None) => return Err(SessionError::Refused(reasons::INVALID_STATE)),
-            Err(StoreError::Conflict(_)) => {
-                // A racing callback for the same identity created the user
-                // first. The creation is idempotent on (provider, subject): look
-                // again, and use the user that now exists. Anything else is a
-                // real conflict.
-                match self.identity.resolve(&ident, &row).await? {
-                    r @ Resolution::ExistingUser { .. } => {
-                        match self.identity.apply(r, &row, &ident, &ectx).await {
-                            Ok(Some(r)) => r,
-                            Ok(None) => {
-                                return Err(SessionError::Refused(reasons::INVALID_STATE));
-                            }
-                            Err(StoreError::Conflict(_)) => {
-                                return Err(SessionError::Refused(reasons::EMAIL_IN_USE));
-                            }
-                            Err(e) => return Err(e.into()),
-                        }
+        //
+        // A store conflict means a concurrent callback got there first: for
+        // the same identity, or for the same primary email (unique when
+        // present). The complete ADR-0011 decision is then taken again, once,
+        // against what now exists: an existing identity is used, an email
+        // owner yields `link_required` (G7-IDP-04).
+        let mut raced = false;
+        let resolved = loop {
+            match resolution {
+                Resolution::Denied(reason) => {
+                    let mut events = vec![
+                        self.ev(ctx, EventKind::LoginFailed, Outcome::Failure)
+                            .app(&txn.app_id)
+                            .provider(provider_id)
+                            .reason(reason)
+                            .build(),
+                    ];
+                    if reason == reasons::EMAIL_IN_USE {
+                        events.push(self.identity.conflict_event(provider_id, reason, &ectx));
                     }
-                    _ => return Err(SessionError::Refused(reasons::EMAIL_IN_USE)),
+                    if self
+                        .sessions
+                        .consume_transaction(&txn.txn_sha256, reason, now, events)
+                        .await?
+                    {
+                        return Err(SessionError::Refused(reason));
+                    }
+                    return Err(SessionError::Refused(reasons::TXN_CONSUMED));
                 }
+                Resolution::LinkRequired { pending } => {
+                    return self
+                        .link_required(ctx, &txn, provider_id, pending, &ectx)
+                        .await;
+                }
+                r => match self.identity.apply(r, &row, &ident, &ectx).await {
+                    Ok(Some(res)) => break res,
+                    Ok(None) => return Err(SessionError::Refused(reasons::INVALID_STATE)),
+                    Err(StoreError::Conflict(_)) if !raced => {
+                        raced = true;
+                        resolution = self.identity.resolve(&ident, &row).await?;
+                    }
+                    Err(StoreError::Conflict(_)) => {
+                        return Err(SessionError::Refused(reasons::EMAIL_IN_USE));
+                    }
+                    Err(e) => return Err(e.into()),
+                },
             }
-            Err(e) => return Err(e.into()),
         };
         let user = resolved.user;
 
@@ -1165,6 +1287,7 @@ impl Service {
             absolute_expires_at: session_abs,
             terminated_at: None,
             terminated_reason: None,
+            authz_version_at_auth: user.authz_version,
         };
         let portal_handle = HandleRow {
             handle_sha256: digest,
@@ -1234,7 +1357,9 @@ impl Service {
         };
         let snap = self.snapshot.load_full();
         match self.evaluate_handle(&view, &snap.default_app, ctx) {
-            HandleState::Usable | HandleState::Expired => {}
+            HandleState::Usable
+            | HandleState::HandleExpired(_)
+            | HandleState::SessionExpired(_) => {}
             HandleState::Dead => return Ok(LogoutOutcome::NoSession),
             HandleState::Mismatch(reason) => {
                 self.apply_mismatch(ctx, &view, &snap.default_app, reason)

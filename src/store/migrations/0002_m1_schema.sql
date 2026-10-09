@@ -18,6 +18,8 @@ CREATE TABLE users (
     last_login_at       INTEGER
 ) STRICT;
 CREATE UNIQUE INDEX users_username ON users (username) WHERE username IS NOT NULL;
+-- ADR-0011: a primary email belongs to at most one user (stored normalized).
+CREATE UNIQUE INDEX users_primary_email ON users (primary_email) WHERE primary_email IS NOT NULL;
 
 CREATE TABLE identities (
     provider_id         TEXT NOT NULL,
@@ -87,7 +89,11 @@ CREATE TABLE sessions (
     last_seen_at        INTEGER NOT NULL,
     absolute_expires_at INTEGER NOT NULL,
     terminated_at       INTEGER,
-    terminated_reason   TEXT
+    terminated_reason   TEXT,
+    -- The user authz_version at authentication (immutable): the baseline a
+    -- `terminate` application compares against. `authz_version` above is the
+    -- mutable snapshot version a `refresh` application advances.
+    authz_version_at_auth INTEGER NOT NULL
 ) STRICT;
 CREATE INDEX sessions_user_terminated ON sessions (user_id, terminated_at);
 
