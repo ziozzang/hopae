@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=13 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=14 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -196,7 +196,7 @@ M2)는 이 필드가 없는 애플리케이션 호스트 라우트를 `strip_req
 | 상태 | 의미 | 헤더 | 게이트웨이 동작(Hangang) |
 | --- | --- | --- | --- |
 | `200` | 허용 | 신원 헤더, `cache-control: no-store`(HC-1이 적용되면 `private, max-age=N`), `x-hopae-reason: ok` | 나열된 헤더를 업스트림 요청에 주입합니다. |
-| `302` | 문서 탐색에 대한 로그인, 재인증(`reauth_required`: 세션의 제공자 인증이 애플리케이션의 `max_auth_age`보다 오래되어 트랜잭션이 포털로 하여금 단일 로그인을 건너뛰고 `max_age`와 `prompt=login`으로 제공자에 묻게 함. [ADR-0016](../adr/0016-management-console-minimum.md)), 단계 상승, 핸드오프, 애플리케이션 호스트 진입점 리디렉션(`logout_entry`, `already_authenticated`, 직접 `logout`) | `location`(포털 URL, 핸드오프 대상 또는 진입점 대상), `set-cookie`(바인딩 쿠키나 핸들을 심거나 지움), `cache-control: no-store`, `x-hopae-reason` | `referrer-policy: no-referrer`와 함께 클라이언트로 중계합니다. 업스트림에는 접속하지 않습니다. |
+| `302` | 문서 탐색에 대한 로그인, 재인증(`reauth_required`: 세션의 제공자 인증이 애플리케이션의 `max_auth_age`보다 오래되어 트랜잭션이 포털로 하여금 단일 로그인을 건너뛰고 브라우저를 제공자로 보내게 함. 제공자의 `reauth` 능력이 `max_age`이면 `max_age`와 `prompt=login`을 실어, 아니면 일반 로그인으로. [ADR-0016](../adr/0016-management-console-minimum.md)), 단계 상승, 핸드오프, 애플리케이션 호스트 진입점 리디렉션(`logout_entry`, `already_authenticated`, 직접 `logout`) | `location`(포털 URL, 핸드오프 대상 또는 진입점 대상), `set-cookie`(바인딩 쿠키나 핸들을 심거나 지움), `cache-control: no-store`, `x-hopae-reason` | `referrer-policy: no-referrer`와 함께 클라이언트로 중계합니다. 업스트림에는 접속하지 않습니다. |
 | `401` | 인증, 재인증 또는 단계 상승 필요, 문서가 아닌 요청 | `content-type: application/json`, 본문 `{"error":"login_required","login":"https://app.example.test/admin/x"}`(또는 `"reauth_required"`, `"step_up_required"`): `login`은 **요청된 애플리케이션 URL 그대로**입니다. 애플리케이션 호스트의 문서 탐색만이 바인딩 쿠키를 심고 트랜잭션을 시작할 수 있기 때문입니다. `401`은 트랜잭션을 만들지 않고 쿠키도 설정하지 않습니다. `www-authenticate: Hopae realm="auth.example.test"`, `cache-control: no-store` | 클라이언트로 중계합니다. 이를 받은 페이지 스크립트는 창을 `login`으로 이동시킵니다. |
 | `403` | 거부: 호출자 키 누락이나 불일치(`caller_unauthorized`), 허용 목록 밖의 호스트(`unknown_app`), 차단된 사용자나 IP, 비활성화된 애플리케이션, 그룹 규칙, 단계 상승 불가, 예약 핸드오프 매개변수를 실은 문서가 아닌 요청(`handoff_parameter_not_allowed`), 모호한 예약 매개변수(`handoff_ambiguous`), 바인딩 경쟁 복구 소진(`handoff_recovery_exhausted`, 브라우저용 작은 HTML 본문), 진입점이 아닌 예약 경로(`reserved_path`), 진입점에 대한 문서가 아닌 요청(`entry_point_not_document`), 요청 출처 밖을 가리키는 진입점 `return`(`return_not_allowed`), **또는 속도 제한**(`{"error":"rate_limited","retry_after":30}`) | `error`를 담은 JSON 본문(문서 탐색의 `handoff_recovery_exhausted`는 HTML), `x-hopae-reason` | 업스트림에 접속하지 않고 본문과 함께 클라이언트로 중계합니다. 수정하지 않은 게이트웨이는 `429`를 `503`으로 바꾸고 `retry-after`를 버리므로 속도 제한에 `403`을 사용합니다. 게이트웨이 변경 HC-8이 있으면 Hopae는 대신 `retry-after`를 실은 `429`로 답합니다(`gateway.rate_limit_status`). |
 | `400` | 계약 위반 | `x-hopae-reason` | 클라이언트에 `503`(거부 처리). |

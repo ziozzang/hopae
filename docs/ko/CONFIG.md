@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=12 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=13 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -148,6 +148,8 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `preset` | 문자열 | `provider_id`와 같은 이름의 프리셋, 없으면 issuer가 일치하는 프리셋 | 잘 알려진 제공자의 내장 기본값. M1에는 `google`만 있습니다(issuer `https://accounts.google.com`, scope `openid email profile`, user-info 호출 없음). |
 | `userinfo` | 불리언 | 프리셋의 값, 프리셋이 없으면 `true` | ID 토큰 검증 뒤 user-info 엔드포인트를 호출합니다. 주체(subject)는 ID 토큰과 일치해야 합니다. |
 | `id_token_typ` | 문자열 | 없음 | 제공자가 설정하는 경우 ID 토큰의 필수 `typ` 헤더. |
+| `reauth`(M4-min) | `max_age`, `unsupported` | 프리셋의 값. 프리셋이 없으면 `max_age` | 제공자가 OpenID Connect `max_age` 매개변수를 존중하고 `auth_time`을 돌려주어 콘솔 재인증이 제공자가 검증한 도전이 되는지 여부. `google` 프리셋은 `unsupported`이며(Google은 재인증 요청을 지원하지 않는다고 문서화함) 그런 제공자에서의 콘솔 신선도는 Hopae 로그인 경과 시간입니다([ADR-0016](../adr/0016-management-console-minimum.md) 결정 15, [관리](ADMIN.md#신선도와-재인증)). |
+| `reauth_prompt`(M4-min) | `login`, `none` | `login` | `max_age` 제공자에 대한 재인증 authorize 요청에 `prompt=login`도 실을지 여부. |
 
 #### 이벤트
 
@@ -173,10 +175,10 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `listen.admin` | M4-min | `127.0.0.1:8702` | 관리 리스너. `admin.public_url`이 설정된 때만 바인딩하며 다른 리스너와 달라야 하고 루프백이 아니면 경고([ADR-0016](../adr/0016-management-console-minimum.md), [관리](ADMIN.md)) |
 | `admin.public_url` | M4-min | 없음 | 콘솔의 외부 노출 origin. 아래 정책을 가진 암묵적 애플리케이션 `admin`(예약 id)을 등록함([ADR-0016](../adr/0016-management-console-minimum.md)) |
 | `admin.session.idle`, `admin.session.absolute`, `admin.binding.ip`, `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6`, `admin.binding.ua`, `admin.binding.on_mismatch` | M4-min | `30m`, `12h`, `strict`, `24`, `64`, `off`, `terminate_session` | 콘솔 호스트의 수명과 바인딩. 타입과 제약은 `apps[].session.*`, `apps[].binding.*`와 같음 |
-| `admin.max_auth_age` | M4-min | `12h` | 콘솔 세션이 의존할 수 있는 가장 오래된 제공자 인증(`sessions.auth_time`). 콘솔의 모든 verify에서 평가하며, 더 오래된 세션은 `max_age`와 `prompt=login`으로 제공자에서 재인증하도록 보내고 돌아온 `auth_time`을 검사함([ADR-0016](../adr/0016-management-console-minimum.md) 결정 15) |
+| `admin.max_auth_age` | M4-min | `12h` | 콘솔 세션의 신선도 한도. 하나의 술어(`auth_time ≤ now + 60초` 그리고 `now − auth_time < N`)로 콘솔의 모든 verify에서 평가함. `reauth` 능력이 `max_age`인 제공자에서는 세션이 제공자가 검증한 `auth_time`을 가져야 하고 오래되면 제공자가 수행하는 재인증으로 보내며, `unsupported` 제공자(Google)에서는 한도가 Hopae 로그인 경과 시간뿐임([ADR-0016](../adr/0016-management-console-minimum.md) 결정 15) |
 | `admin.require_aal` | M4-min | `1` | 콘솔 핸들의 최소 보증 수준(`1` 또는 `2`). `2`는 암묵적 애플리케이션의 단계 상승 규칙도 설정하며 M5 전에는 모든 요청이 거부된다고 `--check`가 경고 |
 | `admin.untrusted_peers` | M4-min | `refuse` | `trusted_proxies` 밖의 TCP 피어를 관리 리스너가 어떻게 다루는지: `refuse`는 쿠키를 읽기 전에 `403 untrusted_peer`로 답함(기록, 집계). `as_client`는 포털처럼 피어를 클라이언트로 취급 |
-| `admin.query_budget_ms` | M4-min | `2000` | 콘솔 목록이나 검색 하나의 마감(100부터 30000). 마감에 닿은 조회는 저장소 안에서 중단되고 `503`으로 답함 |
+| `admin.query_budget_ms` | M4-min | `2000` | 콘솔 저장소 작업 하나(목록, 검색, 변경)의 마감(100부터 30000). 마감은 저장소 작업에 전달되어 SQLite 안에서 문장을 중단하고 롤백한 뒤 `503`으로 답함 |
 | `admin.users[]` | M4-min | `[]` | 시작 시와 `hopae admin import`로 파일에서 심는 부여: `user_id`와 `email` 중 적어도 하나를 가진 `{user_id?, email?, role?, note?}` 항목, `role`은 `admin`(기본) 또는 `viewer`. 이메일만 있는 항목은 검증된 주소를 정확히 한 사용자가 가지고 권위적일 때만 적용됨. `managed_by`와 묘비를 가진 제공자 규칙으로 가져옴([관리](ADMIN.md)) |
 | `limits.admin_max_concurrent` | M4-min | `16` | 관리 리스너의 동시 요청 상한 |
 | `hopae admin grant <user_id 또는 email> [--role admin\|viewer] [--note <text>] [--confirm <user_id>]`, `hopae admin revoke <user_id 또는 email>`, `hopae admin list [--all]`, `hopae admin import [--force <user_id 또는 email>]`(명령) | M4-min | — | 저장소에 대한 명령줄과 파일의 관리자 부여. `grant`는 해결된 사용자를 출력하고 권위적이지 않은 이메일에는 해결된 id를 가리키는 `--confirm`을 요구함. 부여는 그 사용자 id에 묶이며 다시 해결되지 않음. `admin.grant` / `admin.revoke`를 기록함([관리](ADMIN.md)) |

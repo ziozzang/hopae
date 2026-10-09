@@ -18,8 +18,10 @@ recorded as an `admin.*` event in the same transaction as the row; a grant
 binds once to a user who exists, resolved by id or by a verified primary
 email with the resolved user shown and, for a non-authoritative address,
 confirmed by id, never to a disabled one, and is never re-resolved; the file
-can seed and revoke grants but never resurrect a runtime revocation; and the
-schema that holds grants is applied only on a validated foundation.
+can seed and revoke grants but never resurrect a runtime revocation, never
+re-bind an email entry to a new mailbox holder, and never revoke an entry that
+is still present; and the schema that holds grants is applied only on a
+validated foundation, with no backup written before the validation.
 
 ## Preconditions and fixtures
 
@@ -39,7 +41,7 @@ schema that holds grants is applied only on a validated foundation.
 
 - Given: `u_h` (authoritative), `u_v` (not authoritative), `u_u` unverified, `nobody@example.test` unknown.
 - When: (a) `hopae admin grant h@example.test --role viewer --note "ops rotation"`; (b) `hopae admin grant v@example.test`; (c) `hopae admin grant v@example.test --confirm u_v`; (d) `hopae admin grant v@example.test --confirm u_h`; (e) `hopae admin grant nobody@example.test`; (f) `hopae admin grant u@example.test`; (g) `hopae admin grant V@Example.test --confirm u_v`.
-- Then: (a) exits `0` after printing `u_h`'s block (`authoritative`) and `granted viewer to u_h`; the row has `source_email = h@example.test`, `note`; (b) prints `u_v`'s block, then `refusing: a@... is verified but not authoritative; re-run with --confirm u_v if this is the intended person`, exit `2`, nothing written; (c) exits `0`, `granted admin to u_v`, `source_email = v@example.test`; (d) exits `2` with `--confirm names u_h but the address resolves to u_v`, nothing written; (e) exits `2` with `no such user: sign in once first`; (f) exits `2` with `email not verified`; (g) normalizes the address (ADR-0011) to the same user as (c) and is a no-op (305-A1). In every case the row, when written, stores the `user_id` resolved at that moment; a later change of `users.primary_email` never moves the grant.
+- Then: (a) exits `0` after printing `u_h`'s block (`authoritative`) and `granted viewer to u_h`; the row has `source_email = h@example.test`, `note`; (b) prints `u_v`'s block, then `refusing: v@example.test is verified but not authoritative; re-run with --confirm u_v if this is the intended person`, exit `2`, nothing written; (c) exits `0`, `granted admin to u_v`, `source_email = v@example.test`; (d) exits `2` with `--confirm names u_h but the address resolves to u_v`, nothing written; (e) exits `2` with `no such user: sign in once first`; (f) exits `2` with `email not verified`; (g) normalizes the address (ADR-0011) to the same user as (c) and is a no-op (305-A1). In every case the row, when written, stores the `user_id` resolved at that moment; a later change of `users.primary_email` never moves the grant.
 
 ### S305-3 Revoke takes effect on the next request and leaves a tombstone
 
@@ -65,17 +67,17 @@ schema that holds grants is applied only on a validated foundation.
 - When: `hopae admin grant u_v --role admin`.
 - Then: exit `0` within 5 s (SQLite busy handling with a bounded wait), the instance keeps serving, the instance lock in `state_dir` is not taken by the CLI (`run` is the only lock holder) and the next console request of `u_v` sees the new role.
 
-### S305-8 Grants are seeded from the file under the provider import rule
+### S305-8 Grants are seeded from the file under the import rule, by their original keys
 
 - Given: an empty `admin_grants` table; `m4-admin-seeded.json` (`u_a` by id as `admin`; `v@example.test` by email alone as `viewer`; `n@example.test` with `user_id = u_n` as `viewer`); `u_v`'s address is verified but not authoritative; `u_n`'s address matches `u_n`.
-- When: (a) the instance starts (or `hopae admin import` runs); (b) `hopae admin import` runs again with no change; (c) the file is changed so that `u_a`'s entry says `role: viewer` and the `n@example.test` entry is removed, then `hopae admin import`; (d) `hopae admin revoke u_a` (runtime), then `hopae admin import` with the file still listing `u_a`; (e) `hopae admin import --force u_a`; (f) `hopae admin grant u_n --role admin` (runtime change of a file row), then the file restored with `u_n` as `viewer` and `hopae admin import`.
-- Then: (a) rows `u_a (admin, managed_by=file, source_email=NULL)` and `u_n (viewer, file, source_email=n@example.test)` are inserted with `admin.grant` events (`attrs.actor=file`, `attrs.managed_by=file`); the `v@example.test` entry is **skipped** with the preflight warning `admin.users[1]: email_not_authoritative; add user_id to apply` and `hopae --check` prints the same warning; (b) prints `unchanged` for both rows and writes no event; (c) `u_a` becomes `viewer` (`admin.grant` with `previous_role=admin`), `u_n` is revoked with `revoked_by=file` and `admin.revoke` (`actor=file`); (d) the runtime revocation turned `u_a` into an `api` tombstone, the import prints `skipped (revoked at run time): u_a` and the row stays revoked; (e) the file entry is reasserted: `u_a` live again as `viewer`, `managed_by=file`, event `admin.grant` with `attrs.actor=file`, `attrs.forced=true`; (f) the CLI grant flips `u_n` to `managed_by=api, role=admin`, and the subsequent import prints `skipped (changed at run time): u_n` and leaves it `admin`.
+- When: (a) the instance starts (or `hopae admin import` runs); (b) `hopae admin import` runs again with no change; (c) the file is changed so that `u_a`'s entry says `role: viewer` and the `n@example.test` entry is removed, then `hopae admin import`; (d) `hopae admin revoke u_a` (runtime), then `hopae admin import` with the file still listing `u_a`; (e) `hopae admin import --force u_a`; (f) `hopae admin grant u_n --role admin` (runtime change of a file row), then the file restored with `u_n` as `viewer` and `hopae admin import`; (g) the `n@example.test` entry edited to `{user_id: "u_n", email: "x@example.test"}` (a mismatch) with the `u_n` file row live, then `hopae admin import`; (h) the mismatch corrected back, then `hopae admin import`.
+- Then: (a) rows `u_a (admin, managed_by=file, source_email=NULL)` and `u_n (viewer, file, source_email=n@example.test)` are inserted with `admin.grant` events (`attrs.actor=file`, `attrs.managed_by=file`); the `v@example.test` entry is **skipped** with the preflight warning `admin.users[1]: email_not_authoritative; add user_id to apply` and `hopae --check` prints the same warning; (b) prints `unchanged` for both rows and writes no event; (c) `u_a` becomes `viewer` (`admin.grant` with `previous_role=admin`), `u_n` is revoked with `revoked_by=file` and `admin.revoke` (`actor=file`); (d) the runtime revocation turned `u_a` into an `api` tombstone, the import prints `skipped (revoked at run time): u_a` and the row stays revoked; (e) the file entry is reasserted: `u_a` live again as `viewer`, `managed_by=file`, event `admin.grant` with `attrs.actor=file`, `attrs.forced=true`; (f) the CLI grant flips `u_n` to `managed_by=api, role=admin`, and the subsequent import prints `skipped (changed at run time): u_n` and leaves it `admin`; (g) the entry is matched by its `user_id` to the live `u_n` file row, skipped with `user_email_mismatch`, and the row is **left untouched and not revoked** — a present entry is never treated as removed; (h) the corrected entry updates the row normally; the whole import is one write transaction in every run (crash point `after_import_match` leaves nothing changed).
 
-### S305-9 Schema version 3 is applied only on a validated foundation
+### S305-9 Schema version 3 is applied only on a validated foundation, and nothing is backed up before that
 
-- Given: three databases: a current version-2 database written by the released M1 schema; the pre-release version-2 fixture `tests/fixtures/pre_release_0002_m1_schema.sql` (missing `sessions.authz_version_at_auth` and the other version-2 structures); a version-3 database from which the test deletes the `admin_grants` table by hand.
-- When: `hopae run` (or the store's `open`) on each.
-- Then: the first migrates to version 3 (backup `hopae.db.bak-v2` written first, 013-6), the post-migration structural check passes, and `admin_grants`, `sessions.bound_ua_prefix`, `login_txns.reauth_max_age` and the new indexes exist; the second is refused with `DevelopmentSchema` **before** any migration runs: `schema_migrations` still records 2, no `admin_grants` table and no `events_session_at_id` index exist, no backup was written, exit `2`; the third is refused at open with a structural error naming `admin_grants` (version stays 3), exit `2`; in no case does a refused database get its version changed.
+- Given: three databases: a current version-2 database written by the released M1 schema, beside which an older `hopae.db.bak-v2` from a previous run already exists with known content; the pre-release version-2 fixture `tests/fixtures/pre_release_0002_m1_schema.sql` (missing `sessions.authz_version_at_auth` and the other version-2 structures), also beside a pre-existing `hopae.db.bak-v2` with known content; a version-3 database from which the test deletes the `admin_grants` table by hand.
+- When: `hopae run` (the binary, not only the store's `open`) on each; then `hopae admin list` on the second.
+- Then: the first validates the version-2 foundation, **then** writes the backup to a temporary name and renames it over the old `hopae.db.bak-v2` (the old content is gone only after the new copy exists), migrates to version 3, the post-migration structural check passes, and `admin_grants`, `sessions.bound_ua_prefix`, `sessions.auth_time_source`, `login_txns.reauth_max_age` and the new indexes exist; the second is refused with `DevelopmentSchema` **before** any backup and any migration: `schema_migrations` still records 2, no `admin_grants` table and no `events_session_at_id` index exist, the pre-existing `hopae.db.bak-v2` is byte-for-byte unchanged and no temporary file remains, exit `2`; `hopae admin list` on it is refused the same way with the same unchanged files; the third is refused at open with a structural error naming `admin_grants` (version stays 3), exit `2`; in no case does a refused database get its version changed or a backup touched.
 
 ## Alternative flows
 
@@ -92,7 +94,7 @@ schema that holds grants is applied only on a validated foundation.
 | Replay | S305-A1 | yes |
 | Tampering | S305-A2 | yes |
 | Race / timing | S305-A3 | yes |
-| Resource exhaustion | — | no: an operator command against the local store; the console's limits are 300-A4 |
+| Resource exhaustion | — | no: an operator command against the local store; the console's limits are 300-A4 and the import's deadline is the plan's writer-job rule |
 | Confused deputy | S305-A4, S305-A6 | yes |
 | Spoofed or duplicated headers | — | no: no HTTP involved |
 | Downgrade | — | no: no negotiation |
@@ -116,11 +118,11 @@ schema that holds grants is applied only on a validated foundation.
 - When: `hopae admin revoke u_a` and `hopae admin grant u_a` run concurrently with the release of the gate.
 - Then: SQLite's single writer serializes the three transactions; the final row state equals the last committed command and the event order equals the commit order; the console mutation succeeds only if its fenced re-check saw a live `admin` grant, else `403 actor_revoked`; no partial row and no event without its row.
 
-### S305-A4 A grant by email cannot be hijacked through a provider's claim, a stale account or a reassigned mailbox
+### S305-A4 A grant by email cannot be hijacked through a provider's claim, a stale account or a reassigned mailbox — by the CLI or by the file
 
-- Given: (a) `u_v` with `v@example.test` from `mock`; a new login through `mock2` asserting `email: v@example.test`, `email_verified: true` for subject `sub-99` (ADR-0011 `link_required`); (b) user `u_old` created through `mock2` with `primary_email = ops@example.test` (verified, not authoritative) whose provider account still asserts that address although the mailbox now belongs to a person who has not signed in; (c) `u_h` granted by `h@example.test` (305-2 a), after which the provider's address for `u_h` changes and a new user `u_h2` later obtains `h@example.test` as a verified, authoritative primary email.
-- When: (a) `hopae admin grant v@example.test --confirm u_v` after that login attempt; (b) `hopae admin grant ops@example.test` intending the new mailbox owner; (c) `hopae admin import` with a file entry `{email: "h@example.test", role: "admin"}` and `hopae --check`.
-- Then: (a) the grant resolves to `u_v` (the existing user with that primary email), never to a new user created for `sub-99` (none was created: the login stopped at the link notice, 002); (b) the command prints `u_old`'s block — its `mock2:sub-…` identity, `created_at` long before today, `not authoritative` — and refuses without `--confirm u_old`; the operator can see the account is not the new owner; with `--confirm u_old` the grant goes, as confirmed, to `u_old` (the residual of TM-46: the operator decided); (c) the existing row bound to `u_h` (`source_email = h@example.test`) is matched by `source_email` and left bound to `u_h`; nothing is granted to `u_h2`; `--check` warns `admin.users[0]: h@example.test now belongs to u_h2; the grant stays bound to u_h`.
+- Given: (a) `u_v` with `v@example.test` from `mock`; a new login through `mock2` asserting `email: v@example.test`, `email_verified: true` for subject `sub-99` (ADR-0011 `link_required`); (b) user `u_old` created through `mock2` with `primary_email = ops@example.test` (verified, not authoritative) whose provider account still asserts that address although the mailbox now belongs to a person who has not signed in; (c) `u_h` granted by `h@example.test` through the file entry `{email: "h@example.test", role: "admin"}` (its row has `source_email = h@example.test`), after which the provider's address for `u_h` changes and a new user `u_h2` later obtains `h@example.test` as a verified, **authoritative** primary email.
+- When: (a) `hopae admin grant v@example.test --confirm u_v` after that login attempt; (b) `hopae admin grant ops@example.test` intending the new mailbox owner; (c) `hopae admin import` with the unchanged file, `hopae --check`, then `hopae admin import --force h@example.test`.
+- Then: (a) the grant resolves to `u_v` (the existing user with that primary email), never to a new user created for `sub-99` (none was created: the login stopped at the link notice, 002); (b) the command prints `u_old`'s block — its `mock2:sub-…` identity, `created_at` long before today, `not authoritative` — and refuses without `--confirm u_old`; the operator can see the account is not the new owner; with `--confirm u_old` the grant goes, as confirmed, to `u_old` (the residual of TM-46: the operator decided); (c) the import matches the entry **by `source_email` first**, to the row bound to `u_h`, and leaves it bound to `u_h` with its role updated; `u_h2` receives nothing although the address now resolves to it and is authoritative; `--check` warns `admin.users[0]: h@example.test now belongs to u_h2; the grant stays bound to u_h`; `--force h@example.test` selects the **same** existing row (the binding, not a fresh resolution) and reasserts the file's role on `u_h`; only an entry that names `u_h2` by `user_id` can grant `u_h2`.
 
 ### S305-A5 The command reveals nothing beyond the operator's own store
 
@@ -128,15 +130,15 @@ schema that holds grants is applied only on a validated foundation.
 - When: `hopae admin grant unknown@example.test`, `hopae admin grant u_doesnotexist`.
 - Then: both exit `2` with `no such user: sign in once first`; an unverified email keeps its distinct message (305-2) because the operator already holds the store, so enumeration against the local database is not a threat; the messages are operator-facing and never reach a network client.
 
-### S305-A6 The file cannot resurrect a revoked grant, and an ambiguous address grants nobody
+### S305-A6 The file cannot resurrect a revoked grant, cannot revoke a present entry, and an ambiguous address grants nobody
 
-- Given: `u_a` revoked at run time (`api` tombstone) while the file still lists `u_a`; two users `u_p` and `u_q` whose identities both carry `p@example.test` but only `u_p` holds it as `primary_email` (the unique index), and a third user `u_r` whose `primary_email` is `r@example.test` with `email_verified = 0`; file entries `{email: "p@example.test"}`, `{email: "r@example.test"}`.
+- Given: `u_a` revoked at run time (`api` tombstone) while the file still lists `u_a`; two users `u_p` and `u_q` whose identities both carry `p@example.test` but only `u_p` holds it as `primary_email` (the unique index), and a third user `u_r` whose `primary_email` is `r@example.test` with `email_verified = 0`; file entries `{email: "p@example.test"}`, `{email: "r@example.test"}`, `{user_id: "u_s", email: "p@example.test"}` (a present but mismatched entry for a live file row `u_s`).
 - When: the instance restarts (import at start) and `hopae --check` runs.
-- Then: `u_a` stays revoked (`skipped (revoked at run time)`), no event; `p@example.test` resolves to the single `primary_email` holder `u_p` only if that address is authoritative — here it is not, so the entry is skipped with `email_not_authoritative` (an entry with `user_id: u_p` added would apply); `r@example.test` is skipped with `email_unverified`; both warnings appear in `--check` and at start; no grant was written for any of them; `--strict` turns the warnings into exit `2`.
+- Then: `u_a` stays revoked (`skipped (revoked at run time)`), no event; `p@example.test` resolves to the single `primary_email` holder `u_p` only if that address is authoritative — here it is not, so the entry is skipped with `email_not_authoritative` (an entry with `user_id: u_p` added would apply); `r@example.test` is skipped with `email_unverified`; the `u_s` entry is skipped with `user_email_mismatch` and the live `u_s` row is **neither updated nor revoked** (present entries are never treated as removed); all warnings appear in `--check` and at start; no grant was written for any of them; `--strict` turns the warnings into exit `2`.
 
 ## Observability expectations
 
-- Log: the CLI prints one line per change to stdout and errors to stderr, plus the resolution block before every grant; the instance logs the import summary at start (`admin.users: inserted n, updated n, revoked n, skipped n`) and warns per skipped entry; the migration runner logs `schema foundation validated (vN)` before applying and the refusal reason otherwise.
+- Log: the CLI prints one line per change to stdout and errors to stderr, plus the resolution block before every grant; the instance logs the import summary at start (`admin.users: inserted n, updated n, revoked n, skipped n`) and warns per skipped entry; the migration runner logs `schema foundation validated (vN)` before any backup and before applying, and the refusal reason otherwise.
 - Audit: `admin.grant` / `admin.revoke` with `attrs.actor` ∈ {`cli`, `file`}, `role`, `previous_role`, `managed_by`, `forced`, written with the row; delivered by the instance's log sink at-least-once (014).
 - Metrics: none for the CLI; `hopae_admin_requests_total{role}` on the instance reflects the new role; `hopae_admin_grants_imported_total{outcome}` at start.
 
@@ -151,18 +153,19 @@ schema that holds grants is applied only on a validated foundation.
 | S305-5 | `s305_5_regrant_clears_revocation_and_changes_role` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
 | S305-6 | `s305_6_command_works_beside_running_instance` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
 | S305-7 | `s305_7_recovery_when_every_administrator_is_gone` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-8 | `s305_8_grants_seeded_from_file_under_import_rule` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-9 | `s305_9_schema_v3_applied_only_on_validated_foundation` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
+| S305-8 | `s305_8_grants_seeded_from_file_by_original_keys` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
+| S305-9 | `s305_9_schema_v3_only_on_validated_foundation_and_no_backup_before` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
 | S305-A1 | `s305_a1_repeating_a_grant_is_a_noop` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
 | S305-A2 | `s305_a2_malformed_identifiers_addresses_and_entries` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
 | S305-A3 | `s305_a3_grant_and_revoke_racing_each_other_and_console` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
 | S305-A4 | `s305_a4_email_grant_not_hijacked_by_claim_stale_account_or_reassigned_mailbox` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
 | S305-A5 | `s305_a5_command_reveals_nothing_beyond_own_store` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-A6 | `s305_a6_file_cannot_resurrect_revoked_grant_and_ambiguous_address_grants_nobody` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
+| S305-A6 | `s305_a6_file_cannot_resurrect_revoke_present_or_grant_ambiguous` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
 
 The migration-guard case (305-9) also keeps scenario 013-6's pre-release
 rejection test green: `s013_6_*` asserts the refusal, 305-9 additionally
-asserts the unchanged version and the absence of version-3 structures.
+asserts the unchanged version, the absence of version-3 structures and the
+untouched backup file.
 
 ## Live verification
 
@@ -181,7 +184,7 @@ asserts the unchanged version and the absence of version-3 structures.
 관리자 취소, 복구를 비밀번호나 토큰이나 재시작 없이 처리합니다. 부여는 존재하는
 사용자(id 또는 검증된 기본 이메일)에 한 번만 묶이고, 명령은 해결된 사용자의 신원과
 주소의 권위 여부를 출력하며 권위적이지 않은 이메일에는 `--confirm <user_id>`를
-요구합니다. 파일 심기는 제공자 가져오기 규칙(`managed_by`, 묘비)을 따라 실행 중
-취소를 되살리지 않고 파일에서 지워진 항목을 취소하며, 이메일만 있는 항목은 단일
-보유자이고 권위적일 때만 적용됩니다. 마이그레이션 `0003`은 기존 버전의 구조가
-검증된 뒤에만 적용되고 거부는 버전을 바꾸지 않습니다.
+요구합니다. 파일 심기는 항목의 원래 키로 기존 행을 먼저 대조하므로 이메일 항목은
+새 메일함 보유자에게 다시 묶이지 않고, 존재하는(어긋난) 항목은 취소되지 않으며,
+실행 중 취소는 되살아나지 않습니다. 마이그레이션 `0003`은 기존 버전의 구조가
+검증된 뒤에만 적용되고, 거부는 버전도 백업 파일도 바꾸지 않습니다.

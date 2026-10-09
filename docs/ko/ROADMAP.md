@@ -1,6 +1,6 @@
 # 로드맵
 
-<!-- translation-status: source=../ROADMAP.md source-rev=8 status=current -->
+<!-- translation-status: source=../ROADMAP.md source-rev=9 status=current -->
 
 [문서 목차](README.md) · [English](../ROADMAP.md)
 
@@ -140,7 +140,7 @@ Hopae는 Hangang 게이트웨이 앞에 서는 것이 아니라 게이트웨이�
 
 - [ ] 콘솔 호스트를 제공하는 세 번째 리스너 `listen.admin`. 콘솔 호스트는 `admin.public_url`로 등록되는 암묵적 애플리케이션 `admin`이며 게이트웨이의 보호 라우트(표준 `auth` 블록, `strip_request_cookies` 없음) 뒤에 있음. 모든 요청을 Hopae가 게이트웨이 리스너의 거부 관측과 함께 verify 엔진을 통해 `__Host-hopae` 핸들로 인증. 주입된 신원 헤더는 절대 읽지 않음. `trusted_proxies` 밖의 피어는 기본적으로 거부(`admin.untrusted_peers`).
 - [ ] 부여된 사용자로서의 관리자: 마이그레이션 `0003`의 `admin_grants` 테이블(역할 `admin`, 읽기 전용 관리자 `viewer`. `managed_by`, `source_email`). `hopae admin grant|revoke|list|import`와 묘비를 가진 제공자 가져오기 규칙으로 심는 `admin.users[]`. 부여는 해결된 사용자 id에 한 번 묶이고, 명령줄은 해결된 사용자를 출력하며 권위적이지 않은 이메일에는 `--confirm`을 요구함. 요청마다 부여를 읽음. `admin.require_aal`.
-- [ ] 실제 콘솔 신선도(`admin.max_auth_age`): 콘솔의 모든 verify에서 평가. 로그인 트랜잭션이 `reauth_max_age`를 담고, 제공자가 `max_age`와 `prompt=login`을 받으며, ID 토큰의 `auth_time`이 필수이고 검사되며, 세션은 단계 상승 트랜잭션으로 재인증됨. 모든 OIDC 세션의 `auth_time`은 있으면 클레임에서 옴(ADR-0010 개정).
+- [ ] 콘솔의 모든 verify, 리스너, 울타리에서 하나의 술어로 평가하는 콘솔 신선도(`admin.max_auth_age`). 제공자는 `reauth` 능력을 선언함(범용 OpenID 제공자는 `max_age`, `google` 프리셋은 `unsupported`): `max_age`에서는 로그인 트랜잭션이 `reauth_max_age`를 담고 제공자가 `max_age`와 `prompt=login`을 받으며 ID 토큰의 `auth_time`이 필수이고 검사되고 세션은 단계 상승 트랜잭션으로 재인증됨. `unsupported`에서는 한도가 정직하게 Hopae 로그인 경과 시간임. 모든 세션은 `auth_time_source`를 기록하고 잘못된 클레임은 로그인을 실패시킴(ADR-0010 개정).
 - [ ] 쓰기 트랜잭션 안에서 울타리를 친 변경(마감, 호스트, 사용자 상태, 인가 기준, 신선도, 수준, 부여). 불변 순서의 1만 행 인덱스 창으로 제한되고 마지막으로 살펴본 후보 뒤를 가리키는 커서를 가지며 `admin.query_budget_ms`에서 중단되는 목록. `0003`을 적용하기 전에 기록된 버전의 구조를 검증하는 마이그레이션 실행기.
 - [ ] 사용자: 목록과 검색, 신원·세션·최근 이벤트가 있는 상세. 비활성화(상태, `authz_version`, 살아 있는 모든 세션 종료)와 활성화.
 - [ ] 세션: 사용자, 호스트, 생성, 마지막 활동, 클라이언트 주소, user-agent 접두사(`sessions.bound_ua_prefix`), 수준이 있는 살아 있는 세션. 하나 종료. 사용자의 모든 세션 종료.
@@ -163,6 +163,18 @@ Hopae는 Hangang 게이트웨이 앞에 서는 것이 아니라 게이트웨이�
 없는 사용자는 거부되고, 비활성화된 사용자의 세션은 모든 호스트의 다음 요청에서
 거부되고, 종료된 세션은 거부되고, 모든 작업에 `admin.*` 기록이 있고, 위조된
 신원 헤더로 게이트웨이를 우회한 요청은 거부된다.
+
+### 다음 제안: 관리자용 2차 인증 요소(TOTP)
+
+ADR-0016 설계 검토 2차 뒤에 제안된 것으로, 일정에 넣지도 여기서 구현하지도
+않습니다: M5의 TOTP 요소를 관리자에 한정해 M4-min 다음 마일스톤으로 앞당깁니다.
+이유: 기준 제공자에서는 콘솔 신선도가 Hopae 로그인 경과 시간이므로(Google은
+재인증 요청을 지원하지 않음) 콘솔의 진짜 단계 상승에는 Hopae 자체 2차 인증
+요소가 필요합니다. 채택된다면의 형태: [ADR-0008](../adr/0008-second-factor-extension-point.md)의
+`Factor` 트레이트와 TOTP 요소, 부여된 사용자만을 위한 포털 등록, 쓸 수 있게 되는
+`admin.require_aal = 2`, verify에서 강제되는 암묵적 애플리케이션의 단계 상승
+규칙, 복구 코드, `hopae admin`을 통한 관리자 재설정. M5의 나머지(WebAuthn, Lua,
+웹훅)는 제자리에 둡니다. 별도 ADR로 결정합니다.
 
 ### M2 — 세션, 남용 제어, 공유 상태(0.3.0)
 

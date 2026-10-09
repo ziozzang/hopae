@@ -35,7 +35,7 @@ contacting a provider.
 
 - Given: as above; then the `discovery_down` switch and the discovery cache's hard deadline passed by the clock.
 - When: `GET /v1/status` before and after.
-- Then: before: `mock` (`kind: oidc`, `enabled: true`, `managed_by: file`, `health: ok`, `client_secret_env: "HOPAE_TEST_MOCK_SECRET"`, `secret_present: true`), `mock2` (`enabled: false`, `health: disabled`, `client_secret_env` naming the unset variable, `secret_present: false`), `mock3` (`managed_by: api`, `enabled: false`); after: `mock.health` is `degraded` with reason `provider_unavailable` taken from the registry's cached discovery state; the status request itself made no outbound call (the mock records none); no field of any provider contains the secret's value (the harness greps the body for the generated value).
+- Then: before: `mock` (`kind: oidc`, `enabled: true`, `managed_by: file`, `health: ok`, `reauth: max_age`, `client_secret_env: "HOPAE_TEST_MOCK_SECRET"`, `secret_present: true`), `mock2` (`enabled: false`, `health: disabled`, `client_secret_env` naming the unset variable, `secret_present: false`), `mock3` (`managed_by: api`, `enabled: false`, `reauth: unsupported` from its stored setting); after: `mock.health` is `degraded` with reason `provider_unavailable` taken from the registry's cached discovery state; the status request itself made no outbound call (the mock records none); no field of any provider contains the secret's value (the harness greps the body for the generated value).
 
 ### S304-3 Store, build and configuration
 
