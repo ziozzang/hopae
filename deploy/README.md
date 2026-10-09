@@ -9,7 +9,7 @@ hostnames (`auth.example.test`, `app.example.test`) are placeholders.
 | `compose.yaml` | Hardened Docker Compose service: user 1000, read-only root, all capabilities dropped, `no-new-privileges`, memory and process limits, rotated JSON logs, host network namespace with loopback listeners |
 | `hopae.example.json` | Configuration with one application and the Google provider; copy to `hopae.local.json` |
 | `env.example` | Environment variable names (values are `change-me` placeholders); copy to `hopae.env` |
-| `hangang-routes.example.json` | The portal route and a protected application route, as Hangang route objects (the protected route needs gateway changes HC-3 for `static_request_headers` and HC-12 for `strip_request_cookies`; without HC-12 the session handle reaches the application in the `cookie` header) |
+| `hangang-routes.example.json` | The portal route and a protected application route, as Hangang route objects (the protected route needs gateway changes HC-3 for `static_request_headers` and HC-12 for the route-level `strip_request_cookies`, which also belongs on any public route of the same host; without HC-12 the session handle reaches the application in the `cookie` header) |
 
 The image is built from the repository `Dockerfile` (static musl binary, empty
 `scratch` base). Tag convention: `hopae:<version>-<shortsha>`.

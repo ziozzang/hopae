@@ -33,9 +33,41 @@ pub struct MintRequest {
 #[derive(Debug)]
 pub struct MintedHandoff {
     pub code: Secret,
-    /// The return target with the reserved parameter appended.
+    /// The delivery URL: the host's login entry point carrying the return
+    /// target and the reserved parameter ([`landing_location`]).
     pub location: Url,
     pub issued_aal: Aal,
+}
+
+/// Characters of a target's path and query that must not stay literal inside
+/// the value of the `return` parameter (the target is already percent-encoded
+/// ASCII, so only the separators of the carrying query matter).
+const RETURN_VALUE: &percent_encoding::AsciiSet = &percent_encoding::CONTROLS
+    .add(b'%')
+    .add(b'&')
+    .add(b'+')
+    .add(b'#')
+    .add(b' ');
+
+/// Where a handoff is delivered (ADR-0015): always the application host's
+/// login entry point, `https://<host>/_hopae/login?return=<target path and
+/// query>&_hopae_handoff=<code>`. Hopae answers that path on every protected
+/// host (a whole-host route, or the `site-hopae` route of a path-scoped host),
+/// whatever the target's own path is routed to, so the code is always
+/// redeemed and never reaches an upstream; redemption plants the handle and
+/// redirects to the clean target.
+pub fn landing_location(target: &Url, code: &str) -> Url {
+    let mut u = target.clone();
+    u.set_fragment(None);
+    let mut pq = target.path().to_string();
+    if let Some(q) = target.query() {
+        pq.push('?');
+        pq.push_str(q);
+    }
+    u.set_path("/_hopae/login");
+    let enc = percent_encoding::utf8_percent_encode(&pq, RETURN_VALUE);
+    u.set_query(Some(&format!("return={enc}&{HANDOFF_PARAM}={code}")));
+    u
 }
 
 /// Append the reserved parameter to the raw query, leaving every existing
@@ -98,7 +130,7 @@ impl Service {
             {
                 Ok(()) => {
                     return Ok(MintedHandoff {
-                        location: append_handoff_param(&req.target, code.expose()),
+                        location: landing_location(&req.target, code.expose()),
                         code,
                         issued_aal: issued,
                     });
@@ -115,6 +147,23 @@ impl Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_landing_location_is_the_login_entry_with_the_target_in_return() {
+        let t = Url::parse("https://app.example.test:8443/admin/x?q=1&z=%2B2+3").unwrap();
+        let l = landing_location(&t, "K");
+        assert_eq!(
+            l.as_str(),
+            "https://app.example.test:8443/_hopae/login?return=/admin/x?q=1%26z=%252B2%2B3&_hopae_handoff=K"
+        );
+        let (_, back) = l.query_pairs().find(|(k, _)| k == "return").unwrap();
+        assert_eq!(back, "/admin/x?q=1&z=%2B2+3");
+        let root = landing_location(&Url::parse("https://app.example.test/").unwrap(), "K");
+        assert_eq!(
+            root.as_str(),
+            "https://app.example.test/_hopae/login?return=/&_hopae_handoff=K"
+        );
+    }
 
     #[test]
     fn handoff_parameter_is_appended_without_touching_the_rest() {

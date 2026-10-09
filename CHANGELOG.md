@@ -27,6 +27,13 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 - Gateway contract v1.1 reserves the `/_hopae/` namespace on every protected application host: an application route under it is no longer supported and is answered `403 reserved_path` once ADR-0015 is implemented. The route fragments in the contract, `deploy/hangang-routes.example.json` and the `hopae --check` output gain `strip_request_cookies`; a gateway without HC-12 rejects the key.
 
+### Changed (review pass 1 of ADR-0015)
+
+- Every handoff is delivered to `https://<host>/_hopae/login?return=<clean target>&_hopae_handoff=<code>` instead of the target itself, so redemption no longer depends on the target's route: on a path-scoped host a default or public target used to carry the code to the upstream unredeemed. The scenario 002, 003, 005 and 008 expectations read the new wire (see their wire notes); the adapter's URL bound for the reserved namespace is `3 × 2048 + 512` bytes.
+- `strip_request_cookies` (HC-12) is a route-level field that also applies to public routes (`auth.strip_request_cookies` stays an alias); criteria add last-step stripping, rejecting `cookie` as an identity output, quoted-value-aware parsing and dropping the header on ambiguity. `hopae --check` prints it as its own route field. The HC-1 criteria and the cache section bypass the whole `/_hopae` namespace.
+- `hopae --check` warns when an application sets `logout_confirm = false`; the same-origin navigation-gadget residual and the transferable logout ticket are documented (ADR-0015, threat model, configuration reference, scenario 015-A8 and A9).
+- Migration `0002` was edited in place for the last time; later schema changes are new numbered migrations (operations guide).
+
 ### Fixed
 
 - `txn.max_rows` is a hard bound: the eviction now happens inside the same store write as the capped transaction insert (login, retry and logout ticket) instead of in a detached task, and the per-address `txn.per_ip_per_minute` cap is enforced in that write for the verify engine too, so concurrent callers can no longer overshoot either limit.

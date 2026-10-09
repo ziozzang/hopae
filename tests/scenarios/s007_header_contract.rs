@@ -288,9 +288,20 @@ mod gateway_layer {
                 assert!(!loc.contains("evil.example.org"), "{loc}");
             }
         }
+        // ADR-0015: delivered to the host's login entry point, carrying the
+        // unchanged return target.
         assert_eq!(
             l.handoff_location.split('?').next().unwrap(),
-            format!("http://{}/admin/x", s.app),
+            format!("http://{}/_hopae/login", s.app),
+        );
+        let carried = url::Url::parse(&l.handoff_location)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "return")
+            .map(|(_, v)| v.into_owned());
+        assert_eq!(
+            carried.as_deref(),
+            Some("/admin/x"),
             "return_target unchanged"
         );
     }

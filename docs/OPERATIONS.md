@@ -1,6 +1,6 @@
 # Operations
 
-<!-- doc-rev: 3 -->
+<!-- doc-rev: 4 -->
 
 [Documentation](README.md) · [한국어](ko/OPERATIONS.md)
 
@@ -98,7 +98,12 @@ pre-release development build, recognizable by a missing
 `event_deliveries_event_id` index, or `txn_admissions` table: the
 start fails with exit status 2 and the message "development database from a
 pre-release schema; delete it". Before the first release schema version 2 was
-edited in place, so such a database cannot be upgraded; delete it.
+edited in place, so such a database cannot be upgraded; delete it. That was
+the last in-place edit of migration `0002` (it gained the `logout` transaction
+purpose, recognizable by the `login_txns` check constraint): once a deployment
+holds a database, **every schema change is a new numbered migration**, applied
+forward only after the backup above, and an applied migration file is never
+edited again.
 
 Upgrade procedure:
 

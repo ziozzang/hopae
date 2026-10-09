@@ -1,6 +1,6 @@
 # 운영
 
-<!-- translation-status: source=../OPERATIONS.md source-rev=3 status=current -->
+<!-- translation-status: source=../OPERATIONS.md source-rev=4 status=current -->
 
 [문서 목차](README.md) · [English](../OPERATIONS.md)
 
@@ -91,7 +91,11 @@ import`는 잠금을 잡지 않습니다.
 `users_primary_email` 또는 `event_deliveries_event_id` 인덱스, `txn_admissions` 테이블이 없으면 알아볼 수 있으며, 종료 상태 2와 함께
 "development database from a pre-release schema; delete it" 메시지로 시작이
 실패합니다. 첫 릴리스 전에는 스키마 버전 2를 제자리에서 수정했으므로 그런
-데이터베이스는 업그레이드할 수 없습니다. 삭제하십시오.
+데이터베이스는 업그레이드할 수 없습니다. 삭제하십시오. 이것이 마이그레이션 `0002`의
+마지막 제자리 수정이었습니다(`logout` 트랜잭션 목적이 추가되었으며 `login_txns`의 check
+제약으로 알아볼 수 있음). 배포가 데이터베이스를 갖게 된 뒤로는 **모든 스키마 변경이 번호가
+매겨진 새 마이그레이션**이며, 위의 백업 뒤에 앞으로만 적용되고, 적용된 마이그레이션 파일은
+다시 수정하지 않습니다.
 
 업그레이드 절차:
 

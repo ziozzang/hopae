@@ -201,12 +201,21 @@ pub fn report(cfg: &Config) -> String {
         "gateway route auth fragment (register it on every protected route; the key is the variable name, never a value):"
     );
     let names = cfg.cookie_names();
-    let fragment =
-        gateway_facts::route_auth_fragment(&verify_url, timeout, &[&names.handle, &names.bind]);
+    let fragment = gateway_facts::route_auth_fragment(&verify_url, timeout);
     let _ = writeln!(
         out,
         "{}",
         serde_json::to_string_pretty(&fragment).unwrap_or_default()
+    );
+    let _ = writeln!(
+        out,
+        "gateway route field strip_request_cookies (HC-12: set it on every route that reaches an application upstream, public routes of a path-scoped host included; the gateway removes these cookies from the request it forwards):"
+    );
+    let strip = gateway_facts::route_strip_fragment(&[&names.handle, &names.bind]);
+    let _ = writeln!(
+        out,
+        "{}",
+        serde_json::to_string_pretty(&strip).unwrap_or_default()
     );
     let _ = writeln!(out, "config ok");
     out

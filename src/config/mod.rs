@@ -1101,6 +1101,11 @@ impl Config {
             }
         }
         for (i, a) in self.apps.iter().enumerate() {
+            if a.logout_confirm == Some(false) {
+                w.push(format!(
+                    "apps[{i}].logout_confirm is false: /_hopae/logout ends the session on any same-origin navigation without confirmation, so a navigation gadget in the application (a script that assigns a URL taken from its own query to location) can log users out; keep the default unless that is accepted (ADR-0015)"
+                ));
+            }
             for (j, h) in a.hosts.iter().enumerate() {
                 if h.as_str() != h.to_ascii_lowercase() {
                     w.push(format!(

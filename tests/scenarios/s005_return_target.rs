@@ -160,7 +160,7 @@ fn s005_a3_provider_redirect_ignored() {
     let cb = portal.get(&format!("{callback}&next=https://evil.example.org/"));
     let loc = cb.location().expect("handoff redirect");
     assert!(
-        loc.starts_with("https://app.example.test/a?_hopae_handoff="),
+        loc.starts_with("https://app.example.test/_hopae/login?return=/a&_hopae_handoff="),
         "{loc}"
     );
 }

@@ -19,6 +19,14 @@ or by controlling an unregistered sibling host.
 
 ## Preconditions and fixtures
 
+> **Wire note (ADR-0015).** Every handoff is delivered to the application host's
+> login entry point, `https://<host>/_hopae/login?return=<clean target path and
+> query>&_hopae_handoff=K`, and redemption answers `302` to the clean target.
+> Where this scenario writes `<target>?_hopae_handoff=K`, read that wire for the
+> `location` Hopae mints and for the request the browser makes; the code's
+> recorded host and path are the `return` target's, and every rule below is
+> unchanged. The older form on a protected route is still redeemed.
+
 - Configuration `tests/fixtures/m1-two-domains.json`: application `app` with host `app.example.test`, application `other` with host `other.example.org`; the `default` application carries policy defaults and no hosts; no `ports` listed (443 only).
 - Unit fixtures: a table of URLs and expected validation outcomes in `tests/fixtures/return-targets.json`.
 

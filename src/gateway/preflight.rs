@@ -34,16 +34,21 @@ pub const REQUEST_HEADERS: [&str; 6] = [
 /// (gateway change HC-3); the gateway operator may choose another name.
 pub const GATEWAY_KEY_ENV: &str = "HANGANG_HOPAE_KEY";
 
+/// The route-level `strip_request_cookies` field (gateway change HC-12,
+/// ADR-0015): the configured handle and binding cookie names, which the gateway
+/// removes from the request it forwards upstream. It belongs on every route
+/// that reaches an application upstream, public routes of a path-scoped host
+/// included.
+pub fn route_strip_fragment(strip_cookies: &[&str]) -> Value {
+    json!({ "strip_request_cookies": strip_cookies })
+}
+
 /// The `auth` block of a protected route, as in docs/GATEWAY_CONTRACT.md.
-/// `strip_cookies` are the configured handle and binding cookie names, which
-/// the gateway removes from the request it forwards upstream (gateway change
-/// HC-12, ADR-0015).
-pub fn route_auth_fragment(verify_url: &str, timeout_ms: u64, strip_cookies: &[&str]) -> Value {
+pub fn route_auth_fragment(verify_url: &str, timeout_ms: u64) -> Value {
     json!({
         "url": verify_url,
         "request_headers": REQUEST_HEADERS,
         "response_headers": IDENTITY_HEADERS,
-        "strip_request_cookies": strip_cookies,
         "static_request_headers": {
             "x-hopae-contract": "1",
             "x-hopae-gateway-key": {"env": GATEWAY_KEY_ENV},

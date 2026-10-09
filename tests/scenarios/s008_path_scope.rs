@@ -16,6 +16,9 @@ mod gateway_layer {
             test,
             GatewayRoutes::new()
                 .path_scoped(APP_HOST, "/admin")
+                // The contract's third route: every handoff is delivered to
+                // /_hopae/login (ADR-0015), which Hopae must answer.
+                .hopae_prefix(APP_HOST)
                 .portal(PORTAL_HOST),
         )
     }

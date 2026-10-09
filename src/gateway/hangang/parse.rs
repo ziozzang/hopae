@@ -32,6 +32,12 @@ const H_METHOD: &str = "x-original-method";
 /// Upper bound in bytes of the requested URL once the handoff pair is removed
 /// (the return-target limit of ADR-0004).
 const MAX_URL: usize = 2048;
+/// Upper bound in bytes of the requested URL of the login entry point, which
+/// carries a return target of up to `MAX_URL` bytes inside its `return`
+/// parameter (ADR-0015: every handoff is delivered there). The target's own
+/// separators are percent-encoded in it, so the bound is the worst case of
+/// three bytes per target byte plus the origin and the fixed prefix.
+const MAX_ENTRY_URL: usize = 3 * MAX_URL + 512;
 /// Bytes of the handoff pair Hopae appends to a return target: `&`, the
 /// reserved name, `=` and a 43-character code (32 random bytes, base64url).
 const HANDOFF_OVERHEAD: usize = 1 + recognition::HANDOFF_PARAM.len() + 1 + 43;
@@ -343,12 +349,22 @@ pub fn parse(
     };
     // On the wire the URL may carry Hopae's own handoff pair on top of the
     // limit; the limit itself applies to the cleaned target below.
-    if raw_url.len() > MAX_URL + HANDOFF_OVERHEAD || raw_url.contains('#') {
+    // The reserved namespace carries a whole target in `return`: a longer bound,
+    // only on a path that looks like it (the canonical decision comes later).
+    let max_url = if raw_path(raw_url)
+        .get(..8)
+        .is_some_and(|p| p.eq_ignore_ascii_case("/_hopae/"))
+    {
+        MAX_ENTRY_URL
+    } else {
+        MAX_URL
+    };
+    if raw_url.len() > max_url + HANDOFF_OVERHEAD || raw_url.contains('#') {
         return Err(violation(H_URL));
     }
     let original_url = url::Url::parse(raw_url).map_err(|_| violation(H_URL))?;
     let clean_url = recognition::clean_target(&original_url);
-    if clean_url.as_str().len() > MAX_URL {
+    if clean_url.as_str().len() > max_url {
         return Err(violation(H_URL));
     }
     if !matches!(original_url.scheme(), "http" | "https")

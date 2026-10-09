@@ -63,13 +63,19 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 
 - Given: no cookie.
 - When: verify with `x-original-url: https://app.example.test/_hopae/login?return=%2Fadmin%2Fx`.
-- Then: `302` to `https://auth.example.test/login?txn=…`; `set-cookie: __Host-hopae_bind=…` as in 001-1; the transaction's `return_target = https://app.example.test/admin/x` (not the entry URL); after login the handoff `location` is `https://app.example.test/admin/x?_hopae_handoff=…` and redemption plants `H1` (003). Without `return`, the target is `https://app.example.test/`.
+- Then: `302` to `https://auth.example.test/login?txn=…`; `set-cookie: __Host-hopae_bind=…` as in 001-1; the transaction's `return_target = https://app.example.test/admin/x` (not the entry URL); after login the handoff `location` is `https://app.example.test/_hopae/login?return=/admin/x&_hopae_handoff=…` (every handoff is delivered to the login entry point, S015-12), redemption there plants `H1` and answers `302 https://app.example.test/admin/x` (003). Without `return`, the target is `https://app.example.test/`.
 
 ### S015-7 Login entry with a session redirects to the target
 
 - Given: cookie `H1`.
 - When: verify with `x-original-url: https://app.example.test/_hopae/login?return=%2Fadmin%2Fx`.
 - Then: `302`; `location: https://app.example.test/admin/x`; no `set-cookie`; `cache-control: no-store`; `x-hopae-reason: already_authenticated`; `H1.last_seen_at` touched as a `200` would; through the gateway, zero upstream requests. A handle that an ordinary verify would refuse (terminated session, binding mismatch under `terminate_session`) yields that verify's `302` to the portal with the same side effects.
+
+### S015-12 Every handoff is delivered to the login entry point, whatever the target's route
+
+- Given: gateway layer; the three-route path-scoped fragment (`site-public` for `/`, `site-admin` for `/admin`, `site-hopae`); an unauthenticated browser.
+- When: the browser starts a login with `/_hopae/login` (default target `/`), then with `/_hopae/login?return=/public/page?x=1` (a public target), then with `/_hopae/login?return=/admin/x` (a protected target), and follows the portal login to the handoff `location`.
+- Then: each handoff `location` is `https://app.example.test/_hopae/login?return=<target path and query>&_hopae_handoff=K` (only `%`, `&`, `+`, `#` percent-encoded inside `return`); presenting it is answered by Hopae through `site-hopae`: `302` to the clean target, `set-cookie: __Host-hopae=…`; the echo upstream records no request until the browser follows that `302`, and no request it ever records contains `_hopae_handoff` or `/_hopae/`; the default and the public target no longer leak the code to the upstream. A target of the full 2048 bytes fits (the adapter's bound for the reserved namespace is `3 × 2048 + 512` bytes); a `return` over 2048 bytes is `403 return_not_allowed`. The older wire (`<target>?_hopae_handoff=K` on a protected route) is still redeemed.
 
 ## Alternative flows
 
@@ -105,7 +111,7 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 | Tampering | S015-A2 | yes |
 | Race / timing | S015-A3 | yes |
 | Resource exhaustion | S015-A4 | yes |
-| Confused deputy | S015-A5, S015-A7 | yes |
+| Confused deputy | S015-A5, S015-A7, S015-A8, S015-A9 | yes |
 | Spoofed or duplicated headers | S015-A6 | yes |
 | Downgrade | — | no: no negotiation; `x-forwarded-proto: http` is `insecure_transport` as in 001 |
 | Enumeration | — | no: non-document requests get one answer for the whole namespace; a document navigation's outcome is visible only to the navigating browser |
@@ -119,7 +125,7 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 ### S015-A2 `return` cannot leave the origin
 
 - Given: cookie `H1`.
-- When: verify for `/_hopae/logout` and `/_hopae/login` with each `return`: `https://evil.example.org/`, `//evil.example.org/`, `/\evil.example.org`, `https://other.example.org/` (registered, different origin), `https://app.example.test:8443/`, `http://app.example.test/`, `https://app.example.test@evil.example.org/`, `https://app.example.test/#f`, `javascript:alert(1)`, `/x?_hopae_handoff=K`, `/_hopae/login`, `/_HOPAE/logout`, a 2100-character path, and two `return` pairs.
+- When: verify for `/_hopae/logout` and `/_hopae/login` with each `return`: `https://evil.example.org/`, `//evil.example.org/`, `/\evil.example.org`, `https://other.example.org/` (registered, different origin), `https://app.example.test:8443/`, `http://app.example.test/`, `https://app.example.test@evil.example.org/`, `https://app.example.test/#f`, `javascript:alert(1)`, `/x?_hopae_handoff=K`, `/_hopae/login`, `/_HOPAE/logout`, a 2100-character path (the entry URL bound for the reserved namespace admits it; it is refused as a target), and two `return` pairs.
 - Then: each is `403 {"error":"return_not_allowed"}`, `x-hopae-reason: return_not_allowed`, no transaction, no `set-cookie`, event `verify.denied`; every `location` emitted anywhere in this scenario names `app.example.test` or the portal.
 
 ### S015-A3 Ticket racing termination
@@ -152,6 +158,18 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 - When: the victim's browser (`P1`, `H0`) loads the page and the victim clicks confirm.
 - Then: `Ta`'s digest does not match `P1`, so the ticket is treated as absent: the page is the plain confirmation, and the `POST` ends only the victim's own portal session, which the victim consented to on the portal's page (006-A4 applies); the attacker's session is untouched; no `location` names any origin the victim did not come from (the signed-out page is rendered, without a link from the foreign ticket).
 
+### S015-A8 Direct mode accepts same-origin navigation gadgets, and `--check` says so
+
+- Given: fixture `m1-logout-direct.json` (`logout_confirm: false`); an application page that assigns a URL from its own query to `location` (`/continue?next=/_hopae/logout`) loaded by the victim; cookie `H1`.
+- When: the loaded page starts the new navigation to `/_hopae/logout` (the verify call carries `sec-fetch-site: same-origin`, a document navigation); then `hopae --check` on the fixture and on `m1-two-domains.json`.
+- Then: the session is ended without a click (the documented residual risk of the opt-in mode: fetch metadata cannot tell the user's intent from the application's own script); with the default configuration the same call only creates a ticket (S015-1); `hopae --check` prints `logout_confirm false` for the application and a warning naming `logout_confirm`, the missing confirmation and the navigation gadget, and prints no such warning for the default. (The browser case with two navigations is described, not automated: it needs a real browser.)
+
+### S015-A9 An unopened ticket is a transferable revocation capability
+
+- Given: the attacker holds a ticket `Ta` for their own session `s_a` (S015-1) and does not open it; the victim has session `s_v` with handles `H0v`, `P1v`.
+- When: the victim opens `https://auth.example.test/logout?txn=Ta` (first visit) and confirms.
+- Then: `Ta`'s portal digest is the victim's (`sha256(P1v)`); the form names the application; the confirmation ends exactly `s_a` (the session the ticket names) and `s_v` (the victim's own portal session), both with `reason=logout`, two `session.terminated` events, no other session; `Ta` is consumed. This is accepted: the ticket only reduces access, cannot name another session, and needs the confirming click with `Origin` and CSRF checks (contract: logout ticket).
+
 ## Observability expectations
 
 - Log: `verify.denied` with `reason` ∈ {`reserved_path`, `entry_point_not_document`, `return_not_allowed`, `txn_rate_limited`}; `x-hopae-reason` ∈ {`logout_entry`, `already_authenticated`, `logout`} on the `302`s; `txn_purpose_mismatch` at the portal.
@@ -173,6 +191,7 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 | S015-9 | `s015_9_namespace_variants_never_reach_upstream` | `tests/scenarios/s015_app_host_entry_points.rs` | gateway | planned |
 | S015-10 | `s015_10_path_scoped_host_needs_hopae_route` | `tests/scenarios/s015_app_host_entry_points.rs` | gateway | planned |
 | S015-11 | `s015_11_hc12_strips_hopae_cookies_upstream` | `tests/scenarios/s015_app_host_entry_points.rs` | gateway | planned |
+| S015-12 | `s015_12_handoff_lands_on_login_entry_whatever_the_target` | `tests/scenarios/s015_app_host_entry_points.rs` | gateway | planned |
 | S015-A1 | `s015_a1_replayed_or_foreign_ticket_harmless` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
 | S015-A2 | `s015_a2_return_cannot_leave_origin` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
 | S015-A3 | `s015_a3_ticket_racing_termination` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
@@ -180,6 +199,8 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 | S015-A5 | `s015_a5_cross_site_cannot_log_out` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
 | S015-A6 | `s015_a6_spoofed_metadata_and_canonical_tricks` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
 | S015-A7 | `s015_a7_attacker_ticket_not_redeemable_by_victim` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
+| S015-A8 | `s015_a8_direct_mode_accepts_navigation_gadgets_and_check_warns` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
+| S015-A9 | `s015_a9_unvisited_ticket_is_a_transferable_revocation_capability` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
 
 Scenario 004-11 (`s004_11_no_non_allow_path_is_2xx`) gains the outcomes
 `reserved_path`, `entry_point_not_document`, `return_not_allowed`,
@@ -196,7 +217,7 @@ with `clear_handle`.
 ## Open questions
 
 - Should `sec-purpose` be added to the listed request headers so that prefetch and prerender never count as a document navigation at the entry points (and elsewhere)? Recorded in the roadmap backlog; it changes every route fragment.
-- A `return` too long for the verify URL limit (2048 bytes) never reaches Hopae's return check: the gateway-facing parser refuses the whole call (`400 contract_violation`) and nothing is created; S015-A2 asserts that for its 2100-character case.
+- The `site-public` route of the path-scoped fragment strips the Hopae cookies too once the gateway supports the route-level HC-12 field; until the gateway build with route-level support exists, S015-11 exercises the whole-host route only (review F1 is a gateway change, not a Hopae one).
 
 ## 한국어 요약
 
@@ -208,4 +229,7 @@ CSRF로 보호된 `POST`만이 세션을 끝내고, 이어서 포털이 보호�
 대신(제공자가 조용히 다시 로그인시키므로) 같은 출처로 제한된 돌아갈 대상으로 가는
 "다시 로그인" 링크가 있는 로그아웃 완료 페이지를 보여 줍니다. 교차 사이트 `<img>`나 탐색, 형제 서브도메인, 공격자가 만든
 티켓은 아무것도 끝내지 못하고, `return`은 다른 출처를 가리킬 수 없습니다.
+모든 핸드오프는 대상의 라우트와 무관하게 항상 `/_hopae/login?return=…`으로 전달됩니다.
+`logout_confirm=false`는 같은 출처 탐색 가젯을 받아들이는 옵트인이며 `--check`가 경고하고,
+열어 보지 않은 로그아웃 티켓은 넘길 수 있는 취소 권한입니다.
 HC-12가 있으면 업스트림은 `__Host-hopae`와 `__Host-hopae_bind`를 보지 못합니다.

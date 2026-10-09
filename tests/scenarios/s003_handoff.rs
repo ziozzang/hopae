@@ -123,12 +123,15 @@ async fn s003_2_other_query_parameters_preserved() {
             query.ends_with(&format!("_hopae_handoff={}", l.code.expose())),
             "{query}"
         );
+        assert_eq!(l.location.path(), "/_hopae/login", "ADR-0015 wire");
         assert_eq!(
             l.target.as_str(),
             format!("https://{APP}{pq}"),
             "stripping gives the original target back"
         );
-        assert_eq!(l.location.path(), "/admin/x");
+        // The `return` value carries path and query byte for byte (the separators of
+        // the carrying query are the only escapes added, and decode back).
+        assert_eq!(strip_handoff(&l.location), l.target);
         let (location, _, _, _) = minted(k.redeem(&l.code, &l.target, Some(&k.b1), None).await);
         assert_eq!(
             location.as_str(),
@@ -1500,8 +1503,21 @@ mod gateway_layer {
             );
         };
 
+        // The parameter on an ordinary path (the form this rule is written for; the
+        // delivery URL of ADR-0015 is a reserved path with its own answer, below).
+        let legacy = format!("/admin/x?_hopae_handoff={}", k1);
+        let delivery = b.fetch(APP_HOST, &pq1);
+        assert_eq!(delivery.status, 403, "{delivery:?}");
+        assert_eq!(
+            s.gw.tap.answers().last().unwrap().header("x-hopae-reason"),
+            Some("entry_point_not_document"),
+            "a non-document request to the delivery URL is refused, code untouched"
+        );
+        assert!(s.echo.requests().is_empty());
+        s.gw.tap.clear();
+
         // (1) no handle
-        expect_terminated(&s, &b, &pq1, "without a handle");
+        expect_terminated(&s, &b, &legacy, "without a handle");
         assert!(unconsumed(&s), "K1 stays unconsumed");
         assert_eq!(has_bind(&b, APP_HOST).as_deref(), Some(bind.as_str()));
 
@@ -1517,7 +1533,7 @@ mod gateway_layer {
 
         // (2) valid handle + K1, (3) valid handle + an invalid code: still 403,
         // never a 200 that would make the gateway forward the query.
-        expect_terminated(&s, &b, &pq1, "valid handle and K1");
+        expect_terminated(&s, &b, &legacy, "valid handle and K1");
         expect_terminated(
             &s,
             &b,

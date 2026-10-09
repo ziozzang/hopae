@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 9 -->
+<!-- doc-rev: 10 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -112,7 +112,7 @@ for. A host not listed is denied (`unknown_app`).
 | `apps[].binding.ua` | `strict`, `off` | `off` | User-agent binding. |
 | `apps[].binding.on_mismatch` | `terminate_session`, `drop_handle` | `terminate_session` | What a binding mismatch does. |
 | `apps[].on_authz_change` | `refresh`, `terminate` | `refresh` | What happens to live sessions when authorization data changes. |
-| `apps[].verify_cache_seconds` | integer | `0` | Staleness bound the gateway may cache an allow for; at most `30`. Reported by `--check`. |
+| `apps[].verify_cache_seconds` | integer | `0` | Staleness bound the gateway may cache an allow for; at most `30`. `hopae --check` prints the value per application and **warns when it is `false`**: `sec-fetch-site: same-origin` proves only that a document of the application's own origin started the navigation, so a navigation gadget in the application (a page that assigns a URL from its own query to `location`, such as `/continue?next=/_hopae/logout`) can end a user's session without a click. Keep `true` unless that is accepted. |
 | `apps[].logout_confirm` | boolean | `true` (inherited from the `default` application when it sets it) | `true`: `/_hopae/logout` on the application host redirects to the portal's confirmation page. `false`: a document navigation with `sec-fetch-site: same-origin` that presents a valid handle ends the session at once and is redirected to the portal's signed-out page; every other request still goes through the confirmation. After either, the portal shows a "Sign in again" link instead of redirecting to the protected target ([ADR-0015](adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md), [gateway contract](GATEWAY_CONTRACT.md#application-host-entry-points)). Reported by `--check`. |
 | `apps[].step_up[]` | array of `{path_prefix, require: {aal, max_age}}` | none | Step-up rules. In M1 they are parsed and validated (`aal` is 1 or 2, `path_prefix` starts with `/`, `max_age` is positive seconds) and force `no-store`; enforcement arrives in M5. |
 

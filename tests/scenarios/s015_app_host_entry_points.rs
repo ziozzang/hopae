@@ -182,6 +182,8 @@ struct Signed {
     ip: String,
     /// The handoff `location` of the login.
     handoff: String,
+    /// Where the redemption sent the browser (the clean target).
+    landed: String,
 }
 
 impl Signed {
@@ -243,12 +245,14 @@ fn sign_in_at(h: &Hopae, idp: &MockIdp, start_url: &str, ip: &str) -> Signed {
     );
     assert_eq!(redeem.status, 302, "{redeem:?}");
     let h1 = cookie_value(&redeem, HANDLE).expect("application handle");
+    let landed = redeem.location().expect("clean target").to_string();
     Signed {
         jar,
         h1,
         b1,
         ip: ip.to_string(),
         handoff,
+        landed,
     }
 }
 
@@ -556,11 +560,47 @@ fn s015_6_login_entry_starts_login_for_target() {
     );
     assert!(
         s.handoff
-            .starts_with("https://app.example.test/admin/x?_hopae_handoff="),
+            .starts_with("https://app.example.test/_hopae/login?return=/admin/x&_hopae_handoff="),
         "{}",
         s.handoff
     );
     assert!(s.h1.starts_with("v1."));
+    // The redemption at the entry point ends at the clean validated target.
+    assert_eq!(s.landed, format!("https://{APP}/admin/x"));
+    // Without `return` the handoff lands on the root, through the entry point too.
+    let s0 = sign_in_at(
+        &h,
+        &idp,
+        &format!("https://{APP}/_hopae/login"),
+        "203.0.113.21",
+    );
+    assert!(
+        s0.handoff
+            .starts_with("https://app.example.test/_hopae/login?return=/&_hopae_handoff="),
+        "{}",
+        s0.handoff
+    );
+    assert_eq!(s0.landed, format!("https://{APP}/"));
+    // Every login, entered anywhere, is delivered the same way.
+    let s1 = sign_in_at(
+        &h,
+        &idp,
+        &format!("https://{APP}/docs/a?q=1&z=%2B"),
+        "203.0.113.22",
+    );
+    assert!(
+        s1.handoff.starts_with(
+            "https://app.example.test/_hopae/login?return=/docs/a?q=1%26z=%252B&_hopae_handoff="
+        ),
+        "{}",
+        s1.handoff
+    );
+    assert_eq!(s1.landed, format!("https://{APP}/docs/a?q=1&z=%2B"));
+    // A target of the maximum length (2048 bytes) still fits the entry URL.
+    let long = format!("https://{APP}/{}", "a".repeat(2048 - 24 - 1));
+    assert_eq!(long.len(), 2048);
+    let s2 = sign_in_at(&h, &idp, &long, "203.0.113.23");
+    assert_eq!(s2.landed, long);
 }
 
 #[test]
@@ -808,7 +848,8 @@ fn s015_a2_return_cannot_leave_origin() {
         assert_eq!(dup.status, 403, "{ep}: {dup:?}");
         assert_eq!(dup.header("x-hopae-reason"), Some("return_not_allowed"));
     }
-    // Too long for the verify URL limit: refused before any ticket exists.
+    // A target longer than the 2048-byte limit still fits the entry URL (entry
+    // points carry targets up to the limit) and is refused as a target.
     let long = format!("/{}", "a".repeat(2100));
     let r = h.verify(with_cookies(
         entry(
@@ -817,7 +858,8 @@ fn s015_a2_return_cannot_leave_origin() {
         ),
         &s,
     ));
-    assert!(matches!(r.status, 400 | 403), "{r:?}");
+    assert_eq!(r.status, 403, "{r:?}");
+    assert_eq!(r.header("x-hopae-reason"), Some("return_not_allowed"));
     assert_eq!(txn_count(&h), before, "no transaction created");
     assert_eq!(terminated(&h, &session_id(&h)), None);
     assert!(
@@ -1071,6 +1113,118 @@ fn s015_a7_attacker_ticket_not_redeemable_by_victim() {
     assert_eq!(row(&h, &ta).consumed_at, None, "the ticket is not consumed");
 }
 
+#[test]
+fn s015_a8_direct_mode_accepts_navigation_gadgets_and_check_warns() {
+    // Residual risk of the opt-in mode (ADR-0015, TM-41): a document the
+    // application itself serves that starts a new same-origin navigation to
+    // `/_hopae/logout` (a script that assigns a URL from its own query to
+    // `location`) presents `sec-fetch-site: same-origin`, so the ambient handle
+    // is ended without a click. The mode accepts it; the default does not.
+    let (idp, h) = spawn("m1-logout-direct");
+    let s = sign_in(&h, &idp);
+    let sid = session_id(&h);
+    let r = h.verify(with_cookies(
+        entry("/_hopae/logout", Some("same-origin")),
+        &s,
+    ));
+    assert_eq!(r.header("x-hopae-reason"), Some("logout"), "{r:?}");
+    assert_eq!(terminated(&h, &sid).as_deref(), Some("logout"));
+    let (idp, h) = spawn("m1-two-domains");
+    let s = sign_in(&h, &idp);
+    let r = h.verify(with_cookies(
+        entry("/_hopae/logout", Some("same-origin")),
+        &s,
+    ));
+    assert_eq!(r.header("x-hopae-reason"), Some("logout_entry"), "{r:?}");
+    assert_eq!(
+        terminated(&h, &session_id(&h)),
+        None,
+        "the default asks first"
+    );
+
+    // `hopae --check` names the setting.
+    let check = |fixture: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(format!("{fixture}.json"));
+        let mut v: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        v["state_dir"] = json!(dir.path().join("state"));
+        let cfg = dir.path().join("hopae.json");
+        std::fs::write(&cfg, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+        let o = std::process::Command::new(env!("CARGO_BIN_EXE_hopae"))
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("HOPAE_TEST_GATEWAY_KEY", "k".repeat(32))
+            .env("HOPAE_TEST_MOCK_SECRET", "s".repeat(32))
+            .arg("--check")
+            .arg("--config")
+            .arg(&cfg)
+            .output()
+            .unwrap();
+        format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        )
+    };
+    let warned = check("m1-logout-direct");
+    assert!(
+        warned.contains("logout_confirm is false") && warned.contains("navigation gadget"),
+        "{warned}"
+    );
+    assert!(
+        warned.contains("logout_confirm false"),
+        "printed per application: {warned}"
+    );
+    let quiet = check("m1-two-domains");
+    assert!(!quiet.contains("logout_confirm is false"), "{quiet}");
+}
+
+#[test]
+fn s015_a9_unvisited_ticket_is_a_transferable_revocation_capability() {
+    let (idp, h) = spawn("m1-two-domains");
+    let attacker = sign_in_at(&h, &idp, &format!("https://{APP}/admin/x"), IP);
+    let a_sid = session_id(&h);
+    idp.set_user("sub-victim", "victim@example.test", true, "Victim");
+    let victim = sign_in_at(&h, &idp, &format!("https://{APP}/admin/x"), "203.0.113.10");
+    let v_sid: String = db(&h)
+        .query_row(
+            "SELECT session_id FROM sessions WHERE session_id != ?1",
+            [&a_sid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    // The attacker mints a ticket for their own session and never opens it.
+    let r = h.verify(with_cookies(
+        entry("/_hopae/logout", Some("same-origin")),
+        &attacker,
+    ));
+    let ta = txn_of(&r, "/logout");
+    assert_eq!(row(&h, &ta).portal_bind, None, "unvisited");
+    // The victim's first visit binds it to the victim's browser and shows the form.
+    let vc = victim.portal(&h);
+    let page = vc.get(&format!("/logout?txn={ta}"));
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(page.body.contains(&format!("name=\"txn\" value=\"{ta}\"")));
+    assert_eq!(row(&h, &ta).portal_bind, Some(sha(&victim.p1())));
+    // The victim confirms: exactly the attacker-selected session (their own) and
+    // the victim's own portal session end. Nothing else, and no foreign id was injected.
+    let out = confirm(&vc, &csrf_of(&page.body), Some(&ta));
+    assert_eq!(out.status, 200, "{out:?}");
+    assert_eq!(terminated(&h, &a_sid).as_deref(), Some("logout"));
+    assert_eq!(terminated(&h, &v_sid).as_deref(), Some("logout"));
+    assert_eq!(
+        count(
+            &h,
+            "SELECT count(*) FROM sessions WHERE terminated_at IS NOT NULL"
+        ),
+        2
+    );
+    assert_eq!(events(&h, "session.terminated").len(), 2);
+    assert!(row(&h, &ta).consumed_at.is_some());
+}
+
 // ---------------------------------------------------------------------------
 // Namespace variants at the Hopae level (the gateway cases are below)
 // ---------------------------------------------------------------------------
@@ -1288,6 +1442,68 @@ mod gateway_layer {
         } else {
             assert_eq!(v.status, 200, "{v:?}");
             assert_eq!(s.echo.requests().len(), 1);
+        }
+    }
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn s015_12_handoff_lands_on_login_entry_whatever_the_target() {
+        // The three-route fragment: public `/`, protected `/admin`, and `site-hopae`.
+        let routes = GatewayRoutes::new()
+            .path_scoped(APP_HOST, "/admin")
+            .hopae_prefix(APP_HOST)
+            .portal(PORTAL_HOST);
+        let Some(s) = Stack::with_routes("s015_12", routes) else {
+            return;
+        };
+        let cases = [
+            // (entry path, where the browser ends up)
+            ("/_hopae/login", "/"),
+            (
+                "/_hopae/login?return=%2Fpublic%2Fpage%3Fx%3D1",
+                "/public/page?x=1",
+            ),
+            ("/_hopae/login?return=%2Fadmin%2Fx", "/admin/x"),
+        ];
+        for (entry, end) in cases {
+            let b = s.gw.browser();
+            s.echo.clear();
+            let first = nav(&b, &s.app, entry);
+            assert_eq!(first.status, 302, "{entry}: {first:?}");
+            let c = b.login_from(&s.idp, first);
+            // The code is delivered to the entry point, whatever the target's path.
+            assert!(
+                c.handoff_location
+                    .starts_with("https://app.example.test/_hopae/login?return="),
+                "{entry}: {}",
+                c.handoff_location
+            );
+            let redeemed = b.redeem(&c);
+            assert_eq!(redeemed.status, 302, "{entry}: {redeemed:?}");
+            assert_eq!(
+                redeemed.location(),
+                Some(format!("https://app.example.test{end}").as_str()),
+                "{entry}"
+            );
+            assert!(
+                b.jar.for_host(APP_HOST).value(HANDLE).is_some(),
+                "{entry}: the handle is planted"
+            );
+            assert!(
+                s.echo.requests().is_empty(),
+                "{entry}: nothing, least of all the code, reached the upstream: {:?}",
+                s.echo.requests()
+            );
+            // The clean target is then an ordinary request on its own route.
+            let landed = b.follow(&s.app, &redeemed);
+            assert_eq!(landed.status, 200, "{entry}: {landed:?}");
+            let seen = s.echo.requests();
+            assert_eq!(seen.len(), 1, "{entry}");
+            assert!(
+                !seen[0].path().contains("_hopae_handoff") && !seen[0].path().contains("_hopae/"),
+                "{entry}: {:?}",
+                seen[0]
+            );
         }
     }
 

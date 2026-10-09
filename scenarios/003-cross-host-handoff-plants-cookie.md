@@ -20,6 +20,14 @@ yields a session handle and never replaces another user's session.
 
 ## Preconditions and fixtures
 
+> **Wire note (ADR-0015).** Every handoff is delivered to the application host's
+> login entry point, `https://<host>/_hopae/login?return=<clean target path and
+> query>&_hopae_handoff=K`, and redemption answers `302` to the clean target.
+> Where this scenario writes `<target>?_hopae_handoff=K`, read that wire for the
+> `location` Hopae mints and for the request the browser makes; the code's
+> recorded host and path are the `return` target's, and every rule below is
+> unchanged. The older form on a protected route is still redeemed.
+
 - Configuration `tests/fixtures/m1-two-domains.json`: applications `app` (`app.example.test`) and `other` (`other.example.org`); every host registered by exact name.
 - The browser holds `__Host-hopae_bind=B1` on `app.example.test` (planted in scenario 001); session `s_1` (`aal=1`, `cred_gen=1`) with portal handle `H0`; handoff code `K1` for `(s_1, app.example.test, /admin/x, 203.0.113.9, sha256(B1), issued_aal=1, cred_gen=1)` created at `t0`.
 - Every verify request carries the caller key.

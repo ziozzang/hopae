@@ -266,9 +266,24 @@ fn s013_1_valid_configuration_passes() {
         "{frag}"
     );
     assert_eq!(frag["forward_response"], true);
-    // HC-12 (ADR-0015): the configured handle and binding cookie names.
+    // HC-12 (ADR-0015): the route-level field with the configured handle and
+    // binding cookie names, printed beside the `auth` fragment.
+    assert!(
+        frag.get("strip_request_cookies").is_none(),
+        "route level, not in auth"
+    );
+    let at = so
+        .find("route field strip_request_cookies")
+        .expect("route field header");
+    let rest = &so[at..];
+    let brace = rest.find('{').expect("route field json");
+    let field: Value = serde_json::Deserializer::from_str(&rest[brace..])
+        .into_iter::<Value>()
+        .next()
+        .unwrap()
+        .expect("route field parses");
     assert_eq!(
-        frag["strip_request_cookies"],
+        field["strip_request_cookies"],
         json!(["__Host-hopae", "__Host-hopae_bind"])
     );
     assert_eq!(frag["static_request_headers"]["x-hopae-contract"], "1");

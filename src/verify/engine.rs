@@ -207,20 +207,30 @@ async fn flow(cx: &Cx<'_>) -> Flow {
         return Err(cx.deny(reasons::INSECURE_TRANSPORT, DenyKind::ContractViolation));
     }
 
-    // The return target: the only URL a user is ever sent back to.
-    let target =
-        apps::validate_return_target(input.original_url.as_str(), &cx.snapshot, ctx.limits.secure)
-            .map_err(|r| {
-                let kind = if r == reasons::UNKNOWN_APP
-                    || r == reasons::APP_DISABLED
-                    || r == reasons::PORT_NOT_ALLOWED
-                {
-                    DenyKind::Forbidden
-                } else {
-                    DenyKind::ContractViolation
-                };
-                cx.deny(r, kind)
-            })?;
+    // The return target: the only URL a user is ever sent back to. An entry
+    // point's own URL may carry a whole target in `return` (longer than the
+    // limit); its host, port and application are checked on the origin's root,
+    // and the `return` itself is validated by the entry point.
+    let validated = if matches!(input.canonical_path.reserved(), Reserved::Entry(_)) {
+        let mut root = input.original_url.clone();
+        root.set_path("/");
+        root.set_query(None);
+        root
+    } else {
+        input.original_url.clone()
+    };
+    let target = apps::validate_return_target(validated.as_str(), &cx.snapshot, ctx.limits.secure)
+        .map_err(|r| {
+            let kind = if r == reasons::UNKNOWN_APP
+                || r == reasons::APP_DISABLED
+                || r == reasons::PORT_NOT_ALLOWED
+            {
+                DenyKind::Forbidden
+            } else {
+                DenyKind::ContractViolation
+            };
+            cx.deny(r, kind)
+        })?;
     if target.host_str() != Some(input.host.as_str()) {
         return Err(cx.deny(reasons::CONTRACT_VIOLATION, DenyKind::ContractViolation));
     }
@@ -239,22 +249,7 @@ async fn flow(cx: &Cx<'_>) -> Flow {
     match (&input.handoff, cx.document()) {
         (Handoff::None, _) => {}
         (Handoff::Code(code), true) => return handoff::redeem(cx, app, &target, code).await,
-        (Handoff::Ambiguous, true) => {
-            // Refused before any redemption is attempted; the code (if any)
-            // stays unconsumed. Recorded as `handoff.rejected` (required, its
-            // own transaction: nothing else changes).
-            if let Some(events) = &ctx.events {
-                let ev = cx
-                    .event(EventKind::HandoffRejected, Outcome::Failure, app)
-                    .attr("host", input.host.as_str())
-                    .reason(reasons::HANDOFF_AMBIGUOUS)
-                    .build();
-                if let Err(e) = events.append_required(vec![ev]).await {
-                    tracing::warn!(error = %e, "handoff.rejected (ambiguous) could not be recorded");
-                }
-            }
-            return Err(cx.deny(reasons::HANDOFF_AMBIGUOUS, DenyKind::Forbidden));
-        }
+        (Handoff::Ambiguous, true) => return Err(ambiguous_handoff(cx, app).await),
         (_, false) => {
             return Err(cx.deny(reasons::HANDOFF_PARAMETER_NOT_ALLOWED, DenyKind::Forbidden));
         }
@@ -264,6 +259,23 @@ async fn flow(cx: &Cx<'_>) -> Flow {
         Authn::Refused(cause) => login(cx, app, &target, cause, 0).await,
         Authn::Allowed(authed) => Ok(allow(cx, app, *authed)),
     }
+}
+
+/// Refused before any redemption is attempted; the code (if any) stays
+/// unconsumed. Recorded as `handoff.rejected` (required, its own transaction:
+/// nothing else changes).
+async fn ambiguous_handoff(cx: &Cx<'_>, app: &AppPolicy) -> Decision {
+    if let Some(events) = &cx.ctx.events {
+        let ev = cx
+            .event(EventKind::HandoffRejected, Outcome::Failure, app)
+            .attr("host", cx.input.host.as_str())
+            .reason(reasons::HANDOFF_AMBIGUOUS)
+            .build();
+        if let Err(e) = events.append_required(vec![ev]).await {
+            tracing::warn!(error = %e, "handoff.rejected (ambiguous) could not be recorded");
+        }
+    }
+    cx.deny(reasons::HANDOFF_AMBIGUOUS, DenyKind::Forbidden)
 }
 
 /// What the presented handle amounts to.
@@ -711,13 +723,21 @@ async fn entry_point(cx: &Cx<'_>, app: &AppPolicy, entry: EntryPoint) -> Flow {
         return Err(cx.deny(reasons::RETURN_NOT_ALLOWED, DenyKind::Forbidden));
     };
     match entry {
-        EntryPoint::Login => match authenticate(cx, app).await? {
-            Authn::Allowed(authed) => {
-                // As a `200` would: the handle is in use.
-                touch(cx, app, &authed.view);
-                Ok(Decision::AlreadyAuthenticated { location: target })
-            }
-            Authn::Refused(cause) => login(cx, app, &target, cause, 0).await,
+        // Every handoff is delivered here (ADR-0015): the reserved parameter is
+        // redeemed against the validated `return` target, which is also where the
+        // browser is sent next. On the logout entry point, and on every other
+        // reserved path, the parameter is neither redeemed nor consulted.
+        EntryPoint::Login => match &cx.input.handoff {
+            Handoff::Code(code) => handoff::redeem(cx, app, &target, code).await,
+            Handoff::Ambiguous => Err(ambiguous_handoff(cx, app).await),
+            Handoff::None => match authenticate(cx, app).await? {
+                Authn::Allowed(authed) => {
+                    // As a `200` would: the handle is in use.
+                    touch(cx, app, &authed.view);
+                    Ok(Decision::AlreadyAuthenticated { location: target })
+                }
+                Authn::Refused(cause) => login(cx, app, &target, cause, 0).await,
+            },
         },
         EntryPoint::Logout => logout_entry(cx, app, &target).await,
     }

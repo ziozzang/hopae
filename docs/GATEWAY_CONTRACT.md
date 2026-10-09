@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 9 -->
+<!-- doc-rev: 10 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -35,7 +35,7 @@ changes are proposed. Decisions are recorded in
 | Hopae | `apps[].logout_confirm` | Default `true`: `/_hopae/logout` on the application host goes through the portal's confirmation page; `false` ends the session at once for a same-origin document navigation that presents a valid handle ([application-host entry points](#application-host-entry-points)) |
 | Gateway | route `auth.url` | `http://127.0.0.1:8701/_hopae/verify` |
 | Gateway | route `auth.static_request_headers` | `{"x-hopae-contract": "1", "x-hopae-gateway-key": {"env": "HANGANG_HOPAE_KEY"}}` (HC-3) |
-| Gateway | route `auth.strip_request_cookies` | `["__Host-hopae", "__Host-hopae_bind"]` (HC-12): the configured handle and binding cookie names, removed from the `cookie` header the upstream receives, after the verify call |
+| Gateway | route `strip_request_cookies` | `["__Host-hopae", "__Host-hopae_bind"]` (HC-12): the configured handle and binding cookie names, removed from the `cookie` header the upstream receives, after the verify call and every other header change. A **route-level** field, set on every route that reaches an application upstream, public routes included; `auth.strip_request_cookies` stays accepted as an alias on a protected route |
 | Gateway | route `auth.request_headers` | `cookie`, `user-agent`, `accept`, `sec-fetch-dest`, `sec-fetch-mode`, `sec-fetch-site` |
 | Gateway | route `auth.response_headers` | The identity header set listed below |
 | Gateway | route `auth.forward_response` | `true` (mandatory: login redirects and cookie planting travel through it) |
@@ -64,15 +64,19 @@ Protected application (whole host):
       "x-hopae-contract": "1",
       "x-hopae-gateway-key": {"env": "HANGANG_HOPAE_KEY"}
     },
-    "strip_request_cookies": ["__Host-hopae", "__Host-hopae_bind"],
     "timeout_ms": 500,
     "forward_response": true
-  }
+  },
+  "strip_request_cookies": ["__Host-hopae", "__Host-hopae_bind"]
 }
 ```
 
 `static_request_headers` is gateway change HC-3 and `strip_request_cookies`
-is HC-12. An unmodified gateway rejects both keys (`deny_unknown_fields`);
+is HC-12. `strip_request_cookies` is a route-level field and belongs on every
+route that reaches the application upstream, **the public routes of a
+path-scoped host included** (the browser sends `Path=/` cookies to them too);
+`auth.strip_request_cookies` is accepted as an alias on a protected route. An
+unmodified gateway rejects both keys (`deny_unknown_fields`);
 such a gateway can be used only in development with
 `gateway.allow_unauthenticated_caller = true` on the Hopae side and with the
 session handle reaching the upstream (threat TM-40).
@@ -94,7 +98,8 @@ protected whole-host until gateway change HC-10 ships (threat TM-39).
 ```json
 [
   {"id": "site-public", "access_mode": "public", "host": "app.example.test",
-   "path_prefix": "/", "priority": 0, "backends": ["http://127.0.0.1:3000"]},
+   "path_prefix": "/", "priority": 0, "backends": ["http://127.0.0.1:3000"],
+   "strip_request_cookies": ["__Host-hopae", "__Host-hopae_bind"]},
   {"id": "site-admin", "access_mode": "protected", "host": "app.example.test",
    "path_prefix": "/admin", "path_match": "segment_prefix", "priority": 10,
    "backends": ["http://127.0.0.1:3000"],
@@ -105,8 +110,8 @@ protected whole-host until gateway change HC-10 ships (threat TM-39).
                                  "x-hopae-auth-time", "x-hopae-expires", "x-hopae-aal", "x-hopae-factors"],
             "static_request_headers": {"x-hopae-contract": "1",
                                        "x-hopae-gateway-key": {"env": "HANGANG_HOPAE_KEY"}},
-            "strip_request_cookies": ["__Host-hopae", "__Host-hopae_bind"],
-            "timeout_ms": 500, "forward_response": true}},
+            "timeout_ms": 500, "forward_response": true},
+   "strip_request_cookies": ["__Host-hopae", "__Host-hopae_bind"]},
   {"id": "site-hopae", "access_mode": "protected", "host": "app.example.test",
    "path_prefix": "/_hopae", "path_match": "segment_prefix", "priority": 20,
    "backends": ["http://127.0.0.1:3000"],
@@ -117,8 +122,8 @@ protected whole-host until gateway change HC-10 ships (threat TM-39).
                                  "x-hopae-auth-time", "x-hopae-expires", "x-hopae-aal", "x-hopae-factors"],
             "static_request_headers": {"x-hopae-contract": "1",
                                        "x-hopae-gateway-key": {"env": "HANGANG_HOPAE_KEY"}},
-            "strip_request_cookies": ["__Host-hopae", "__Host-hopae_bind"],
-            "timeout_ms": 500, "forward_response": true}}
+            "timeout_ms": 500, "forward_response": true},
+   "strip_request_cookies": ["__Host-hopae", "__Host-hopae_bind"]}
 ]
 ```
 
@@ -135,11 +140,13 @@ request gateway-wide. The fragments above are validated against the gateway's
 schema (`deny_unknown_fields`) in scenario 008; the `site-hopae` route and
 `strip_request_cookies` are exercised in scenario 015.
 
-Preflight and drift: `hopae --check` prints the `auth` fragment with
-`strip_request_cookies` derived from `cookie.name` (`hopae`, `hopae_bind`
-when `cookie.secure` is `false`). The phase-1 drift report
+Preflight and drift: `hopae --check` prints the `auth` fragment and, beside
+it, the route-level `strip_request_cookies` field derived from `cookie.name`
+(`hopae`, `hopae_bind` when `cookie.secure` is `false`) with the instruction to
+set it on every application-host route, public ones included. The phase-1
+drift report
 ([ADR-0012](adr/0012-service-registration-and-gateway-config-ownership.md),
-M2) flags a protected route without the field as
+M2) flags an application-host route without the field as
 `strip_request_cookies_missing` and a host whose protected routes cover only
 prefixes without a `/_hopae` route as `reserved_namespace_unrouted`.
 
@@ -260,8 +267,21 @@ After login (or when the portal already has a valid session), Hopae redirects
 the browser to the stored return target with one extra query parameter:
 
 ```text
-https://app.example.test/admin/x?_hopae_handoff=<code>
+https://app.example.test/_hopae/login?return=/admin/x&_hopae_handoff=<code>
 ```
+
+The delivery URL is always the application host's login entry point, with the
+clean return target as the value of `return` (a path-absolute reference;
+only `%`, `&`, `+` and `#` are percent-encoded in it, so a target of up to
+2048 bytes fits and the wire URL may be up to three times that long). The
+entry point is answered by Hopae on every protected host (a whole-host route,
+or the `site-hopae` route of a path-scoped host), so the code is redeemed
+whatever route the target itself selects and never reaches an upstream;
+redemption plants the handle and answers `302` to the clean, re-validated
+target (ADR-0015 decision 10). Older wire forms, `<target>?_hopae_handoff=K`,
+are still redeemed on a protected route, but Hopae no longer mints them. In
+the rest of this page "the handoff request" means this request, and the
+code's recorded path is the path of the `return` target.
 
 The gateway's forward-auth call for that request carries the parameter in
 `x-original-url` and the host's cookies. Only a document navigation redeems.
@@ -348,12 +368,15 @@ and `/_hopae/logout` under the same comparison (`/_HOPAE/Logout` and
 cookies untouched. An application route under `/_hopae/` is not supported.
 Reserved-path recognition runs after the return-target and application
 checks (an unlisted host is still `unknown_app`) and before reserved-parameter
-recognition; on a reserved path the handoff parameter is neither redeemed nor
-consulted. The portal host has no such namespace (`404`).
+recognition; on a reserved path other than `/_hopae/login` the handoff
+parameter is neither redeemed nor consulted, and on `/_hopae/login` it is
+redeemed against the `return` target (below). The portal host has no such
+namespace (`404`).
 
 | Request | Answer |
 | --- | --- |
 | Non-document request to either entry point | `403 {"error":"reserved_path"}`, `x-hopae-reason: entry_point_not_document`; no `set-cookie`; no transaction |
+| `GET /_hopae/login?return=<target>&_hopae_handoff=<code>` (the handoff delivery, [above](#cross-domain-handoff)) | The ordinary redemption rules (single use, host and path of `return` match, client IP, binding cookie digest, recovery depth) with the validated `return` as the target: `302 Location: <clean target>` with `set-cookie: __Host-hopae=…`; a replayed code gets the same `302` without a cookie (`code_already_redeemed`); a rejected code starts a recovery login for the same target. A repeated or malformed `_hopae_handoff` is `403 handoff_ambiguous`. On every other reserved path, and on `/_hopae/logout`, the parameter is ignored |
 | `GET /_hopae/login` with a handle an ordinary verify would allow | `302 Location: <target>`; no cookie change; `already_authenticated`; `last_seen_at` touched as a `200` would |
 | `GET /_hopae/login` otherwise | The ordinary outcome of a document navigation to the target: the unauthenticated `302` to the portal with the binding cookie planted and a transaction whose `return_target` is the target (the handoff lands there, never on the entry point), a step-up `302`, or the denial |
 | `GET /_hopae/logout` (default `apps[].logout_confirm = true`) | The presented handle is evaluated as an ordinary verify would (a binding mismatch terminates as usual; an invalid handle is cleared as on every `302`); then a transaction of purpose `logout` — the **logout ticket** — stores the target, the application and the session of the valid handle presented, if any, and the answer is `302 Location: https://auth.example.test/logout?txn=<id>` (`logout_entry`). **No cookie is cleared and nothing is revoked**: the only state change is the portal's CSRF-protected `POST` ([portal entry points](#portal-entry-points)). The ticket is single use, expires with the transaction lifetime (600 s) and counts against `txn.per_ip_per_minute` and `txn.max_rows` like a login transaction |
@@ -380,6 +403,25 @@ return target, which passes the same return-target validation again when the
 page is rendered (no link is shown when it no longer validates). The reference
 in the redirect is the consumed logout ticket (single use, 600 s, readable
 only while it lives); the query never carries a URL (TM-01).
+
+**The logout ticket is a transferable revocation capability.** Its id is a
+bearer value that selects the session it was minted for (the session of the
+handle its creator presented, never one the creator names). Whoever first
+opens it at the portal binds it to their browser; a ticket nobody opened yet
+can therefore be handed to another person, whose confirmation ends the session
+the ticket names (the creator's own) and the confirming person's own portal
+session. That only reduces access, is limited to those two sessions, needs the
+confirmation click with Origin and CSRF checks, and is accepted (scenario
+015-A9). The ticket is single use and expires after 600 s.
+
+**Direct mode is opt-in and accepts navigation gadgets.** `sec-fetch-site:
+same-origin` proves that the navigation was started by a document of the
+application's own origin, not that the user meant to log out: an application
+page that assigns a URL taken from its own query to `location` (for example
+`/continue?next=/_hopae/logout`) lets anyone who can lead a user there end
+their session without a click. `logout_confirm = false` accepts that residual
+risk, and `hopae --check` warns when any application sets it; the default
+keeps the confirmation (TM-41, scenario 015-A8).
 
 **Why the logout `302` clears nothing.** A cleared handle would be re-planted
 by single sign-on on the next document navigation, so clearing is not a
@@ -431,6 +473,7 @@ Hopae decides cacheability; the gateway only honors it.
 | `200`, decision independent of path and method for this application | `private, max-age=N` where `N = min(app.verify_cache_seconds, 30)`; `x-hopae-fresh-until` = `min(authoritative_read_at + N, handle expiry, session expiry)` in unix milliseconds; `x-hopae-gen` from the same read; default `N = 0`, which emits `no-store` and no deadline | Caches the identity headers keyed on **(gateway configuration generation, route id, resolved client IP, normalized external scheme and authority, SHA-256 of the listed and static request headers)**, tagged with `x-hopae-session` and `x-forwarded-user` and stamped with `x-hopae-gen`, for `min(N, route decision_cache_ms, fresh-until − now)`; never when the response carries `set-cookie`; a fill whose `x-hopae-gen` component is older than the generation last seen for one of its tags is discarded |
 | `200`, path- or method-dependent (step-up rule, path rule) | `no-store` | Never cached |
 | Any request matching the reserved parameter recognition rule (decoded query name, ambiguous forms, or the raw or encoded name in the path) | `no-store` | Neither looked up nor filled: the handoff must always reach Hopae |
+| Any request whose canonical path is in the reserved namespace: equal to `/_hopae` or starting with `/_hopae/`, compared ASCII-case-insensitively (the entry points, their case and encoding variants, every other reserved path, document or not) | `no-store` | Neither looked up nor filled: the cache key excludes the path, so a hit would forward `/_hopae/logout` upstream without Hopae ever answering it |
 | `302`, `401`, `403`, `400`, `503` | `no-store` | Never cached |
 
 The zero-trust default is `N = 0` on both sides: every request reaches Hopae
@@ -538,11 +581,11 @@ recommendation.
 | ID | Change | Gateway surface | Acceptance criteria |
 | --- | --- | --- | --- |
 | HC-3 (M1) | Static request headers on the external-auth call: `auth.static_request_headers: {"x-hopae-contract": "1", "x-hopae-gateway-key": {"env": "HANGANG_HOPAE_KEY"}}` | `ExternalAuth` (config validation, `authorize`) | Values are literal or environment references resolved at activation; names cannot collide with generated context or listed client headers; a client-supplied header of the same name is dropped; the env value never appears in config dumps, logs or the admin API; unit test for collision rejection; a gateway-layer test shows the header on the verify call; the Hopae scenarios 004-A8 and 013-A1 pass against the built gateway. |
-| HC-12 (M1) | Strip Hopae cookies from the upstream request: route field `auth.strip_request_cookies: ["__Host-hopae", "__Host-hopae_bind"]` (the configured handle and binding cookie names). **After** the external-auth call, which still receives the unmodified `cookie` header, the gateway removes every `name=value` pair whose name equals a listed name from the joined `cookie` header of the upstream request; other pairs are kept unchanged and in order; the header is dropped when nothing remains ([ADR-0015](adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md)) | `ExternalAuth` (config validation), upstream request construction after `authorize` | Optional field, default empty, zero behavior change when absent; valid only together with `auth`; names are non-empty RFC 6265 cookie-name tokens without duplicates; matching is byte-exact and case-sensitive on each pair of the header after HTTP/2 split fields are joined (RFC 9113); every pair with a listed name is removed, duplicates included; other pairs keep their bytes, order and `; ` separators; a pair that is not `name=value` is kept; when no pair remains the `cookie` header is absent, never empty; the auth call sees the unmodified header (test with a recording auth stub and an echo upstream); stripping also applies to HC-1 cache hits (test with a primed entry); `set-cookie` and responses are untouched; the field round-trips through the admin API and configuration dumps; unit tests for first, middle, last, only, duplicated, absent and malformed pairs; the Hopae scenario 015-11 passes against the built gateway. |
+| HC-12 (M1) | Strip Hopae cookies from the upstream request: **route-level** field `strip_request_cookies: ["__Host-hopae", "__Host-hopae_bind"]` (the configured handle and binding cookie names), allowed on every route that reaches a backend, **public routes included** (`auth.strip_request_cookies` stays accepted as an alias on a route with `auth`; both set at once is a validation error). On a route with `auth`, the external-auth call still receives the unmodified `cookie` header; the gateway removes every `name=value` pair whose name equals a listed name from the joined `cookie` header of the upstream request ([ADR-0015](adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md)) | `ExternalAuth` and route validation, upstream request construction | Optional field, default empty, zero behavior change when absent; names are non-empty RFC 6265 cookie-name tokens without duplicates; matching is byte-exact and case-sensitive on each pair of the header after HTTP/2 split fields are joined (RFC 9113); every pair with a listed name is removed, duplicates included; other pairs keep their bytes, order and `; ` separators; **stripping is the last step**: it runs after the external-auth call, every request-header transformation and identity reassertion, immediately before dispatch and before the request is captured for retry (a transformation that sets `Cookie: __Host-hopae=…` cannot restore the cookie); **`cookie` is rejected as an identity output** (`response_headers`, identity reassertion) when the route strips; parsing is quoted-value-aware (a `;` inside a quoted cookie value does not split) and attribute-free pairs separated by whitespace only are treated as ambiguous; **on any ambiguity the whole `cookie` header is dropped** for that upstream request, never forwarded half-stripped; when no pair remains the header is absent, never empty; the auth call sees the unmodified header (test with a recording auth stub and an echo upstream); stripping also applies to HC-1 cache hits (test with a primed entry) and to public routes (test: a public path of a path-scoped host receives no Hopae cookie); `set-cookie` and responses are untouched; the field round-trips through the admin API and configuration dumps; unit tests for first, middle, last, only, duplicated, absent, quoted, whitespace-separated and malformed pairs and for a transformation that restores a listed cookie; the Hopae scenario 015-11 passes against the built gateway. |
 | HC-6 | Canonical path context: generated headers `x-hangang-canonical-path` (the `canonical_path` result used for route selection, or absent when the route was selected on the raw path) and `x-hangang-route-id` on the external-auth call | `forward_auth_context` | Present exactly when the gateway used a canonical path; equals the value route selection used; client-supplied copies replaced; unit test with `/%61dmin/x`; the names are reserved like `x-original-*`. |
 | HC-8 | Relay `429` from the external-auth service with `forward_response`, including `retry-after`, `content-type`, `cache-control` and a bounded body | `authorize` response handling | Only when `forward_response` is on; `retry-after` relayed only on `429`; still `503` for every other unexpected status; `path_failure_bans` can count `429`; test for relay and for the unchanged `503` mapping. |
 | HC-4 | Cookie filtering: `auth.request_cookies: ["__Host-hopae", "__Host-hopae_bind"]` forwards only the named cookies in the `cookie` header to the auth service | `authorize` request construction | Only listed cookie names are sent; the upstream still receives all cookies; HTTP/2 split cookies are joined first; malformed cookie pairs are dropped, not forwarded; test covering ordering and absence. |
-| HC-1 | Per-route decision micro-cache: `auth.decision_cache_ms` (default `0` = off, max `30000`); caches `2xx` only, keyed on **(configuration generation, route id, resolved client IP, normalized external scheme and authority, SHA-256 of the listed and static request headers)**, honoring `cache-control: max-age` and `x-hopae-fresh-until` as upper bounds and `no-store` as a veto; neither lookup nor fill when the request matches the reserved parameter recognition rule (decoded query names, ambiguous forms, raw or encoded name in the path); entries tagged with `x-hopae-session` and `x-forwarded-user` and stamped with the response's `x-hopae-gen`; bounded entry count per route; optional `stale_if_error_ms` (default `0`) | `authorize`, new cache module, metrics | Off by default; zero behavior change when off; `no-store` never cached; a hit replays identical identity headers and never replays refresh cookies; `set-cookie` responses never cached; handoff requests always reach the auth service, including `?%5Fhopae%5Fhandoff=K` and duplicated parameters against a primed entry (regression test); a request from another client IP or another authority never hits an entry (tests); entries expire by the smaller of TTL and `x-hopae-fresh-until`; a fill whose `x-hopae-gen` component is older than the generation last seen for one of its tags is discarded (test); high-water marks are kept per epoch and a response with an unseen epoch purges every entry from that auth service and resets the marks (restore test); memory bound enforced; metrics `auth_cache_hits`, `auth_cache_misses`, `auth_cache_evictions`, `auth_cache_stale_fills_rejected`; config activation drops the cache. |
+| HC-1 | Per-route decision micro-cache: `auth.decision_cache_ms` (default `0` = off, max `30000`); caches `2xx` only, keyed on **(configuration generation, route id, resolved client IP, normalized external scheme and authority, SHA-256 of the listed and static request headers)**, honoring `cache-control: max-age` and `x-hopae-fresh-until` as upper bounds and `no-store` as a veto; neither lookup nor fill when the request matches the reserved parameter recognition rule (decoded query names, ambiguous forms, raw or encoded name in the path) **or when its canonical path is in the reserved `/_hopae` namespace** (equal to `/_hopae` or starting with `/_hopae/`, ASCII-case-insensitive, so `/_HOPAE/Logout` and `/_hopae/%6Cogout` too); entries tagged with `x-hopae-session` and `x-forwarded-user` and stamped with the response's `x-hopae-gen`; bounded entry count per route; optional `stale_if_error_ms` (default `0`) | `authorize`, new cache module, metrics | Off by default; zero behavior change when off; `no-store` never cached; a hit replays identical identity headers and never replays refresh cookies; `set-cookie` responses never cached; handoff requests always reach the auth service, including `?%5Fhopae%5Fhandoff=K` and duplicated parameters against a primed entry (regression test); requests to `/_hopae/login` and `/_hopae/logout`, their encoded and case variants and non-document requests to them always reach the auth service against a primed entry of an ordinary allow for the same key (regression tests for both entry points); a request from another client IP or another authority never hits an entry (tests); entries expire by the smaller of TTL and `x-hopae-fresh-until`; a fill whose `x-hopae-gen` component is older than the generation last seen for one of its tags is discarded (test); high-water marks are kept per epoch and a response with an unseen epoch purges every entry from that auth service and resets the marks (restore test); memory bound enforced; metrics `auth_cache_hits`, `auth_cache_misses`, `auth_cache_evictions`, `auth_cache_stale_fills_rejected`; config activation drops the cache. |
 | HC-2 | Invalidation subscriber: `auth.invalidation: {"redis_env": "HANGANG_HOPAE_REDIS_URL", "channel": "hopae:prod:invalidate"}` purging HC-1 entries by tag and recording the message's `gen` per tag and epoch | New subscriber task using the `security_redis` connection pattern | Subscribes with TLS rules identical to `security_redis`; a `session`/`user`/`all` message purges matching entries within 100 ms in a loopback test and raises the tag's generation; a message with an unseen epoch purges all entries and resets the marks; reconnect purges all entries; malformed messages are counted and ignored; the subscriber failing never affects request handling beyond losing early purges. |
 | HC-9 | Strip `x-original-*` from client requests on every route, as `x-forwarded-*` already is | Ingress header handling | Client-supplied `x-original-*` never reaches an upstream or an auth service; generated values unaffected; test on a route without external authorization. |
 | HC-5 | Native entry points on application hosts: `auth.entrypoints: {"login": "/_hopae/login", "logout": "/_hopae/logout"}` answered by the gateway with a `302` to the portal carrying the original URL as the return target through a verify call with `x-hopae-phase: login \| logout` | `authorize` call site | Optional; identical observable behavior to the Hopae-side implementation of [ADR-0015](adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md) (reserved namespace, case-insensitive matching, `return` rule, logout ticket, no cookie cleared at the `GET`, `logout_confirm`), including the binding cookie; the verify call for a logout entry point carries the cookie; no gateway-side state; tests for both entry points and for a path collision with an application route. |

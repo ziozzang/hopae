@@ -18,6 +18,14 @@ mixed-up callback never creates a session.
 
 ## Preconditions and fixtures
 
+> **Wire note (ADR-0015).** Every handoff is delivered to the application host's
+> login entry point, `https://<host>/_hopae/login?return=<clean target path and
+> query>&_hopae_handoff=K`, and redemption answers `302` to the clean target.
+> Where this scenario writes `<target>?_hopae_handoff=K`, read that wire for the
+> `location` Hopae mints and for the request the browser makes; the code's
+> recorded host and path are the `return` target's, and every rule below is
+> unchanged. The older form on a protected route is still redeemed.
+
 - Configuration `tests/fixtures/m1-basic.json`; provider `mock` (`oidc`, issuer from the mock's discovery document, `client_secret_env = HOPAE_TEST_MOCK_SECRET`).
 - Mock provider profile `default`; profiles `wrong_state`, `wrong_nonce`, `expired_token`, `wrong_aud`, `invalid_signature`, `unverified_email`, `userinfo_wrong_sub`, `hd_example_test`, `oversized` for abuse and failure cases.
 - Transaction `T1` from scenario 001 with `return_target = https://app.example.test/admin/x`, `bind_sha256 = sha256(B1)` and `portal_bind_sha256 = sha256(P1)`; the browser holds `__Host-hopae_portal=P1` on the portal host and `__Host-hopae_bind=B1` on the application host.

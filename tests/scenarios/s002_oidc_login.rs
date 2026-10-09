@@ -768,8 +768,25 @@ pub(crate) mod kit {
         Secret::new(v)
     }
 
-    /// The location without the reserved parameter (always the last one the service appends).
+    /// The clean return target a handoff location stands for. Every handoff is
+    /// delivered to the host's login entry point, `/_hopae/login?return=<target>
+    /// &_hopae_handoff=<code>` (ADR-0015); the target is its `return`.
     pub fn strip_handoff(location: &Url) -> Url {
+        assert_eq!(location.path(), "/_hopae/login", "{location}");
+        let ret = location
+            .query_pairs()
+            .find(|(k, _)| k == "return")
+            .map(|(_, v)| v.into_owned())
+            .expect("return parameter");
+        let mut origin = location.clone();
+        origin.set_path("/");
+        origin.set_query(None);
+        origin.join(&ret).expect("return resolves on the origin")
+    }
+
+    /// The location without the reserved parameter, as the pre-ADR-0015 wire had it.
+    #[allow(dead_code)]
+    pub fn strip_handoff_param(location: &Url) -> Url {
         let s = location.as_str();
         let i = s.rfind("_hopae_handoff=").expect("handoff parameter");
         let base = s[..i].trim_end_matches(['&', '?']);
@@ -845,7 +862,9 @@ async fn s002_2_callback_validates_and_creates_session() {
     };
     assert!(created_user && !reused_session);
     assert_eq!(location.host_str(), Some(APP));
-    assert_eq!(location.path(), "/admin/x");
+    // ADR-0015: delivered to the login entry point, carrying the target.
+    assert_eq!(location.path(), "/_hopae/login");
+    assert_eq!(strip_handoff(&location).path(), "/admin/x");
     let code = code_of(&location);
     let handle = portal_handle.expect("portal handle");
     assert_eq!(
@@ -1172,7 +1191,8 @@ async fn s002_6_sso_from_portal_handle() {
     };
     assert_eq!(session_id, first.session_id);
     assert_eq!(location.host_str(), Some(OTHER));
-    assert_eq!(location.path(), "/");
+    assert_eq!(location.path(), "/_hopae/login");
+    assert_eq!(strip_handoff(&location).path(), "/");
     let code = code_of(&location);
     assert_eq!(
         k.mock.begins.load(std::sync::atomic::Ordering::SeqCst),

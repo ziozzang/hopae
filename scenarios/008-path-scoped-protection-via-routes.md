@@ -17,6 +17,14 @@ manual registration of phase 0 (ADR-0012) is checked by preflight.
 
 ## Preconditions and fixtures
 
+> **Wire note (ADR-0015).** Every handoff is delivered to the application host's
+> login entry point, `https://<host>/_hopae/login?return=<clean target path and
+> query>&_hopae_handoff=K`, and redemption answers `302` to the clean target.
+> Where this scenario writes `<target>?_hopae_handoff=K`, read that wire for the
+> `location` Hopae mints and for the request the browser makes; the code's
+> recorded host and path are the `return` target's, and every rule below is
+> unchanged. The older form on a protected route is still redeemed.
+
 - Gateway layer with the two-route fragment from the contract page (`site-public` priority 0, `site-admin` priority 10, `path_match: segment_prefix`, `static_request_headers` with the caller key) on a gateway build that includes HC-3.
 - Hopae configuration `tests/fixtures/m1-basic.json`; application `app` with host `app.example.test` and, for S008-A5, a `step_up` rule `{"path_prefix": "/admin", "require": {"aal": 2}}` evaluated in a unit test (enforcement ships in M5; the canonical-path matching is M1).
 - Echo upstream that percent-decodes the request path before serving (as most application servers do).
