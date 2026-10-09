@@ -58,7 +58,8 @@ Out of scope: a native gateway implementation (HC-5 stays optional and must matc
 - The `login_txns` purpose set gains `logout`; the portal gains a `txn`-aware confirmation page and `POST` and the read-only `GET /signed-out`; scenario 015 maps the tests; 004-11 enumerates the new non-allow outcomes.
 - Every handoff is delivered to `/_hopae/login`, which makes path-scoped hosts depend on the `site-hopae` route for login completion, not only for the entry points: without it a handoff reaches the public route. The redirect pair (one extra hop on the application host) is the price of never depending on the target's route.
 - Direct mode (`logout_confirm = false`) accepts same-origin navigation gadgets (decision 11); an unopened logout ticket can be passed to another person (decision 11).
-- Transaction admission is one store write: the per-address cap, the eviction down to `txn.max_rows` and the insert happen together (login, retry and logout tickets), so `txn.max_rows` is a hard bound and the cap cannot be overshot by concurrent callers.
+- The logout ticket's consumption and the termination of the session it names (with its event) are one store write: a failure or crash between them leaves the ticket unconsumed and the session live, and the retry still logs out (code review G7 pass 1, F1).
+- Transaction admission is one store write: the per-address cap, the eviction down to `txn.max_rows` and the insert happen together (login, retry, logout tickets, and the post-authentication switch and link transactions, which skip only the per-address cap), so `txn.max_rows` is a hard bound and the cap cannot be overshot by concurrent callers.
 - Forwarding `sec-purpose` (to ignore prefetch and prerender at every entry point) is a candidate contract minor for a later release, recorded in the roadmap backlog.
 - HC-5, if ever built, must reproduce decisions 1–7 exactly; its acceptance criteria already say so.
 

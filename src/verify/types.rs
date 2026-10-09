@@ -141,6 +141,8 @@ pub struct VerifyInput {
     pub bind_cookie: Option<Secret>,
     pub user_agent: Option<String>,
     pub navigation: Navigation,
+    /// An `Accept` header names HTML (`text/html`, `application/xhtml+xml`).
+    pub accepts_html: bool,
     pub fetch_site: FetchSite,
     pub entry_return: EntryReturn,
     pub handoff: Handoff,
@@ -227,6 +229,9 @@ pub enum Decision {
     LogoutEntry {
         transaction: Secret,
         clear_handle: bool,
+        /// Why a presented handle was refused (as on `Login`): the
+        /// `verify.denied` reason.
+        cause: Option<Reason>,
     },
     /// `GET /_hopae/logout` in the no-confirmation mode, after the session
     /// ended: `302` to the portal's `/signed-out?txn=<consumed ticket>` with

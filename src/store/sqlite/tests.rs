@@ -1358,7 +1358,13 @@ async fn capped_insert_evicts_in_the_same_write_so_max_rows_is_a_hard_bound() {
         let secret = random_token(&f.rng, 16);
         let out = f
             .store
-            .create_transaction_capped(new_txn(&f, &secret, "192.0.2.1"), vec![], since, 1000, 5)
+            .create_transaction_capped(
+                new_txn(&f, &secret, "192.0.2.1"),
+                vec![],
+                since,
+                Some(1000),
+                5,
+            )
             .await
             .unwrap();
         let Admission::Admitted { evicted } = out else {
@@ -1387,12 +1393,39 @@ async fn capped_insert_evicts_in_the_same_write_so_max_rows_is_a_hard_bound() {
             new_txn(&f, &secret, "192.0.2.1"),
             vec![],
             f.now().sub(Duration::from_secs(3600)),
-            3,
+            Some(3),
             5,
         )
         .await
         .unwrap();
     assert_eq!(out, Admission::OverCap);
+    assert_eq!(f.count("SELECT COUNT(*) FROM login_txns"), 5);
+}
+
+#[tokio::test]
+async fn mixed_capped_and_uncapped_callers_never_exceed_max_rows() {
+    let f = std::sync::Arc::new(fx());
+    let since = f.now().sub(Duration::from_secs(60));
+    let mut tasks = Vec::new();
+    for n in 0..48u32 {
+        let f = f.clone();
+        tasks.push(tokio::spawn(async move {
+            let secret = random_token(&f.rng, 16);
+            // Even: a login (per-address cap); odd: a switch or link (post-auth, no cap).
+            let cap = (n % 2 == 0).then_some(1000);
+            let out = f
+                .store
+                .create_transaction_capped(new_txn(&f, &secret, "192.0.2.1"), vec![], since, cap, 5)
+                .await
+                .unwrap();
+            assert!(matches!(out, Admission::Admitted { .. }));
+            f.count("SELECT COUNT(*) FROM login_txns")
+        }));
+    }
+    for t in tasks {
+        let seen = t.await.unwrap();
+        assert!(seen <= 5, "{seen} rows");
+    }
     assert_eq!(f.count("SELECT COUNT(*) FROM login_txns"), 5);
 }
 

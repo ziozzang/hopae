@@ -108,10 +108,12 @@ pub fn assert_only_allow_is_2xx() {
         Decision::LogoutEntry {
             transaction: tok(),
             clear_handle: false,
+            cause: None,
         },
         Decision::LogoutEntry {
             transaction: tok(),
             clear_handle: true,
+            cause: None,
         },
         Decision::LoggedOut { transaction: tok() },
     ];
@@ -206,9 +208,11 @@ fn clone_decision(d: &Decision) -> Decision {
         Decision::LogoutEntry {
             transaction,
             clear_handle,
+            cause,
         } => Decision::LogoutEntry {
             transaction: transaction.clone(),
             clear_handle: *clear_handle,
+            cause: *cause,
         },
         Decision::LoggedOut { transaction } => Decision::LoggedOut {
             transaction: transaction.clone(),

@@ -533,6 +533,7 @@ pub(crate) mod kit {
                 bind_cookie: bind.cloned(),
                 user_agent: Some(UA.into()),
                 navigation: Navigation::Document,
+                accepts_html: true,
                 fetch_site: FetchSite::Unknown,
                 entry_return: EntryReturn::Absent,
                 handoff: code.map_or(Handoff::None, |c| Handoff::Code(c.clone())),
@@ -1064,6 +1065,35 @@ async fn assert_link_required(k: &Kit) {
     assert!(
         !ev[0].to_json().to_string().contains("a@example.test"),
         "no email in the event"
+    );
+}
+
+/// ADR-0015 review: `txn.max_rows` also bounds the link transaction (written
+/// after authentication, so without the per-address cap).
+#[tokio::test]
+async fn link_transaction_respects_max_rows_at_capacity() {
+    let k = Kit::with(Opts {
+        txn_max_rows: 1,
+        ..Opts::default()
+    })
+    .await;
+    existing_user_with_email(&k, false).await;
+    let started = k.start(APP, "/admin/x", Some(&k.b1)).await;
+    assert_eq!(k.count("SELECT COUNT(*) FROM login_txns"), 1, "at capacity");
+    let state = k.redirect(&started.transaction, &k.p1).await;
+    let out = k.callback(&state, Some(&k.p1), None).await.unwrap();
+    assert!(
+        matches!(out, CallbackOutcome::LinkRequired { .. }),
+        "{out:?}"
+    );
+    assert_eq!(
+        k.count("SELECT COUNT(*) FROM login_txns"),
+        1,
+        "the link row evicted the dead login row instead of exceeding the bound"
+    );
+    assert_eq!(
+        k.count("SELECT COUNT(*) FROM login_txns WHERE purpose = 'link'"),
+        1
     );
 }
 

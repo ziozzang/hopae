@@ -137,8 +137,9 @@ pub(super) async fn redeem(cx: &Cx<'_>, app: &AppPolicy, target: &Url, code: &Se
                 pending_identity: None,
                 recovery_depth: code.recovery_depth,
             };
+            // Post-authentication: no per-address cap, but `txn.max_rows` holds.
             ctx.sessions
-                .create_transaction(row, vec![])
+                .create_transaction_capped(row, vec![], cx.now, None, ctx.limits.txn_max_rows)
                 .await
                 .map_err(|e| cx.store_err(e))?;
             Ok(Decision::Switch { transaction: txn })
@@ -396,6 +397,7 @@ mod tests {
                 bind_cookie: bind.cloned(),
                 user_agent: None,
                 navigation: Navigation::Document,
+                accepts_html: true,
                 fetch_site: FetchSite::Unknown,
                 entry_return: EntryReturn::Absent,
                 handoff: code.map_or(Handoff::None, |c| Handoff::Code(c.clone())),
@@ -828,6 +830,71 @@ mod tests {
             panic!("login")
         };
         assert!(matches!(bind, BindAction::Plant(_)));
+    }
+
+    #[tokio::test]
+    async fn switch_transaction_respects_max_rows_at_capacity() {
+        let mut t = t();
+        t.ctx.limits.txn_max_rows = 1;
+        let (a, b) = (t.user(1).await, t.user(2).await);
+        let (sa, _) = t.session(&a).await;
+        let (sb, _) = t.session(&b).await;
+        let hb = t.app_handle(&sb).await;
+        let bind = random_token(&*t.rng, 16);
+        let code = t.code(&sa, &bind, 0).await;
+        // The table is at capacity with a live transaction.
+        let filler = random_token(&*t.rng, 16);
+        let now = t.clock.now();
+        t.store
+            .sessions()
+            .create_transaction_capped(
+                NewTransaction {
+                    txn_sha256: filler.digest(),
+                    created_at: now,
+                    expires_at: now.add(Duration::from_secs(600)),
+                    app_id: crate::policy::types::AppId::new("app"),
+                    return_target: Url::parse(URL).unwrap(),
+                    bind_sha256: None,
+                    portal_bind_sha256: None,
+                    retry_bind_sha256: None,
+                    client_ip: ip("203.0.113.1"),
+                    ua_sha256: None,
+                    provider_id: None,
+                    state_sha256: None,
+                    nonce: None,
+                    pkce_verifier: None,
+                    portal_session_id: None,
+                    purpose: TxnPurpose::Login,
+                    conflicting_handle_sha256: None,
+                    pending_identity: None,
+                    recovery_depth: 0,
+                },
+                vec![],
+                now,
+                Some(30),
+                1,
+            )
+            .await
+            .unwrap();
+        let mut i = t.input(URL, Some(&code.secret), Some(&bind));
+        i.cookie_handle = Some(hb.clone());
+        let Decision::Switch { transaction } = t.run(i).await else {
+            panic!("expected switch")
+        };
+        let rows: i64 = t
+            .store
+            .conn()
+            .query_row("SELECT COUNT(*) FROM login_txns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "the switch row replaced the filler");
+        assert!(
+            t.store
+                .sessions()
+                .transaction(&transaction.digest())
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[tokio::test]

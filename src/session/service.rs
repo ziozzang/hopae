@@ -1249,7 +1249,7 @@ impl Service {
         // the pending identity travels in a fresh `link` transaction with a
         // fresh 10-minute expiry (ADR-0011).
         self.sessions
-            .create_transaction(
+            .create_transaction_capped(
                 NewTransaction {
                     txn_sha256: link.digest(),
                     created_at: now,
@@ -1272,6 +1272,10 @@ impl Service {
                     recovery_depth: txn.recovery_depth,
                 },
                 vec![],
+                now,
+                // Post-authentication: no per-address cap, but `txn.max_rows` holds.
+                None,
+                self.cfg.txn_max_rows,
             )
             .await?;
         let _ = ctx;

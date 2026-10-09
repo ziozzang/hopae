@@ -448,6 +448,7 @@ pub(crate) mod fx {
                 } else {
                     Navigation::Other
                 },
+                accepts_html: self.document,
                 fetch_site: self.site,
                 entry_return: self.entry_return,
                 handoff: match (self.code, self.ambiguous) {

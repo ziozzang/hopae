@@ -34,6 +34,14 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 - `hopae --check` warns when an application sets `logout_confirm = false`; the same-origin navigation-gadget residual and the transferable logout ticket are documented (ADR-0015, threat model, configuration reference, scenario 015-A8 and A9).
 - Migration `0002` was edited in place for the last time; later schema changes are new numbered migrations (operations guide).
 
+### Fixed (code review G7 pass 1 of ADR-0015)
+
+- A logout ticket is consumed and the session it names is terminated in one store transaction (a crash in between no longer loses the logout).
+- An absolute `return` must use the standard authority form and its normalized destination is checked against the reserved namespace (`https:///h/_hopae/logout` was accepted as a target).
+- `txn.max_rows` also bounds switch and link transactions (eviction applies; the per-address cap does not).
+- The URL-length limit of the login entry point is chosen from the canonical path, so encoded spellings of `/_hopae/login` carry targets of the full length.
+- Entry points require an HTML `Accept` (ADR-0015 decision 2); a logout entry that refuses a presented handle is recorded as `verify.denied` like the ordinary login.
+
 ### Fixed
 
 - `txn.max_rows` is a hard bound: the eviction now happens inside the same store write as the capped transaction insert (login, retry and logout ticket) instead of in a detached task, and the per-address `txn.per_ip_per_minute` cap is enforced in that write for the verify engine too, so concurrent callers can no longer overshoot either limit.

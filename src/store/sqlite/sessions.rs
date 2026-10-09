@@ -303,20 +303,41 @@ impl Sessions for Store {
         self.write("terminate_session", move |env| {
             let shared = env.shared.clone();
             let tx = env.begin()?;
-            let state: Option<Option<i64>> = tx
-                .query_row("SELECT terminated_at FROM sessions WHERE session_id=?1", [id.as_str()], |r| r.get(0))
-                .optional()?;
-            if !matches!(state, Some(None)) {
-                return Ok(()); // unknown or already terminated: idempotent, nothing recorded again
-            }
-            tx.execute(
-                "UPDATE sessions SET terminated_at=?2, terminated_reason=?3, cred_gen = cred_gen + 1 WHERE session_id=?1",
-                params![id.as_str(), at.secs(), reason.0],
-            )?;
-            revoke_session_handles(&tx, &id, reasons::SESSION_TERMINATED.0, at)?;
-            consume_session_codes(&tx, &id, reason.0, at)?;
-            insert_events(&tx, &shared, &events)?;
+            terminate_in(&tx, &shared, &id, reason, at, &events)?;
             finish(tx, &shared, None)
+        })
+        .await
+    }
+
+    async fn consume_logout_ticket(
+        &self,
+        txn_sha256: &Digest,
+        session: Option<&SessionId>,
+        reason: Reason,
+        at: Timestamp,
+        events: Vec<Event>,
+    ) -> StoreResult<bool> {
+        let (d, session) = (*txn_sha256, session.cloned());
+        self.write("consume_logout_ticket", move |env| {
+            let shared = env.shared.clone();
+            let tx = env.begin()?;
+            let n = tx.execute(
+                "UPDATE login_txns SET consumed_at=?2, consumed_reason=?3 WHERE txn_sha256=?1 AND purpose='logout' AND consumed_at IS NULL",
+                params![blob(&d), at.secs(), reason.0],
+            )?;
+            if n == 0 {
+                return Ok(false);
+            }
+            if let Some(h) = &shared.hooks {
+                h.crash_point("after_ticket_consume");
+            }
+            // The same write transaction: a ticket is never consumed while the
+            // session it names stays live.
+            if let Some(id) = &session {
+                terminate_in(&tx, &shared, id, reason, at, &events)?;
+            }
+            finish(tx, &shared, None)?;
+            Ok(true)
         })
         .await
     }
@@ -358,7 +379,7 @@ impl Sessions for Store {
         t: NewTransaction,
         events: Vec<Event>,
         since: Timestamp,
-        cap: u32,
+        cap: Option<u32>,
         max_rows: u32,
     ) -> StoreResult<Admission> {
         self.write("create_transaction_capped", move |env| {
@@ -372,7 +393,7 @@ impl Sessions for Store {
                 params![t.client_ip.to_string(), since.secs()],
                 |r| r.get(0),
             )?;
-            if n >= i64::from(cap) {
+            if cap.is_some_and(|cap| n >= i64::from(cap)) {
                 return Ok(Admission::OverCap);
             }
             let evicted = evict_to(&tx, max_rows.saturating_sub(1), t.created_at)?;
@@ -694,6 +715,36 @@ impl Store {
         })
         .await
     }
+}
+
+/// End a session inside `tx`: idempotent (an unknown or already terminated
+/// session changes nothing and records no events).
+fn terminate_in(
+    tx: &Transaction<'_>,
+    shared: &Shared,
+    id: &SessionId,
+    reason: Reason,
+    at: Timestamp,
+    events: &[Event],
+) -> StoreResult<()> {
+    let state: Option<Option<i64>> = tx
+        .query_row(
+            "SELECT terminated_at FROM sessions WHERE session_id=?1",
+            [id.as_str()],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if !matches!(state, Some(None)) {
+        return Ok(());
+    }
+    tx.execute(
+        "UPDATE sessions SET terminated_at=?2, terminated_reason=?3, cred_gen = cred_gen + 1 WHERE session_id=?1",
+        params![id.as_str(), at.secs(), reason.0],
+    )?;
+    revoke_session_handles(tx, id, reasons::SESSION_TERMINATED.0, at)?;
+    consume_session_codes(tx, id, reason.0, at)?;
+    insert_events(tx, shared, events)?;
+    Ok(())
 }
 
 /// Delete transactions until at most `keep` remain: dead rows (consumed or

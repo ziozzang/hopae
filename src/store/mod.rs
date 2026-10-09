@@ -153,6 +153,18 @@ pub trait Sessions: Send + Sync {
         at: Timestamp,
         events: Vec<Event>,
     ) -> StoreResult<()>;
+    /// Consume a `logout` ticket and, when `session` is given, end that
+    /// session (idempotently, with `events` only if it was live) in ONE write
+    /// transaction: a ticket is never consumed while its session stays live.
+    /// `false` = the ticket was not a live logout ticket (nothing changed).
+    async fn consume_logout_ticket(
+        &self,
+        txn_sha256: &Digest,
+        session: Option<&SessionId>,
+        reason: Reason,
+        at: Timestamp,
+        events: Vec<Event>,
+    ) -> StoreResult<bool>;
     async fn refresh_snapshot(
         &self,
         id: &SessionId,
@@ -164,13 +176,16 @@ pub trait Sessions: Send + Sync {
     /// the same `client_ip` were created since `since`; the count, the
     /// eviction down to `max_rows - 1` rows (dead rows first, then the
     /// oldest) and the insert are one write transaction, so `max_rows` is a
-    /// hard bound on this path. `OverCap` = nothing written.
+    /// hard bound on this path. `cap = None` skips the per-address count (post-
+    /// authentication transactions: switch and link) but never the eviction.
+    /// Every production transaction insert goes through here. `OverCap` =
+    /// nothing written.
     async fn create_transaction_capped(
         &self,
         txn: NewTransaction,
         events: Vec<Event>,
         since: Timestamp,
-        cap: u32,
+        cap: Option<u32>,
         max_rows: u32,
     ) -> StoreResult<Admission>;
     async fn transaction(&self, txn_sha256: &Digest) -> StoreResult<Option<TransactionRow>>;

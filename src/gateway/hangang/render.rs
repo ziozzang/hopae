@@ -160,6 +160,7 @@ pub fn render(
         Decision::LogoutEntry {
             transaction,
             clear_handle,
+            ..
         } => match portal_url(cfg, "logout", transaction.expose()) {
             Some(u) => {
                 let mut o = Out::new(StatusCode::FOUND, reasons::LOGOUT_ENTRY.0);

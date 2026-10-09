@@ -951,6 +951,7 @@ fn entry_point_redirects_render_302_with_the_contract_headers() {
         Decision::LogoutEntry {
             transaction: Secret::new("T1".into()),
             clear_handle: false,
+            cause: None,
         },
         Navigation::Document,
     );
@@ -966,6 +967,7 @@ fn entry_point_redirects_render_302_with_the_contract_headers() {
         Decision::LogoutEntry {
             transaction: Secret::new("T1".into()),
             clear_handle: true,
+            cause: None,
         },
         Navigation::Document,
     );

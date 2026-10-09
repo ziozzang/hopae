@@ -168,6 +168,12 @@ fn accepts_html(accept: &HeaderValue) -> bool {
     })
 }
 
+/// Whether the request accepts HTML (ADR-0015 decision 2: an entry point
+/// answers only a document navigation that asks for HTML).
+fn html_accept(h: &HeaderMap) -> bool {
+    h.get_all("accept").iter().any(accepts_html)
+}
+
 fn navigation(h: &HeaderMap) -> Navigation {
     let document = if let Some(dest) = h.get("sec-fetch-dest") {
         dest.as_bytes().eq_ignore_ascii_case(b"document")
@@ -222,21 +228,52 @@ fn entry_return(original_url: &url::Url, raw_query: &str) -> EntryReturn {
     } else {
         value
     };
-    if url::Url::parse(&candidate).is_err()
-        || !matches!(
-            recognition::find_handoff(raw_query_of(&candidate)),
-            Handoff::None
-        )
-    {
+    // Only the standard `scheme://authority/...` form: the URL parser repairs
+    // `https:///host/x`, `https:/host/x` and the like into a different
+    // destination than the one the raw text names, and everything below reads
+    // the raw text.
+    if !standard_authority(&candidate) {
         return EntryReturn::Invalid;
     }
-    match canonical::canonical_path(raw_path(&candidate)) {
-        Ok(canonical_path) => EntryReturn::Candidate {
-            url: candidate,
-            canonical_path,
-        },
-        Err(()) => EntryReturn::Invalid,
+    let Ok(parsed) = url::Url::parse(&candidate) else {
+        return EntryReturn::Invalid;
+    };
+    if !matches!(
+        recognition::find_handoff(raw_query_of(&candidate)),
+        Handoff::None
+    ) {
+        return EntryReturn::Invalid;
     }
+    // The canonical path of the destination as the parser normalized it (what
+    // the redirect will name), and of the raw text (dot segments, encoded
+    // ambiguity): both must be canonical, and neither may be reserved.
+    let (Ok(raw), Ok(normalized)) = (
+        canonical::canonical_path(raw_path(&candidate)),
+        canonical::canonical_path(parsed.path()),
+    ) else {
+        return EntryReturn::Invalid;
+    };
+    if raw.reserved() != Reserved::No {
+        return EntryReturn::Invalid;
+    }
+    EntryReturn::Candidate {
+        url: candidate,
+        canonical_path: normalized,
+    }
+}
+
+/// `scheme://authority...` with a non-empty authority that does not start with
+/// a slash or a backslash (no `https:///h`, no `https:/h`).
+fn standard_authority(candidate: &str) -> bool {
+    let Some((scheme, rest)) = candidate.split_once("://") else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+        && !rest.starts_with(['/', '\\', '?', '#'])
+        && !rest.is_empty()
 }
 
 /// The query of a URL string, up to a fragment.
@@ -351,15 +388,17 @@ pub fn parse(
     // limit; the limit itself applies to the cleaned target below.
     // The reserved namespace carries a whole target in `return`: a longer bound,
     // only on a path that looks like it (the canonical decision comes later).
-    let max_url = if raw_path(raw_url)
-        .get(..8)
-        .is_some_and(|p| p.eq_ignore_ascii_case("/_hopae/"))
-    {
-        MAX_ENTRY_URL
-    } else {
-        MAX_URL
+    // The outer ceiling first (nothing is canonicalized above it), then the
+    // canonical path decides which limit applies, so an encoded spelling of the
+    // namespace (`/_%68opae/login`) gets the same limit as the literal one.
+    if raw_url.len() > MAX_ENTRY_URL + HANDOFF_OVERHEAD || raw_url.contains('#') {
+        return Err(violation(H_URL));
+    }
+    let max_url = match canonical::canonical_path(raw_path(raw_url)) {
+        Ok(p) if matches!(p.reserved(), Reserved::Entry(_)) => MAX_ENTRY_URL,
+        _ => MAX_URL,
     };
-    if raw_url.len() > max_url + HANDOFF_OVERHEAD || raw_url.contains('#') {
+    if raw_url.len() > max_url + HANDOFF_OVERHEAD {
         return Err(violation(H_URL));
     }
     let original_url = url::Url::parse(raw_url).map_err(|_| violation(H_URL))?;
@@ -512,6 +551,7 @@ pub fn parse(
         bind_cookie: cookies.bind.map(Secret::new),
         user_agent,
         navigation: navigation(h),
+        accepts_html: html_accept(h),
         fetch_site,
         entry_return,
         handoff,

@@ -677,7 +677,7 @@ async fn create_txn(cx: &Cx<'_>, app: &AppPolicy, t: NewTxn<'_>) -> Result<Secre
             row,
             t.events,
             cx.now.sub(RATE_WINDOW),
-            ctx.limits.txn_per_ip_per_minute,
+            Some(ctx.limits.txn_per_ip_per_minute),
             ctx.limits.txn_max_rows,
         )
         .await
@@ -716,7 +716,7 @@ async fn create_txn(cx: &Cx<'_>, app: &AppPolicy, t: NewTxn<'_>) -> Result<Secre
 async fn entry_point(cx: &Cx<'_>, app: &AppPolicy, entry: EntryPoint) -> Flow {
     // Only a document navigation by `GET` is an entry-point request; anything
     // else (fetch, `<img>`, a form `POST`) changes nothing and gets one answer.
-    if !cx.document() || cx.input.method != http::Method::GET {
+    if !cx.document() || !cx.input.accepts_html || cx.input.method != http::Method::GET {
         return Err(cx.deny(reasons::ENTRY_POINT_NOT_DOCUMENT, DenyKind::Forbidden));
     }
     let Some(target) = entry_target(cx) else {
@@ -781,8 +781,14 @@ async fn logout_entry(cx: &Cx<'_>, app: &AppPolicy, target: &url::Url) -> Flow {
     let authn = authenticate(cx, app).await?;
     let (session, clear_handle) = match authn {
         Authn::Allowed(authed) => (Some(authed.view), false),
-        Authn::Refused(cause) => (None, cause.is_some()),
+        Authn::Refused(cause) => {
+            // As the ordinary login records it (`verify.denied`), including
+            // when the ticket then cannot be admitted.
+            *cx.cause.lock().unwrap_or_else(|p| p.into_inner()) = cause;
+            (None, cause.is_some())
+        }
     };
+    let cause = *cx.cause.lock().unwrap_or_else(|p| p.into_inner());
     let direct =
         !app.logout_confirm && input.fetch_site == FetchSite::SameOrigin && session.is_some();
     // The informational binding digest of the browser, never planted here.
@@ -825,5 +831,6 @@ async fn logout_entry(cx: &Cx<'_>, app: &AppPolicy, target: &url::Url) -> Flow {
     Ok(Decision::LogoutEntry {
         transaction: ticket,
         clear_handle,
+        cause,
     })
 }

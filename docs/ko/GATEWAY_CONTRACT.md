@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=10 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=11 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -360,7 +360,7 @@ https://app.example.test/_hopae/logout[?return=<같은 출처의 대상>]
 
 | 요청 | 응답 |
 | --- | --- |
-| 어느 진입점이든 문서가 아닌 요청 | `403 {"error":"reserved_path"}`, `x-hopae-reason: entry_point_not_document`. `set-cookie` 없음, 트랜잭션 없음 |
+| 어느 진입점이든 문서가 아닌 요청(`document`가 아닌 `sec-fetch-dest`, HTML `Accept`(`text/html` 또는 `application/xhtml+xml`)가 없는 경우, `GET`이 아닌 메서드) | `403 {"error":"reserved_path"}`, `x-hopae-reason: entry_point_not_document`. `set-cookie` 없음, 트랜잭션 없음 |
 | `GET /_hopae/login?return=<대상>&_hopae_handoff=<코드>`([위](#도메인-간-핸드오프)의 핸드오프 전달) | 검증된 `return`을 대상으로 한 통상의 교환 규칙(1회용, `return`의 호스트와 경로 일치, 클라이언트 IP, 바인딩 쿠키 다이제스트, 복구 깊이): `set-cookie: __Host-hopae=…`와 함께 `302 Location: <깨끗한 대상>`. 다시 제시된 코드는 쿠키 없이 같은 `302`(`code_already_redeemed`). 거부된 코드는 같은 대상으로 복구 로그인을 시작합니다. 반복되거나 잘못된 `_hopae_handoff`는 `403 handoff_ambiguous`. 그 밖의 모든 예약 경로와 `/_hopae/logout`에서는 매개변수를 무시합니다 |
 | 통상의 verify가 허용했을 핸들을 가진 `GET /_hopae/login` | `302 Location: <대상>`. 쿠키 변경 없음. `already_authenticated`. `200`과 마찬가지로 `last_seen_at` 갱신 |
 | 그 밖의 `GET /_hopae/login` | 대상으로의 문서 탐색이 받았을 통상의 결과: 바인딩 쿠키를 심고 `return_target`이 대상인 트랜잭션을 만드는 미인증 `302`(핸드오프는 진입점이 아니라 대상에 착지), 단계 상승 `302`, 또는 거부 |
@@ -373,7 +373,10 @@ https://app.example.test/_hopae/logout[?return=<같은 출처의 대상>]
 결과는 verify 엔드포인트의 돌아갈 대상 검증을 통과하고 요청과 정확히 같은
 스킴, 호스트, 포트를 가져야 하며(단지 등록된 출처가 아니라 같은 등록 출처),
 예약 핸드오프 매개변수를 실으면 안 되고, 그 정규 경로가 예약되어 있으면 안
-됩니다. 그 밖의 모든 것은 `403 {"error":"return_not_allowed"}`
+됩니다. 절대 `return`은 표준 `scheme://authority/…` 형식이어야 하며(`https:/h/x`,
+`https:///h/x`, 역슬래시 권한부는 거부: URL 파서가 원문이 가리키는 것과 다른 목적지로
+고쳐 버리기 때문), 예약 이름 공간 검사는 원문뿐 아니라 정규화된 목적지의 정규 경로에도
+적용됩니다. 그 밖의 모든 것은 `403 {"error":"return_not_allowed"}`
 (`return_not_allowed`)이며 아무것도 만들지 않습니다. 대상은 트랜잭션 안에서만
 포털에 도달하며 URL이 그대로 오가는 일은 없습니다(TM-01).
 

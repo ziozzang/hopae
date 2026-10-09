@@ -111,7 +111,8 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 | Tampering | S015-A2 | yes |
 | Race / timing | S015-A3 | yes |
 | Resource exhaustion | S015-A4 | yes |
-| Confused deputy | S015-A5, S015-A7, S015-A8, S015-A9 | yes |
+| Confused deputy | S015-A5, S015-A7, S015-A8, S015-A9, S015-A11 | yes |
+| Atomicity / crash | S015-A10 | yes |
 | Spoofed or duplicated headers | S015-A6 | yes |
 | Downgrade | — | no: no negotiation; `x-forwarded-proto: http` is `insecure_transport` as in 001 |
 | Enumeration | — | no: non-document requests get one answer for the whole namespace; a document navigation's outcome is visible only to the navigating browser |
@@ -170,6 +171,36 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 - When: the victim opens `https://auth.example.test/logout?txn=Ta` (first visit) and confirms.
 - Then: `Ta`'s portal digest is the victim's (`sha256(P1v)`); the form names the application; the confirmation ends exactly `s_a` (the session the ticket names) and `s_v` (the victim's own portal session), both with `reason=logout`, two `session.terminated` events, no other session; `Ta` is consumed. This is accepted: the ticket only reduces access, cannot name another session, and needs the confirming click with `Origin` and CSRF checks (contract: logout ticket).
 
+### S015-A10 Ticket consumption and session termination are one transaction
+
+- Given: S015-4 (no portal handle); the process dies between consuming `T1` and terminating `s_1` (crash point `after_ticket_consume`).
+- When: Hopae restarts; the browser retries the confirmation.
+- Then: after the restart `T1` is not consumed and `s_1` is live (`H1` works); the retry ends `s_1` with `reason=logout`, exactly one `session.terminated` event. A consumed ticket never coexists with the live session it names.
+
+### S015-A11 `return` normalization cannot reach the reserved namespace
+
+- Given: cookie `H1`.
+- When: both entry points with `return` = `https:/app.example.test/_hopae/logout`, `https:///app.example.test/_hopae/logout`, `https:////app.example.test/_hopae/login`, a backslash authority, `/_HOPAE/Logout`, `/_%68opae/logout`, `…/x/../_hopae/logout`.
+- Then: each is `403 return_not_allowed`, no `set-cookie`, no transaction (non-standard authority syntax is refused before the raw path is read, and the normalized destination's canonical path is checked too).
+
+### S015-A12 `txn.max_rows` is a table-wide bound
+
+- Given: `txn.max_rows = 4`; switch and link transactions are created post-authentication.
+- When: logins, logout tickets, switch and link transactions are created, from mixed concurrent callers.
+- Then: the table never holds more than `max_rows` rows; the switch and link inserts skip the per-address cap but not the eviction.
+
+### S015-A13 Entry points need an HTML `Accept`
+
+- Given: `sec-fetch-dest: document` with `Accept` absent, `application/json`, `*/*` or `text/plain`; also with `logout_confirm: false` and a valid handle.
+- When: either entry point is requested.
+- Then: `403 entry_point_not_document` (body `reserved_path`), no `set-cookie`, no transaction, nothing terminated.
+
+### S015-A14 A refused handle at the logout entry is recorded like at login
+
+- Given: a malformed or unknown handle cookie.
+- When: `/_hopae/login` and `/_hopae/logout` are requested with the same cookie.
+- Then: both clear the cookie and both produce the same `verify.denied` reason (`malformed_handle` or `unknown_handle`); a ticket refused by the rate limit is recorded under the same primary reason.
+
 ## Observability expectations
 
 - Log: `verify.denied` with `reason` ∈ {`reserved_path`, `entry_point_not_document`, `return_not_allowed`, `txn_rate_limited`}; `x-hopae-reason` ∈ {`logout_entry`, `already_authenticated`, `logout`} on the `302`s; `txn_purpose_mismatch` at the portal.
@@ -201,6 +232,11 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 | S015-A7 | `s015_a7_attacker_ticket_not_redeemable_by_victim` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
 | S015-A8 | `s015_a8_direct_mode_accepts_navigation_gadgets_and_check_warns` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
 | S015-A9 | `s015_a9_unvisited_ticket_is_a_transferable_revocation_capability` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
+| S015-A10 | `s015_a10_ticket_consume_and_termination_are_one_transaction` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
+| S015-A11 | `s015_a11_return_normalization_cannot_reach_the_reserved_namespace` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
+| S015-A12 | `s015_a12_max_rows_holds_for_switch_and_link_creation` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
+| S015-A13 | `s015_a13_entry_points_need_an_html_accept` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
+| S015-A14 | `s015_a14_logout_entry_records_a_refused_handle_like_login` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
 
 Scenario 004-11 (`s004_11_no_non_allow_path_is_2xx`) gains the outcomes
 `reserved_path`, `entry_point_not_document`, `return_not_allowed`,

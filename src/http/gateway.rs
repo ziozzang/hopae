@@ -92,7 +92,7 @@ impl GatewayState {
             // The primary reason wins: a bad handle that was then rate limited
             // is still a bad-handle denial.
             Decision::Deny { reason, .. } => Some(cause.unwrap_or(*reason)),
-            Decision::Login { cause, .. } => *cause,
+            Decision::Login { cause, .. } | Decision::LogoutEntry { cause, .. } => *cause,
             _ => None,
         }
     }

@@ -135,7 +135,7 @@ impl Service {
                 new_row,
                 vec![started],
                 now.sub(COUNTER_WINDOW),
-                self.cfg.txn_per_ip_per_minute,
+                Some(self.cfg.txn_per_ip_per_minute),
                 self.cfg.txn_max_rows,
             )
             .await?

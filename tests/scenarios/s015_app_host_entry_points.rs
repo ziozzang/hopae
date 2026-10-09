@@ -1225,6 +1225,218 @@ fn s015_a9_unvisited_ticket_is_a_transferable_revocation_capability() {
     assert!(row(&h, &ta).consumed_at.is_some());
 }
 
+#[test]
+fn s015_a10_ticket_consume_and_termination_are_one_transaction() {
+    let (idp, h) = spawn("m1-two-domains");
+    let mut h = h;
+    let s = sign_in(&h, &idp);
+    let sid = session_id(&h);
+    let r = h.verify(with_cookies(
+        entry("/_hopae/logout", Some("same-origin")),
+        &s,
+    ));
+    let t1 = txn_of(&r, "/logout");
+    // No portal handle: only the ticket can end the session (S015-4).
+    s.jar.for_host(PORTAL).remove(HANDLE);
+    let c = s.portal(&h);
+    let page = c.get(&format!("/logout?txn={t1}"));
+    assert_eq!(page.status, 200, "{page:?}");
+    let csrf = csrf_of(&page.body);
+    // The process dies between the ticket's consumption and the termination.
+    h.hooks.crash_at("after_ticket_consume");
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        confirm(&c, &csrf, Some(&t1))
+    }));
+    assert!(
+        h.wait_exit(Duration::from_secs(10)).is_some(),
+        "the crash point did not fire"
+    );
+    h.restart();
+    // Neither half survived: no consumed ticket beside a live session.
+    assert_eq!(row(&h, &t1).consumed_at, None, "the ticket is not consumed");
+    assert_eq!(terminated(&h, &sid), None, "the session is untouched");
+    let ok = h.verify(with_cookies(entry("/", None), &s));
+    assert_eq!(ok.status, 200, "H1 still works: {ok:?}");
+    // The retry still logs out.
+    let c = s.portal(&h);
+    let page = c.get(&format!("/logout?txn={t1}"));
+    assert_eq!(page.status, 200, "{page:?}");
+    let out = confirm(&c, &csrf_of(&page.body), Some(&t1));
+    assert_eq!(out.status, 200, "{out:?}");
+    assert!(
+        links(&out.body).contains(&format!("https://{APP}/")),
+        "{}",
+        out.body
+    );
+    assert!(row(&h, &t1).consumed_at.is_some());
+    assert_eq!(terminated(&h, &sid).as_deref(), Some("logout"));
+    assert_eq!(events(&h, "session.terminated").len(), 1);
+}
+
+#[test]
+fn s015_a11_return_normalization_cannot_reach_the_reserved_namespace() {
+    let (idp, h) = spawn("m1-two-domains");
+    let s = sign_in(&h, &idp);
+    let before = txn_count(&h);
+    let enc = |v: &str| url::form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();
+    let bad = [
+        // single and triple slash: the URL parser repairs them into this origin
+        "https:/app.example.test/_hopae/logout",
+        "https:///app.example.test/_hopae/logout",
+        "https:////app.example.test/_hopae/login",
+        "http:///app.example.test/_hopae/logout",
+        "https:\\app.example.test/_hopae/logout",
+        // spellings of the namespace
+        "https://app.example.test/_HOPAE/Logout",
+        "https://app.example.test/_%68opae/logout",
+        "https://app.example.test/x/../_hopae/logout",
+        "/x/../_hopae/login",
+        "/./_hopae/logout",
+    ];
+    for ep in ["/_hopae/logout", "/_hopae/login"] {
+        for ret in bad {
+            let r = h.verify(with_cookies(
+                entry(&format!("{ep}?return={}", enc(ret)), Some("same-origin")),
+                &s,
+            ));
+            assert_eq!(r.status, 403, "{ep} {ret:?}: {r:?}");
+            assert_eq!(
+                r.header("x-hopae-reason"),
+                Some("return_not_allowed"),
+                "{ret:?}"
+            );
+            assert!(r.set_cookies().is_empty(), "{ret:?}: {r:?}");
+        }
+    }
+    assert_eq!(txn_count(&h), before, "no transaction created");
+    assert_eq!(terminated(&h, &session_id(&h)), None);
+}
+
+#[test]
+fn s015_a12_max_rows_holds_for_switch_and_link_creation() {
+    // The table-wide bound is exercised where those rows are written:
+    // `capped_insert_*` and `switch_and_link_inserts_*` in the store and engine
+    // unit tests. Here, the black-box part: tickets and logins share one table.
+    let (_idp, h) = spawn_with(
+        "m1-two-domains",
+        json!({"txn": {"max_rows": 4, "per_ip_per_minute": 1000}}),
+    );
+    for i in 0..30 {
+        let ep = if i % 2 == 0 {
+            "/_hopae/logout"
+        } else {
+            "/_hopae/login"
+        };
+        let r = h.verify(entry(ep, Some("same-origin")));
+        assert_eq!(r.status, 302, "{r:?}");
+        assert!(txn_count(&h) <= 4, "round {i}");
+    }
+}
+
+#[test]
+fn s015_a13_entry_points_need_an_html_accept() {
+    for fixture in ["m1-two-domains", "m1-logout-direct"] {
+        let (idp, h) = spawn(fixture);
+        let s = sign_in(&h, &idp);
+        let sid = session_id(&h);
+        let before = txn_count(&h);
+        for ep in ["/_hopae/logout", "/_hopae/login?return=%2Fx"] {
+            for accept in [
+                None,
+                Some("application/json"),
+                Some("*/*"),
+                Some("text/plain"),
+            ] {
+                let mut r = with_cookies(entry(ep, Some("same-origin")), &s).without("accept");
+                if let Some(a) = accept {
+                    r = r.header("accept", a);
+                }
+                let out = h.verify(r);
+                assert_eq!(out.status, 403, "{fixture} {ep} {accept:?}: {out:?}");
+                assert_eq!(
+                    out.header("x-hopae-reason"),
+                    Some("entry_point_not_document"),
+                    "{ep} {accept:?}"
+                );
+                assert_eq!(out.json(), json!({"error": "reserved_path"}));
+                assert!(out.set_cookies().is_empty());
+            }
+        }
+        assert_eq!(txn_count(&h), before, "no transaction");
+        assert_eq!(terminated(&h, &sid), None, "nothing terminated");
+        // An HTML accept in any position is a document request.
+        let out = h.verify(
+            with_cookies(entry("/_hopae/login", Some("same-origin")), &s)
+                .without("accept")
+                .header("accept", "application/json, text/html;q=0.5"),
+        );
+        assert_eq!(out.status, 302, "{out:?}");
+    }
+}
+
+#[test]
+fn s015_a14_logout_entry_records_a_refused_handle_like_login() {
+    let denied_reasons = |entry_path: &str, cookie: &str| {
+        let (_idp, h) = spawn("m1-two-domains");
+        let r = h.verify(entry(entry_path, Some("same-origin")).cookie(HANDLE, cookie));
+        assert_eq!(r.status, 302, "{entry_path}: {r:?}");
+        assert!(
+            r.set_cookies()
+                .iter()
+                .any(|c| c.starts_with("__Host-hopae=;") && c.contains("Max-Age=0")),
+            "the refused handle is cleared: {r:?}"
+        );
+        assert!(wait_denied(&h, "unknown_handle") || wait_denied(&h, "malformed_handle"));
+        let mut v: Vec<String> = events(&h, "verify.denied")
+            .iter()
+            .filter_map(|e| e["reason"].as_str().map(str::to_string))
+            .collect();
+        v.sort();
+        v
+    };
+    let unknown = format!("v1.{}", "A".repeat(43));
+    for cookie in [unknown.as_str(), "garbage"] {
+        let login = denied_reasons("/_hopae/login", cookie);
+        let logout = denied_reasons("/_hopae/logout", cookie);
+        assert!(!login.is_empty(), "{cookie}");
+        assert_eq!(login, logout, "same denial reasons for {cookie:?}");
+    }
+}
+
+#[test]
+fn hopae_level_encoded_namespace_gets_the_entry_limit() {
+    let (_idp, h) = spawn("m1-two-domains");
+    // A target of the full 2048 bytes whose query holds `%`, `&` and `+`.
+    let mut target = format!("https://{APP}/x?");
+    while target.len() < 2048 {
+        target.push_str("a%26b=%2B+%25&");
+    }
+    target.truncate(2048);
+    while target.ends_with('%') || target.ends_with("%2") {
+        target.pop();
+        target.push('z');
+    }
+    let ret = &target[format!("https://{APP}").len()..];
+    let enc: String = url::form_urlencoded::byte_serialize(ret.as_bytes()).collect();
+    for ns in [
+        "/_hopae/login",
+        "/_%68opae/login",
+        "/%5Fhopae/login",
+        "/_HOPAE/Login",
+        "/_hop%61e/%6Cogin",
+    ] {
+        let r =
+            h.verify(entry(&format!("{ns}?return={enc}"), Some("same-origin")).ip("203.0.113.40"));
+        assert_eq!(r.status, 302, "{ns}: {r:?}");
+        let t = txn_of(&r, "/login");
+        assert_eq!(row(&h, &t).return_target, target, "{ns}");
+        // The ordinary ceiling still applies off the namespace.
+        let long = format!("/other{}?return={enc}", "a".repeat(10));
+        let r = h.verify(entry(&long, None).ip("203.0.113.41"));
+        assert_eq!(r.status, 400, "{r:?}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Namespace variants at the Hopae level (the gateway cases are below)
 // ---------------------------------------------------------------------------

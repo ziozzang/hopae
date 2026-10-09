@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 10 -->
+<!-- doc-rev: 11 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -375,7 +375,7 @@ namespace (`404`).
 
 | Request | Answer |
 | --- | --- |
-| Non-document request to either entry point | `403 {"error":"reserved_path"}`, `x-hopae-reason: entry_point_not_document`; no `set-cookie`; no transaction |
+| Non-document request to either entry point (any `sec-fetch-dest` other than `document`, or no HTML `Accept`: `text/html` or `application/xhtml+xml`; also any method but `GET`) | `403 {"error":"reserved_path"}`, `x-hopae-reason: entry_point_not_document`; no `set-cookie`; no transaction |
 | `GET /_hopae/login?return=<target>&_hopae_handoff=<code>` (the handoff delivery, [above](#cross-domain-handoff)) | The ordinary redemption rules (single use, host and path of `return` match, client IP, binding cookie digest, recovery depth) with the validated `return` as the target: `302 Location: <clean target>` with `set-cookie: __Host-hopae=…`; a replayed code gets the same `302` without a cookie (`code_already_redeemed`); a rejected code starts a recovery login for the same target. A repeated or malformed `_hopae_handoff` is `403 handoff_ambiguous`. On every other reserved path, and on `/_hopae/logout`, the parameter is ignored |
 | `GET /_hopae/login` with a handle an ordinary verify would allow | `302 Location: <target>`; no cookie change; `already_authenticated`; `last_seen_at` touched as a `200` would |
 | `GET /_hopae/login` otherwise | The ordinary outcome of a document navigation to the target: the unauthenticated `302` to the portal with the binding cookie planted and a transaction whose `return_target` is the target (the handoff lands there, never on the entry point), a step-up `302`, or the denial |
@@ -389,7 +389,11 @@ the request origin, or an absolute URL. The result must pass the return-target
 validation of the verify endpoint and have the request's exact scheme, host
 and port (the same registered origin, not merely a registered one), must not
 carry the reserved handoff parameter, and its canonical path must not be
-reserved. Anything else is `403 {"error":"return_not_allowed"}`
+reserved. An absolute `return` must use the standard `scheme://authority/…`
+form (`https:/h/x`, `https:///h/x` and backslash authorities are refused: the
+URL parser would repair them into a different destination than the raw text
+names), and the reserved-namespace check applies to the canonical path of the
+normalized destination as well as of the raw text. Anything else is `403 {"error":"return_not_allowed"}`
 (`return_not_allowed`) and creates nothing. The target reaches the portal only
 inside the transaction; no URL travels in the clear (TM-01).
 

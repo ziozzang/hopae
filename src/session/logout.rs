@@ -22,7 +22,6 @@ use crate::event::types::{EventKind, Outcome, reasons};
 use crate::policy::apps;
 use crate::policy::types::AppId;
 use crate::session::service::{RequestCtx, Service, SessionError};
-use crate::session::types::SessionId;
 use crate::store::types::{TransactionRow, TxnPurpose};
 
 /// What the signed-out page shows.
@@ -159,45 +158,41 @@ impl Service {
         let Some(row) = row else {
             return Ok(None);
         };
-        // Single use: the conditional consume arbitrates racing confirmations.
+        // Single use, and atomic with the termination of the session the ticket
+        // names: the conditional consume arbitrates racing confirmations, and a
+        // failure between the two can never leave a consumed ticket beside a
+        // live session (a retry still logs out).
+        let (session, events) = match &row.portal_session_id {
+            Some(id) => match self.sessions.session(id).await? {
+                Some(s) if s.terminated_at.is_none() => (
+                    Some(s.session_id.clone()),
+                    vec![
+                        self.ev(ctx, EventKind::SessionTerminated, Outcome::Info)
+                            .user(&s.user_id)
+                            .session(&s.session_id)
+                            .provider(&s.provider_id)
+                            .reason(reasons::LOGOUT)
+                            .build(),
+                    ],
+                ),
+                _ => (None, vec![]),
+            },
+            None => (None, vec![]),
+        };
         if !self
             .sessions
-            .consume_transaction(&row.txn_sha256, reasons::LOGOUT, self.clock.now(), vec![])
+            .consume_logout_ticket(
+                &row.txn_sha256,
+                session.as_ref(),
+                reasons::LOGOUT,
+                self.clock.now(),
+                events,
+            )
             .await?
         {
             return Ok(None);
         }
-        if let Some(sid) = &row.portal_session_id {
-            self.end_session(ctx, sid).await?;
-        }
         Ok(Some(self.signed_out(&row)))
-    }
-
-    /// End a session by id with `reason=logout`; a no-op (and no event) when
-    /// it is already over.
-    async fn end_session(&self, ctx: &RequestCtx, id: &SessionId) -> Result<(), SessionError> {
-        let Some(session) = self.sessions.session(id).await? else {
-            return Ok(());
-        };
-        if session.terminated_at.is_some() {
-            return Ok(());
-        }
-        let event = self
-            .ev(ctx, EventKind::SessionTerminated, Outcome::Info)
-            .user(&session.user_id)
-            .session(&session.session_id)
-            .provider(&session.provider_id)
-            .reason(reasons::LOGOUT)
-            .build();
-        self.sessions
-            .terminate_session(
-                &session.session_id,
-                reasons::LOGOUT,
-                self.clock.now(),
-                vec![event],
-            )
-            .await?;
-        Ok(())
     }
 
     /// `GET /signed-out?txn=`: the page the no-confirmation mode redirects to.
