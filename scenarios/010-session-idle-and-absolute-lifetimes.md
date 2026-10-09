@@ -19,8 +19,8 @@ anything.
 
 ## Preconditions and fixtures
 
-- Configuration `tests/fixtures/m1-lifetimes.json`: application `app` (`app.example.test`) with `session = {idle: "12h", absolute: "7d"}`; application `short` (`short.example.test`) with `{idle: "1h", absolute: "1d"}`; the `default` application (portal handle) with `{idle: "2h", absolute: "3d"}`; session-wide `session.idle = 24h`, `session.absolute = 30d`.
-- Session `s_1` created at `t0` with portal handle `H0`, handle `H1` on `app` and handle `H2` on `short`, all created at `t0`; injected clock.
+- Configuration `tests/fixtures/m1-lifetimes.json`: application `app` (`app.example.test`) with `session = {idle: "12h", absolute: "7d"}`; application `short` (`short.example.test`) with `{idle: "1h", absolute: "1d"}`; the `default` application (portal handle) with `{idle: "2h", absolute: "30d"}`; session-wide `session.idle = 24h`, `session.absolute = 30d`.
+- Session `s_1` created at `t0` with portal handle `H0`, handle `H1` on `app` and handle `H2` on `short`, all created at `t0`; injected clock. Unless a case says otherwise, the harness keeps `H0` active by visiting the portal hourly so that single sign-on remains available.
 
 ## Main flow
 
@@ -38,9 +38,9 @@ anything.
 
 ### S010-3 Handle absolute expiry despite activity
 
-- Given: `H1` seen every hour; `now = t0 + 7d + 1s`.
+- Given: `H1` seen every hour; `H0` kept active hourly (its own absolute timer runs to `t0 + 30d`); `now = t0 + 7d + 1s`.
 - When: verify with `H1`.
-- Then: denied; `revoked_reason = absolute`; the preceding verify at `t0 + 7d − 30m` returned `x-hopae-expires = t0 + 7d`; a new handoff through the still-valid portal session issues a fresh handle on `app`.
+- Then: denied; `revoked_reason = absolute`; the preceding verify at `t0 + 7d − 30m` returned `x-hopae-expires = t0 + 7d`; the resulting login transaction completes by single sign-on with the still-valid `H0` and issues a fresh handle on `app` without provider interaction. In a variant where `H0` was not kept active (expired by its 2 h idle timer), the portal shows the provider chooser instead.
 
 ### S010-4 Session idle expiry terminates every handle
 
@@ -64,7 +64,7 @@ anything.
 
 ### S010-7 Portal handle follows the default policy
 
-- Given: `H0` last seen at `t0`; `now = t0 + 2h + 1s`; `H1` seen at `t0 + 2h`.
+- Given: `H0` last seen at `t0` (the hourly keep-alive is switched off for this case); `now = t0 + 2h + 1s`; `H1` seen at `t0 + 2h`.
 - When: `GET /login?txn=T2` for a new host with cookie `H0`.
 - Then: `H0` is revoked (`idle`, 2 h policy); no single sign-on: the portal shows the provider chooser; the session itself continues and `H1` still verifies `200`.
 
@@ -72,7 +72,7 @@ anything.
 
 - Given: handoff on `app` at `t0 + 1h`.
 - When: cookie planted.
-- Then: `Max-Age = 7d − 0` for a handle created at `t0 + 1h` (the handle's own absolute timer starts at its creation), expressed in seconds.
+- Then: `Max-Age = 7d` in seconds for a handle created at `t0 + 1h` (the handle's own absolute timer starts at its creation; the session's 30 d is irrelevant to the cookie); scenario 009-1 asserts the same rule.
 
 ### S010-9 Expiry sweep prunes terminated rows
 
@@ -95,9 +95,9 @@ anything.
 
 ### S010-A1 Terminated session cannot be revived by an older handoff code
 
-- Given: `s_1` terminated by `idle`; a handoff code created before termination with a matching binding cookie.
+- Given: `s_1` terminated by `idle`; a handoff code created before termination with a matching binding cookie (termination consumed it and bumped `cred_gen`).
 - When: redemption.
-- Then: rejected (`code_session_terminated`); no handle; the code is burned.
+- Then: rejected (`code_consumed` or `code_stale_generation`); no handle; the code stays burned.
 
 ### S010-A2 Client cannot extend lifetimes
 

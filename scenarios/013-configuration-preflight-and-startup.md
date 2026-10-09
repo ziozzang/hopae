@@ -5,7 +5,7 @@
 - Area: lifecycle
 - Milestone: M1
 - ADRs: 0002, 0003, 0005, 0010, 0012
-- Threat model: TM-12, TM-14, TM-19
+- Threat model: TM-12, TM-14, TM-19, TM-34, TM-35
 - Gateway contract: Prerequisites and configuration
 
 ## Goal
@@ -56,15 +56,15 @@ unsafe configuration.
 
 ### S013-6 Migration from an older schema and provider authority on restart
 
-- Given: a store at schema version 1 (fixture file); separately, a store whose `providers` row `google` is `enabled = false, managed_by = api` while the configuration file lists `google` as enabled.
-- When: `run`.
-- Then: migrated to the current version inside a transaction; `meta.schema_version` updated; a backup copy `hopae.sqlite.bak-v1` is written first for SQLite. For the provider case: `google` stays disabled after start, the log says `provider google: database authoritative (managed_by=api); file entry ignored`, callbacks for it answer `provider_disabled`; `hopae providers import --force google` is the only way to reassert the file and it logs an `admin.*` event.
+- Given: a store at schema version 1 (fixture file); separately, a store whose `providers` row `google` is `enabled = false, managed_by = api` while the configuration file lists `google` as enabled; separately, a store where `google` was **removed** through the management API (tombstone row with `deleted_at` set) while the file still lists it.
+- When: `run`, then a callback for `google`.
+- Then: migrated to the current version inside a transaction; `meta.schema_version` updated; a backup copy `hopae.sqlite.bak-v1` is written first for SQLite. For the disabled case: `google` stays disabled after start, the log says `provider google: database authoritative (managed_by=api); file entry ignored`, callbacks answer `provider_disabled`. For the removed case: the tombstone is kept, the provider is absent from the chooser, the log says `provider google: removed at run time; file entry ignored`, and the callback answers `provider_disabled`. `hopae providers import --force google` is the only way to reassert the file in either case and it logs an `admin.*` event.
 
-### S013-7 Reload is not supported in M1
+### S013-7 Reload is not supported in M1; caller-key rotation uses restarts without an outage
 
-- Given: running process.
-- When: `SIGHUP`.
-- Then: logged `reload not supported; restart`; no change; configuration reload arrives in M6.
+- Given: running process with `gateway.caller_key_env = HOPAE_GW_KEY_A`.
+- When: `SIGHUP`; then the rotation sequence: restart with `gateway.caller_key_next_env = HOPAE_GW_KEY_B` added, switch the harness gateway to key B, restart with `caller_key_env = HOPAE_GW_KEY_B` and `caller_key_next_env` removed.
+- Then: `SIGHUP` is logged `reload not supported; restart` with no change (configuration reload arrives in M6). During the rotation, verifies presenting key A or key B are accepted at every step except the last, where only B is accepted; no verify in the sequence is refused; `hopae --check` warns `caller_key_next_env configured since <date>` once the overlap exceeds 7 days.
 
 ## Abuse cases
 
@@ -125,7 +125,7 @@ unsafe configuration.
 | S013-4 | `s013_4_run_refuses_invalid_config` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 | S013-5 | `s013_5_startup_order_and_readiness` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 | S013-6 | `s013_6_schema_migration_and_provider_authority` | `tests/scenarios/s013_preflight.rs` | integration | planned |
-| S013-7 | `s013_7_reload_unsupported_in_m1` | `tests/scenarios/s013_preflight.rs` | integration | planned |
+| S013-7 | `s013_7_reload_unsupported_and_key_rotation_by_restart` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 | S013-A1 | `s013_a1_unsafe_values_rejected` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 | S013-A2 | `s013_a2_second_process_same_store_refused` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 | S013-A3 | `s013_a3_huge_config_bounded` | `tests/scenarios/s013_preflight.rs` | integration | planned |

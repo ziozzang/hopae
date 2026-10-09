@@ -27,12 +27,17 @@ attempts) and `Events` (append-only events) — with two backends:
 | `sqlite` (default) | `rusqlite` bundled, WAL, `synchronous=NORMAL`, `foreign_keys=ON`, one writer task fed by a channel, readers on a blocking pool; embedded migrations keyed by `user_version` | Single instance; restart is the HA story; M1 |
 | `postgres` | `tokio-postgres` with rustls; the same migrations in SQL dialect files; advisory lock for migrations | Two or more instances sharing one directory; M2 |
 
-Redis/Valkey is never a source of truth. From M2 it serves as: a write-through
-cache of session lookups keyed by handle digest with the session's remaining
-lifetime as TTL; the pub/sub invalidation channel; and the home of throttling
-counters (`attempts`) when configured, following the gateway's atomic-script
-pattern. A cache miss, timeout or error falls back to the primary store; a
-Redis outage disables the local cache (TTL 0) and logs `cache_degraded`.
+Redis/Valkey is never a source of truth and **never caches positive session
+state**: no handle-to-session entry, no identity snapshot, no allow decision
+lives in Redis (review finding N02: a successfully answering but stale Redis
+entry would silently outlive a revocation, and no timeout or breaker would
+notice). From M2 it serves only as the pub/sub invalidation channel and as
+the home of throttling counters (`attempts`) when configured, following the
+gateway's atomic-script pattern; counter operations that time out fail
+closed for the login attempt they guard. Every verify reads the primary
+store; the only cache in front of it is Hopae's opt-in local cache
+([ADR-0006](0006-verify-caching-and-invalidation.md)), whose entries keep the
+time of the authoritative read and the generations observed at that time.
 
 Hot-path bounds: a verify does one `session_handles` lookup joined with
 `sessions` (indexed by digest), one `users` lookup for `status` and
@@ -43,16 +48,22 @@ invalidation), and a coalesced `last_seen_at` write at most every 30 s per
 handle.
 
 Deadline budget: a verify has a total budget `gateway.verify_budget_ms`
-(default 400, below the recommended gateway timeout of 500 ms). Each cache
-operation gets `cache.op_timeout_ms` (default 50); on timeout the lookup
-falls through to the primary store with the remaining budget. Three
-consecutive cache timeouts open a breaker that bypasses the cache for 5 s and
-logs `cache_degraded`. A stalled connection (accepted, never answering) is
-the test case, not only a refused connection.
+(default 400, below the recommended gateway timeout of 500 ms). Each Redis
+operation (counters, publish) gets `cache.op_timeout_ms` (default 50); a
+timed-out counter fails closed for the guarded attempt and a timed-out
+publish is logged and counted. Three consecutive timeouts open a breaker
+that bypasses Redis for 5 s and logs `cache_degraded`. A stalled connection
+(accepted, never answering) is the test case, not only a refused connection.
 
 Durable events: the `Events` trait exposes `append_in(&mut tx, event)` so
-that required audit events are committed in the same transaction as the
-state change they describe ([ADR-0009](0009-event-model.md)).
+that required audit events, and one `event_deliveries` row per subscribed
+sink, are committed in the same transaction as the state change they
+describe ([ADR-0009](0009-event-model.md)).
+
+Credential generations: `sessions.cred_gen` is incremented in the same
+transaction as any handle revocation or elevation; handoff codes record the
+generation at issuance and are consumed in that transaction
+([ADR-0008](0008-second-factor-extension-point.md)).
 
 Out of scope: distributed SQLite (replication, shared filesystems),
 MySQL, embedded key-value stores.
@@ -91,8 +102,12 @@ MySQL, embedded key-value stores.
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 1 | 3 | 0 | 0 | 4 × FIX_FIRST applied (shared findings R06, R08, R10, R11) |
+| 2 | 2026-10-09 | 1 | 0 | 0 | 0 | R06, R11 CLOSED; R08, R10 PARTIAL → N02, N04 FIX_FIRST applied (Redis no longer caches positive session state; per-sink delivery rows) |
 
 Findings and dispositions:
+
+- N02 (S1, pass 2, shared with ADR-0006): a Redis session cache answering successfully after a revocation defeats every declared bound. FIX_FIRST: Redis is bus and counters only; no positive session state is cached outside the opt-in local cache, whose entries carry authoritative-read time and generations.
+- N04 (S1, pass 2, shared with ADR-0009): a time-ordered id cursor can skip an event committed late. FIX_FIRST: `event_deliveries` rows written in the event's transaction; no cursor scans.
 
 - R06 (S1, shared with ADR-0009): a 5 s directory snapshot would serve stale user status and groups. FIX_FIRST: verify reads `users.status` and `users.authz_version` on every call; the in-memory snapshot holds configuration only.
 - R08 (S2, shared with ADR-0006): directory staleness contributed to an unbounded freshness claim. FIX_FIRST: identity state is read per verify; configuration changes publish `all`.
@@ -111,6 +126,7 @@ given per-handle idle expiry (ADR-0007)?
 
 기본 저장소는 SQLite(rusqlite, WAL)이며 단일 인스턴스 배포의 기본값입니다.
 여러 인스턴스가 사용자 ID, 연결 정보, 차단 목록을 공유해야 하므로 다중 인스턴스
-배포는 PostgreSQL을 사용합니다(M2). Redis/Valkey는 세션 조회 캐시, 무효화
-pub/sub, 시도 횟수 카운터로만 쓰며 절대 진실의 원천이 아닙니다. 캐시 장애는
-기본 저장소로 폴백하고, 접근을 넓히는 일은 없습니다.
+배포는 PostgreSQL을 사용합니다(M2). Redis/Valkey는 무효화 pub/sub과 시도 횟수
+카운터로만 쓰며, 세션 상태나 허용 결정을 절대 캐시하지 않고 진실의 원천도
+아닙니다. 모든 verify는 기본 저장소를 읽고, 필수 감사 이벤트와 싱크별 전달 행은
+상태 변경과 같은 트랜잭션에서 커밋합니다.

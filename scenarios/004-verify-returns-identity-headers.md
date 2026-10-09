@@ -5,7 +5,7 @@
 - Area: core
 - Milestone: M1
 - ADRs: 0002, 0003, 0005, 0006, 0008, 0013
-- Threat model: TM-07, TM-12, TM-14, TM-18, TM-19, TM-24, TM-29
+- Threat model: TM-07, TM-12, TM-14, TM-18, TM-19, TM-24, TM-29, TM-35
 - Gateway contract: Verify endpoint, Identity headers, Cache semantics, Versioning
 
 ## Goal
@@ -19,7 +19,7 @@ contract answers a status the gateway treats as denial.
 
 - Configuration `tests/fixtures/m1-basic.json`; `apps.app.verify_cache_seconds = 0` (default); `gateway.caller_key_env = HOPAE_TEST_GATEWAY_KEY`; `gateway.verify_budget_ms = 400`.
 - Every verify request carries `x-hopae-gateway-key` with the configured value unless a case says otherwise.
-- User `u_1` (`primary_email = a@example.test`, `username = alice`, display name `Alice 김`, `status = active`, `authz_version = 3`); session `s_1` with `aal=1`, `factors=[{"kind":"oidc","provider":"mock","at":t0}]`, `authz_version = 3`; handle `H1` for `app.example.test` with `issued_aal = 1`, `created_at = t0`, `last_seen_at = t0`.
+- User `u_1` (`primary_email = a@example.test`, `username = alice`, display name `Alice 김`, `status = active`, `authz_version = 3`); session `s_1` with `aal=1`, `factors=[{"kind":"oidc","provider":"mock","at":t0}]`, `authz_version = 3`, `cred_gen = 2`; configuration generation `5`; handle `H1` for `app.example.test` with `issued_aal = 1`, `created_at = t0`, `last_seen_at = t0`.
 - Injected clock `now = t0 + 60 s`.
 
 ## Main flow
@@ -28,7 +28,7 @@ contract answers a status the gateway treats as denial.
 
 - Given: as above.
 - When: `GET /_hopae/verify` with `cookie: __Host-hopae=H1`, `x-original-url: https://app.example.test/admin/x`, `x-forwarded-host: app.example.test`, `x-forwarded-proto: https`, `x-forwarded-for: 203.0.113.9`, `user-agent: UA1`.
-- Then: `200`; headers `x-forwarded-user: u_1`, `x-forwarded-email: a@example.test`, `x-forwarded-preferred-username: alice`, `x-hopae-session: s_1`, `x-hopae-provider: mock`, `x-hopae-auth-time: <t0>`, `x-hopae-expires: <t0+12h>` (the handle's idle deadline, the earliest timer), `x-hopae-aal: 1`, `x-hopae-factors: oidc:mock`, `x-hopae-contract: 1`, `x-hopae-reason: ok`, `cache-control: no-store`; no `set-cookie`; `x-forwarded-groups` absent; total identity header bytes ≤ 8 KiB; the store recorded one handle/session read and one `users(status, authz_version)` read.
+- Then: `200`; headers `x-forwarded-user: u_1`, `x-forwarded-email: a@example.test`, `x-forwarded-preferred-username: alice`, `x-hopae-session: s_1`, `x-hopae-provider: mock`, `x-hopae-auth-time: <t0>`, `x-hopae-expires: <t0+12h>` (the handle's idle deadline, the earliest timer), `x-hopae-aal: 1`, `x-hopae-factors: oidc:mock`, `x-hopae-contract: 1`, `x-hopae-gen: s2.u3.c5`, `x-hopae-reason: ok`, `cache-control: no-store` (no `x-hopae-fresh-until` because `N = 0`); no `set-cookie`; `x-forwarded-groups` absent; total identity header bytes ≤ 8 KiB; the store recorded one handle/session read and one `users(status, authz_version)` read.
 
 ### S004-2 Non-ASCII values are percent-encoded
 
@@ -72,13 +72,13 @@ contract answers a status the gateway treats as denial.
 
 - Given: `apps.app.verify_cache_seconds = 5` and no `step_up` rule.
 - When: verify with `H1`.
-- Then: `cache-control: private, max-age=5` and `x-hopae-fresh-until: <now + 5 s>` in unix milliseconds; with the handle 2 s from its idle deadline the deadline is `now + 2 s`. With a `step_up` rule for `/admin` configured: `cache-control: no-store` and no deadline. With `verify_cache_seconds = 60`: preflight rejects the configuration (`> 30`). A request whose query contains `_hopae_handoff` always answers `no-store`.
+- Then: `cache-control: private, max-age=5`, `x-hopae-fresh-until: <authoritative read time + 5 s>` in unix milliseconds and `x-hopae-gen: s2.u3.c5`; with the handle 2 s from its idle deadline the deadline is `read time + 2 s`. With `cache.local_ttl_ms = 3000` a second verify within 3 s is served from the local cache with the **same** `x-hopae-fresh-until` (not renewed) and the same `x-hopae-gen`; after a `session` invalidation with `gen=3` the local entry is discarded and the next verify reads the store. With a `step_up` rule for `/admin` configured: `cache-control: no-store` and no deadline. With `verify_cache_seconds = 60`: preflight rejects the configuration (`> 30`). A request matching the reserved parameter recognition rule always answers `no-store`.
 
-### S004-9 A stalled cache or store dependency stays within the verify budget
+### S004-9 A stalled dependency stays within the verify budget and never serves stale state
 
 - Given: (M2) Redis configured with `cache.op_timeout_ms = 50`, and the harness replaces it with a listener that accepts connections and never answers; (M1) alternatively the primary store is stalled by the harness.
-- When: verify with `H1`, repeated five times.
-- Then (stalled Redis): each of the first three verifies answers `200` within 150 ms after one 50 ms cache timeout and a primary-store read; the fourth and fifth skip the cache (breaker open, under 10 ms of cache time); log `cache_degraded` once; metric `hopae_cache_degraded = 1`; after the stub answers again the breaker closes within 5 s. Then (stalled store): `503` with `x-hopae-reason: budget_exceeded` within 400 ms, never later; the gateway's 500 ms timeout is not reached.
+- When: verify with `H1`, repeated five times; then (M2) a login attempt that needs a throttling counter; then (M2) a session termination whose invalidation must be published.
+- Then (stalled Redis): every verify answers `200` from the primary store without waiting on Redis at all (verify never reads Redis); the login attempt is refused after one 50 ms counter timeout (`403 rate_limited` with `reason=counter_unavailable`, fail closed) and after three timeouts the breaker refuses for 5 s without waiting; the termination's publish times out, is logged `invalidation_publish_failed` and counted, and the terminated session is still denied on the next verify because the store is authoritative. Then (stalled store): `503` with `x-hopae-reason: budget_exceeded` within 400 ms, never later; the gateway's 500 ms timeout is not reached. A harness that answers Redis requests with a stale, previously valid session payload has no effect because no such lookup exists (asserted by the Redis stub's request log containing no `GET`/`HGET` on session keys).
 
 ### S004-10 An authorization change is seen on the next verify
 
@@ -143,9 +143,9 @@ contract answers a status the gateway treats as denial.
 
 ### S004-A8 Missing or wrong caller key is refused before any state is touched
 
-- Given: valid `H1`; `gateway.allow_unauthenticated_caller` unset.
+- Given: valid `H1`; `gateway.allow_unauthenticated_caller` unset; `gateway.caller_key_next_env` unset.
 - When: verify without `x-hopae-gateway-key`, then with a wrong value, then with the right value but also a second copy of the header.
-- Then: `403` with `x-hopae-reason: caller_unauthorized` for all three; no store read (store call counter stays at zero); no transaction; no binding cookie; metric `hopae_verify_unauthorized_total = 3`; the comparison is constant-time (unit test on the compare function with equal-length inputs). With `gateway.allow_unauthenticated_caller = true` the first request is processed as S004-1 and preflight had printed the warning.
+- Then: `403` with `x-hopae-reason: caller_unauthorized` for all three; no store read (store call counter stays at zero); no transaction; no binding cookie; metric `hopae_verify_unauthorized_total = 3`; the comparison is constant-time (unit test on the compare function with equal-length inputs). With `gateway.allow_unauthenticated_caller = true` the first request is processed as S004-1 and preflight had printed the warning. With `gateway.caller_key_next_env` set to a second variable, a verify presenting either the current or the next value is processed as S004-1 and a verify presenting a third value is refused; the metric labels the accepted key (`current`, `next`) so the operator can see when the gateway has switched.
 
 ## Observability expectations
 

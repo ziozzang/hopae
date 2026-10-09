@@ -22,7 +22,10 @@ as **contract v1** with these fixed points:
 | Point | Decision |
 | --- | --- |
 | Verify endpoint | `GET /_hopae/verify` on a dedicated gateway listener (`listen.gateway`, default `127.0.0.1:8701`), never served by the portal listener |
-| Caller authentication | Required in M1: the gateway sends `x-hopae-gateway-key` (gateway change HC-3, implemented alongside M1); Hopae compares it in constant time with the value of `gateway.caller_key_env` before reading any other header; mismatch or absence → `403` `caller_unauthorized` with no state touched. Loopback binding is a defense in depth, not the authentication: on a host-network gateway any local process can reach loopback (review finding R09). `gateway.allow_unauthenticated_caller = true` exists for development only and makes preflight print a warning. |
+| Caller authentication | Required in M1: the gateway sends `x-hopae-gateway-key` (gateway change HC-3, implemented alongside M1); Hopae compares it in constant time with the value of `gateway.caller_key_env` and, when set, `gateway.caller_key_next_env`, before reading any other header; mismatch or absence → `403` `caller_unauthorized` with no state touched. Loopback binding is a defense in depth, not the authentication: on a host-network gateway any local process can reach loopback (review finding R09). `gateway.allow_unauthenticated_caller = true` exists for development only and makes preflight print a warning. |
+| Caller key rotation | Hopae accepts two keys during an overlap: current and next. Sequence: (1) set `caller_key_next_env` on every Hopae instance and restart them; (2) switch the gateway route's static header to the new value (one activation); (3) move the new value to `caller_key_env`, unset `caller_key_next_env`, restart Hopae instances. The gateway side stays a single value per header (review finding N11). Preflight warns when a next key has been configured for more than 7 days (`gateway.caller_key_next_since`, written by preflight on first sight). |
+| Unauthenticated non-document requests | `401` with `{"error":"login_required","login":"<the application URL as requested>"}`: the `login` target is the application URL itself, because only a document navigation on the application host can plant the binding cookie and start a usable transaction; the `401` creates no transaction and sets no cookie (review finding N06). Step-up uses the same shape with `step_up_required`. |
+| Generation provenance | Every `200` carries `x-hopae-gen: s<session cred_gen>.u<user authz_version>.c<configuration generation>` next to `x-hopae-fresh-until`; a caching gateway (HC-1) stores both and discards a fill whose generations are older than the last invalidation it saw for the entry's tags ([ADR-0006](0006-verify-caching-and-invalidation.md)). |
 | Required request context | `x-original-url`, `x-forwarded-host`, `x-forwarded-proto`, `x-forwarded-for` (or `x-real-ip`); any missing → `400` `contract_violation` → gateway `503` |
 | Optional gateway context | `x-hangang-canonical-path` and `x-hangang-route-id` (gateway change HC-6): the decoded, normalized path the gateway used for route selection and the selected route id. Until present, Hopae computes the canonical path itself with the gateway's rules ([ADR-0013](0013-gateway-adapter-boundary.md)). |
 | Listed client headers | `cookie`, `user-agent`, `accept`, `sec-fetch-dest`, `sec-fetch-mode`, `sec-fetch-site` |
@@ -69,8 +72,12 @@ Applications that need more than these headers wait for `x-hopae-claims`
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 1 | 1 | 2 | 0 | 4 × FIX_FIRST applied (R04 shared, R09, R17, R18) |
+| 2 | 2026-10-09 | 0 | 1 | 1 | 0 | R04, R09, R17, R18 CLOSED; new N06 (shared), N11: FIX_FIRST applied |
 
 Findings and dispositions:
+
+- N06 (S2, pass 2, shared with ADR-0004): the `401` login URL could not complete a login. FIX_FIRST: `login` names the application URL (document bootstrap); no transaction on `401`; scenario 001-4.
+- N11 (S3, pass 2): single caller key made rotation an outage. FIX_FIRST: `caller_key_next_env` overlap and the documented sequence; scenario 004-A8 and 013-7 extended. Nothing further is needed from HC-3.
 
 - R04 (S1, shared with ADR-0008 and ADR-0013): the gateway selects routes on a canonical path but sends the raw path. FIX_FIRST: optional `x-hangang-canonical-path`/`x-hangang-route-id` (HC-6) and Hopae-side canonicalization with the gateway's rules until then; scenario 008-A5.
 - R09 (S2): loopback is not caller authentication and container loopback differs from host loopback. FIX_FIRST: `x-hopae-gateway-key` required in M1 (HC-3 implemented in the gateway); the deployment template runs Hopae in the gateway's network namespace or publishes the port on the host loopback only; scenario 013-A1 and 004-6.

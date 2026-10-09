@@ -21,7 +21,7 @@ an unauthenticated flood cannot exhaust the store.
 - Every verify request in this scenario carries `x-hopae-gateway-key` with the configured value unless a case says otherwise.
 - Mock provider profile `default`.
 - Gateway route fragment: the protected whole-host route from the contract page (including `static_request_headers`).
-- Injected clock at `2026-10-09T00:00:00Z`; injected randomness so the transaction id is `T1` and the binding cookie value is `B1`.
+- Injected clock at `2026-10-09T00:00:00Z`; injected randomness so the transaction id is `T1`, the binding cookie value is `B1` and the portal binding cookie value is `P1`.
 
 ## Main flow
 
@@ -35,13 +35,13 @@ an unauthenticated flood cannot exhaust the store.
 
 - Given: S001-1 completed.
 - When: `GET https://auth.example.test/login?txn=T1` through the portal listener from `203.0.113.9` with `user-agent: UA1`.
-- Then: `200 text/html` listing the enabled provider; `set-cookie: __Host-hopae_txn=T1; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600`; response security headers present (`cache-control: no-store`, `x-content-type-options: nosniff`, `referrer-policy: no-referrer`, `content-security-policy` without `unsafe-inline` scripts).
+- Then: `200 text/html` listing the enabled provider; `set-cookie: __Host-hopae_portal=P1; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` (an existing well-formed value would be kept and refreshed instead); the transaction row now has `portal_bind_sha256 = sha256(P1)`; response security headers present (`cache-control: no-store`, `x-content-type-options: nosniff`, `referrer-policy: no-referrer`, `content-security-policy` without `unsafe-inline` scripts).
 
 ### S001-3 Single enabled provider redirects immediately
 
 - Given: exactly one enabled provider.
 - When: as S001-2.
-- Then: `302` to the provider's authorization endpoint with `state`, `nonce`, `code_challenge`, `code_challenge_method=S256`, `redirect_uri=https://auth.example.test/callback/mock`; the transaction cookie is set on the same response.
+- Then: `302` to the provider's authorization endpoint with `state`, `nonce`, `code_challenge`, `code_challenge_method=S256`, `redirect_uri=https://auth.example.test/callback/mock`; the portal binding cookie is set on the same response.
 
 ## Alternative flows
 
@@ -49,7 +49,7 @@ an unauthenticated flood cannot exhaust the store.
 
 - Given: no cookie.
 - When: verify with `sec-fetch-dest: empty`, `sec-fetch-mode: cors`, `accept: application/json`.
-- Then: `401`; `content-type: application/json`; body `{"error":"login_required","login":"https://auth.example.test/login?txn=T1"}`; `www-authenticate: Hopae realm="auth.example.test"`; `cache-control: no-store`; **no** `set-cookie` (a non-document request never receives a binding cookie, so its transaction can never complete a handoff); a transaction row is created as in S001-1 with `bind_sha256` empty.
+- Then: `401`; `content-type: application/json`; body `{"error":"login_required","login":"https://app.example.test/admin/x?q=1"}` — the `login` target is the application URL itself, the document bootstrap that plants the binding cookie; `www-authenticate: Hopae realm="auth.example.test"`; `cache-control: no-store`; **no** `set-cookie`; **no** transaction row is created; a following document navigation to that URL behaves exactly as S001-1.
 
 ### S001-5 Missing fetch metadata falls back to `accept`
 
@@ -90,14 +90,14 @@ an unauthenticated flood cannot exhaust the store.
 
 ### S001-A3 Transaction from one client cannot be continued by another
 
-- Given: `T1` created from `203.0.113.9` with `binding.ip = strict`.
-- When: `GET /login?txn=T1` from `198.51.100.7`.
-- Then: `400` expired-link page; `reason=txn_binding`; no cookie; the transaction is marked consumed so the original client must restart as well.
+- Given: `T1` created from `203.0.113.9` with `binding.ip = strict`; separately, `T1` already visited once by a browser whose portal cookie digest is recorded.
+- When: `GET /login?txn=T1` from `198.51.100.7`; separately, `GET /login?txn=T1` from the right IP but with a different (or no) `__Host-hopae_portal` cookie.
+- Then: `400` expired-link page; `reason=txn_binding` or `portal_bind_mismatch`; no new cookie; the transaction is marked consumed so the original client must restart as well.
 
 ### S001-A4 Transaction flood is bounded
 
 - Given: `txn.max_rows = 1000` and `txn.per_ip_per_minute = 30` in the fixture.
-- When: 31 verify calls without cookies from one IP within a minute, then 2,000 from distinct IPs.
+- When: 31 document-navigation verify calls without cookies from one IP within a minute, then 2,000 from distinct IPs (non-document `401` calls are not counted because they create nothing).
 - Then: the 31st from the same IP answers `403` with body `{"error":"rate_limited","retry_after":60}` and `x-hopae-reason: txn_rate_limited` (an unmodified gateway relays `403` with its body but maps `429` to `503` and drops `retry-after`; with gateway change HC-8 and `gateway.rate_limit_status = 429` the same case answers `429` with `retry-after: 60`); beyond `max_rows` the oldest unconsumed transactions are evicted and `txn.evicted` events carry the count; the process RSS stays under the harness limit; store row count ≤ 1000.
 
 ### S001-A5 Gateway listener path on the portal listener is not served
@@ -150,13 +150,13 @@ an unauthenticated flood cannot exhaust the store.
 
 ## Open questions
 
-- Should the `401` body include the login URL at all, or only a static `WWW-Authenticate` challenge (TM-21)?
 - Is `txn.per_ip_per_minute = 30` a reasonable default behind corporate NAT?
 
 ## 한국어 요약
 
-쿠키 없는 브라우저가 보호된 호스트를 요청하면 verify가 서버 측 로그인
-트랜잭션을 만들고 포털로 `302`를 보냅니다. 돌아갈 URL은 게이트웨이가 만든
-`x-original-url`에서만 가져오며 클라이언트 값은 무시합니다. 핵심 남용 사례는
-트랜잭션 홍수 제한과 다른 클라이언트가 트랜잭션을 이어받지 못하게 하는
-바인딩입니다.
+쿠키 없는 브라우저가 보호된 호스트를 문서 탐색으로 요청하면 verify가 서버 측
+로그인 트랜잭션을 만들고 바인딩 쿠키를 심은 뒤 포털로 `302`를 보냅니다. 문서가
+아닌 요청은 `401`과 함께 애플리케이션 URL 자체를 돌려주며 아무것도 만들지
+않습니다. 돌아갈 URL은 게이트웨이가 만든 `x-original-url`에서만 가져오며
+클라이언트 값은 무시합니다. 핵심 남용 사례는 트랜잭션 홍수 제한과 다른
+클라이언트가 트랜잭션을 이어받지 못하게 하는 바인딩입니다.

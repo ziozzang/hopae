@@ -71,12 +71,17 @@ event. An optional encrypted-at-rest mode for console-entered secrets is
 deferred to M4 and recorded there if adopted.
 
 **Runtime management.** Providers live in the `providers` table from M1
-with a `managed_by` column (`file` or `api`). At start, file entries are
-imported only for rows that do not exist or are `managed_by = file`; a row
-that was ever changed through the management API (M4) is `managed_by = api`
-and the file never touches it again, so a runtime disable survives restarts
-(review finding R12). `hopae providers import --force <id>` is the explicit
-way to reassert the file. A disabled provider rejects callbacks with
+with a `managed_by` column (`file` or `api`) and a `deleted_at` column. At
+start, file entries are imported only for rows that do not exist or are
+`managed_by = file` with `deleted_at` null; a row that was ever changed
+through the management API (M4) is `managed_by = api` and the file never
+touches it again, so a runtime disable survives restarts (review finding
+R12). Runtime removal is a **soft delete**: the row stays as a tombstone
+(`deleted_at` set, `managed_by = api`, secrets reference cleared), is
+excluded from the chooser and rejects callbacks with `provider_disabled`,
+and is never re-imported from the file (review finding N09). `hopae
+providers import --force <id>` is the explicit way to reassert the file for
+a disabled or deleted row and records an `admin.*` event. A disabled provider rejects callbacks with
 `provider_disabled`. Because secrets are environment references, adding a
 provider or rotating its secret requires the process (or container) to be
 restarted with the new variable; the console says so when a referenced
@@ -120,8 +125,11 @@ token refresh for application use.
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 2 | 1 | 0 | 0 | 3 × FIX_FIRST applied (R01 shared, R07, R12) |
+| 2 | 2026-10-09 | 0 | 1 | 0 | 0 | R01, R07, R12 CLOSED; new N09 FIX_FIRST applied (deletion tombstones) |
 
 Findings and dispositions:
+
+- N09 (S2, pass 2): removing an API-managed provider let the file import resurrect it. FIX_FIRST: soft delete with a tombstone excluded from import; scenario 013-6 covers remove → restart → callback rejection.
 
 - R01 (S1, shared with ADR-0011): `email_verified` does not prove ownership of an existing Hopae account. FIX_FIRST: `email_authoritative` distinguishes mailbox authority from verification; linking defaults to explicit.
 - R07 (S1): user-info claims were not bound to the validated token subject. FIX_FIRST: subject consistency invariant above; scenario 002-A9 with mock profile `userinfo_wrong_sub`.

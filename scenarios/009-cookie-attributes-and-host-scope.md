@@ -5,7 +5,7 @@
 - Area: security
 - Milestone: M1
 - ADRs: 0004
-- Threat model: TM-02, TM-04, TM-13
+- Threat model: TM-02, TM-04, TM-13, TM-31
 - Gateway contract: Cookies
 
 ## Goal
@@ -26,13 +26,13 @@ client cannot be adopted as a session.
 
 - Given: valid `K1`.
 - When: redemption through verify.
-- Then: `set-cookie` parses to name `__Host-hopae`, value `v1.` + 43 base64url characters, `Path=/`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Max-Age` equal to the session's remaining absolute lifetime, no `Domain`, no `Expires`.
+- Then: `set-cookie` parses to name `__Host-hopae`, value `v1.` + 43 base64url characters, `Path=/`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Max-Age` equal to the **handle's** remaining absolute lifetime (`apps[].session.absolute`, 7 d by default, counted from the handle's creation, never the session's 30 d), no `Domain`, no `Expires`.
 
-### S009-2 Transaction cookie attributes
+### S009-2 Portal binding cookie attributes
 
-- Given: a transaction.
-- When: `GET /login?txn=T1`.
-- Then: `__Host-hopae_txn` with `Path=/`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Max-Age=600`, no `Domain`.
+- Given: a transaction; the browser has never visited the portal.
+- When: `GET /login?txn=T1`, then again 10 minutes later with the cookie still present.
+- Then: `__Host-hopae_portal` with `Path=/`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Max-Age=600`, no `Domain`, value of 22 base64url characters; the second response re-sends the **same** value with a fresh `Max-Age` (stable per browser); a malformed value is replaced.
 
 ### S009-3 Clearing uses matching attributes
 
@@ -63,8 +63,8 @@ client cannot be adopted as a session.
 ### S009-7 Binding cookie attributes
 
 - Given: no cookie on `app.example.test`.
-- When: the unauthenticated document navigation of scenario 001, then the redemption of scenario 003.
-- Then: the `302` to the portal sets `__Host-hopae_bind` with `Path=/`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Max-Age=600`, no `Domain`, value of 22 base64url characters; the redemption response clears it with matching attributes and `Max-Age=0`; a `401` for a non-document request sets no binding cookie.
+- When: the unauthenticated document navigation of scenario 001, a second unauthenticated navigation with the cookie present, then the redemption of scenario 003, then an unauthenticated navigation after a failed redemption.
+- Then: the first `302` to the portal sets `__Host-hopae_bind` with `Path=/`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Max-Age=600`, no `Domain`, value of 22 base64url characters; the second re-sends the same value with a fresh `Max-Age`; the redemption response carries no `set-cookie` for it; the post-failure `302` keeps it; a `401` for a non-document request sets no binding cookie; a malformed value (wrong length or alphabet) is replaced.
 
 ## Abuse cases
 
@@ -107,7 +107,7 @@ client cannot be adopted as a session.
 
 - Given: configuration containing `cookie.same_site = none` and, separately, `cookie.same_site = strict`.
 - When: `hopae --check`.
-- Then: both rejected as an unknown key (`cookie.same_site` does not exist); every cookie Hopae sets (`__Host-hopae`, `__Host-hopae_bind`, `__Host-hopae_txn`) carries `SameSite=Lax`, which the cross-site portal → application navigation and the provider callback require.
+- Then: both rejected as an unknown key (`cookie.same_site` does not exist); every cookie Hopae sets (`__Host-hopae`, `__Host-hopae_bind`, `__Host-hopae_portal`) carries `SameSite=Lax`, which the cross-site portal → application navigation and the provider callback require.
 
 ## Observability expectations
 
@@ -120,7 +120,7 @@ client cannot be adopted as a session.
 | Case | Test | File | Kind | Status |
 | --- | --- | --- | --- | --- |
 | S009-1 | `s009_1_session_cookie_attributes` | `tests/scenarios/s009_cookies.rs` | integration | planned |
-| S009-2 | `s009_2_txn_cookie_attributes` | `tests/scenarios/s009_cookies.rs` | integration | planned |
+| S009-2 | `s009_2_portal_binding_cookie_attributes` | `tests/scenarios/s009_cookies.rs` | integration | planned |
 | S009-3 | `s009_3_clearing_matches_attributes` | `tests/scenarios/s009_cookies.rs` | integration | planned |
 | S009-4 | `s009_4_jar_isolation_across_hosts` | `tests/scenarios/s009_cookies.rs` | integration | planned |
 | S009-5 | `s009_5_dev_mode_drops_prefix` | `tests/scenarios/s009_cookies.rs` | integration | planned |

@@ -20,23 +20,23 @@ mixed-up callback never creates a session.
 
 - Configuration `tests/fixtures/m1-basic.json`; provider `mock` (`oidc`, issuer from the mock's discovery document, `client_secret_env = HOPAE_TEST_MOCK_SECRET`).
 - Mock provider profile `default`; profiles `wrong_state`, `wrong_nonce`, `expired_token`, `wrong_aud`, `invalid_signature`, `unverified_email`, `userinfo_wrong_sub`, `hd_example_test`, `oversized` for abuse and failure cases.
-- Transaction `T1` from scenario 001 with `return_target = https://app.example.test/admin/x` and `bind_sha256 = sha256(B1)`, cookie `__Host-hopae_txn=T1` held by the browser on the portal host and `__Host-hopae_bind=B1` on the application host.
+- Transaction `T1` from scenario 001 with `return_target = https://app.example.test/admin/x`, `bind_sha256 = sha256(B1)` and `portal_bind_sha256 = sha256(P1)`; the browser holds `__Host-hopae_portal=P1` on the portal host and `__Host-hopae_bind=B1` on the application host.
 - Injected clock; injected randomness for `state=S1`, `nonce=N1`, PKCE verifier `V1`, session id `s_1`, handle `H0`, handoff code `K1`.
 
 ## Main flow
 
 ### S002-1 Starting the provider flow stores state, nonce and PKCE
 
-- Given: `T1` unconsumed; chooser page loaded (CSRF token `C1` bound to the transaction cookie).
-- When: `POST /login/mock` with form `csrf=C1`, cookie `__Host-hopae_txn=T1`, `origin: https://auth.example.test`.
+- Given: `T1` unconsumed; chooser page loaded (CSRF token `C1` bound to the portal binding cookie).
+- When: `POST /login/mock` with form `csrf=C1`, `txn=T1`, cookie `__Host-hopae_portal=P1`, `origin: https://auth.example.test`.
 - Then: `302` to the mock authorization endpoint with `response_type=code`, `client_id`, `redirect_uri=https://auth.example.test/callback/mock`, `scope=openid email profile`, `state=S1`, `nonce=N1`, `code_challenge=S256(V1)`; the transaction row holds `provider_id=mock`, `state_sha256`, `nonce`, `pkce_verifier`; event `login.started` is not duplicated (already emitted in 001).
 
 ### S002-2 Callback exchanges the code and validates the ID token
 
 - Given: the mock issued `code=AC1` for `S1` with `nonce=N1`.
-- When: `GET /callback/mock?code=AC1&state=S1` with cookie `__Host-hopae_txn=T1`.
-- Then: Hopae `POST`s the mock token endpoint with `grant_type=authorization_code`, `code=AC1`, `code_verifier=V1`, `redirect_uri`, client authentication; the ID token passes `iss`, `aud`, `exp`, `iat` (60 s leeway), `nonce=N1`, signature (`kid` from JWKS); no redirects followed on the token call; the user-info response's `sub` equals the ID token's `sub` (subject consistency); `users` row created with `primary_email` from the token (verified), `authz_version=1`, `identities` row `(mock, sub)`; `sessions` row `s_1` with `provider_id=mock`, `factors=[{"kind":"oidc","provider":"mock","at":now}]`, `aal=1`, `authz_version=1`, `bound_ip=203.0.113.9`, `bound_ua_sha256`, `absolute_expires_at`; `session_handles` row for `(s_1, auth.example.test)` with `issued_aal=1`; `handoff_codes` row for `(s_1, app.example.test, /admin/x, 203.0.113.9, bind_sha256=sha256(B1))` expiring in 60 s; transaction `consumed_at` set; events `login.succeeded` and `session.created` committed in the same transaction as the session.
-- Then (response): `302 location: https://app.example.test/admin/x?_hopae_handoff=K1`; `set-cookie: __Host-hopae=H0; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=<handle absolute remaining>`; `set-cookie: __Host-hopae_txn=; Max-Age=0; …`; `cache-control: no-store`.
+- When: `GET /callback/mock?code=AC1&state=S1` with cookie `__Host-hopae_portal=P1` (the transaction is located by `state`; the cookie digest must match `portal_bind_sha256`).
+- Then: Hopae `POST`s the mock token endpoint with `grant_type=authorization_code`, `code=AC1`, `code_verifier=V1`, `redirect_uri`, client authentication; the ID token passes `iss`, `aud`, `exp`, `iat` (60 s leeway), `nonce=N1`, signature (`kid` from JWKS); no redirects followed on the token call; the user-info response's `sub` equals the ID token's `sub` (subject consistency); `users` row created with `primary_email` from the token (verified), `authz_version=1`, `identities` row `(mock, sub)`; `sessions` row `s_1` with `provider_id=mock`, `factors=[{"kind":"oidc","provider":"mock","at":now}]`, `aal=1`, `authz_version=1`, `bound_ip=203.0.113.9`, `bound_ua_sha256`, `absolute_expires_at`; `session_handles` row for `(s_1, auth.example.test)` with `issued_aal=1`; `handoff_codes` row for `(s_1, app.example.test, /admin/x, 203.0.113.9, bind_sha256=sha256(B1), issued_aal=1, cred_gen=1)` expiring in 60 s; transaction `consumed_at` set; events `login.succeeded` and `session.created` and their `event_deliveries` rows committed in the same transaction as the session.
+- Then (response): `302 location: https://app.example.test/admin/x?_hopae_handoff=K1`; `set-cookie: __Host-hopae=H0; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=<handle absolute remaining>`; the portal binding cookie is left in place; `cache-control: no-store`.
 
 ### S002-3 Returning user maps to the existing identity
 
@@ -80,7 +80,7 @@ mixed-up callback never creates a session.
 ### S002-A1 Replayed callback is rejected
 
 - Given: S002-2 completed (transaction consumed).
-- When: the same `GET /callback/mock?code=AC1&state=S1` again, with or without the (now cleared) transaction cookie.
+- When: the same `GET /callback/mock?code=AC1&state=S1` again, with the same portal binding cookie.
 - Then: `400` expired-link page; no token endpoint call; no new session; event `login.failed` with `reason=txn_consumed`.
 
 ### S002-A2 Tampered state, nonce, audience, signature or expiry is rejected
@@ -103,14 +103,14 @@ mixed-up callback never creates a session.
 
 ### S002-A5 Login CSRF: a victim cannot complete the attacker's transaction
 
-- Given: attacker started `T9` in their browser and obtained `state=S9`; victim's browser holds no `__Host-hopae_txn` cookie (or holds `T1`).
+- Given: attacker started `T9` in their browser (portal binding `P9` recorded in `T9`) and obtained `state=S9`; victim's browser holds no `__Host-hopae_portal` cookie or holds its own `P1`.
 - When: the victim's browser is sent to `GET /callback/mock?code=AC9&state=S9`.
-- Then: `400`; `reason=txn_cookie_mismatch` (or `txn_missing`); no token exchange; no session for the victim.
+- Then: `400`; `reason=portal_bind_mismatch`; no token exchange; no session for the victim; `T9` is consumed so the attacker cannot retry it either.
 
 ### S002-A6 Provider mix-up: artifacts from provider A cannot complete a transaction for provider B
 
 - Given: `T1` chose provider `mock`; a second provider `mock2` with a different issuer.
-- When: `GET /callback/mock2?code=AC1&state=S1` with the `T1` cookie; separately, a token from `mock2`'s issuer presented on `/callback/mock`.
+- When: `GET /callback/mock2?code=AC1&state=S1` with the portal binding cookie; separately, a token from `mock2`'s issuer presented on `/callback/mock`.
 - Then: `400 provider_mismatch` without any token exchange for the first; `invalid_issuer` for the second; no session.
 
 ### S002-A7 Missing PKCE or nonce support cannot be negotiated away
@@ -167,6 +167,7 @@ mixed-up callback never creates a session.
 
 - Should S002-6 (SSO) refresh the portal handle to rotate the cookie value?
 - Does a `prefers-fresh-login` per application belong in M1 (`max_auth_age`), given SSO exists from M1?
+- Should `portal.sso_confirm_new_host` default to `true` (one click per new host per session)?
 
 ## 한국어 요약
 

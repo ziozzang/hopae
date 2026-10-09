@@ -29,7 +29,7 @@
 | Phase | Milestone | Behavior | Evidence of safety |
 | --- | --- | --- | --- |
 | 0 — Manual | M1 | The operator creates the route with the `auth` fragment from the contract page and the application row in Hopae. `hopae --check` warns when an application host has no corresponding route it can see (if a gateway read-only credential is configured) | No writes by Hopae |
-| 1 — Proposal and drift | M2/M4 | `hopae gateway render --app <id>` prints the route `auth` fragment (and a full route skeleton on request). With a read-only gateway credential, Hopae compares its applications to the gateway's routes and reports drift (missing route, missing identity header in `response_headers`, `forward_response` false, timeout out of range) in the console and in `hopae --check`. Nothing is written | Read-only credential; diff only |
+| 1 — Proposal and drift | M2/M4 | `hopae gateway render --app <id>` prints the route `auth` fragment (and a full route skeleton on request). With a read-only gateway credential, Hopae compares its applications to the gateway's routes and reports drift (missing route, missing identity header in `response_headers`, `forward_response` false, timeout out of range, **a registered host whose DNS does not resolve to the gateway's public addresses**, which would be an open credential destination) in the console and in `hopae --check`. Nothing is written | Read-only credential; diff only |
 | 2 — Apply with consent | M7 or later, by a new ADR, **and only after gateway change HC-7 exists** | For routes whose id is listed in `gateway.managed_routes` by the operator, Hopae may apply the rendered `auth` block through a gateway endpoint that accepts **only** the `auth` sub-resource of a route (`PUT /v1/routes/http/<id>/auth`, HC-7) with a credential whose scope the gateway enforces as "auth block of these route ids", under the gateway's revision CAS, after showing the diff and receiving an explicit console confirmation per change. The whole-route `PUT` is never used by Hopae. Conflicts abort and are shown | Gateway-enforced field scope and id scope (HC-7); CAS; human confirmation; audit on both sides. Client-side diffing is a courtesy, not the boundary (review finding R13) |
 
 A phase advances only when the previous one has run in the reference
@@ -75,6 +75,7 @@ database.
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 0 | 1 | 0 | 0 | 1 × FIX_FIRST applied (R13) |
+| 2 | 2026-10-09 | 0 | 0 | 0 | 0 | R13 CLOSED; the phase-1 drift check gains the dangling-host rule from N03 |
 
 Findings and dispositions:
 

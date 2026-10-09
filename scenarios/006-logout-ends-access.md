@@ -5,7 +5,7 @@
 - Area: sessions
 - Milestone: M1
 - ADRs: 0004, 0006, 0009
-- Threat model: TM-03, TM-18
+- Threat model: TM-03, TM-18, TM-33
 - Gateway contract: Portal entry points (`/logout`), Verify endpoint (`302` with cookie clear)
 
 ## Goal
@@ -58,7 +58,13 @@ cross-site request cannot log a user out.
 
 - Given: Redis configured.
 - When: S006-2.
-- Then: one message `{"v":1,"kind":"session","id":"s_1",…}` on `hopae:<ns>:invalidate`.
+- Then: one message `{"v":1,"kind":"session","id":"s_1","gen":<cred_gen after termination>,…}` on `hopae:<ns>:invalidate`.
+
+### S006-7 Application-host sign-out of a different account through the switch page
+
+- Given: the application holds user V's handle `Hy` while the portal session now belongs to user A (V's portal handle expired and A signed in); a handoff for A reached `session_conflict` and produced the switch transaction `Ts` (scenario 003-A10).
+- When: `POST /switch` with `choice=switch`, the CSRF token and the portal binding cookie.
+- Then: `Hy` is revoked with `reason=switch` (event `handle.revoked`, session of V otherwise untouched); a fresh code for A is minted and the browser is redirected to the clean target; the next verify on that host is `200` as A. With `choice=keep`: nothing is revoked and the next verify is `200` as V. Without the CSRF token or from a cross-site `Origin`: `403`, nothing revoked.
 
 ## Abuse cases
 
@@ -119,6 +125,7 @@ cross-site request cannot log a user out.
 | S006-4 | `s006_4_logout_without_session` | `tests/scenarios/s006_logout.rs` | integration | planned |
 | S006-5 | `s006_5_logout_everywhere` | `tests/scenarios/s006_logout.rs` | integration | planned |
 | S006-6 | `s006_6_invalidation_published` | `tests/scenarios/s006_logout.rs` | integration | planned (M2) |
+| S006-7 | `s006_7_switch_page_signs_out_other_account` | `tests/scenarios/s006_logout.rs` | integration | planned |
 | S006-A1 | `s006_a1_replayed_logout_harmless` | `tests/scenarios/s006_logout.rs` | integration | planned |
 | S006-A2 | `s006_a2_csrf_mismatch_rejected` | `tests/scenarios/s006_logout.rs` | integration | planned |
 | S006-A3 | `s006_a3_logout_racing_handoff` | `tests/scenarios/s006_logout.rs` | integration | planned |

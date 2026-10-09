@@ -40,19 +40,29 @@ Kinds in M1: `login.started`, `login.succeeded`, `login.failed`,
 Delivery is a **transactional outbox**, not a bus (review finding R10):
 
 - Required kinds — `login.*`, `session.*`, `handle.*`, `handoff.*`, `identity.*`, `factor.*`, `block.*`, `admin.*`, `config.loaded` — are written to the `events` table **in the same store transaction** as the state change they describe (`Events::append_in(tx, event)`). A session exists only if its `session.created` event exists. A crash after commit loses nothing; a crash before commit loses both consistently.
-- Diagnostic kinds — `verify.denied` (sampled), `provider.error`, `txn.evicted`, `events.dropped` — are written by a bounded best-effort batch writer; drops are counted and reported as `events.dropped`.
-- An in-process notification channel carries only event ids after commit; sinks (the structured log, webhooks in M5) read the durable rows by id and keep a durable cursor (`event_sinks(sink, last_event_id)`), so a slow or restarted sink resumes without loss. The log sink may fall behind; the table is the record.
+- In that same transaction, one `event_deliveries(sink, event_id, state, attempts, next_attempt_at, last_error)` row with `state = pending` is inserted for every enabled sink subscribed to the kind (the structured log; webhook destinations in M5). Delivery workers claim `pending` rows (`SELECT … FOR UPDATE SKIP LOCKED` in PostgreSQL, the single writer in SQLite); there is **no cursor** over event ids, so a transaction that commits late can never be skipped (review finding N04).
+- Delivery is **at-least-once**: a worker may crash between sending and marking `delivered`, so a line or a webhook may be repeated; receivers deduplicate by `event_id`, which every payload and log line carries. Exactly-once is not claimed anywhere.
+- Diagnostic kinds — `verify.denied` (sampled), `provider.error`, `txn.evicted`, `events.dropped` — are written by a bounded best-effort batch writer without delivery rows; drops are counted and reported as `events.dropped`.
 - Security counters are **not** derived from events: throttling and lockout (M2) update their counters synchronously and atomically (an SQL `UPDATE … RETURNING` or a Redis script, as the gateway's counters do) before an attempt is admitted; the `login.failed` event is written in the same transaction for history.
 
-Retention: `events.retention_days` (default 90) and `events.max_rows`
-(default 1,000,000), pruned hourly oldest-first; pruning never removes rows
-newer than any sink's cursor.
+Backlog and retention are bounded, and the storage bound wins (review
+finding N05): per sink, `events.max_pending_per_sink` (default 10,000)
+pending or retrying deliveries are kept; beyond that the oldest are moved to
+`state = failed` with `last_error = backlog_overflow`, and a
+`sink.backlog_overflow` event plus metric `hopae_event_deliveries_failed_total{sink,reason}`
+report it. Retries use exponential backoff capped at 24 h total, after
+which a delivery is `failed` (`retries_exhausted`). `events.retention_days`
+(default 90) and `events.max_rows` (default 1,000,000) prune rows hourly
+oldest-first **regardless of delivery state**; pruning a row with a
+non-terminal delivery marks that delivery `failed` (`pruned`) first and
+counts it. `failed` deliveries are visible in the console (M4) and can be
+re-queued by an administrator while the event row still exists.
 
 Consumers defined now, implemented later: login history queries (M2) read
 the table; webhooks (M5) deliver HMAC-signed JSON per destination from the
-durable rows with `event_id` as the idempotency key and a per-destination
-cursor and retry state; the administrator audit (M4) is `admin.*` events in
-the same table.
+durable rows, `event_id` as the idempotency key, per-destination delivery
+rows and retry state as above; the administrator audit (M4) is `admin.*`
+events in the same table.
 
 Out of scope: event schemas as a public API (webhook payloads are versioned
 separately in M5), log shipping.
@@ -62,11 +72,12 @@ separately in M5), log shipping.
 ### Positive
 
 - One vocabulary of reasons across logs, history, webhooks and the console; one place to enforce "no secrets".
-- Audit rows and state changes cannot disagree; webhooks replay from durable rows after a restart.
+- Audit rows and state changes cannot disagree; a sink can never skip an event; a stalled sink can never exhaust the disk.
 
 ### Negative
 
-- Every login or session write carries an extra row in its transaction; the batching writer only exists for diagnostics.
+- Every login or session write carries an extra row per subscribed sink in its transaction; the batching writer only exists for diagnostics.
+- At-least-once delivery means receivers must deduplicate; the log may contain a repeated line after a crash.
 - Sampling `verify.denied` hides repeated denials of one client; the counter metric keeps the volume visible.
 
 ### Neutral
@@ -80,6 +91,7 @@ separately in M5), log shipping.
 | Log lines as the only record, parsed later | Not queryable for lockouts and history; schema drift. |
 | Separate tables per consumer (history, audit, webhook outbox) | Three write paths and three vocabularies for one fact. |
 | In-process broadcast bus with a store subscriber and a synchronous fallback (the G1 draft) | Rejected after review finding R10: a lagging receiver is overwritten before the fallback can see it; counters derived from events undercount. |
+| Per-sink cursor over time-ordered event ids (the pass-1 revision) | Rejected after review finding N04: an event whose transaction commits after a later id was delivered is skipped forever; cursor-protected retention also made storage unbounded (N05). |
 | External message broker | A new runtime dependency for a single process; Redis pub/sub (M2) is for invalidation, not durable events. |
 
 ## Adversarial review
@@ -87,8 +99,12 @@ separately in M5), log shipping.
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 0 | 1 | 0 | 0 | 1 × FIX_FIRST applied (R10) |
+| 2 | 2026-10-09 | 1 | 1 | 0 | 0 | R10 PARTIAL → N04, N05 FIX_FIRST applied (per-sink delivery rows, at-least-once with dedup, bounded backlog with dead-letter) |
 
 Findings and dispositions:
+
+- N04 (S1, pass 2): a time-ordered id cursor could skip a late-committing event, and "exactly once" was unachievable. FIX_FIRST: `event_deliveries` rows in the event's transaction, claimed by workers; at-least-once with `event_id` deduplication; scenario 014-7 rewritten.
+- N05 (S2, pass 2): cursor-protected retention let a stalled sink grow the table without bound. FIX_FIRST: `max_pending_per_sink`, retry cap, dead-letter `failed` state, pruning regardless of delivery state; scenario 014-8.
 
 - R10 (S2): the broadcast bus could lose `login.failed` events and undercount throttling. FIX_FIRST: transactional outbox for required kinds, durable sink cursors, synchronous atomic counters; scenario 014-5 and 014-6 rewritten.
 
@@ -102,7 +118,8 @@ switch?
 ## 한국어 요약
 
 보안 관련 모든 사건은 하나의 `Event` 타입으로 표현합니다. 식별자와 사유
-코드만 담고 자격 증명은 절대 담지 않습니다. M1에서는 구조화 로그와 `events`
-테이블에 기록하고, M2의 로그인 기록·시도 차단, M4의 관리자 감사, M5의 웹훅은
-같은 버스를 구독하는 소비자로 구현합니다. `login.*`과 `session.*`은 유실하지
-않습니다.
+코드만 담고 자격 증명은 절대 담지 않습니다. 필수 이벤트와 싱크별 전달 행은
+상태 변경과 같은 트랜잭션에서 커밋되어 세션과 기록이 어긋나거나 전달이 건너뛰어
+질 수 없습니다. 전달은 최소 1회이며 수신자는 `event_id`로 중복을 제거합니다.
+싱크가 멈추면 전달 적체는 상한에서 실패 상태로 옮겨지고 보존 정책이 저장소 상한을
+지킵니다. 시도 차단 카운터는 이벤트가 아니라 동기 원자 연산으로 갱신합니다.

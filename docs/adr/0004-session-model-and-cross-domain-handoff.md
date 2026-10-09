@@ -14,6 +14,8 @@
 - Revocation must be immediate and global (logout everywhere, administrator revocation, binding mismatch) — a self-contained signed cookie cannot provide that without a denylist.
 - Return URLs are a classic open-redirect vector; the gateway supplies the original URL on every verify call, but its authority is still client-selected on host-neutral routes (review finding R14).
 - A handoff code bound only to host, path and client IP can be redeemed by any browser behind the same NAT, which allows login CSRF by session swapping (review finding R02). The handoff needs a secret that only the browser that started the login holds on the target host.
+- The portal cannot observe an application host's cookies, so it can never prove that the browser finishing a transaction is the one that started it on the application host; the only defense against a code being delivered to a hostile destination is that destinations are exactly the hosts the operator registered and serves through the gateway (review finding N03). Suffix patterns admit dangling subdomains.
+- Browsers open several tabs; a transaction or binding cookie that each new login replaces makes concurrent logins fail each other (review finding N07). Elevation that leaves earlier handoff codes alive lets a pre-elevation code mint an elevated handle (review finding N01).
 
 ## Decision
 
@@ -26,22 +28,31 @@ matching **binding cookie** on that host.
 | --- | --- |
 | Session | One row per browser login: user, provider, `auth_time`, satisfied factors, `aal`, binding context, lifetimes, termination reason, `authz_version` of the user at snapshot time. Carries an identity snapshot so verify needs no joins beyond the user status check. |
 | Handle | `v1.` + base64url(32 CSPRNG bytes); stored as SHA-256; bound to exactly one (session, host); carries `issued_aal`, `created_at`, `last_seen_at`, `absolute_expires_at`. Cookie `__Host-hopae` with `Path=/; Secure; HttpOnly; SameSite=Lax`; `Max-Age` = remaining handle lifetime. The portal host holds a handle too (the "portal handle"). |
-| Binding cookie | `__Host-hopae_bind` = base64url(16 CSPRNG bytes), planted on the **application host** by the unauthenticated `302` that starts a login (document navigations only), `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600`. The transaction stores `bind_sha256` for that host. Cleared by the redemption response. |
-| Login transaction | 128-bit random id in cookie `__Host-hopae_txn` on the portal host (`Max-Age=600`) and in the `txn` query parameter; stores the return target from `x-original-url`, the application, client IP, UA digest, `bind_sha256`, chosen provider, `state`, `nonce`, PKCE verifier, purpose (`login`, `stepup`, `link`). Consumed once. |
-| Handoff code | 32 CSPRNG bytes, stored as SHA-256; bound to (session, target host, target path, client IP, `bind_sha256`); 60 s lifetime; consumed by an atomic conditional update. Delivered as `?_hopae_handoff=<code>` appended to the return target. |
-| Redemption rule | Verify redeems a code only when: the code is unexpired and unconsumed; host and path match; the client IP matches; the request carries `__Host-hopae_bind` whose SHA-256 equals the code's `bind_sha256`; and the request carries **no** valid `__Host-hopae` for a different user. A valid handle of the same user is replaced (re-handoff after elevation); a valid handle of another user rejects the code with `session_conflict` and leaves the existing cookie untouched. Any failure burns the code. |
+| Binding cookie | `__Host-hopae_bind` = base64url(16 CSPRNG bytes), a **stable per-browser secret on the application host**: planted by the unauthenticated `302` that starts a login (document navigations only) when the request carries no well-formed bind, otherwise the existing value is kept and its `Max-Age=600` refreshed. `Path=/; Secure; HttpOnly; SameSite=Lax`. Every transaction for that host stores the same `bind_sha256`, so concurrent tabs share it. It is never cleared or replaced by a redemption, a failure or a non-document response; it expires by `Max-Age`. |
+| Portal binding cookie | `__Host-hopae_portal` = base64url(16 CSPRNG bytes), a stable per-browser secret on the portal host, planted at first portal contact and refreshed (`Max-Age=600`). Each transaction stores `portal_bind_sha256` at its first portal visit; the provider callback and every portal `POST` require the cookie to match the transaction's digest. There is no per-transaction portal cookie, so several transactions can be open in several tabs. |
+| Login transaction | 128-bit random id carried in the `txn` query parameter only; stores the return target from `x-original-url`, the application, client IP, UA digest, `bind_sha256`, `portal_bind_sha256`, chosen provider, `state` digest, `nonce`, PKCE verifier, purpose (`login`, `stepup`, `link`, `switch`), `conflicting_handle_sha256` (for `switch`). The callback locates the transaction by `state`. Consumed once. |
+| Handoff code | 32 CSPRNG bytes, stored as SHA-256; bound to (session, target host, target path, client IP, `bind_sha256`); records `issued_aal` (the session's level when the code was minted) and `cred_gen` (the session's credential generation at that time); 60 s lifetime; consumed by an atomic conditional update. Delivered as `?_hopae_handoff=<code>` appended to the return target. |
+| Reserved parameter recognition | The query is parsed as `application/x-www-form-urlencoded` pairs; a pair whose **decoded** name equals `_hopae_handoff` (so `%5Fhopae%5Fhandoff` is the same parameter) is the handoff parameter. More than one such pair, or a pair with a malformed percent escape in its name, makes the request ambiguous: nothing is redeemed and the request is denied (`handoff_ambiguous`). The same rule is the gateway's cache-bypass rule ([ADR-0006](0006-verify-caching-and-invalidation.md)). |
+| Redemption rule | Only a document navigation redeems; a non-document request carrying the parameter is verified as if the parameter were absent. Verify redeems when: the code is unexpired and unconsumed; host and path match; the client IP matches; `__Host-hopae_bind`'s SHA-256 equals the code's `bind_sha256`; `cred_gen` equals the session's current generation (checked inside the consuming update); and the request carries **no** valid `__Host-hopae` of a different user. The new handle's `issued_aal` is `min(code.issued_aal, session.aal)`: redemption never raises a grant. A valid handle of the same session is replaced. A valid handle of another user answers `302` to the portal's `/switch` page (purpose `switch`, below) and burns the code. If the request carries a **consumed** code together with a valid handle of the same session (a prefetch or a retried navigation redeemed it already), verify answers the clean `302` without touching cookies (`code_already_redeemed`). Any other failure burns the code and answers the unauthenticated `302` (which keeps the existing bind). |
+| Account switch | On `session_conflict` the portal shows a CSRF-protected confirmation naming the host and both accounts. Confirming revokes the presented handle (possession of a handle authorizes revoking it, as logout does), mints a fresh code for the new session and redirects; declining returns to the clean URL as the existing user. Nothing switches silently. |
 | Lifetimes | Per handle: `apps[].session.idle` (default 12 h) and `apps[].session.absolute` (default 7 d). Per session: `session.idle` (default 24 h, measured from the newest `last_seen_at` of any handle including the portal's) and `session.absolute` (default 30 d). The state machine is in [ADR-0007](0007-context-binding-policy.md). `last_seen_at` writes are coalesced to one per 30 s per handle. |
-| Termination and revocation | Session reasons: `logout`, `logout_all`, `idle`, `absolute`, `binding_ip`, `binding_ua`, `admin`, `user_disabled`, `blocked`, `key_rotation`, `authz_change`. Handle reasons: `idle`, `absolute`, `binding_ip`, `binding_ua`, `elevation`, `session_terminated`. Termination revokes every handle and publishes an invalidation message (M2). |
-| Single sign-on | When the portal holds a valid portal handle whose session passes the portal's binding policy, `/login?txn=` skips the provider and mints a handoff code for the transaction's host and `bind_sha256` immediately; `auth_time` is not refreshed. |
-| Return target | Only from `x-original-url` of the verify call that created the transaction; validated: absolute; scheme `https` (or `http` only with `cookie.secure=false`); host equals `x-forwarded-host`; **host and port are in the return-origin allowlist**; ≤ 2048 bytes; no userinfo; no fragment. Emitted only as `Location` toward that origin. |
-| Return-origin allowlist | The set of origins Hopae may redirect to: every registered application's `hosts` entries (exact host names or `*.suffix` patterns such as `*.example.test`) with port 443 (or 80 in insecure mode) and any `apps[].ports` listed explicitly. There is no "any host" mode: the former `apps.unregistered = allow_default` is replaced by explicit patterns on the `default` application, and a host that matches no pattern is denied with `unknown_app` before any transaction is created. |
+| Termination, revocation and generations | Session reasons: `logout`, `logout_all`, `idle`, `absolute`, `binding_ip`, `binding_ua`, `admin`, `user_disabled`, `blocked`, `key_rotation`, `authz_change`. Handle reasons: `idle`, `absolute`, `binding_ip`, `binding_ua`, `elevation`, `switch`, `session_terminated`. Every revocation and every elevation increments `sessions.cred_gen` and marks all outstanding handoff codes of the session consumed, in one transaction; termination revokes every handle and publishes an invalidation message (M2). |
+| Single sign-on | When the portal holds a valid portal handle whose session passes the portal's binding policy, `/login?txn=` skips the provider and mints a handoff code for the transaction's host and `bind_sha256` immediately; `auth_time` is not refreshed. With `portal.sso_confirm_new_host = true` (default `false`) the portal first shows a one-click confirmation naming the destination host the first time this session is handed off to it. |
+| Return target | Only from `x-original-url` of the verify call that created the transaction; validated: absolute; scheme `https` (or `http` only with `cookie.secure=false`); host equals `x-forwarded-host`; **host and port are an exact entry of the return-origin allowlist**; ≤ 2048 bytes; no userinfo; no fragment. Emitted only as `Location` toward that origin. |
+| Return-origin allowlist | Exactly the registered applications' `hosts` entries, which are **exact host names only** (lower-case, no wildcard, no pattern), with port 443 (or 80 in insecure mode) and any `apps[].ports` listed explicitly. Registering a host asserts that it is served through the gateway; a registered host whose DNS no longer points at the gateway is an open credential destination, which the phase-1 drift check reports ([ADR-0012](0012-service-registration-and-gateway-config-ownership.md)). There is no "any host" mode and no suffix mode: a host that is not listed is denied with `unknown_app` before any transaction is created. The `default` application carries policy defaults, not hosts. |
 | Cookie scope | Host-only. `SameSite=Lax` for every cookie; no `Domain=` mode; no `Strict` option (the portal → application redirect is a cross-site top-level navigation). |
 
 Handoff on an application host, step by step:
 
-1. Verify sees `_hopae_handoff` in `x-original-url`. It strips the parameter to obtain the target. Caching, if any, is bypassed before this step (ADR-0006).
-2. It consumes the code atomically under the redemption rule above. On failure: unauthenticated `302` to a new transaction (which plants a fresh binding cookie), event `handoff.rejected` with the reason.
-3. It mints a handle for (session, host) with `issued_aal` = the session's current `aal`, answers `302 Location: <target>` with `Set-Cookie: __Host-hopae=<handle>`, `Set-Cookie: __Host-hopae_bind=; Max-Age=0` and `Cache-Control: no-store`.
+1. Verify recognizes the handoff parameter under the recognition rule and strips it to obtain the target. Caching, if any, is bypassed before this step (ADR-0006). A non-document request skips to ordinary verification.
+2. It consumes the code atomically under the redemption rule above (one conditional update that also checks `cred_gen`; in PostgreSQL both this update and the elevation transaction lock the session row). On failure: the unauthenticated `302` to a new transaction, which keeps the existing bind; event `handoff.rejected` with the reason.
+3. It mints a handle for (session, host) with `issued_aal = min(code.issued_aal, session.aal)`, answers `302 Location: <target>` with `Set-Cookie: __Host-hopae=<handle>` and `Cache-Control: no-store`. The bind cookie is left as it is.
+
+Clients that cannot perform a document navigation (the `401` path) receive the
+application URL itself as the `login` target: opening it in a browser is the
+document bootstrap that plants the bind and starts a transaction. No
+transaction is created for a `401`. Browserless clients are out of scope
+until the API-client mode (M7).
 
 Out of scope for this ADR: step-up policy (ADR-0008), binding evaluation
 rules and the lifetime state machine (ADR-0007), the wire details (ADR-0005).
@@ -60,6 +71,7 @@ rules and the lifetime state machine (ADR-0007), the wire details (ADR-0005).
 
 - Every new host costs one extra redirect pair, and a login started in one browser cannot be finished in another (by design).
 - A browser that blocks cookies on the application host cannot log in; the failure page says so.
+- Every protected host must be registered by exact name; wildcard hosts are not supported for login.
 - The code is visible in the URL for up to 60 s and appears in the gateway's access log; mitigated by single use, binding and `referrer-policy: no-referrer` on the relayed response.
 - A reserved query parameter name exists on every protected application.
 
@@ -79,25 +91,35 @@ rules and the lifetime state machine (ADR-0007), the wire details (ADR-0005).
 | Code delivered in a URL fragment and planted by JavaScript | The portal must work without JavaScript; the gateway cannot see fragments. |
 | Same handle on every host | A leak on one host compromises all hosts; per-host revocation impossible. |
 | Trusting `x-original-url`'s host because the gateway generated it | Rejected after review finding R14: on host-neutral routes the authority is still chosen by the client's `Host` header. |
+| `*.suffix` host patterns in the return-origin allowlist (the pass-1 revision) | Rejected after review finding N03: a dangling subdomain under the suffix becomes a credential destination; the portal cannot verify bind possession across hosts, so destination trust must be exact. |
+| Per-transaction bind and portal cookies replaced on every login (the pass-1 revision) | Rejected after review finding N07: concurrent tabs invalidate each other; a stable per-browser secret per host supports many transactions. |
+| Proving bind possession at the portal | Impossible without a round trip through the destination, which is the handoff itself; replaced by exact destinations and the optional first-handoff confirmation. |
 
 ## Adversarial review
 
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 1 | 2 | 1 | 0 | 4 × FIX_FIRST applied (R02, R14, R15, R16) |
+| 2 | 2026-10-09 | 2 | 3 | 1 | 0 | R02, R16 CLOSED; R14, R15 PARTIAL → N03, N10; new N01 (shared), N06, N07, N08, N12 (shared): all FIX_FIRST applied |
 
 Findings and dispositions:
+
+- N01 (S1, pass 2, shared with ADR-0008): a code minted before elevation redeemed afterwards received the elevated level. FIX_FIRST: codes carry `issued_aal` and `cred_gen`; elevation consumes outstanding codes; redemption never raises a grant; scenario 003-A11 races both orders.
+- N03 (S1, pass 2): a dangling host under a `*.suffix` pattern could receive a victim's code; the portal cannot prove bind possession. FIX_FIRST: exact registered hosts only; optional first-handoff confirmation; drift check for registered hosts not served by the gateway; scenario 005 rewritten.
+- N06 (S2, pass 2): the `401` login URL started a transaction that could never hand off. FIX_FIRST: `401` creates nothing and names the application URL as the document bootstrap; scenario 001-4.
+- N07 (S2, pass 2): per-transaction cookies broke concurrent tabs; failures reset binds; prefetch left a consumed code in the navigated URL. FIX_FIRST: stable per-host bind and stable portal binding cookie, transactions located by `state`, document-only redemption, binds never cleared by responses, idempotent `code_already_redeemed`; scenarios 003-6, 003-7, 002-A1/A5.
+- N08 (S2, pass 2): `session_conflict` had no legitimate exit. FIX_FIRST: CSRF-protected `/switch` confirmation that revokes the presented handle on consent; scenario 003-A10 and 006-7.
+- N10 (S2, pass 2): scenario contradictions on cookie lifetime and portal validity. FIX_FIRST: scenarios 009-1 and 010 fixtures corrected.
+- N12 (S3, pass 2, shared with ADR-0006): encoded parameter aliases escaped recognition. FIX_FIRST: one decoded-name recognition rule with ambiguity rejection, used by redemption and by HC-1 bypass; scenarios 003-2 and 003-A12.
 
 - R02 (S1): handoff codes allowed session swapping between browsers behind one IP. FIX_FIRST: browser binding cookie on the application host, `bind_sha256` in the code, never replace another user's valid handle; scenarios 003-A9 and 003-A10.
 - R14 (S2): `allow_default` let a host-neutral route redirect to an attacker-chosen authority. FIX_FIRST: explicit return-origin allowlist from application host patterns and ports; `allow_default` removed; scenario 005-3 rewritten.
 - R15 (S2, shared with ADR-0007): per-host expiry contradicted session-wide termination. FIX_FIRST: handles carry their own timers; session timers are separate; state machine in ADR-0007; scenario 010 rewritten.
 - R16 (S3): `SameSite=Strict` would break the cross-site SSO navigation. FIX_FIRST: no `same_site` option; `Lax` fixed.
 
-Open for the reviewer: a browser prefetch that consumes the handoff code
-before the user's navigation now fails closed (the bind cookie travels with
-prefetches too, so the prefetch succeeds and the navigation sees the planted
-handle — confirm with real browsers at G8). Binding the code to the client IP
-in addition to the bind cookie is kept; it can be relaxed per application later.
+Open for the reviewer: whether `portal.sso_confirm_new_host` should default
+to `true`; whether binding the code to the client IP in addition to the bind
+cookie should follow the application's `binding.ip` mode.
 
 ## References
 
@@ -109,9 +131,11 @@ in addition to the bind cookie is kept; it can be relaxed per application later.
 
 세션은 서버에만 저장하고, 브라우저는 호스트마다 하나씩 발급되는 불투명 핸들만
 `__Host-hopae` 쿠키로 보관합니다. 로그인을 시작하는 미인증 `302`가
-애플리케이션 호스트에 바인딩 쿠키(`__Host-hopae_bind`)를 심고, 로그인이 끝나면
-돌아갈 URL에 붙인 일회용 핸드오프 코드는 그 바인딩 쿠키를 가진 브라우저만
-소비할 수 있습니다. 같은 IP의 다른 브라우저는 코드를 쓸 수 없고, 다른
-사용자의 유효한 세션을 조용히 바꿔치기할 수도 없습니다. 돌아갈 URL은
-게이트웨이가 만든 `x-original-url`에서만 가져오되, 등록된 애플리케이션 호스트
-패턴과 포트로 이루어진 명시적 허용 목록 안에 있어야 합니다.
+애플리케이션 호스트에 브라우저별로 안정적인 바인딩 쿠키(`__Host-hopae_bind`)를
+심고, 로그인이 끝나면 돌아갈 URL에 붙인 일회용 핸드오프 코드는 그 바인딩
+쿠키를 가진 브라우저만, 문서 탐색으로만 소비할 수 있습니다. 코드는 발급 시점의
+인증 수준과 세션의 자격 증명 세대를 기록하므로 단계 상승 전에 만든 코드로
+상승된 핸들을 얻을 수 없습니다. 돌아갈 URL은 게이트웨이가 만든
+`x-original-url`에서만 가져오되, 정확히 등록된 호스트와 포트로만 이루어진 허용
+목록 안에 있어야 하며 와일드카드는 없습니다. 다른 사용자의 세션은 조용히
+바꿔치기되지 않고 확인 페이지를 거칩니다.

@@ -4,9 +4,9 @@
 
 - Area: sessions
 - Milestone: M1
-- ADRs: 0004, 0005
-- Threat model: TM-02, TM-04, TM-05, TM-22
-- Gateway contract: Cross-domain handoff, Cookies, Verify endpoint (`302` with `set-cookie`)
+- ADRs: 0004, 0005, 0008
+- Threat model: TM-02, TM-04, TM-05, TM-22, TM-23, TM-31, TM-33, TM-36
+- Gateway contract: Cross-domain handoff, Reserved parameter recognition, Cookies, Verify endpoint (`302` with `set-cookie`)
 
 ## Goal
 
@@ -20,8 +20,8 @@ yields a session handle and never replaces another user's session.
 
 ## Preconditions and fixtures
 
-- Configuration `tests/fixtures/m1-two-domains.json`: applications `app` (`app.example.test`) and `other` (`other.example.org`); `default` application with pattern `*.example.test`.
-- The browser holds `__Host-hopae_bind=B1` on `app.example.test` (planted in scenario 001); session `s_1` with portal handle `H0`; handoff code `K1` for `(s_1, app.example.test, /admin/x, 203.0.113.9, sha256(B1))` created at `t0`.
+- Configuration `tests/fixtures/m1-two-domains.json`: applications `app` (`app.example.test`) and `other` (`other.example.org`); every host registered by exact name.
+- The browser holds `__Host-hopae_bind=B1` on `app.example.test` (planted in scenario 001); session `s_1` (`aal=1`, `cred_gen=1`) with portal handle `H0`; handoff code `K1` for `(s_1, app.example.test, /admin/x, 203.0.113.9, sha256(B1), issued_aal=1, cred_gen=1)` created at `t0`.
 - Every verify request carries the caller key.
 - Gateway route fragments for both hosts (gateway layer).
 - Injected clock and randomness (`H1` for the new handle).
@@ -31,14 +31,14 @@ yields a session handle and never replaces another user's session.
 ### S003-1 Valid code with the binding cookie plants the handle and redirects to the clean URL
 
 - Given: `K1` unconsumed, `now = t0 + 5 s`.
-- When: `GET /_hopae/verify` with `x-original-url: https://app.example.test/admin/x?_hopae_handoff=K1`, `x-forwarded-host: app.example.test`, `x-forwarded-proto: https`, `x-forwarded-for: 203.0.113.9`, `cookie: __Host-hopae_bind=B1`.
-- Then: `302 location: https://app.example.test/admin/x`; `set-cookie: __Host-hopae=H1; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=<handle absolute remaining>`; `set-cookie: __Host-hopae_bind=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`; `cache-control: no-store`; `x-hopae-reason: handoff`; `handoff_codes.consumed_at` set; `session_handles` row `(sha256(H1), s_1, app.example.test, issued_aal=1)`; event `session.handoff` in the same transaction.
+- When: `GET /_hopae/verify` (document navigation) with `x-original-url: https://app.example.test/admin/x?_hopae_handoff=K1`, `x-forwarded-host: app.example.test`, `x-forwarded-proto: https`, `x-forwarded-for: 203.0.113.9`, `cookie: __Host-hopae_bind=B1`.
+- Then: `302 location: https://app.example.test/admin/x`; `set-cookie: __Host-hopae=H1; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=<handle absolute remaining>`; **no** `set-cookie` for `__Host-hopae_bind` (it stays); `cache-control: no-store`; `x-hopae-reason: handoff`; `handoff_codes.consumed_at` set; `session_handles` row `(sha256(H1), s_1, app.example.test, issued_aal=1)`; event `session.handoff` in the same transaction.
 
-### S003-2 Other query parameters are preserved
+### S003-2 Other query parameters are preserved and encoded aliases are recognized
 
-- Given: as S003-1 with `x-original-url: https://app.example.test/admin/x?q=1&_hopae_handoff=K1&z=2`.
+- Given: as S003-1 with `x-original-url: https://app.example.test/admin/x?q=1&_hopae_handoff=K1&z=2`, then with `?q=1&%5Fhopae%5Fhandoff=K1&z=2`, then with `?q=1&_hopae_handoff=K1%2B&z=2` (value percent-encoded).
 - When: verify.
-- Then: `location: https://app.example.test/admin/x?q=1&z=2`; parameter order preserved; no double `?`.
+- Then: in each case `location: https://app.example.test/admin/x?q=1&z=2`; parameter order preserved; no double `?`; the encoded name is recognized as the same parameter and the value is percent-decoded before lookup.
 
 ### S003-3 Next request on the host is allowed
 
@@ -49,8 +49,8 @@ yields a session handle and never replaces another user's session.
 ### S003-4 Second domain via single sign-on
 
 - Given: the browser holds `H0` on the portal host; no cookie on `other.example.org`.
-- When: verify for `https://other.example.org/` → `302` to `/login?txn=T2` planting `__Host-hopae_bind=B2` on `other.example.org` → `GET /login?txn=T2` with `H0` → `302` with `?_hopae_handoff=K2` (bound to `sha256(B2)`) → verify for `other.example.org` with `K2` and `cookie: __Host-hopae_bind=B2`.
-- Then: a handle `H2` for `(s_1, other.example.org)`; `session_handles` now has three rows for `s_1`; no provider interaction; `B2` cleared.
+- When: verify for `https://other.example.org/` → `302` to `/login?txn=T2` planting `__Host-hopae_bind=B2` on `other.example.org` → `GET /login?txn=T2` with `H0` and the portal binding cookie → `302` with `?_hopae_handoff=K2` (bound to `sha256(B2)`) → verify for `other.example.org` with `K2` and `cookie: __Host-hopae_bind=B2`.
+- Then: a handle `H2` for `(s_1, other.example.org)`; `session_handles` now has three rows for `s_1`; no provider interaction; `B2` stays. With `portal.sso_confirm_new_host = true` the portal first answers `200` with a one-click confirmation naming `other.example.org` and continues after `POST /login/continue` with the CSRF token.
 
 ## Alternative flows
 
@@ -60,13 +60,31 @@ yields a session handle and never replaces another user's session.
 - When: the full chain from the portal `302` to the final `200` on `app.example.test` and `other.example.org`.
 - Then: the upstream never receives a request containing `_hopae_handoff`; the browser receives `set-cookie` only on responses from the respective host; `referrer-policy: no-referrer` present on the relayed `302`.
 
+### S003-6 Already-redeemed code with its own handle answers the clean redirect
+
+- Given: a prefetch redeemed `K1` and the browser now holds `H1`; the user's navigation still carries `?_hopae_handoff=K1`.
+- When: verify (document navigation) with `cookie: __Host-hopae=H1; __Host-hopae_bind=B1` and the consumed `K1`.
+- Then: `302 location: https://app.example.test/admin/x`; no `set-cookie` at all; `x-hopae-reason: code_already_redeemed`; no event beyond a sampled diagnostic; the following `GET /admin/x` is `200`.
+
+### S003-7 Non-document requests never redeem and never touch cookies
+
+- Given: `K1` unconsumed; the browser holds `B1`.
+- When: verify with `sec-fetch-dest: empty`, `sec-fetch-mode: cors` and `x-original-url` carrying `K1`, then the same with an invalid code.
+- Then: both answer `401 login_required` (the parameter is ignored); `K1` stays unconsumed; no `set-cookie`; `B1` is untouched; the user's later document navigation with `K1` succeeds as S003-1.
+
+### S003-8 Concurrent transactions share the binding cookie
+
+- Given: tab A started a login on `app.example.test` (transaction `TA`, bind `B1`); before it completes, tab B starts another (`TB`).
+- When: tab B's unauthenticated verify arrives with `cookie: __Host-hopae_bind=B1`.
+- Then: the `302` keeps `B1` (refreshes `Max-Age`, no new value); `TB.bind_sha256 = sha256(B1)`; both `KA` and `KB` redeem successfully in either order, the second replacing the handle of the same session; at the portal both transactions coexist under the same `__Host-hopae_portal` value.
+
 ## Abuse cases
 
 | Category | Case | Applies |
 | --- | --- | --- |
 | Replay | S003-A1 | yes |
-| Tampering | S003-A2 | yes |
-| Race / timing | S003-A3 | yes |
+| Tampering | S003-A2, S003-A12 | yes |
+| Race / timing | S003-A3, S003-A11 | yes |
 | Resource exhaustion | S003-A4 | yes |
 | Confused deputy | S003-A5, S003-A9, S003-A10 | yes |
 | Spoofed or duplicated headers | S003-A6 | yes |
@@ -76,8 +94,8 @@ yields a session handle and never replaces another user's session.
 ### S003-A1 Replayed code is rejected without state change
 
 - Given: `K1` consumed by S003-1.
-- When: the same verify request again (no cookie).
-- Then: `302` to the portal with a new transaction (as scenario 001); no second handle; `handoff.rejected` with `reason=code_consumed`; the existing session is untouched.
+- When: the same verify request again from a browser without `H1` (another browser holding `B1`'s digest is impossible; the harness replays without any handle).
+- Then: `302` to the portal with a new transaction (as scenario 001); no second handle; existing cookies untouched; `handoff.rejected` with `reason=code_consumed`; the existing session is untouched.
 
 ### S003-A2 Code moved to another host or path is rejected
 
@@ -125,13 +143,25 @@ yields a session handle and never replaces another user's session.
 
 - Given: attacker browser X and victim browser Y share `203.0.113.9`. X started a login on `app.example.test` (binding cookie `Bx`), completed it, and captured its unconsumed code `Kx` (bound to `sha256(Bx)`) from the portal's redirect. Y holds no cookie on `app.example.test`, or holds its own binding cookie `By` from a login it started, or holds a valid handle of user V.
 - When: Y navigates to `https://app.example.test/admin/x?_hopae_handoff=Kx` within 60 s (verify sees Y's cookies only).
-- Then: `302` to the portal with a new transaction and a fresh binding cookie; **no** `set-cookie` for `__Host-hopae`; Y's existing cookies are unchanged; `Kx` is burned; event `handoff.rejected` with `reason=bind_mismatch`; X's own later navigation with `Kx` is also refused (`code_consumed`) and X recovers through single sign-on with a new code.
+- Then: `302` to the portal with a new transaction; Y's existing binding cookie, if any, is kept (a fresh one is planted only if Y had none); **no** `set-cookie` for `__Host-hopae`; `Kx` is burned; event `handoff.rejected` with `reason=bind_mismatch`; X's own later navigation with `Kx` is also refused (`code_consumed`) and X recovers through single sign-on with a new code.
 
-### S003-A10 A valid handle of another user is never replaced
+### S003-A10 A valid handle of another user is never replaced silently; the switch is explicit
 
-- Given: browser Y holds a valid `__Host-hopae=Hy` for user V on `app.example.test` and a binding cookie `By`; a code `Ka` for user A exists whose `bind_sha256 = sha256(By)` (constructed by the harness through the store to test the invariant directly).
-- When: verify with `x-original-url: https://app.example.test/admin/x?_hopae_handoff=Ka`, `cookie: __Host-hopae=Hy; __Host-hopae_bind=By`.
-- Then: `302 location: https://app.example.test/admin/x` with **no** `set-cookie` for `__Host-hopae` (the existing handle stays), `Ka` burned, event `handoff.rejected` with `reason=session_conflict`; the next verify with `Hy` is `200` as user V. With `Hy` belonging to user A instead, the code is redeemed and `Hy` is replaced by a new handle for A (re-handoff of the same user).
+- Given: browser Y holds a valid `__Host-hopae=Hy` for user V on `app.example.test` and a binding cookie `By`; a code `Ka` for user A exists whose `bind_sha256 = sha256(By)` (constructed by the harness through the store to test the invariant directly; naturally this arises when the portal session changed to A while the application still holds V).
+- When: verify (document navigation) with `x-original-url: https://app.example.test/admin/x?_hopae_handoff=Ka`, `cookie: __Host-hopae=Hy; __Host-hopae_bind=By`.
+- Then: `302 location: https://auth.example.test/switch?txn=Ts` with **no** `set-cookie` (every cookie stays); `Ka` burned; transaction `Ts` of purpose `switch` stores `conflicting_handle_sha256 = sha256(Hy)` and the clean target; event `handoff.rejected` with `reason=session_conflict`. `GET /switch?txn=Ts` shows host, user V and user A. `POST /switch` with `choice=switch`, the CSRF token and the portal binding cookie revokes `Hy` (`handle.revoked` with `reason=switch`), mints a fresh code for A bound to `sha256(By)` and redirects to the clean target with it; the next verify plants A's handle. `POST /switch` with `choice=keep` redirects to the clean target and the next verify with `Hy` is `200` as user V. With `Hy` belonging to A's own session instead, the code is redeemed directly and `Hy` is replaced (re-handoff of the same session).
+
+### S003-A11 A code minted before elevation never mints an elevated handle
+
+- Given: session `s_1` at `aal=1`, `cred_gen=1`; an unconsumed code `K0` (`issued_aal=1`, `cred_gen=1`) bound to the attacker's binding cookie `Bx` on `other.example.org` (obtained through single sign-on with a stolen portal handle); the victim completes a second factor, which in one transaction sets `aal=2`, `cred_gen=2`, revokes every handle and consumes every outstanding code.
+- When: (a) the attacker redeems `K0` after the elevation committed; (b) the attacker's redemption and the elevation race, with the redemption committing first.
+- Then: (a) `302` to the portal, `handoff.rejected` with `reason=code_consumed` (consumed by the elevation) or `code_stale_generation`, no handle. (b) the redemption mints a handle with `issued_aal = min(1, 1) = 1`, and the elevation that commits next revokes it (`reason=elevation`); the attacker's following verify is denied. In no interleaving does any handle with `issued_aal=2` exist for `other.example.org` unless minted from a code with `issued_aal=2` and `cred_gen=2`. The test runs both orders deterministically with harness-controlled commit points and additionally 200 unordered iterations.
+
+### S003-A12 Ambiguous reserved parameters are refused without consuming anything
+
+- Given: `K1` unconsumed and `B1` held.
+- When: verify (document navigation) with `x-original-url` carrying `?_hopae_handoff=K1&_hopae_handoff=K2`, then `?_hopae_handoff=K1&%5Fhopae%5Fhandoff=K1`, then `?%5Fhopae%ZZhandoff=K1`.
+- Then: `403` with `x-hopae-reason: handoff_ambiguous` for the first two (duplicate decoded name) and the third (malformed escape in a candidate name); `K1` remains unconsumed; no cookie changes; event `handoff.rejected` with `reason=handoff_ambiguous`. A later well-formed navigation with `K1` succeeds as S003-1.
 
 ## Observability expectations
 
@@ -148,6 +178,9 @@ yields a session handle and never replaces another user's session.
 | S003-3 | `s003_3_next_request_allowed` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-4 | `s003_4_second_domain_via_sso` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-5 | `s003_5_handoff_through_live_gateway` | `tests/scenarios/s003_handoff.rs` | gateway | planned |
+| S003-6 | `s003_6_already_redeemed_code_clean_redirect` | `tests/scenarios/s003_handoff.rs` | integration | planned |
+| S003-7 | `s003_7_non_document_never_redeems` | `tests/scenarios/s003_handoff.rs` | integration | planned |
+| S003-8 | `s003_8_concurrent_transactions_share_bind` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A1 | `s003_a1_replayed_code_rejected` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A2 | `s003_a2_moved_code_rejected_and_burned` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A3 | `s003_a3_concurrent_redemption_single_handle` | `tests/scenarios/s003_handoff.rs` | integration | planned |
@@ -157,7 +190,9 @@ yields a session handle and never replaces another user's session.
 | S003-A7 | `s003_a7_plain_http_target_refused` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A8 | `s003_a8_expired_code_uniform_response` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A9 | `s003_a9_two_browsers_same_ip_cannot_swap_sessions` | `tests/scenarios/s003_handoff.rs` | gateway | planned |
-| S003-A10 | `s003_a10_other_users_valid_handle_never_replaced` | `tests/scenarios/s003_handoff.rs` | integration | planned |
+| S003-A10 | `s003_a10_other_users_handle_requires_explicit_switch` | `tests/scenarios/s003_handoff.rs` | integration | planned |
+| S003-A11 | `s003_a11_pre_elevation_code_never_elevated` | `tests/scenarios/s003_handoff.rs` | integration | planned |
+| S003-A12 | `s003_a12_ambiguous_parameter_refused` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 
 ## Live verification
 
@@ -167,14 +202,16 @@ yields a session handle and never replaces another user's session.
 
 ## Open questions
 
-- A browser prefetch carries the binding cookie, so it redeems the code and the user's navigation then presents the planted handle; confirm with real browsers at G8 that the user-visible effect is nil.
+- Confirm with real browsers at G8 that a prefetch-redeemed code followed by the navigation (S003-6) is invisible to the user.
 - Should the IP binding of the code follow the application's `binding.ip` mode (`prefix`) rather than always `strict`, now that the binding cookie is the primary secret?
 
 ## 한국어 요약
 
 로그인 후 돌아갈 URL에 붙은 일회용 핸드오프 코드는 로그인을 시작할 때 그
-애플리케이션 호스트에 심어 둔 바인딩 쿠키를 가진 브라우저만 소비할 수 있으며,
-소비하면 그 호스트 전용 `__Host-hopae` 쿠키를 심고 깨끗한 URL로 `302`합니다.
-같은 IP의 다른 브라우저는 코드를 쓸 수 없고, 다른 사용자의 유효한 핸들은 절대
-바꿔치기되지 않습니다. 재사용·이동·만료·추측된 코드는 핸들을 만들지 못하며
-업스트림은 코드를 절대 보지 못합니다.
+애플리케이션 호스트에 심어 둔 브라우저별 바인딩 쿠키를 가진 브라우저만, 문서
+탐색으로만 소비할 수 있으며, 소비하면 그 호스트 전용 `__Host-hopae` 쿠키를
+심고 깨끗한 URL로 `302`합니다. 바인딩 쿠키는 여러 탭이 공유하고 어떤 응답도
+지우지 않습니다. 같은 IP의 다른 브라우저는 코드를 쓸 수 없고, 다른 사용자의
+유효한 핸들은 확인 페이지를 거쳐야만 바뀌며, 단계 상승 전에 만든 코드는 상승된
+핸들을 만들 수 없습니다. 인코딩된 매개변수 별칭은 같은 매개변수로 인식하고
+중복·모호한 형태는 거부합니다.

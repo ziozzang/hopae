@@ -46,6 +46,11 @@ guarded routes, so the Hopae check is a second line for other adapters.
 When both a gateway header and a computed value exist and differ, the
 request is denied (`canonical_path_mismatch`) and counted.
 
+The adapter also applies the reserved parameter recognition rule of
+[ADR-0004](0004-session-model-and-cross-domain-handoff.md) (decoded query
+names, ambiguity rejected) and sets `VerifyInput.handoff` to `None`,
+`Some(code)` or `Ambiguous`; the core never parses a query string.
+
 Rules:
 
 - `verify/`, `session/`, `policy/`, `identity/` and `provider/` never mention a gateway header name, a status code to send to a gateway, or a cookie attribute. A compile-time test in `gateway/` asserts the core modules do not import `gateway::*`, and a `grep`-based check in `make check-docs`' sibling target `make check-boundary` fails on the strings `x-original-`, `x-forwarded-` and `x-hangang` outside `gateway/` and `tests/`.
@@ -87,6 +92,7 @@ Out of scope: writing any non-Hangang adapter in M1–M6; a plugin ABI.
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 1 | 0 | 0 | 0 | 1 × FIX_FIRST applied (R04, shared) |
+| 2 | 2026-10-09 | 0 | 0 | 1 | 0 | R04 CLOSED; N12 (shared) FIX_FIRST applied: the recognition rule lives in the adapter and `VerifyInput.handoff` carries the result |
 
 Findings and dispositions:
 

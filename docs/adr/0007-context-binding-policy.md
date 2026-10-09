@@ -93,6 +93,7 @@ Out of scope: device fingerprinting, TLS fingerprinting, risk scoring.
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 0 | 1 | 0 | 0 | 1 × FIX_FIRST applied (R15, shared with ADR-0004) |
+| 2 | 2026-10-09 | 0 | 1 | 0 | 0 | R15 PARTIAL → N10 (scenario contradictions) FIX_FIRST applied in scenarios 009 and 010; the state machine itself stands |
 
 Findings and dispositions:
 

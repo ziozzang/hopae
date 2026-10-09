@@ -31,16 +31,23 @@ present and `2` when at least one second factor is present. First factors
 are `oidc`, `oauth2`, `email_link`, `password`; second factors are the
 `Factor` kinds. Entries are append-only for the life of the session.
 
-**Handles carry their level.** Every handle records `issued_aal` at
-issuance and the effective level of a request is the handle's `issued_aal`,
-never the session's current `aal`. When a second factor is satisfied the
-session's `aal` rises, **every existing handle of the session is revoked**
-(reason `elevation`), the portal handle is reissued to the browser that
-completed the challenge, and that browser is handed off again to the
-application it came from through the normal browser-bound handoff
-(ADR-0004); other hosts obtain new handles lazily through single sign-on on
-their next request. A handle stolen before elevation therefore never gains
-the elevation (review finding R05).
+**Handles and codes carry their level.** Every handle records `issued_aal`
+at issuance and the effective level of a request is the handle's
+`issued_aal`, never the session's current `aal`. Every handoff code records
+`issued_aal` and the session's `cred_gen` when minted. When a second factor
+is satisfied, one transaction: raises the session's `aal`, increments
+`sessions.cred_gen`, **revokes every existing handle** (reason `elevation`)
+and **marks every outstanding handoff code consumed** (reason `elevation`).
+The portal handle is then reissued to the browser that completed the
+challenge, and that browser is handed off again to the application it came
+from with a code minted at the new level and generation (ADR-0004); other
+hosts obtain new handles lazily through single sign-on on their next
+request. Redemption checks the code's `cred_gen` inside its consuming update
+and issues `min(code.issued_aal, session.aal)`, so a code minted before the
+elevation can neither be redeemed after it nor mint an elevated handle if
+its redemption commits first (it then mints a level-1 handle that the
+elevation revokes). A handle or code obtained before elevation therefore
+never gains the elevation (review findings R05, N01).
 
 **Headers.** Verify emits `x-hopae-aal` (the handle's `issued_aal`) and
 `x-hopae-factors` (`kind[:provider]` comma list) on every `200` from M1, so
@@ -107,8 +114,11 @@ details (origin is the portal origin), push factors.
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 2 | 0 | 0 | 0 | 2 × FIX_FIRST applied (R04 shared, R05) |
+| 2 | 2026-10-09 | 1 | 0 | 0 | 0 | R04 CLOSED; R05 PARTIAL → N01 FIX_FIRST applied |
 
 Findings and dispositions:
+
+- N01 (S1, pass 2): an outstanding handoff code survived elevation and was redeemed at the session's new level. FIX_FIRST: codes carry `issued_aal` and `cred_gen`; the elevation transaction consumes outstanding codes; redemption checks the generation in its conditional update and never raises the grant; scenario 003-A11 races redemption against elevation in both orders.
 
 - R04 (S1, shared): `path_prefix` matched the raw path while the gateway routes on the canonical path (`/%61dmin/x`). FIX_FIRST: rules match the canonical path from ADR-0013; scenario 008-A5.
 - R05 (S1): a stolen pre-elevation handle inherited the session's new `aal`. FIX_FIRST: `issued_aal` per handle, revoke-and-reissue on elevation, browser-bound re-handoff.

@@ -5,20 +5,21 @@
 - Area: security
 - Milestone: M1
 - ADRs: 0004, 0005
-- Threat model: TM-01, TM-26
+- Threat model: TM-01, TM-26, TM-30
 - Gateway contract: Verify endpoint (`x-original-url`), Cross-domain handoff
 
 ## Goal
 
 Every `Location` Hopae emits toward an application is derived from the
 gateway-generated original URL, validated against the explicit return-origin
-allowlist (registered application host patterns and ports) and bounds, and
-an attacker cannot turn the portal or the handoff into an open redirector,
-not even by choosing the `Host` header on a host-neutral route.
+allowlist (exactly the registered application host names and ports) and
+bounds, and an attacker cannot turn the portal or the handoff into an open
+redirector, not even by choosing the `Host` header on a host-neutral route
+or by controlling an unregistered sibling host.
 
 ## Preconditions and fixtures
 
-- Configuration `tests/fixtures/m1-two-domains.json`: application `app` with host `app.example.test`, application `other` with host `other.example.org`, the `default` application with pattern `*.example.test`; no `ports` listed (443 only).
+- Configuration `tests/fixtures/m1-two-domains.json`: application `app` with host `app.example.test`, application `other` with host `other.example.org`; the `default` application carries policy defaults and no hosts; no `ports` listed (443 only).
 - Unit fixtures: a table of URLs and expected validation outcomes in `tests/fixtures/return-targets.json`.
 
 ## Main flow
@@ -50,15 +51,17 @@ not even by choosing the `Host` header on a host-neutral route.
 | `https://app.example.test/..%2fadmin` | accept as a return target (the path is the application's URL); the canonical path for policy is computed separately and this one is non-canonical, so policy rules deny it |
 | `https://app.example.test:8443/` | reject `port_not_allowed` (no `apps[].ports` entry) |
 | `https://app.example.test:443/` | accept |
+| `https://new.example.test/` | reject `unknown_app` (sibling of a registered host; no suffix matching exists) |
+| `https://old.example.test/` | reject `unknown_app` (a formerly used host that was removed from `apps[].hosts`) |
 | `javascript:alert(1)` | reject `scheme` |
 
 ## Alternative flows
 
-### S005-3 Pattern-matched host under the default application
+### S005-3 Only exact registered hosts are credential destinations
 
-- Given: the `default` application has `hosts = ["*.example.test"]`.
-- When: verify with `x-forwarded-host: new.example.test`.
-- Then: accept; the transaction carries `app_id = default`. With `x-forwarded-host: new.example.org` (no pattern): `403 unknown_app`, no transaction, even though a `default` application exists. There is no configuration that accepts every host.
+- Given: a configuration that tries `hosts = ["*.example.test"]` and one that tries `hosts = ["App.Example.Test"]`.
+- When: `hopae --check`, then verify with `x-forwarded-host: new.example.test` against the valid fixture.
+- Then: the wildcard configuration is rejected by preflight (`hosts must be exact lower-case host names`); the mixed-case entry is normalized to lower-case with a warning; the verify answers `403 unknown_app` with no transaction and no cookie. There is no configuration that accepts every host or a suffix of hosts; with the read-only gateway credential (phase 1) `hopae --check` warns for every registered host whose DNS does not resolve to the gateway's addresses.
 
 ## Abuse cases
 
@@ -127,7 +130,7 @@ not even by choosing the `Host` header on a host-neutral route.
 | --- | --- | --- | --- | --- |
 | S005-1 | `s005_1_valid_target_round_trips_unchanged` | `tests/scenarios/s005_return_target.rs` | integration | planned |
 | S005-2 | `s005_2_validation_table` | `tests/scenarios/s005_return_target.rs` | unit | planned |
-| S005-3 | `s005_3_pattern_matched_host_default_app` | `tests/scenarios/s005_return_target.rs` | integration | planned |
+| S005-3 | `s005_3_only_exact_hosts_are_destinations` | `tests/scenarios/s005_return_target.rs` | integration | planned |
 | S005-A1 | `s005_a1_portal_parameters_cannot_alter_target` | `tests/scenarios/s005_return_target.rs` | integration | planned |
 | S005-A2 | `s005_a2_pathological_urls_bounded` | `tests/scenarios/s005_return_target.rs` | unit | planned |
 | S005-A3 | `s005_a3_provider_redirect_ignored` | `tests/scenarios/s005_return_target.rs` | integration | planned |
@@ -149,7 +152,8 @@ not even by choosing the `Host` header on a host-neutral route.
 ## 한국어 요약
 
 Hopae가 애플리케이션으로 보내는 모든 `Location`은 게이트웨이가 만든
-`x-original-url`에서만 나오며, 등록된 애플리케이션 호스트 패턴과 포트로 이루어진
-명시적 허용 목록과 스킴·길이·userinfo·fragment 검사를 통과해야 합니다. 모든
-호스트를 허용하는 설정은 없으므로, 호스트 중립 라우트에서 공격자가 `Host`를
-골라도 돌아갈 출처가 될 수 없고 오픈 리디렉션이 성립하지 않습니다.
+`x-original-url`에서만 나오며, 정확히 등록된 애플리케이션 호스트 이름과 포트로만
+이루어진 허용 목록과 스킴·길이·userinfo·fragment 검사를 통과해야 합니다.
+와일드카드나 접미사 패턴은 없으므로, 호스트 중립 라우트에서 공격자가 `Host`를
+골라도, 등록되지 않은 형제 호스트를 장악해도 돌아갈 출처가 될 수 없고 오픈
+리디렉션이 성립하지 않습니다.
