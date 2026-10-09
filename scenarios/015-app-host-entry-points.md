@@ -201,6 +201,12 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 - When: `/_hopae/login` and `/_hopae/logout` are requested with the same cookie.
 - Then: both clear the cookie and both produce the same `verify.denied` reason (`malformed_handle` or `unknown_handle`); a ticket refused by the rate limit is recorded under the same primary reason.
 
+### S015-A15 A refused ticket-only confirmation is recorded
+
+- Given: S015-4 (no portal handle), the confirmation page loaded.
+- When: `POST /logout` with `txn=T1` and a wrong CSRF token, then with a foreign `Origin`.
+- Then: both answer the no-op signed-out page (no link); `T1` is unconsumed and `s_1` live; two `csrf.rejected` events with `purpose=logout` and `cause=token` / `origin` exist. The genuine confirmation afterwards still works.
+
 ## Observability expectations
 
 - Log: `verify.denied` with `reason` ∈ {`reserved_path`, `entry_point_not_document`, `return_not_allowed`, `txn_rate_limited`}; `x-hopae-reason` ∈ {`logout_entry`, `already_authenticated`, `logout`} on the `302`s; `txn_purpose_mismatch` at the portal.
@@ -237,6 +243,7 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 | S015-A12 | `s015_a12_max_rows_holds_for_switch_and_link_creation` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
 | S015-A13 | `s015_a13_entry_points_need_an_html_accept` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
 | S015-A14 | `s015_a14_logout_entry_records_a_refused_handle_like_login` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
+| S015-A15 | `s015_a15_ticket_only_post_failing_csrf_or_origin_is_recorded` | `tests/scenarios/s015_app_host_entry_points.rs` | integration | planned |
 
 Scenario 004-11 (`s004_11_no_non_allow_path_is_2xx`) gains the outcomes
 `reserved_path`, `entry_point_not_document`, `return_not_allowed`,

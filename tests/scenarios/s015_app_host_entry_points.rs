@@ -765,7 +765,22 @@ fn s015_a1_replayed_or_foreign_ticket_harmless() {
         "no link from a consumed ticket: {}",
         post.body
     );
-    assert_eq!(total_events(&h), events_before, "no new event");
+    // The replay carries the plain page's token (bound to nothing), which does not
+    // verify against the portal binding cookie: that refusal is recorded
+    // (S015-A15), and it is the only new event: nothing was terminated.
+    assert_eq!(
+        total_events(&h),
+        events_before + 1,
+        "{:?}",
+        h.hooks.events(None, Some(5000))
+    );
+    let rejected = events(&h, "csrf.rejected");
+    assert_eq!(rejected.len(), 1, "{rejected:?}");
+    assert_eq!(rejected[0]["attrs"]["purpose"], "logout");
+    assert!(
+        events(&h, "session.terminated").len() == 1,
+        "no second termination"
+    );
     // Unknown id and a malformed one.
     let unknown = c.get("/logout?txn=AAAAAAAAAAAAAAAAAAAAAA");
     assert_eq!(unknown.status, 200);
@@ -1346,6 +1361,11 @@ fn s015_a13_entry_points_need_an_html_accept() {
                 Some("application/json"),
                 Some("*/*"),
                 Some("text/plain"),
+                // Explicitly unacceptable HTML is not accepted HTML (quality 0).
+                Some("text/html;q=0"),
+                Some("text/html; q=0.0"),
+                Some("application/xhtml+xml;q=0"),
+                Some("application/json, text/html;q=0, application/xhtml+xml;q=0.000"),
             ] {
                 let mut r = with_cookies(entry(ep, Some("same-origin")), &s).without("accept");
                 if let Some(a) = accept {
@@ -1371,6 +1391,18 @@ fn s015_a13_entry_points_need_an_html_accept() {
                 .header("accept", "application/json, text/html;q=0.5"),
         );
         assert_eq!(out.status, 302, "{out:?}");
+        // A positive quality, or one acceptable HTML range, counts.
+        for accept in [
+            "text/html;q=0.1",
+            "text/html;q=0, application/xhtml+xml;q=1",
+        ] {
+            let out = h.verify(
+                with_cookies(entry("/_hopae/login", Some("same-origin")), &s)
+                    .without("accept")
+                    .header("accept", accept),
+            );
+            assert_eq!(out.status, 302, "{accept}: {out:?}");
+        }
     }
 }
 
@@ -1401,6 +1433,63 @@ fn s015_a14_logout_entry_records_a_refused_handle_like_login() {
         assert!(!login.is_empty(), "{cookie}");
         assert_eq!(login, logout, "same denial reasons for {cookie:?}");
     }
+}
+
+#[test]
+fn s015_a15_ticket_only_post_failing_csrf_or_origin_is_recorded() {
+    let (idp, h) = spawn("m1-two-domains");
+    let s = sign_in(&h, &idp);
+    let sid = session_id(&h);
+    let r = h.verify(with_cookies(
+        entry("/_hopae/logout", Some("same-origin")),
+        &s,
+    ));
+    let t1 = txn_of(&r, "/logout");
+    // No portal handle: the ticket and the portal binding cookie are all there is.
+    s.jar.for_host(PORTAL).remove(HANDLE);
+    let c = s.portal(&h);
+    let page = c.get(&format!("/logout?txn={t1}"));
+    let csrf = csrf_of(&page.body);
+    let before = events(&h, "csrf.rejected").len();
+    // A bad token, then a foreign Origin with the right token.
+    let bad_token = c.send(
+        Req::post("/logout")
+            .form(&[("csrf", "not-a-token"), ("txn", &t1)])
+            .header("origin", PORTAL_URL),
+    );
+    let bad_origin = c.send(
+        Req::post("/logout")
+            .form(&[("csrf", &csrf), ("txn", &t1)])
+            .header("origin", "https://evil.example.org"),
+    );
+    for r in [&bad_token, &bad_origin] {
+        // The existing no-op page; nothing acted on.
+        assert_eq!(r.status, 200, "{r:?}");
+        assert!(
+            !links(&r.body).iter().any(|l| l.contains(APP)),
+            "{}",
+            r.body
+        );
+    }
+    assert_eq!(row(&h, &t1).consumed_at, None, "the ticket is untouched");
+    assert_eq!(terminated(&h, &sid), None, "the session is untouched");
+    let rejected = events(&h, "csrf.rejected");
+    assert_eq!(rejected.len(), before + 2, "{rejected:?}");
+    let causes: Vec<&str> = rejected
+        .iter()
+        .filter_map(|e| e["attrs"]["cause"].as_str())
+        .collect();
+    assert!(
+        causes.contains(&"token") && causes.contains(&"origin"),
+        "{causes:?}"
+    );
+    for e in &rejected {
+        assert_eq!(e["attrs"]["purpose"], "logout", "{e}");
+    }
+    // The genuine confirmation still works afterwards.
+    let out = confirm(&c, &csrf, Some(&t1));
+    assert_eq!(out.status, 200);
+    assert_eq!(terminated(&h, &sid).as_deref(), Some("logout"));
 }
 
 #[test]

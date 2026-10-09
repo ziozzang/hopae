@@ -37,7 +37,7 @@ use crate::provider::types::{CallbackQuery, Provider, ProviderError, ProviderId,
 use crate::session::handoff::MintRequest;
 use crate::session::types::{Aal, FactorEntry, FactorKind, SessionId};
 use crate::store::types::{
-    CreateSession, HandleRow, HandleView, IdentitySnapshot, NewTransaction, SessionRow,
+    Admission, CreateSession, HandleRow, HandleView, IdentitySnapshot, NewTransaction, SessionRow,
     TransactionBinding, TransactionRow, TxnPurpose, User, UserStatus,
 };
 use crate::store::{Directory, Events, Sessions, StoreError};
@@ -1248,7 +1248,8 @@ impl Service {
         // The store has no way to change a transaction's purpose in place, so
         // the pending identity travels in a fresh `link` transaction with a
         // fresh 10-minute expiry (ADR-0011).
-        self.sessions
+        let admission = self
+            .sessions
             .create_transaction_capped(
                 NewTransaction {
                     txn_sha256: link.digest(),
@@ -1278,7 +1279,16 @@ impl Service {
                 self.cfg.txn_max_rows,
             )
             .await?;
-        let _ = ctx;
+        if let Admission::Admitted { evicted } = admission
+            && evicted > 0
+        {
+            self.emitter
+                .diagnostic(EventKind::TxnEvicted, Outcome::Info, &ctx.request_id, |b| {
+                    b.app(&txn.app_id)
+                        .reason(reasons::TXN_EVICTED)
+                        .attr("count", evicted)
+                });
+        }
         Ok(CallbackOutcome::LinkRequired { transaction: link })
     }
 

@@ -162,9 +162,21 @@ fn accepts_html(accept: &HeaderValue) -> bool {
         return false;
     };
     s.split(',').any(|range| {
-        let media = range.split(';').next().unwrap_or("").trim();
-        media.eq_ignore_ascii_case("text/html")
-            || media.eq_ignore_ascii_case("application/xhtml+xml")
+        let mut parts = range.split(';');
+        let media = parts.next().unwrap_or("").trim();
+        if !(media.eq_ignore_ascii_case("text/html")
+            || media.eq_ignore_ascii_case("application/xhtml+xml"))
+        {
+            return false;
+        }
+        // A range with quality 0 is explicitly not acceptable (RFC 9110 12.4.2);
+        // an unparseable quality is not trusted either.
+        parts.all(|param| match param.split_once('=') {
+            Some((name, value)) if name.trim().eq_ignore_ascii_case("q") => {
+                value.trim().parse::<f32>().is_ok_and(|q| q > 0.0)
+            }
+            _ => true,
+        })
     })
 }
 

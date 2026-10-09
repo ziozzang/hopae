@@ -13,7 +13,9 @@ use crate::crypto::{Secret, handle_value, is_well_formed_bind, sha256};
 use crate::event::types::{EventKind, Outcome, reasons};
 use crate::policy::types::AppPolicy;
 use crate::session::types::SessionId;
-use crate::store::types::{HandleRow, NewTransaction, RedeemOutcome, RedeemRequest, TxnPurpose};
+use crate::store::types::{
+    Admission, HandleRow, NewTransaction, RedeemOutcome, RedeemRequest, TxnPurpose,
+};
 
 /// Redeem `code` for the browser behind this request. `target` is the
 /// requested URL as the adapter delivers it: the handoff pair is already
@@ -138,10 +140,14 @@ pub(super) async fn redeem(cx: &Cx<'_>, app: &AppPolicy, target: &Url, code: &Se
                 recovery_depth: code.recovery_depth,
             };
             // Post-authentication: no per-address cap, but `txn.max_rows` holds.
-            ctx.sessions
+            let admission = ctx
+                .sessions
                 .create_transaction_capped(row, vec![], cx.now, None, ctx.limits.txn_max_rows)
                 .await
                 .map_err(|e| cx.store_err(e))?;
+            if let Admission::Admitted { evicted } = admission {
+                engine::report_eviction(cx, app, evicted);
+            }
             Ok(Decision::Switch { transaction: txn })
         }
         RedeemOutcome::Exhausted { .. } => {
@@ -836,6 +842,15 @@ mod tests {
     async fn switch_transaction_respects_max_rows_at_capacity() {
         let mut t = t();
         t.ctx.limits.txn_max_rows = 1;
+        let (bus, mut diag) = crate::event::bus::channel(16);
+        t.ctx.emitter = Some(crate::event::bus::Emitter::new(
+            t.clock.clone(),
+            t.rng.clone(),
+            bus,
+            Arc::new(crate::event::sampling::Sampler::default()),
+            Arc::new(crate::event::prune::PruneTrigger::new(1000)),
+            false,
+        ));
         let (a, b) = (t.user(1).await, t.user(2).await);
         let (sa, _) = t.session(&a).await;
         let (sb, _) = t.session(&b).await;
@@ -887,6 +902,9 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM login_txns", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 1, "the switch row replaced the filler");
+        let ev = diag.try_recv().expect("txn.evicted is reported");
+        assert_eq!(ev.kind, EventKind::TxnEvicted);
+        assert_eq!(ev.to_json()["attrs"]["count"], 1);
         assert!(
             t.store
                 .sessions()

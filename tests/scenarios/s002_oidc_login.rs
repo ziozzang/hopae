@@ -63,16 +63,23 @@ pub(crate) mod kit {
 
     /// An emitter whose diagnostics go nowhere (the receiver is dropped; the
     /// drops are counted), for tests that drive the services in process.
-    pub fn test_emitter(clock: Arc<dyn Clock>, rng: Arc<dyn Rng>) -> hopae::event::bus::Emitter {
-        let (bus, _rx) = hopae::event::bus::channel(16);
-        hopae::event::bus::Emitter::new(
+    pub fn test_emitter(
+        clock: Arc<dyn Clock>,
+        rng: Arc<dyn Rng>,
+    ) -> (
+        hopae::event::bus::Emitter,
+        tokio::sync::mpsc::Receiver<hopae::event::types::Event>,
+    ) {
+        let (bus, rx) = hopae::event::bus::channel(64);
+        let emitter = hopae::event::bus::Emitter::new(
             clock,
             rng,
             bus,
             Arc::new(hopae::event::sampling::Sampler::default()),
             Arc::new(hopae::event::prune::PruneTrigger::new(1000)),
             false,
-        )
+        );
+        (emitter, rx)
     }
 
     pub fn host(s: &str) -> Host {
@@ -340,6 +347,8 @@ pub(crate) mod kit {
         pub b1: Secret,
         pub p1: Secret,
         pub opts: Opts,
+        /// The diagnostic events the service and the engine emitted.
+        diag: std::sync::Mutex<tokio::sync::mpsc::Receiver<Event>>,
         _dir: tempfile::TempDir,
     }
 
@@ -430,11 +439,12 @@ pub(crate) mod kit {
                 )
                 .await
                 .unwrap();
+            let (emitter, diag) = test_emitter(clock.clone(), rng.clone());
             let svc = Service::new(Deps {
                 directory: store.directory(),
                 sessions: store.sessions(),
                 events: store.events(),
-                emitter: test_emitter(clock.clone(), rng.clone()),
+                emitter: emitter.clone(),
                 clock: clock.clone(),
                 rng: rng.clone(),
                 snapshot: snapshot.clone(),
@@ -459,7 +469,7 @@ pub(crate) mod kit {
                 handoff_failures_per_minute: opts.failures_per_minute,
                 ..VerifyLimits::default()
             };
-            let verify = VerifyContext::new(
+            let mut verify = VerifyContext::new(
                 store.directory(),
                 store.sessions(),
                 clock.clone(),
@@ -467,7 +477,10 @@ pub(crate) mod kit {
                 snapshot,
                 limits,
             );
+            // The engine reports diagnostics (`txn.evicted`) through the same emitter.
+            verify.emitter = Some(emitter);
             Kit {
+                diag: std::sync::Mutex::new(diag),
                 store,
                 clock,
                 svc,
@@ -730,6 +743,18 @@ pub(crate) mod kit {
 
         pub fn text(&self, sql: &str) -> Option<String> {
             self.store.conn().query_row(sql, [], |r| r.get(0)).ok()
+        }
+
+        /// Rows reported evicted so far by `txn.evicted` diagnostics (the sum of their counts).
+        pub fn evicted_reported(&self) -> i64 {
+            let mut rx = self.diag.lock().unwrap();
+            let mut total = 0;
+            while let Ok(ev) = rx.try_recv() {
+                if ev.kind == EventKind::TxnEvicted {
+                    total += ev.to_json()["attrs"]["count"].as_i64().unwrap_or(0);
+                }
+            }
+            total
         }
 
         pub async fn events(&self, kind: EventKind) -> Vec<Event> {
@@ -1094,6 +1119,11 @@ async fn link_transaction_respects_max_rows_at_capacity() {
     assert_eq!(
         k.count("SELECT COUNT(*) FROM login_txns WHERE purpose = 'link'"),
         1
+    );
+    assert_eq!(
+        k.evicted_reported(),
+        1,
+        "the eviction made by the link insert is reported as txn.evicted"
     );
 }
 

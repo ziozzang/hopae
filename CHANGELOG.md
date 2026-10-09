@@ -34,6 +34,12 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 - `hopae --check` warns when an application sets `logout_confirm = false`; the same-origin navigation-gadget residual and the transferable logout ticket are documented (ADR-0015, threat model, configuration reference, scenario 015-A8 and A9).
 - Migration `0002` was edited in place for the last time; later schema changes are new numbered migrations (operations guide).
 
+### Fixed (code review G7 pass 2 of ADR-0015)
+
+- An `Accept` range with quality 0 (`text/html;q=0`) is not accepted HTML for the entry points.
+- Switch and link transaction inserts report their evictions as `txn.evicted`, like login and retry.
+- A ticket-only logout confirmation that fails the `Origin` or CSRF check is recorded as `csrf.rejected` (purpose `logout`) before the existing no-op answer.
+
 ### Fixed (code review G7 pass 1 of ADR-0015)
 
 - A logout ticket is consumed and the session it names is terminated in one store transaction (a crash in between no longer loses the logout).

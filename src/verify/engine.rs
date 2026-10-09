@@ -643,6 +643,25 @@ struct NewTxn<'a> {
     events: Vec<crate::event::types::Event>,
 }
 
+/// Report rows a transaction insert evicted (`txn.evicted`, a diagnostic).
+pub(super) fn report_eviction(cx: &Cx<'_>, app: &AppPolicy, evicted: u32) {
+    if evicted == 0 {
+        return;
+    }
+    if let Some(emitter) = cx.ctx.emitter.clone() {
+        emitter.diagnostic(
+            EventKind::TxnEvicted,
+            Outcome::Info,
+            cx.input.request_id.clone(),
+            |b| {
+                b.app(&app.app_id)
+                    .reason(reasons::TXN_EVICTED)
+                    .attr("count", evicted)
+            },
+        );
+    }
+}
+
 /// Admit and write one transaction (a login, or a logout ticket) under the
 /// per-address cap and `txn.max_rows`, both enforced inside the one store
 /// write (eviction included, so `max_rows` is a hard bound). Over the cap is
@@ -690,20 +709,7 @@ async fn create_txn(cx: &Cx<'_>, app: &AppPolicy, t: NewTxn<'_>) -> Result<Secre
             },
         )),
         Admission::Admitted { evicted } => {
-            if evicted > 0
-                && let Some(emitter) = ctx.emitter.clone()
-            {
-                emitter.diagnostic(
-                    EventKind::TxnEvicted,
-                    Outcome::Info,
-                    input.request_id.clone(),
-                    |b| {
-                        b.app(&app.app_id)
-                            .reason(reasons::TXN_EVICTED)
-                            .attr("count", evicted)
-                    },
-                );
-            }
+            report_eviction(cx, app, evicted);
             Ok(txn)
         }
     }

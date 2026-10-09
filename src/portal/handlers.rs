@@ -795,7 +795,18 @@ pub(crate) async fn logout_post(State(st): State<PortalState>, req: Request) -> 
         let Some(txn) = ticket_of(Some(&form.0)) else {
             return signed_out(&rq, None);
         };
-        if guard_check(&st, &parts, &form, Purpose::Logout, Some(bind.expose())).is_err() {
+        if let Err(cause) = guard_check(&st, &parts, &form, Purpose::Logout, Some(bind.expose())) {
+            // A ticket-only confirmation that fails Origin or CSRF acts on
+            // nothing, but the attempt is recorded like every refused POST.
+            st.services
+                .csrf_rejected(&rq.ctx, Purpose::Logout.as_str(), cause)
+                .await;
+            tracing::info!(
+                request_id = rq.rid(),
+                purpose = Purpose::Logout.as_str(),
+                cause,
+                "csrf check refused"
+            );
             return signed_out(&rq, None);
         }
         let cookies = Cookies {
