@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Hopae pre-commit: a safety net, not the rule (docs/PROCESS.md, security rules).
+# Enable with: git config core.hooksPath .githooks
+set -u
+cd "$(git rev-parse --show-toplevel)" || exit 1
+rc=0
+
+if command -v gitleaks >/dev/null 2>&1; then
+    if gitleaks git --help >/dev/null 2>&1; then
+        gitleaks git --staged --redact --no-banner || rc=1
+    else
+        gitleaks protect --staged --redact --no-banner || rc=1
+    fi
+else
+    echo "pre-commit: gitleaks not installed; skipping (install it for full coverage)" >&2
+fi
+
+# Denylist lives outside the repository; fall back to the internal copy.
+if [ -z "${HOPAE_PUBLISH_DENYLIST:-}" ] && [ -f internal/publish-denylist.txt ]; then
+    export HOPAE_PUBLISH_DENYLIST="$PWD/internal/publish-denylist.txt"
+fi
+args=(--only publish)
+[ -f "$HOME/env" ] && args+=(--env-file "$HOME/env")
+python3 tools/check_docs.py "${args[@]}" || rc=1
+
+exit $rc

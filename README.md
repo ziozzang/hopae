@@ -6,7 +6,7 @@
 
 **A single-binary identity provider for zero-trust gateways, written in Rust.**
 
-Hopae (호패) is named after the Joseon-era state-issued identity tag. It signs
+Hopae (`호패`) is named after the Joseon-era state-issued identity tag. It signs
 people in through OAuth/OIDC providers or email, keeps their sessions, and
 answers a gateway's "who is this request from?" question so that the gateway
 can inject verified identity into upstream requests. It is packaged around the
