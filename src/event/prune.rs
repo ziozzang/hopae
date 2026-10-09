@@ -25,6 +25,44 @@ pub const SWEEP_PERIOD: Duration = Duration::from_secs(3600);
 /// How often the loops look at the clocks.
 const TICK: Duration = Duration::from_millis(250);
 
+/// The label of the delivery-failure metrics: the one sink, else `all`.
+pub fn sink_label(sinks: &[String]) -> String {
+    match sinks {
+        [one] => one.clone(),
+        _ => "all".to_string(),
+    }
+}
+
+/// Count what a prune pass did. The single place for this accounting, shared
+/// by the asynchronous pruner and the store's inline pruning (G7 B03).
+pub fn account_report(report: &PruneReport, sink_label: &str) {
+    if report.events_deleted > 0 {
+        counters::add(counters::EVENTS_PRUNED_TOTAL, &[], report.events_deleted);
+    }
+    if report.deliveries_marked_pruned > 0 {
+        counters::add(
+            counters::EVENT_DELIVERIES_FAILED_TOTAL,
+            &[("sink", sink_label), ("reason", reasons::PRUNED.0)],
+            report.deliveries_marked_pruned,
+        );
+    }
+    if report.backlog_overflowed > 0 {
+        counters::add(
+            counters::EVENT_DELIVERIES_FAILED_TOTAL,
+            &[
+                ("sink", sink_label),
+                ("reason", reasons::BACKLOG_OVERFLOW.0),
+            ],
+            report.backlog_overflowed,
+        );
+        tracing::warn!(
+            sink = %sink_label,
+            moved = report.backlog_overflowed,
+            "event delivery backlog over the cap: oldest pending deliveries marked failed"
+        );
+    }
+}
+
 /// Counts event rows about to be inserted and wakes the pruner.
 pub struct PruneTrigger {
     inserted: AtomicU64,
@@ -115,10 +153,7 @@ impl Pruner {
         trigger: Arc<PruneTrigger>,
         sinks: Vec<String>,
     ) -> Self {
-        let sink_label = match sinks.as_slice() {
-            [one] => one.clone(),
-            _ => "all".to_string(),
-        };
+        let sink_label = sink_label(&sinks);
         Pruner {
             events,
             clock,
@@ -137,31 +172,7 @@ impl Pruner {
     pub async fn run_once(&self) -> StoreResult<PruneReport> {
         let report = self.events.prune(self.clock.now(), &self.policy).await?;
         self.trigger.reset();
-        if report.events_deleted > 0 {
-            counters::add(counters::EVENTS_PRUNED_TOTAL, &[], report.events_deleted);
-        }
-        if report.deliveries_marked_pruned > 0 {
-            counters::add(
-                counters::EVENT_DELIVERIES_FAILED_TOTAL,
-                &[("sink", &self.sink_label), ("reason", reasons::PRUNED.0)],
-                report.deliveries_marked_pruned,
-            );
-        }
-        if report.backlog_overflowed > 0 {
-            counters::add(
-                counters::EVENT_DELIVERIES_FAILED_TOTAL,
-                &[
-                    ("sink", &self.sink_label),
-                    ("reason", reasons::BACKLOG_OVERFLOW.0),
-                ],
-                report.backlog_overflowed,
-            );
-            tracing::warn!(
-                sink = %self.sink_label,
-                moved = report.backlog_overflowed,
-                "event delivery backlog over the cap: oldest pending deliveries marked failed"
-            );
-        }
+        account_report(&report, &self.sink_label);
         Ok(report)
     }
 

@@ -12,7 +12,7 @@ use super::events::insert_events;
 use super::rows::{
     self, CODE_COLS, HANDLE_COLS, SESSION_COLS, TXN_COLS, blob, cols, opt_blob, snapshot_json,
 };
-use super::{Shared, Store, WriterEnv, commit};
+use super::{Shared, Store, WriterEnv, commit, require_provider_live};
 use crate::crypto::{Digest, Timestamp};
 use crate::event::types::{Event, Reason, reasons};
 use crate::policy::types::Host;
@@ -109,6 +109,7 @@ impl Sessions for Store {
             }
             let s = &req.session;
             let tx = env.begin()?;
+            require_provider_live(&tx, s.provider_id.as_str())?;
             tx.execute(
                 "INSERT INTO sessions (session_id, user_id, provider_id, auth_time, factors, aal, authz_version, cred_gen, snapshot, bound_ip, bound_ua_sha256, created_at, last_seen_at, absolute_expires_at, terminated_at, terminated_reason, authz_version_at_auth) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL,?15)",
                 params![
@@ -344,32 +345,37 @@ impl Sessions for Store {
         self.write("create_transaction", move |env| {
             let shared = env.shared.clone();
             let tx = env.begin()?;
-            tx.execute(
-                "INSERT INTO login_txns (txn_sha256, created_at, expires_at, app_id, return_target, bind_sha256, portal_bind_sha256, retry_bind_sha256, client_ip, ua_sha256, provider_id, state_sha256, nonce, pkce_verifier, portal_session_id, purpose, conflicting_handle_sha256, pending_identity, recovery_depth) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
-                params![
-                    blob(&t.txn_sha256),
-                    t.created_at.secs(),
-                    t.expires_at.secs(),
-                    t.app_id.as_str(),
-                    t.return_target.as_str(),
-                    opt_blob(&t.bind_sha256),
-                    opt_blob(&t.portal_bind_sha256),
-                    opt_blob(&t.retry_bind_sha256),
-                    t.client_ip.to_string(),
-                    opt_blob(&t.ua_sha256),
-                    t.provider_id.as_ref().map(|p| p.as_str()),
-                    opt_blob(&t.state_sha256),
-                    t.nonce,
-                    t.pkce_verifier.as_ref().map(|s| s.expose()),
-                    t.portal_session_id.as_ref().map(|s| s.as_str()),
-                    t.purpose.as_str(),
-                    opt_blob(&t.conflicting_handle_sha256),
-                    t.pending_identity.as_ref().map(|v| v.to_string()),
-                    i64::from(t.recovery_depth),
-                ],
-            )?;
+            insert_txn(&tx, &t)?;
             insert_events(&tx, &shared, &events)?;
             finish(tx, &shared, None)
+        })
+        .await
+    }
+
+    async fn create_transaction_capped(
+        &self,
+        t: NewTransaction,
+        events: Vec<Event>,
+        since: Timestamp,
+        cap: u32,
+    ) -> StoreResult<bool> {
+        self.write("create_transaction_capped", move |env| {
+            let shared = env.shared.clone();
+            let tx = env.begin()?;
+            // Count and insert in one write transaction: parallel callers
+            // are serialized here, so the cap cannot be overshot.
+            let n: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM login_txns WHERE client_ip=?1 AND created_at >= ?2",
+                params![t.client_ip.to_string(), since.secs()],
+                |r| r.get(0),
+            )?;
+            if n >= i64::from(cap) {
+                return Ok(false);
+            }
+            insert_txn(&tx, &t)?;
+            insert_events(&tx, &shared, &events)?;
+            finish(tx, &shared, None)?;
+            Ok(true)
         })
         .await
     }
@@ -638,6 +644,34 @@ impl Sessions for Store {
         })
         .await
     }
+}
+
+fn insert_txn(tx: &Transaction<'_>, t: &NewTransaction) -> StoreResult<()> {
+    tx.execute(
+        "INSERT INTO login_txns (txn_sha256, created_at, expires_at, app_id, return_target, bind_sha256, portal_bind_sha256, retry_bind_sha256, client_ip, ua_sha256, provider_id, state_sha256, nonce, pkce_verifier, portal_session_id, purpose, conflicting_handle_sha256, pending_identity, recovery_depth) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+        params![
+            blob(&t.txn_sha256),
+            t.created_at.secs(),
+            t.expires_at.secs(),
+            t.app_id.as_str(),
+            t.return_target.as_str(),
+            opt_blob(&t.bind_sha256),
+            opt_blob(&t.portal_bind_sha256),
+            opt_blob(&t.retry_bind_sha256),
+            t.client_ip.to_string(),
+            opt_blob(&t.ua_sha256),
+            t.provider_id.as_ref().map(|p| p.as_str()),
+            opt_blob(&t.state_sha256),
+            t.nonce,
+            t.pkce_verifier.as_ref().map(|s| s.expose()),
+            t.portal_session_id.as_ref().map(|s| s.as_str()),
+            t.purpose.as_str(),
+            opt_blob(&t.conflicting_handle_sha256),
+            t.pending_identity.as_ref().map(|v| v.to_string()),
+            i64::from(t.recovery_depth),
+        ],
+    )?;
+    Ok(())
 }
 
 /// ADR-0004 redemption as one transaction: the pinned conditional `UPDATE`

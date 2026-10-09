@@ -38,6 +38,10 @@ pub enum StoreError {
     /// The request conflicts with current state (duplicate, already bound, unknown parent).
     #[error("store conflict: {0}")]
     Conflict(&'static str),
+    /// The provider the write names is disabled or tombstoned in the database
+    /// (checked inside the write transaction, G7-IDP-01).
+    #[error("provider disabled")]
+    ProviderDisabled,
     /// A stored value could not be decoded; the message names a column, never a value.
     #[error("stored data is corrupt: {0}")]
     Corrupt(String),
@@ -48,6 +52,10 @@ pub enum StoreError {
     },
     #[error("store error: {0}")]
     Sqlite(rusqlite::Error),
+    /// Schema version 2 was edited in place before the first release; a
+    /// database from such a build lacks the later additions.
+    #[error("development database from a pre-release schema; delete it")]
+    DevelopmentSchema,
     #[error("database schema version {found} is newer than this binary supports ({supported})")]
     SchemaTooNew { found: u32, supported: u32 },
 }
@@ -152,6 +160,16 @@ pub trait Sessions: Send + Sync {
         authz_version: u64,
     ) -> StoreResult<()>;
     async fn create_transaction(&self, txn: NewTransaction, events: Vec<Event>) -> StoreResult<()>;
+    /// As `create_transaction`, but only when fewer than `cap` transactions of
+    /// the same `client_ip` were created since `since`; the count and the
+    /// insert are one write transaction. `false` = over the cap, nothing written.
+    async fn create_transaction_capped(
+        &self,
+        txn: NewTransaction,
+        events: Vec<Event>,
+        since: Timestamp,
+        cap: u32,
+    ) -> StoreResult<bool>;
     async fn transaction(&self, txn_sha256: &Digest) -> StoreResult<Option<TransactionRow>>;
     async fn transaction_by_state(
         &self,

@@ -1003,7 +1003,6 @@ async fn s014_a3_events_cannot_fill_disk() {
         trigger: trigger.clone(),
         pruner: Some(pruner.clone()),
         hooks: None,
-        log: None,
     };
     let wtask = tokio::spawn(writer.run(stop_rx.clone()));
     let ptask = tokio::spawn(pruner.run(stop_rx.clone()));
@@ -1379,6 +1378,16 @@ fn extra_s014_3_generated_credentials_never_reach_the_log() {
     );
     secrets.push(("presented handle", stale));
 
+    // What the provider issued and received during these flows.
+    let issued = idp.issued_secrets();
+    for what in ["ID token", "access token", "PKCE verifier"] {
+        assert!(
+            issued.iter().any(|(w, v)| *w == what && v.len() >= 16),
+            "the mock never saw a {what}: the scan would prove nothing"
+        );
+    }
+    secrets.extend(issued.iter().map(|(w, v)| (*w, v.clone())));
+
     h.advance(Duration::from_secs(61));
     std::thread::sleep(Duration::from_secs(2));
     let log = h.log();
@@ -1396,4 +1405,158 @@ fn extra_s014_3_generated_credentials_never_reach_the_log() {
     }
     // The scan means something: the log does hold this flow.
     assert!(log.contains("login.succeeded") || log.contains("session.created"));
+}
+
+fn g7_store(
+    max_rows: u64,
+    prune_every: u64,
+) -> (tempfile::TempDir, Store, Arc<TestClock>, Arc<OsRng>) {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = Arc::new(TestClock::new(Timestamp(T0)));
+    let rng = Arc::new(OsRng);
+    let store = Store::open(
+        &dir.path().join("hopae.db"),
+        clock.clone(),
+        vec!["log".into()],
+        None,
+    )
+    .unwrap();
+    store.set_rng(rng.clone());
+    store.set_event_retention(EventRetention {
+        retention: DAY,
+        max_rows,
+        prune_every,
+        max_pending_per_sink: 100,
+        terminal_retention: DAY,
+    });
+    (dir, store, clock, rng)
+}
+
+/// G7-P01 (pass 2): the bound holds at every commit boundary, observed by a
+/// concurrent reader (not after a barrier): a diagnostic flush of thousands of
+/// queued events prunes between its batches.
+#[tokio::test(flavor = "multi_thread")]
+async fn g7_p01_bound_holds_at_every_commit_for_a_concurrent_reader() {
+    let (_dir, store, clock, rng) = g7_store(500, 100);
+    let mk = |kind| EventBuilder::new(&*clock, &*rng, kind, Outcome::Success, "r").build();
+    for _ in 0..170 {
+        let evs = vec![
+            mk(EventKind::LoginSucceeded),
+            mk(EventKind::LoginSucceeded),
+            mk(EventKind::LoginSucceeded),
+        ];
+        store
+            .directory()
+            .import_providers(vec![], None, evs)
+            .await
+            .unwrap();
+    }
+    let max_seen = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (store, max_seen, stop) = (store.clone(), max_seen.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let n: i64 = store
+                    .conn()
+                    .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+                    .unwrap_or(0);
+                max_seen.fetch_max(n as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+        })
+    };
+    for _ in 0..4 {
+        for _ in 0..4000 {
+            let _ = store
+                .events()
+                .append_diagnostic(mk(EventKind::ProviderError))
+                .await;
+        }
+        store.barrier().await.unwrap();
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    reader.join().unwrap();
+    let seen = max_seen.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        seen <= 600,
+        "a reader saw {seen} rows against a bound of 600"
+    );
+}
+
+/// G7-P01 (pass 2): `prune_every = 1` works with a two-event commit: the
+/// table never exceeds `max_rows` (+ the rows of one transaction).
+#[tokio::test(flavor = "multi_thread")]
+async fn g7_p01_prune_every_one_with_a_two_event_commit() {
+    let (_dir, store, clock, rng) = g7_store(10, 1);
+    let mk = |kind| EventBuilder::new(&*clock, &*rng, kind, Outcome::Success, "r").build();
+    for i in 0..200 {
+        let evs = vec![mk(EventKind::LoginSucceeded), mk(EventKind::SessionCreated)];
+        store
+            .directory()
+            .import_providers(vec![], None, evs)
+            .await
+            .unwrap();
+        let (rows, _) = store.events().count_rows().await.unwrap();
+        assert!(
+            rows <= 11,
+            "after commit {i}: {rows} rows (max_rows 10, prune_every 1)"
+        );
+    }
+}
+
+/// G7-B03: the inline (commit-time) prune and the asynchronous pruner share
+/// one accounting function: the delivery-failure metric counts the pending
+/// deliveries the inline path marked failed.
+#[tokio::test(flavor = "multi_thread")]
+async fn g7_b03_inline_pruning_counts_delivery_failures() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = Arc::new(TestClock::new(Timestamp(T0)));
+    let rng = Arc::new(OsRng);
+    // A sink name of its own: the counters are process-wide.
+    let store = Store::open(
+        &dir.path().join("hopae.db"),
+        clock.clone(),
+        vec!["b03sink".into()],
+        None,
+    )
+    .unwrap();
+    store.set_event_retention(EventRetention {
+        retention: DAY,
+        max_rows: 50,
+        prune_every: 20,
+        max_pending_per_sink: 10_000,
+        terminal_retention: DAY,
+    });
+    let labels = [("sink", "b03sink"), ("reason", "pruned")];
+    let before = counters::get(counters::EVENT_DELIVERIES_FAILED_TOTAL, &labels);
+    for _ in 0..100 {
+        let evs: Vec<Event> = (0..3)
+            .map(|_| {
+                EventBuilder::new(
+                    &*clock,
+                    &*rng,
+                    EventKind::LoginSucceeded,
+                    Outcome::Success,
+                    "r",
+                )
+                .build()
+            })
+            .collect();
+        store
+            .directory()
+            .import_providers(vec![], None, evs)
+            .await
+            .unwrap();
+    }
+    store.barrier().await.unwrap();
+    // Nothing delivered the events: every event the prune deleted still had a
+    // pending delivery, which the prune marked failed (and cascaded away).
+    let (rows, _) = store.events().count_rows().await.unwrap();
+    let deleted = 300 - rows as i64;
+    assert!(deleted > 0, "the inline prune must have run");
+    let counted = counters::get(counters::EVENT_DELIVERIES_FAILED_TOTAL, &labels) - before;
+    assert_eq!(
+        counted, deleted,
+        "the metric counts what the inline prune did"
+    );
 }

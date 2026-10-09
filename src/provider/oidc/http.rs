@@ -54,6 +54,10 @@ impl Fetcher {
         // programming or platform error; fall back to a client that still
         // refuses redirects rather than panicking on the request path.
         let mut builder = reqwest::Client::builder()
+            // No automatic environment proxy (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY):
+            // a proxy resolves the destination itself, which would bypass the
+            // address vetting below (G7-IDP-03).
+            .no_proxy()
             .redirect(Policy::none())
             .timeout(REQUEST_TIMEOUT)
             .connect_timeout(REQUEST_TIMEOUT)

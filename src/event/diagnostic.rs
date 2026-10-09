@@ -13,7 +13,6 @@ use crate::crypto::{Clock, Rng};
 use crate::event::bus::DropCounts;
 use crate::event::prune::{PruneTrigger, Pruner};
 use crate::event::sampling::Sampler;
-use crate::event::sinks::LogSink;
 use crate::event::types::{Event, EventBuilder, EventKind, Outcome};
 use crate::store::{Events, Store};
 use crate::telemetry::counters;
@@ -38,8 +37,6 @@ pub struct DiagnosticWriter {
     pub pruner: Option<Pruner>,
     /// Test hooks: the harness can stall this writer alone (S014-5).
     pub hooks: Option<Arc<crate::store::StoreHooks>>,
-    /// Structured log output for the diagnostic events that were persisted.
-    pub log: Option<Arc<LogSink>>,
 }
 
 impl DiagnosticWriter {
@@ -51,12 +48,8 @@ impl DiagnosticWriter {
                 tokio::time::sleep(d).await;
             }
         }
-        let for_log = self.log.is_some().then(|| ev.clone());
         match self.events.append_diagnostic(ev).await {
             Ok(()) => {
-                if let (Some(log), Some(ev)) = (&self.log, &for_log) {
-                    log.emit(ev);
-                }
                 self.trigger.note_insert();
                 *since_sync += 1;
                 // The store batches queued diagnostics in one transaction; flush
@@ -108,12 +101,9 @@ impl DiagnosticWriter {
             counters::EVENTS_TOTAL,
             &[("kind", "events.dropped"), ("outcome", "info")],
         );
-        let for_log = self.log.is_some().then(|| ev.clone());
         if self.events.append_diagnostic(ev).await.is_err() {
             // Keep the counts for the next report; the metric already has them.
             self.drops.restore(counts);
-        } else if let (Some(log), Some(ev)) = (&self.log, &for_log) {
-            log.emit(ev);
         }
     }
 
@@ -155,8 +145,21 @@ mod tests {
     use crate::crypto::{OsRng, TestClock, Timestamp};
     use crate::event::bus::{Emitter, channel};
     use crate::event::prune::PruneTrigger;
+    use crate::event::sinks::LogSink;
     use crate::event::types::reasons;
     use crate::store::{Store, StoreHooks, types::EventQuery};
+
+    struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_stalled_store_drops_diagnostics_and_reports_them_by_kind() {
@@ -192,7 +195,6 @@ mod tests {
             trigger: Arc::new(PruneTrigger::new(1000)),
             pruner: None,
             hooks: None,
-            log: None,
         };
         let task = tokio::spawn(writer.run(stop_rx));
         hooks.set_stall(300);
@@ -271,6 +273,8 @@ mod tests {
             false,
         );
         store.set_drop_counts(em.drops().clone());
+        let out = Arc::new(std::sync::Mutex::new(Vec::new()));
+        store.set_diagnostic_log(Arc::new(LogSink::new(Box::new(Buf(out.clone())), None)));
         let (stop_tx, stop_rx) = watch::channel(false);
         let writer = DiagnosticWriter {
             store: store.clone(),
@@ -283,7 +287,6 @@ mod tests {
             trigger: Arc::new(PruneTrigger::new(1000)),
             pruner: None,
             hooks: None,
-            log: None,
         };
         let task = tokio::spawn(writer.run(stop_rx));
         hooks.fail_diag_batches(1);
@@ -293,6 +296,9 @@ mod tests {
             });
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
+        // The report that carries the lost events fails as well (G7 pass 2,
+        // P03): its per-kind counts must survive for the next report.
+        hooks.fail_diag_batches(1);
         store.barrier().await.unwrap();
         let kept = store
             .events()
@@ -307,8 +313,15 @@ mod tests {
         let lost = em.drops().total();
         assert!(lost >= 1, "the failed batch is accounted for, kept {kept}");
         assert_eq!(kept + lost, 5, "kept or counted, never silent");
+        // B02: the structured log claims only what was persisted.
+        let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
+        let logged = text
+            .lines()
+            .filter(|l| l.contains("\"kind\":\"provider.error\""))
+            .count() as u64;
+        assert_eq!(logged, kept, "a failed commit produces no log line");
         // Storage is back: the next report carries the discarded batch.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        tokio::time::sleep(Duration::from_millis(2600)).await;
         stop_tx.send(true).unwrap();
         task.await.unwrap();
         store.barrier().await.unwrap();
@@ -328,18 +341,6 @@ mod tests {
             })
             .sum();
         assert_eq!(reported, lost, "reported by kind after recovery");
-    }
-
-    struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Buf {
-        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(b);
-            Ok(b.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 
     /// G7-P02: every persisted diagnostic kind reaches the structured log as
@@ -366,6 +367,7 @@ mod tests {
             false,
         );
         let out = Arc::new(std::sync::Mutex::new(Vec::new()));
+        store.set_diagnostic_log(Arc::new(LogSink::new(Box::new(Buf(out.clone())), None)));
         let (stop_tx, stop_rx) = watch::channel(false);
         let writer = DiagnosticWriter {
             store: store.clone(),
@@ -378,7 +380,6 @@ mod tests {
             trigger: Arc::new(PruneTrigger::new(1000)),
             pruner: None,
             hooks: None,
-            log: Some(Arc::new(LogSink::new(Box::new(Buf(out.clone())), None))),
         };
         let task = tokio::spawn(writer.run(stop_rx));
         let kinds = [EventKind::ProviderError, EventKind::TxnEvicted];

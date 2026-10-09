@@ -136,6 +136,7 @@ impl Directory for Store {
                     return Err(StoreError::Conflict("username already taken"));
                 }
             }
+            super::require_provider_live(&tx, identity.provider_id.as_str())?;
             insert_identity_guard(&tx, &identity)?;
             tx.execute(
                 "INSERT INTO users (user_id, primary_email, email_verified, email_authoritative, display_name, username, status, authz_version, groups, created_at, updated_at) VALUES (?1,?2,?3,?4,?5,?6,'active',1,'[]',?7,?7)",
@@ -191,6 +192,7 @@ impl Directory for Store {
             if exists.is_none() {
                 return Err(StoreError::Conflict("unknown user"));
             }
+            super::require_provider_live(&tx, identity.provider_id.as_str())?;
             insert_identity(&tx, &user, &identity, now)?;
             insert_events(&tx, &shared, &events)?;
             commit(tx, &shared, None)

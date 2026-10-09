@@ -1,6 +1,6 @@
 # Operations
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/OPERATIONS.md)
 
@@ -92,7 +92,12 @@ copy next to it as `hopae.db.bak-v<N>`, where `<N>` is the schema version found
 (mode `0600`, written with `VACUUM INTO`, so WAL content is included). No
 backup is made for a new, empty or already current database. An existing
 backup of the same version is replaced. A database written by a newer binary is
-refused (the start fails).
+refused (the start fails). So is a database of schema version 2 written by a
+pre-release development build, recognizable by a missing
+`sessions.authz_version_at_auth` column or `users_primary_email` index: the
+start fails with exit status 2 and the message "development database from a
+pre-release schema; delete it". Before the first release schema version 2 was
+edited in place, so such a database cannot be upgraded; delete it.
 
 Upgrade procedure:
 
@@ -245,7 +250,7 @@ counter per reason where counters exist, and no secret in any message.
 - No hot reload of configuration, provider secrets or caller keys before M6; every change is a restart, during which verify fails closed (the gateway answers `503`) for the restart's duration.
 - No metrics endpoint before M7; counters are in-process only. There is no management API or console before M4; the supported management surface is the configuration file and `hopae providers import`.
 - Backups are file copies of a stopped (or checkpointed) database. An online backup tool is M7.
-- Hopae does not terminate TLS and does not talk to the internet except to the configured identity providers (discovery, keys, token and user-info endpoints); there is no telemetry and no self-update before M6.
+- Hopae does not terminate TLS and does not talk to the internet except to the configured identity providers (discovery, keys, token and user-info endpoints); there is no telemetry and no self-update before M6. Provider traffic ignores `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY`: a proxy resolves the destination itself, which would bypass the connect-time address checks. There is no proxy option.
 
 ## Examples, verification and related pages
 

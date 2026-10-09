@@ -203,6 +203,17 @@ fn serve(cfg: Config) -> ExitCode {
                 eprintln!("error: {e}");
                 return ExitCode::from(EXIT_CONFIG);
             }
+            // A development database from a pre-release schema is refused
+            // like an unsafe configuration: exit status 2.
+            if e.chain().any(|c| {
+                matches!(
+                    c.downcast_ref::<hopae::store::StoreError>(),
+                    Some(hopae::store::StoreError::DevelopmentSchema)
+                )
+            }) {
+                eprintln!("error: {e:#}");
+                return ExitCode::from(EXIT_CONFIG);
+            }
             eprintln!("error: {e:#}");
             ExitCode::FAILURE
         }

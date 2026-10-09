@@ -149,6 +149,8 @@ struct Inner {
     malformed_calls: AtomicUsize,
     codes: Mutex<HashMap<String, CodeEntry>>,
     access_tokens: Mutex<HashMap<String, String>>,
+    /// Bearer values the provider issued or saw: (what, value). For leak scans.
+    issued: Mutex<Vec<(&'static str, String)>>,
     auths: Mutex<Vec<AuthRequest>>,
     users: Mutex<HashMap<String, MockUser>>,
     next_sub: Mutex<String>,
@@ -184,6 +186,7 @@ impl MockIdp {
             malformed_calls: AtomicUsize::new(0),
             codes: Mutex::new(HashMap::new()),
             access_tokens: Mutex::new(HashMap::new()),
+            issued: Mutex::new(Vec::new()),
             auths: Mutex::new(Vec::new()),
             users: Mutex::new(HashMap::new()),
             next_sub: Mutex::new("sub-1".into()),
@@ -267,6 +270,12 @@ impl MockIdp {
         let loc = r.location().expect("authorize redirects to the callback");
         let cb = url::Url::parse(loc).expect("callback url");
         format!("{}?{}", cb.path(), cb.query().unwrap_or(""))
+    }
+
+    /// Bearer values the provider issued or received so far (ID and access
+    /// tokens, the PKCE verifier): what a log must never contain.
+    pub fn issued_secrets(&self) -> Vec<(&'static str, String)> {
+        self.inner.issued.lock().unwrap().clone()
     }
 
     /// The subject `/authorize` signs in next (default `sub-1`).
@@ -644,6 +653,10 @@ async fn token(s: &Inner, beh: &Behavior, rec: &RecordedRequest) -> Response {
     }
     if let Some(challenge) = &entry.challenge {
         let verifier = field("code_verifier").unwrap_or_default();
+        s.issued
+            .lock()
+            .unwrap()
+            .push(("PKCE verifier", verifier.clone()));
         let computed = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         if computed != *challenge {
             return invalid();
@@ -654,9 +667,15 @@ async fn token(s: &Inner, beh: &Behavior, rec: &RecordedRequest) -> Response {
         .lock()
         .unwrap()
         .insert(access.clone(), entry.sub.clone());
+    s.issued
+        .lock()
+        .unwrap()
+        .push(("access token", access.clone()));
     let mut body = json!({"access_token": access, "token_type": "Bearer", "expires_in": 3600, "scope": "openid email profile"});
     if !beh.omit_id_token {
-        body["id_token"] = json!(id_token(s, beh, entry));
+        let idt = id_token(s, beh, entry);
+        s.issued.lock().unwrap().push(("ID token", idt.clone()));
+        body["id_token"] = json!(idt);
     }
     json_response(200, &pad(body, beh.oversized))
 }

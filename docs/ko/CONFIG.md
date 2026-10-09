@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=5 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=6 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -131,7 +131,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `providers[].issuer` | 문자열, URL | 프리셋의 issuer | `https://`(`http://`는 루프백 호스트이면서 `allow_private_endpoints: true`일 때만), 쿼리·프래그먼트·자격 증명 없음. 프리셋이 적용되지 않으면 필수입니다. |
 | `providers[].scope` | 문자열 | `openid email profile` | 비어 있으면 안 됩니다. |
 | `providers[].endpoint_hosts` | 호스트 배열 | `[]` | 발급자 자신의 호스트 외에 제공자의 디스커버리 문서가 가리킬 수 있는 호스트(인가, 토큰, 사용자 정보, 키 엔드포인트는 `https`여야 하고 발급자의 호스트이거나 여기 나열된 호스트여야 하며, 스킴과 포트 없는 호스트 이름 또는 IP 주소). `google` 프리셋은 자신의 목록을 가집니다. |
-| `providers[].allow_private_endpoints` | 불리언 | 미설정(`false`) | 개발용 및 사설 인증 제공자 전용: 루프백, 사설, 링크 로컬, CGNAT, 멀티캐스트 주소에 대한 연결 시점 거부를 해제하고 루프백 발급자에 대한 `http://`를 허용합니다. 설정하지 않으면 그런 주소는 거부되며 연결은 검증된 주소로만 갑니다. 명시적 `false`는 `test-hooks` 빌드에서도 항상 우선합니다. |
+| `providers[].allow_private_endpoints` | 불리언 | 미설정(`false`) | 개발용 및 사설 인증 제공자 전용: 루프백, 사설, 링크 로컬, CGNAT, 멀티캐스트 주소에 대한 연결 시점 거부를 해제하고 루프백 발급자에 대한 `http://`를 허용합니다. 설정하지 않으면 그런 주소는 거부되며 연결은 검증된 주소로만 갑니다. 명시적 `false`는 `test-hooks` 빌드에서도 항상 우선합니다. 제공자 요청은 `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`를 사용하지 않습니다. |
 | `providers[].allowed_email_domains` | 도메인 배열 | `[]` | 평범한 도메인 이름. 비어 있지 않으면 그 이메일 도메인으로만 로그인을 제한합니다. 신원 계층이 강제하며 검증된 이메일 주소만 고려합니다. |
 | `providers[].authoritative_domains` | 도메인 배열 | `[]` | 이 제공자가 이메일에 대해 권위를 갖는 도메인([ADR-0011](../adr/0011-account-linking-policy.md)). |
 | `providers[].auto_link` | 불리언 | `false` | 정책이 허용하면 확인 없이 로그인을 기존 사용자에 연결합니다. |

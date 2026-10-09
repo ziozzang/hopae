@@ -1,6 +1,6 @@
 # 운영
 
-<!-- translation-status: source=../OPERATIONS.md source-rev=1 status=current -->
+<!-- translation-status: source=../OPERATIONS.md source-rev=2 status=current -->
 
 [문서 목차](README.md) · [English](../OPERATIONS.md)
 
@@ -86,7 +86,12 @@ import`는 잠금을 잡지 않습니다.
 `<N>`은 발견된 스키마 버전이며 모드는 `0600`이고 `VACUUM INTO`로 기록하므로 WAL
 내용이 포함됩니다. 새 데이터베이스, 빈 데이터베이스, 이미 최신인 데이터베이스는
 백업하지 않습니다. 같은 버전의 기존 백업은 교체됩니다. 더 새 바이너리가 쓴
-데이터베이스는 거부됩니다(시작이 실패합니다).
+데이터베이스는 거부됩니다(시작이 실패합니다). 릴리스 이전 개발 빌드가 쓴 스키마 버전 2
+데이터베이스도 마찬가지입니다. `sessions.authz_version_at_auth` 열이나
+`users_primary_email` 인덱스가 없으면 알아볼 수 있으며, 종료 상태 2와 함께
+"development database from a pre-release schema; delete it" 메시지로 시작이
+실패합니다. 첫 릴리스 전에는 스키마 버전 2를 제자리에서 수정했으므로 그런
+데이터베이스는 업그레이드할 수 없습니다. 삭제하십시오.
 
 업그레이드 절차:
 
@@ -232,7 +237,7 @@ verify는 실패 시 차단합니다(fail closed). Hopae가 해결하지 못하�
 - M6 이전에는 설정, 제공자 비밀 값, 호출자 키의 핫 리로드가 없습니다. 모든 변경은 재시작이며, 재시작하는 동안 verify는 실패 시 차단합니다(게이트웨이가 `503`으로 답합니다).
 - M7 이전에는 메트릭 엔드포인트가 없고 카운터는 프로세스 내에만 있습니다. M4 이전에는 관리 API나 콘솔이 없으며, 지원하는 관리 수단은 설정 파일과 `hopae providers import`입니다.
 - 백업은 멈춘(또는 체크포인트된) 데이터베이스의 파일 복사입니다. 온라인 백업 도구는 M7입니다.
-- Hopae는 TLS를 종료하지 않으며 설정된 ID 제공자(디스커버리, 키, 토큰, user-info 엔드포인트) 외에는 인터넷과 통신하지 않습니다. M6 이전에는 텔레메트리도 자가 업데이트도 없습니다.
+- Hopae는 TLS를 종료하지 않으며 설정된 ID 제공자(디스커버리, 키, 토큰, user-info 엔드포인트) 외에는 인터넷과 통신하지 않습니다. M6 이전에는 텔레메트리도 자가 업데이트도 없습니다. 제공자 트래픽은 `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`를 무시합니다. 프록시가 목적지를 직접 해석하므로 연결 시점 주소 검사를 우회하게 되기 때문입니다. 프록시 옵션은 없습니다.
 
 ## 예제, 검증, 관련 페이지
 

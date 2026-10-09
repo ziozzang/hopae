@@ -79,48 +79,6 @@ pub(super) fn insert_events(
     Ok(())
 }
 
-/// Called by the writer thread after every job (G7-P01): once enough event
-/// rows have been committed since the last prune, prune inline. Counting
-/// committed rows in the serialized write path is what makes
-/// `max_rows + prune_every` a hard bound; an asynchronous wakeup cannot.
-pub(super) fn enforce_retention(env: &mut WriterEnv) {
-    let Some(policy) = retention(&env.shared) else {
-        return;
-    };
-    if env.shared.committed_events.load(Ordering::Relaxed) < prune_threshold(&policy) {
-        return;
-    }
-    let now = env.shared.clock.now();
-    match prune_in(env, now, &policy) {
-        Ok(report) => {
-            if report.events_deleted > 0 {
-                crate::telemetry::counters::add(
-                    crate::telemetry::counters::EVENTS_PRUNED_TOTAL,
-                    &[],
-                    report.events_deleted,
-                );
-            }
-        }
-        Err(e) => tracing::warn!(error = %e, "inline event prune failed"),
-    }
-    env.shared.committed_events.store(0, Ordering::Relaxed);
-}
-
-fn retention(shared: &Shared) -> Option<EventRetention> {
-    shared
-        .retention
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone()
-}
-
-/// Committed rows between inline prunes: half of `prune_every`, so that the
-/// rows one job adds on top of the threshold still fit inside
-/// `max_rows + prune_every`.
-fn prune_threshold(p: &EventRetention) -> u64 {
-    (p.prune_every / 2).max(1)
-}
-
 /// Drain the diagnostic queue in batches, one transaction per batch. Failures
 /// are logged and the batch dropped: diagnostics are best effort.
 pub(super) fn flush_diagnostics(env: &mut WriterEnv) {
@@ -128,12 +86,7 @@ pub(super) fn flush_diagnostics(env: &mut WriterEnv) {
     loop {
         let batch: Vec<Event> = {
             let mut q = env.shared.diag.lock().unwrap_or_else(|p| p.into_inner());
-            let cap = retention(&env.shared)
-                .map_or(DIAG_BATCH, |p| {
-                    usize::try_from(prune_threshold(&p)).unwrap_or(DIAG_BATCH)
-                })
-                .min(DIAG_BATCH);
-            let n = q.len().min(cap);
+            let n = q.len().min(DIAG_BATCH);
             q.drain(..n).collect()
         };
         if batch.is_empty() {
@@ -152,6 +105,18 @@ pub(super) fn flush_diagnostics(env: &mut WriterEnv) {
             }
             commit(tx, &shared, None)
         })();
+        if result.is_ok() {
+            let log = shared
+                .diag_log
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            if let Some(log) = log {
+                for ev in &batch {
+                    log.emit(ev);
+                }
+            }
+        }
         if let Err(e) = result {
             tracing::warn!(error = %e, dropped = batch.len(), "diagnostic event batch failed");
             // Counted by kind where the loss happens; reported by the
@@ -163,7 +128,21 @@ pub(super) fn flush_diagnostics(env: &mut WriterEnv) {
                 .clone();
             if let Some(drops) = drops {
                 for ev in &batch {
-                    drops.record(ev.kind);
+                    if ev.kind == EventKind::EventsDropped {
+                        // A lost report: give its per-kind counts back for
+                        // the next report (the metric already has them).
+                        let counts = ev.attrs["dropped_by_kind"]
+                            .as_object()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|(k, v)| {
+                                Some((EventKind::from_name(k)?.name(), v.as_u64()?))
+                            })
+                            .collect();
+                        drops.restore(counts);
+                    } else {
+                        drops.record(ev.kind);
+                    }
                 }
             }
         }
@@ -184,6 +163,14 @@ fn travels_with_state(kind: EventKind) -> bool {
     )
 }
 
+pub(super) fn retention(shared: &Shared) -> Option<EventRetention> {
+    shared
+        .retention
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
 fn secs_f(t: Timestamp) -> f64 {
     t.0 as f64 / 1000.0
 }
@@ -193,6 +180,21 @@ fn secs_f(t: Timestamp) -> f64 {
 fn prune_in(env: &mut WriterEnv, now: Timestamp, p: &EventRetention) -> StoreResult<PruneReport> {
     let shared = env.shared.clone();
     let tx = env.begin()?;
+    let report = prune_statements(&tx, &shared, now, p)?;
+    tx.commit()?;
+    shared.committed_events.store(0, Ordering::Relaxed);
+    Ok(report)
+}
+
+/// The prune statements, inside the caller's transaction: `prune_in` runs them
+/// in a transaction of their own, `commit` inside the transaction that would
+/// otherwise cross the bound (G7-P01).
+pub(super) fn prune_statements(
+    tx: &Connection,
+    shared: &Shared,
+    now: Timestamp,
+    p: &EventRetention,
+) -> StoreResult<PruneReport> {
     let mut report = PruneReport::default();
 
     // 1. Age.
@@ -261,9 +263,8 @@ fn prune_in(env: &mut WriterEnv, now: Timestamp, p: &EventRetention) -> StoreRes
         .attr("sink", sink.as_str())
         .attr("count", moved)
         .build();
-        insert_event(&tx, &ev, &shared.sinks, now, false)?;
+        insert_event(tx, &ev, &shared.sinks, now, false)?;
     }
-    commit(tx, &shared, None)?;
     Ok(report)
 }
 

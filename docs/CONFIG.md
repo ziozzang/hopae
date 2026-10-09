@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 5 -->
+<!-- doc-rev: 6 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -133,7 +133,7 @@ is the tested provider).
 | `providers[].issuer` | string, URL | the preset's issuer | `https://` (`http://` only for a loopback host and only with `allow_private_endpoints: true`), no query, fragment or credentials. Required unless a preset applies. |
 | `providers[].scope` | string | `openid email profile` | Must not be empty. |
 | `providers[].endpoint_hosts` | array of hosts | `[]` | Hosts, besides the issuer's own, that the provider's discovery document may point to (authorization, token, user info and key endpoints must use `https` and name the issuer's host or one listed here; host names or IP addresses, no scheme or port). The `google` preset lists its own. |
-| `providers[].allow_private_endpoints` | boolean | unset (`false`) | Development and private identity providers only: lifts the connect-time refusal of loopback, private, link-local, CGNAT and multicast addresses and permits `http://` to a loopback issuer. Without it such addresses are refused and the connection goes only to a vetted address. An explicit `false` always wins, even in a `test-hooks` build. |
+| `providers[].allow_private_endpoints` | boolean | unset (`false`) | Development and private identity providers only: lifts the connect-time refusal of loopback, private, link-local, CGNAT and multicast addresses and permits `http://` to a loopback issuer. Without it such addresses are refused and the connection goes only to a vetted address. An explicit `false` always wins, even in a `test-hooks` build. Provider requests never use `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY`. |
 | `providers[].allowed_email_domains` | array of domains | `[]` | Plain domain names; non-empty restricts sign-in to those email domains. Enforced by the identity layer; only a verified email address is considered. |
 | `providers[].authoritative_domains` | array of domains | `[]` | Domains for which this provider is authoritative for email ([ADR-0011](adr/0011-account-linking-policy.md)). |
 | `providers[].auto_link` | boolean | `false` | Link a sign-in to an existing user without confirmation when the policy allows it. |

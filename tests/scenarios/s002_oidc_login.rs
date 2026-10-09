@@ -1948,3 +1948,158 @@ async fn g7_idp04_concurrent_same_email_distinct_subjects_link_required() {
     assert_eq!((logged_in, link_required), (1, 1));
     assert_eq!(k.count("SELECT COUNT(*) FROM sessions"), 1);
 }
+
+/// G7-C03 (pass 2): the touch-coalescing window never lets a handle idle out.
+/// With a 20 s portal idle policy and a visit every 5 s the portal handle
+/// stays alive indefinitely.
+#[tokio::test]
+async fn g7_c03_short_idle_policy_is_kept_alive_by_frequent_visits() {
+    let k = Kit::new().await;
+    let first = k.login().await;
+    let mut snap = (**k.verify.snapshot.load()).clone();
+    snap.default_app.session.idle = std::time::Duration::from_secs(20);
+    k.verify.snapshot.store(Arc::new(snap));
+    for i in 1..=24u32 {
+        k.advance(5);
+        let entry = g7_portal_visit(&k, &first.portal_handle).await;
+        assert!(
+            matches!(entry, LoginEntry::Sso { .. }),
+            "visit {i} at +{}s must be single sign-on, got {entry:?}",
+            5 * i
+        );
+    }
+}
+
+/// G7-C07 (pass 2): counting and admission are one atomic step, so parallel
+/// retries never exceed `txn.per_ip_per_minute`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn g7_c07_parallel_retries_never_exceed_the_cap() {
+    const PORTAL_IP: &str = "198.51.100.77";
+    let k = Arc::new(
+        Kit::with(Opts {
+            txn_per_ip: 5,
+            ..Opts::default()
+        })
+        .await,
+    );
+    let mut snap = (**k.verify.snapshot.load()).clone();
+    for a in snap.apps.iter_mut() {
+        a.binding.ip = hopae::policy::types::IpBinding::Off;
+    }
+    k.verify.snapshot.store(Arc::new(snap));
+    let p2 = hopae::crypto::random_token(&hopae::crypto::OsRng, 16);
+    let mut refs = Vec::new();
+    for batch in 0..4 {
+        if batch > 0 {
+            k.advance(61);
+        }
+        for i in 0..5 {
+            let t = k.start(APP, &format!("/p{batch}{i}"), Some(&k.b1)).await;
+            let state = k.redirect(&t.transaction, &k.p1).await;
+            let out = k
+                .svc
+                .complete_callback(
+                    &k.ctx_ip(PORTAL_IP),
+                    &k.mock_id(),
+                    CallbackQuery {
+                        code: Some("AC1".into()),
+                        state: Some(state.expose().to_string()),
+                        error: None,
+                        error_description: None,
+                    },
+                    Some(&p2),
+                    None,
+                )
+                .await
+                .unwrap();
+            let CallbackOutcome::Interrupted { retry_ref, .. } = out else {
+                panic!("expected Interrupted")
+            };
+            refs.push(retry_ref);
+        }
+    }
+    k.advance(61);
+    let tasks: Vec<_> = refs
+        .into_iter()
+        .map(|r| {
+            let (k, p2) = (k.clone(), p2.clone());
+            tokio::spawn(async move { k.svc.retry(&k.ctx_ip(PORTAL_IP), &r, Some(&p2)).await })
+        })
+        .collect();
+    let mut admitted = 0;
+    for t in tasks {
+        match t.await.unwrap() {
+            Ok(_) => admitted += 1,
+            Err(SessionError::RateLimited { .. }) => {}
+            Err(e) => panic!("unexpected: {e:?}"),
+        }
+    }
+    assert_eq!(admitted, 5, "never above the cap of 5 per minute");
+    assert_eq!(
+        k.count("SELECT COUNT(*) FROM login_txns WHERE created_at >= (SELECT MAX(created_at) FROM login_txns)"),
+        5
+    );
+}
+
+/// G7-IDP-01 (pass 2): a disable that commits after the callback's last
+/// provider-row read but before the identity/session write transaction is
+/// still caught, by the predicate inside that transaction. The store stall
+/// hook holds `create_user` after the last read and before its transaction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn g7_idp01_disable_between_the_last_read_and_the_write() {
+    let hooks = Arc::new(hopae::store::StoreHooks::new());
+    let k = Arc::new(
+        Kit::with(Opts {
+            hooks: Some(hooks.clone()),
+            ..Opts::default()
+        })
+        .await,
+    );
+    let t = k.start(APP, "/admin/x", Some(&k.b1)).await;
+    let state = k.redirect(&t.transaction, &k.p1).await;
+    hooks.set_stall(500);
+    let (kk, p1, st) = (k.clone(), k.p1.clone(), state.clone());
+    let cb = tokio::spawn(async move { kk.callback(&st, Some(&p1), None).await });
+    // `create_user` has been called (so every provider-row read is behind us)
+    // and is waiting out the stall: now the operator disables the provider.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while hooks.calls().get("create_user").copied().unwrap_or(0) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "create_user never called"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    g7_set_provider_row(&k, "enabled = 0");
+    let e = cb.await.unwrap().unwrap_err();
+    assert_eq!(e.reason().0, "provider_disabled");
+    assert_eq!(k.count("SELECT COUNT(*) FROM users"), 0);
+    assert_eq!(k.count("SELECT COUNT(*) FROM identities"), 0);
+    assert_eq!(k.count("SELECT COUNT(*) FROM sessions"), 0);
+
+    // The session write itself is guarded too (existing identity, no create_user).
+    hooks.set_stall(0);
+    g7_set_provider_row(&k, "enabled = 1");
+    let t = k.start(APP, "/admin/y", Some(&k.b1)).await;
+    let state = k.redirect(&t.transaction, &k.p1).await;
+    k.callback(&state, Some(&k.p1), None).await.unwrap();
+    k.advance(5);
+    let t = k.start(APP, "/admin/z", Some(&k.b1)).await;
+    let state = k.redirect(&t.transaction, &k.p1).await;
+    hooks.set_stall(500);
+    let sessions_before = k.count("SELECT COUNT(*) FROM sessions");
+    let (kk, p1, st) = (k.clone(), k.p1.clone(), state.clone());
+    let cb = tokio::spawn(async move { kk.callback(&st, Some(&p1), None).await });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while hooks.calls().get("create_session").copied().unwrap_or(0) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "create_session never called"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    g7_set_provider_row(&k, "enabled = 0");
+    let e = cb.await.unwrap().unwrap_err();
+    assert_eq!(e.reason().0, "provider_disabled");
+    assert_eq!(k.count("SELECT COUNT(*) FROM sessions"), sessions_before);
+}

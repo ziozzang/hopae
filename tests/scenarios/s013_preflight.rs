@@ -898,3 +898,62 @@ fn extra_s013_a5_health_body_reports_insecure_flags() {
         assert_eq!(get(s.portal, "/healthz").json()[flag], true, "{name}");
     }
 }
+
+/// G7 B01: migration 0002 was edited in place before the first release. A
+/// database that a pre-release build left at schema version 2 lacks the
+/// `sessions.authz_version_at_auth` column and the `users_primary_email`
+/// index; starting on it must be refused with a clear message, not fail later
+/// in a session query or silently run without the uniqueness rule.
+#[test]
+fn extra_s013_pre_release_v2_database_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = fixture_in(dir.path(), "valid");
+    std::fs::create_dir_all(dir.path().join("state")).unwrap();
+    {
+        let c = Connection::open(db_path(dir.path())).unwrap();
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, applied_at INTEGER NOT NULL) STRICT;",
+        )
+        .unwrap();
+        c.execute_batch(include_str!("../../src/store/migrations/0001_meta.sql"))
+            .unwrap();
+        c.execute_batch(include_str!("../fixtures/pre_release_0002_m1_schema.sql"))
+            .unwrap();
+        c.execute_batch(
+            "INSERT OR IGNORE INTO schema_migrations VALUES (1,'0001_meta',0);
+             INSERT OR IGNORE INTO schema_migrations VALUES (2,'0002_m1_schema',0);",
+        )
+        .unwrap();
+    }
+    // Bounded: a start that is not refused would serve forever.
+    let mut c = hopae();
+    c.arg("run").arg("--config").arg(&cfg);
+    for (k, v) in BOTH {
+        c.env(k, v);
+    }
+    c.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = c.spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("hopae started on a pre-release v2 database instead of refusing it");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).unwrap();
+    assert_eq!(status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("development database from a pre-release schema; delete it"),
+        "{stderr}"
+    );
+    // A current database starts normally.
+    let dir2 = tempfile::tempdir().unwrap();
+    let cfg2 = fixture_in(dir2.path(), "valid");
+    let mut s = Serve::start(&cfg2, BOTH, "b01");
+    assert_eq!(s.terminate(), Some(0));
+}

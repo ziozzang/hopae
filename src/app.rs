@@ -684,6 +684,9 @@ impl Bound {
         self.services.store.set_event_retention(retention.clone());
         self.services
             .store
+            .set_diagnostic_log(Arc::new(LogSink::stderr(None)));
+        self.services
+            .store
             .set_drop_counts(self.services.emitter.drops().clone());
         let pruner = Pruner::new(
             events.clone(),
@@ -704,7 +707,6 @@ impl Bound {
                 trigger: self.wiring.trigger.clone(),
                 pruner: Some(pruner.clone()),
                 hooks: self.services.store_hooks.clone(),
-                log: Some(Arc::new(LogSink::stderr(None))),
             }
             .run(bg_rx.clone()),
         ));

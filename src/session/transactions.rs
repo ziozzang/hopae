@@ -121,17 +121,6 @@ impl Service {
             .clone()
             .ok_or(SessionError::Refused(reasons::INVALID_STATE))?;
 
-        // Counted against the same address the replacement is inserted with:
-        // the transaction's application IP (ADR-0014), not the portal's.
-        let recent = self
-            .sessions
-            .count_transactions_since(old.client_ip, now.sub(COUNTER_WINDOW))
-            .await?;
-        if recent >= self.cfg.txn_per_ip_per_minute {
-            return Err(SessionError::RateLimited {
-                retry_after: COUNTER_WINDOW,
-            });
-        }
         self.make_room(ctx, &old.app_id).await?;
 
         let depth = old.recovery_depth + 1;
@@ -162,9 +151,23 @@ impl Service {
             pending_identity: None,
             recovery_depth: depth,
         };
-        self.sessions
-            .create_transaction(new_row, vec![started])
-            .await?;
+        // Admission: the per-IP count (against the transaction's application
+        // IP, the address it is inserted with, ADR-0014) and the insert are
+        // one store transaction.
+        if !self
+            .sessions
+            .create_transaction_capped(
+                new_row,
+                vec![started],
+                now.sub(COUNTER_WINDOW),
+                self.cfg.txn_per_ip_per_minute,
+            )
+            .await?
+        {
+            return Err(SessionError::RateLimited {
+                retry_after: COUNTER_WINDOW,
+            });
+        }
         let fresh = self
             .sessions
             .transaction(&txn.digest())

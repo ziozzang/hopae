@@ -133,7 +133,7 @@ pub struct Deps {
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error("store: {0}")]
-    Store(#[from] StoreError),
+    Store(StoreError),
     /// A uniform refusal; the reason is for events and metrics, never for the user.
     #[error("refused ({})", .0.0)]
     Refused(Reason),
@@ -148,6 +148,15 @@ pub enum SessionError {
     Provider(#[from] ProviderError),
     #[error("not implemented")]
     Unimplemented,
+}
+
+impl From<StoreError> for SessionError {
+    fn from(e: StoreError) -> Self {
+        match e {
+            StoreError::ProviderDisabled => SessionError::Refused(reasons::PROVIDER_DISABLED),
+            e => SessionError::Store(e),
+        }
+    }
 }
 
 impl SessionError {
@@ -536,7 +545,8 @@ impl Service {
         let snap = self.snapshot.load_full();
         match self.evaluate_handle(&view, &snap.default_app, ctx) {
             HandleState::Usable => {
-                self.touch_portal_handle(&view).await;
+                self.touch_portal_handle(&view, snap.default_app.session.idle)
+                    .await;
                 Ok(Some(view))
             }
             HandleState::Dead => Ok(None),
@@ -561,9 +571,14 @@ impl Service {
     /// Record portal activity on the handle and its session, coalesced like
     /// verify's touches (at most one write per `touch_coalesce`). Best effort:
     /// a lost touch only makes the next visit retry it.
-    async fn touch_portal_handle(&self, view: &HandleView) {
+    async fn touch_portal_handle(&self, view: &HandleView, handle_idle: Duration) {
         let now = self.clock.now();
-        if now.since(view.handle.last_seen_at) < TOUCH_COALESCE {
+        // The window never exceeds half of either idle timer, so a handle that
+        // is visited at least that often cannot idle out between two writes.
+        let window = TOUCH_COALESCE
+            .min(handle_idle / 2)
+            .min(self.cfg.session.idle / 2);
+        if now.since(view.handle.last_seen_at) < window {
             return;
         }
         if let Err(e) = self

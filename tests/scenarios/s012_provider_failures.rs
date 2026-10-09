@@ -1556,3 +1556,42 @@ async fn g7_idp03_discovery_endpoints_are_confined_to_the_issuer_or_the_allowlis
         "no connection to a loopback address"
     );
 }
+
+/// G7-IDP-03 (pass 2): outbound provider traffic ignores the proxy
+/// environment. A proxy would resolve the target itself, defeating the
+/// destination vetting, so the client never uses one.
+#[test]
+fn g7_idp03_provider_traffic_ignores_proxy_environment() {
+    let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    proxy.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", proxy.local_addr().unwrap());
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(
+        Fixture::new("m1-basic"),
+        &idp,
+        &[
+            ("HTTP_PROXY", url.as_str()),
+            ("http_proxy", url.as_str()),
+            ("HTTPS_PROXY", url.as_str()),
+            ("https_proxy", url.as_str()),
+            ("ALL_PROXY", url.as_str()),
+            ("all_proxy", url.as_str()),
+        ],
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while idp
+        .requests_to("/.well-known/openid-configuration")
+        .is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "discovery never reached the provider directly; log:\n{}",
+            h.log()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        proxy.accept().is_err(),
+        "a provider request went through the environment proxy"
+    );
+}

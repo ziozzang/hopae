@@ -72,6 +72,9 @@ pub(crate) struct Shared {
     pub(crate) diag: Mutex<VecDeque<Event>>,
     pub(crate) diag_flush_queued: AtomicBool,
     /// Retention policy enforced inline by the writer (ADR-0009, G7-P01).
+    /// Structured log output of persisted diagnostic events: written after the
+    /// batch that holds them commits, never before (G7 B02).
+    pub(crate) diag_log: Mutex<Option<Arc<crate::event::sinks::LogSink>>>,
     /// Where diagnostic events lost at the persistence boundary are counted.
     pub(crate) drops: Mutex<Option<Arc<crate::event::bus::DropCounts>>>,
     pub(crate) retention: Mutex<Option<crate::store::types::EventRetention>>,
@@ -107,14 +110,60 @@ impl WriterEnv {
     }
 }
 
+/// Fail with [`StoreError::ProviderDisabled`] when the providers table holds a
+/// row for `id` that is disabled or tombstoned. Called inside the write
+/// transaction that creates identities or sessions, so a disable committed
+/// after the caller's last read still wins (G7-IDP-01).
+pub(crate) fn require_provider_live(tx: &Transaction<'_>, id: &str) -> StoreResult<()> {
+    use rusqlite::OptionalExtension;
+    let dead: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM providers WHERE provider_id=?1 AND (enabled=0 OR deleted_at IS NOT NULL)",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if dead.is_some() {
+        return Err(StoreError::ProviderDisabled);
+    }
+    Ok(())
+}
+
 /// Pass the commit gate `label` (if hooks are present), then commit.
 pub(crate) fn commit(tx: Transaction<'_>, shared: &Shared, gate: Option<&str>) -> StoreResult<()> {
     if let (Some(h), Some(label)) = (&shared.hooks, gate) {
         h.pass_gate(label);
     }
-    tx.commit()?;
+    // Retention is enforced at the commit boundary (G7-P01): when this
+    // transaction's own event rows bring the rows committed since the last
+    // prune to `prune_every`, the prune runs inside it, so no committed state
+    // holds more than `max_rows + prune_every - 1` rows.
     let n = shared.pending_events.swap(0, Ordering::Relaxed);
-    shared.committed_events.fetch_add(n, Ordering::Relaxed);
+    let before = shared.committed_events.load(Ordering::Relaxed);
+    let mut pruned = None;
+    if n > 0
+        && let Some(policy) = events::retention(shared)
+        && before + n >= policy.prune_every.max(1)
+    {
+        match events::prune_statements(&tx, shared, shared.clock.now(), &policy) {
+            Ok(report) => pruned = Some(report),
+            Err(e) => tracing::warn!(error = %e, "inline event prune failed"),
+        }
+    }
+    tx.commit()?;
+    match pruned {
+        Some(report) => {
+            shared.committed_events.store(0, Ordering::Relaxed);
+            let policy_sinks = shared.sinks.clone();
+            crate::event::prune::account_report(
+                &report,
+                &crate::event::prune::sink_label(&policy_sinks),
+            );
+        }
+        None => {
+            shared.committed_events.fetch_add(n, Ordering::Relaxed);
+        }
+    }
     Ok(())
 }
 
@@ -179,6 +228,7 @@ impl Store {
             diag: Mutex::new(VecDeque::new()),
             diag_flush_queued: AtomicBool::new(false),
             drops: Mutex::new(None),
+            diag_log: Mutex::new(None),
             retention: Mutex::new(None),
             pending_events: AtomicU64::new(0),
             committed_events: AtomicU64::new(0),
@@ -193,7 +243,6 @@ impl Store {
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
                     job(&mut env);
-                    events::enforce_retention(&mut env);
                 }
             })
             .map_err(io(path))?;
@@ -218,6 +267,17 @@ impl Store {
 
     pub fn events(&self) -> Arc<dyn Events> {
         Arc::new(self.clone())
+    }
+
+    /// Write each persisted diagnostic event as a JSON line to `log`, after
+    /// the batch transaction that stores it has committed.
+    pub fn set_diagnostic_log(&self, log: Arc<crate::event::sinks::LogSink>) {
+        *self
+            .inner
+            .shared
+            .diag_log
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(log);
     }
 
     /// Count diagnostic events whose batch could not be persisted in `drops`.
@@ -408,5 +468,31 @@ pub fn migrate(conn: &Connection) -> Result<u32, StoreError> {
         )?;
         tx.commit()?;
     }
-    current_version(conn)
+    let version = current_version(conn)?;
+    refuse_pre_release_schema(conn, version)?;
+    Ok(version)
+}
+
+/// Migration 0002 gained `sessions.authz_version_at_auth` and the
+/// `users_primary_email` index while still unreleased (no new migration). A
+/// version-2 database written before that has neither, and no migration will
+/// add them: refuse it rather than fail later in a session query.
+fn refuse_pre_release_schema(conn: &Connection, version: u32) -> Result<(), StoreError> {
+    if version != 2 {
+        return Ok(());
+    }
+    let column: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='authz_version_at_auth'",
+        [],
+        |r| r.get(0),
+    )?;
+    let index: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='users_primary_email'",
+        [],
+        |r| r.get(0),
+    )?;
+    if column == 0 || index == 0 {
+        return Err(StoreError::DevelopmentSchema);
+    }
+    Ok(())
 }

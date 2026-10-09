@@ -364,7 +364,7 @@ async fn flow(cx: &Cx<'_>) -> Flow {
     // are parsed but not enforced in M1: they only make the answer path-dependent.
     let path_dependent = step_up::forces_no_store(&app.step_up);
 
-    touch(cx, &view);
+    touch(cx, app, &view);
 
     let cache = cacheability(cx, app, expires_at, path_dependent);
     Ok(Decision::Allow {
@@ -461,9 +461,15 @@ async fn revoke_handle(
 
 /// `last_seen_at` write coalescing: at most one write per handle per
 /// `touch_coalesce`, never awaited by the decision.
-fn touch(cx: &Cx<'_>, view: &HandleView) {
+fn touch(cx: &Cx<'_>, app: &AppPolicy, view: &HandleView) {
     static SCHEDULED: OnceLock<Mutex<HashMap<Digest, i64>>> = OnceLock::new();
-    let window = cx.ctx.limits.touch_coalesce;
+    // Never longer than half of either idle timer (a short policy must not idle out).
+    let window = cx
+        .ctx
+        .limits
+        .touch_coalesce
+        .min(app.session.idle / 2)
+        .min(cx.ctx.limits.session.idle / 2);
     if cx.now.since(view.handle.last_seen_at) < window {
         return;
     }
