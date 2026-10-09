@@ -30,6 +30,7 @@ pub struct DeliveryWorker {
     events: Arc<dyn Events>,
     sink: Arc<dyn Sink>,
     clock: Arc<dyn Clock>,
+    timeout: Duration,
 }
 
 fn backoff(failures: u32) -> Duration {
@@ -52,7 +53,14 @@ impl DeliveryWorker {
             events,
             sink,
             clock,
+            timeout: DELIVER_TIMEOUT,
         }
+    }
+
+    /// A shorter (or longer) per-attempt timeout; tests.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 
     /// Claim and deliver one batch; returns how many rows were claimed.
@@ -74,11 +82,11 @@ impl DeliveryWorker {
         let n = claimed.len();
         for d in claimed {
             let id = d.event.event_id.clone();
-            let result =
-                match tokio::time::timeout(DELIVER_TIMEOUT, self.sink.deliver(&d.event)).await {
-                    Ok(r) => r,
-                    Err(_) => Err("timeout".to_string()),
-                };
+            let result = match tokio::time::timeout(self.timeout, self.sink.deliver(&d.event)).await
+            {
+                Ok(r) => r,
+                Err(_) => Err("timeout".to_string()),
+            };
             let marked = match result {
                 Ok(()) => {
                     counters::inc(

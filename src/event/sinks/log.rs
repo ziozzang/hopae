@@ -63,18 +63,23 @@ impl Sink for LogSink {
         NAME
     }
 
-    /// Hand the line to the output thread. A full queue is a retryable
-    /// failure: the delivery stays pending and is retried with backoff, so
-    /// delivery stays at-least-once. No thread is parked per attempt.
+    /// Queue the line and wait for the output thread to confirm it was
+    /// written and flushed. No confirmation, no `delivered`: a full queue, a
+    /// write error, a timeout or a shutdown leave the delivery pending, so it
+    /// is retried (and after a crash redelivered, deduplicated by `event_id`):
+    /// at-least-once. Waiting parks no thread.
     async fn deliver(&self, event: &Event) -> Result<(), String> {
         let mut line = Self::line(event);
         line.push('\n');
         // Test hook: die between writing the line and marking the row
         // delivered; the output thread triggers it once the line is out.
-        if self.out.try_line(line.into_bytes(), self.hooks.clone()) {
-            Ok(())
-        } else {
-            Err("log_queue_full".to_string())
+        let rx = self
+            .out
+            .try_line_acked(line.into_bytes(), self.hooks.clone())
+            .ok_or_else(|| "log_queue_full".to_string())?;
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => Err("output_closed".to_string()),
         }
     }
 }

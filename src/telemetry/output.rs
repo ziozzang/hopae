@@ -23,8 +23,13 @@ use crate::telemetry::counters;
 /// Lines the global channel holds.
 const GLOBAL_CAPACITY: usize = 4096;
 
+/// The answer to a line that asked for one: written and flushed, or why not.
+pub type Ack = tokio::sync::oneshot::Sender<Result<(), String>>;
+
 struct Item {
     bytes: Vec<u8>,
+    /// Required deliveries wait for this; diagnostics and tracing do not ask.
+    ack: Option<Ack>,
     /// Test hook: abort once this line is written (`after_log_line`).
     crash_after: Option<Arc<StoreHooks>>,
 }
@@ -44,8 +49,20 @@ impl Output {
             .name("hopae-output".into())
             .spawn(move || {
                 while let Ok(item) = rx.recv() {
-                    // A failing writer loses the line; it never ends the thread.
-                    let _ = writer.write_all(&item.bytes).and_then(|()| writer.flush());
+                    // A failing writer never ends the thread, but it never
+                    // acknowledges a line it could not write either.
+                    let written = writer.write_all(&item.bytes).and_then(|()| writer.flush());
+                    if written.is_err() {
+                        counters::inc(counters::LOG_WRITE_ERRORS_TOTAL, &[]);
+                    }
+                    if let Some(ack) = item.ack {
+                        let _ = ack.send(
+                            written
+                                .as_ref()
+                                .map_err(|e| format!("write_failed_{:?}", e.kind()))
+                                .map(|_| ()),
+                        );
+                    }
                     counted.fetch_sub(1, Ordering::SeqCst);
                     if let Some(h) = item.crash_after {
                         h.crash_point("after_log_line");
@@ -64,8 +81,33 @@ impl Output {
     /// Queue one whole line; `false` when the channel is full (nothing was
     /// queued). Never blocks.
     pub fn try_line(&self, bytes: Vec<u8>, crash_after: Option<Arc<StoreHooks>>) -> bool {
+        self.queue(bytes, crash_after, None)
+    }
+
+    /// As [`Output::try_line`], and the returned receiver answers once the
+    /// line has been written and flushed (or could not be). Used by the
+    /// required-event delivery: no answer, no `delivered`.
+    pub fn try_line_acked(
+        &self,
+        bytes: Vec<u8>,
+        crash_after: Option<Arc<StoreHooks>>,
+    ) -> Option<tokio::sync::oneshot::Receiver<Result<(), String>>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.queue(bytes, crash_after, Some(tx)).then_some(rx)
+    }
+
+    fn queue(
+        &self,
+        bytes: Vec<u8>,
+        crash_after: Option<Arc<StoreHooks>>,
+        ack: Option<Ack>,
+    ) -> bool {
         self.pending.fetch_add(1, Ordering::SeqCst);
-        match self.tx.try_send(Item { bytes, crash_after }) {
+        match self.tx.try_send(Item {
+            bytes,
+            crash_after,
+            ack,
+        }) {
             Ok(()) => true,
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
                 self.pending.fetch_sub(1, Ordering::SeqCst);
@@ -310,10 +352,11 @@ mod tests {
             }
             let sink: Arc<dyn crate::event::sinks::Sink> =
                 Arc::new(LogSink::new(Box::new(parked.clone()), None));
-            let worker = DeliveryWorker::new(store.events(), sink, clock.clone());
+            let worker = DeliveryWorker::new(store.events(), sink, clock.clone())
+                .with_timeout(Duration::from_millis(2));
             let mut attempts = 0;
             for _ in 0..60 {
-                attempts += tokio::time::timeout(Duration::from_secs(5), worker.run_once())
+                attempts += tokio::time::timeout(Duration::from_secs(20), worker.run_once())
                     .await
                     .expect("a delivery round was blocked");
             }
@@ -334,6 +377,154 @@ mod tests {
                 .unwrap();
             assert!(failed > 0, "queue-full deliveries stay pending for a retry");
             parked.release();
+        });
+    }
+
+    /// A writer collecting what is written, line by line.
+    #[derive(Clone, Default)]
+    struct Collect(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Collect {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn required_events(
+        store: &Store,
+        clock: &Arc<TestClock>,
+        n: usize,
+    ) -> impl std::future::Future<Output = Vec<String>> {
+        let rng = OsRng;
+        let evs: Vec<_> = (0..n)
+            .map(|_| {
+                EventBuilder::new(
+                    &**clock,
+                    &rng,
+                    EventKind::LoginSucceeded,
+                    Outcome::Success,
+                    "r",
+                )
+                .build()
+            })
+            .collect();
+        let ids: Vec<String> = evs.iter().map(|e| e.event_id.to_string()).collect();
+        let dir = store.directory();
+        async move {
+            dir.import_providers(vec![], None, evs).await.unwrap();
+            ids
+        }
+    }
+
+    fn states(store: &Store) -> (i64, i64) {
+        let c = store.conn();
+        let n = |state: &str| -> i64 {
+            c.query_row(
+                "SELECT COUNT(*) FROM event_deliveries WHERE state=?1",
+                [state],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        (n("pending"), n("delivered"))
+    }
+
+    /// G7 B07: no acknowledgement, no `delivered`. Output parked (a stderr
+    /// nobody drains) while the instance goes away: no row is marked
+    /// delivered. After the restart, with the output draining, every
+    /// required event's line appears and only then are the rows delivered.
+    #[test]
+    fn a_row_is_delivered_only_once_its_line_is_written_and_survives_a_restart() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("t.db");
+            let clock = Arc::new(TestClock::new(Timestamp(1_800_000_000_000)));
+            let ids = {
+                let store = Store::open(&path, clock.clone(), vec!["log".into()], None).unwrap();
+                let ids = required_events(&store, &clock, 5).await;
+                let parked = Parked::new();
+                let sink: Arc<dyn crate::event::sinks::Sink> =
+                    Arc::new(LogSink::new(Box::new(parked.clone()), None));
+                let worker = DeliveryWorker::new(store.events(), sink, clock.clone())
+                    .with_timeout(Duration::from_millis(100));
+                assert_eq!(worker.run_once().await, 5);
+                assert_eq!(
+                    states(&store),
+                    (5, 0),
+                    "parked output: nothing is delivered"
+                );
+                // Shutdown: the store and the stuck output are dropped.
+                ids
+            };
+            // Restart: the same database, an output that drains.
+            let store = Store::open(&path, clock.clone(), vec!["log".into()], None).unwrap();
+            clock.advance(Duration::from_secs(10));
+            let out = Collect::default();
+            let sink: Arc<dyn crate::event::sinks::Sink> =
+                Arc::new(LogSink::new(Box::new(out.clone()), None));
+            let worker = DeliveryWorker::new(store.events(), sink, clock.clone());
+            assert_eq!(worker.run_once().await, 5);
+            let text = String::from_utf8(out.0.lock().unwrap().clone()).unwrap();
+            for id in &ids {
+                assert!(
+                    text.contains(id.as_str()),
+                    "the line of {id} was never written"
+                );
+            }
+            assert_eq!(
+                states(&store),
+                (0, 5),
+                "delivered, and only with their lines"
+            );
+        });
+    }
+
+    /// G7 B07: an output that fails is never acknowledged: the rows stay
+    /// pending with the error, and the failures are counted.
+    #[test]
+    fn a_failing_output_leaves_rows_pending_with_the_error() {
+        struct Failing;
+        impl Write for Failing {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (_dir, store, clock) = store(&["log"]);
+            required_events(&store, &clock, 3).await;
+            let errors = counters::get(counters::LOG_WRITE_ERRORS_TOTAL, &[]);
+            let sink: Arc<dyn crate::event::sinks::Sink> =
+                Arc::new(LogSink::new(Box::new(Failing), None));
+            let worker = DeliveryWorker::new(store.events(), sink, clock.clone());
+            assert_eq!(worker.run_once().await, 3);
+            assert_eq!(states(&store), (3, 0), "write errors are not acknowledged");
+            let with_error: i64 = store
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM event_deliveries WHERE state='pending' AND last_error LIKE 'write_failed%'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(with_error, 3);
+            assert!(counters::get(counters::LOG_WRITE_ERRORS_TOTAL, &[]) >= errors + 3);
         });
     }
 }

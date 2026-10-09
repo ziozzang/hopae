@@ -15,6 +15,8 @@ pub const EVENTS_DROPPED_TOTAL: &str = "hopae_events_dropped_total";
 pub const EVENTS_LOG_DROPPED_TOTAL: &str = "hopae_events_log_dropped_total";
 /// Tracing log lines dropped because the bounded output channel was full.
 pub const LOG_LINES_DROPPED_TOTAL: &str = "hopae_log_lines_dropped_total";
+/// Writes to the log output that failed (the line was not written).
+pub const LOG_WRITE_ERRORS_TOTAL: &str = "hopae_log_write_errors_total";
 /// Event rows removed by the prune task.
 pub const EVENTS_PRUNED_TOTAL: &str = "hopae_events_pruned_total";
 /// Deliveries moved to `failed`, by sink and reason.
