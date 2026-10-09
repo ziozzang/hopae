@@ -13,6 +13,8 @@ pub const EVENTS_DROPPED_TOTAL: &str = "hopae_events_dropped_total";
 /// Diagnostic log lines dropped because the bounded logging queue was full
 /// (output blocked or slower than the events).
 pub const EVENTS_LOG_DROPPED_TOTAL: &str = "hopae_events_log_dropped_total";
+/// Tracing log lines dropped because the bounded output channel was full.
+pub const LOG_LINES_DROPPED_TOTAL: &str = "hopae_log_lines_dropped_total";
 /// Event rows removed by the prune task.
 pub const EVENTS_PRUNED_TOTAL: &str = "hopae_events_pruned_total";
 /// Deliveries moved to `failed`, by sink and reason.

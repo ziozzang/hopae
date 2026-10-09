@@ -4,41 +4,50 @@
 //! allowlisted everything that gets here.
 
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use super::Sink;
 use crate::event::types::Event;
 use crate::store::StoreHooks;
+use crate::telemetry::counters;
+use crate::telemetry::output::Output;
 
 /// Name of the log sink in `event_deliveries`.
 pub const NAME: &str = "log";
 
 pub struct LogSink {
-    out: Arc<Mutex<Box<dyn Write + Send>>>,
+    out: Arc<Output>,
     hooks: Option<Arc<StoreHooks>>,
 }
 
 impl LogSink {
+    /// A sink writing to `out` through an output thread of its own.
     pub fn new(out: Box<dyn Write + Send>, hooks: Option<Arc<StoreHooks>>) -> Self {
         LogSink {
-            out: Arc::new(Mutex::new(out)),
+            out: Output::spawn(out, 1024),
             hooks,
         }
     }
 
+    /// A sink on the process-wide stderr output, shared with the tracing lines.
     pub fn stderr(hooks: Option<Arc<StoreHooks>>) -> Self {
-        Self::new(Box::new(std::io::stderr()), hooks)
+        LogSink {
+            out: Output::global().clone(),
+            hooks,
+        }
     }
 
-    /// Write `event`'s line, best effort: a diagnostic event that reached the
-    /// store also reaches the log, without a delivery row (ADR-0009).
+    /// Queue `event`'s line, best effort and never blocking: a diagnostic event
+    /// that reached the store also reaches the log, without a delivery row
+    /// (ADR-0009). A line that does not fit is dropped and counted.
     pub fn emit(&self, event: &Event) {
         let mut line = Self::line(event);
         line.push('\n');
-        let mut out = self.out.lock().unwrap_or_else(|p| p.into_inner());
-        let _ = out.write_all(line.as_bytes()).and_then(|()| out.flush());
+        if !self.out.try_line(line.into_bytes(), None) {
+            counters::inc(counters::EVENTS_LOG_DROPPED_TOTAL, &[]);
+        }
     }
 
     /// The line written for `event`, without the newline. `serde_json`
@@ -54,23 +63,18 @@ impl Sink for LogSink {
         NAME
     }
 
+    /// Hand the line to the output thread. A full queue is a retryable
+    /// failure: the delivery stays pending and is retried with backoff, so
+    /// delivery stays at-least-once. No thread is parked per attempt.
     async fn deliver(&self, event: &Event) -> Result<(), String> {
         let mut line = Self::line(event);
         line.push('\n');
-        // Output may block (a full pipe): keep it off the async workers.
-        let out = self.out.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut out = out.lock().unwrap_or_else(|p| p.into_inner());
-            out.write_all(line.as_bytes())
-                .and_then(|()| out.flush())
-                .map_err(|_| "write_failed".to_string())
-        })
-        .await
-        .map_err(|_| "write_failed".to_string())??;
-        // Test hook: die between writing the line and marking the row delivered.
-        if let Some(h) = &self.hooks {
-            h.crash_point("after_log_line");
+        // Test hook: die between writing the line and marking the row
+        // delivered; the output thread triggers it once the line is out.
+        if self.out.try_line(line.into_bytes(), self.hooks.clone()) {
+            Ok(())
+        } else {
+            Err("log_queue_full".to_string())
         }
-        Ok(())
     }
 }

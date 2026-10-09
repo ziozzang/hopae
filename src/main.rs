@@ -157,6 +157,7 @@ fn providers_import(cfg: &Config, force: Option<&str>) -> ExitCode {
     let result = runtime()
         .map_err(anyhow::Error::from)
         .and_then(|rt| rt.block_on(app::import_providers_cli(cfg, force)));
+    telemetry::output::Output::global().flush(std::time::Duration::from_secs(2));
     match result {
         Ok(r) => {
             let list = |v: &[hopae::provider::types::ProviderId]| {
@@ -196,7 +197,10 @@ fn serve(cfg: Config) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match rt.block_on(run(cfg)) {
+    let result = rt.block_on(run(cfg));
+    // Lines still queued for the output thread are written (bounded wait).
+    telemetry::output::Output::global().flush(std::time::Duration::from_secs(2));
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             if e.downcast_ref::<app::StoreLocked>().is_some() {

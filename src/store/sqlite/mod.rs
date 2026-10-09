@@ -45,8 +45,6 @@ pub const LATEST_SCHEMA_VERSION: u32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
 /// Bound of the best-effort diagnostic event queue.
 pub const DIAGNOSTIC_QUEUE_CAP: usize = 4096;
-/// Diagnostic log lines queued for the logging thread.
-const LOG_QUEUE_CAP: usize = 1024;
 /// Read connections kept for reuse.
 const READER_POOL_MAX: usize = 4;
 
@@ -76,7 +74,7 @@ pub(crate) struct Shared {
     /// Retention policy enforced inline by the writer (ADR-0009, G7-P01).
     /// Structured log output of persisted diagnostic events: written after the
     /// batch that holds them commits, never before (G7 B02).
-    pub(crate) diag_log: Mutex<Option<mpsc::SyncSender<Event>>>,
+    pub(crate) diag_log: Mutex<Option<Arc<crate::event::sinks::LogSink>>>,
     /// Where diagnostic events lost at the persistence boundary are counted.
     pub(crate) drops: Mutex<Option<Arc<crate::event::bus::DropCounts>>>,
     pub(crate) retention: Mutex<Option<crate::store::types::EventRetention>>,
@@ -274,28 +272,15 @@ impl Store {
     /// Write each persisted diagnostic event as a JSON line to `log`, after
     /// the batch transaction that stores it has committed.
     ///
-    /// The output happens on a logging thread of its own, behind a bounded
-    /// queue: the store writer only tries to enqueue, never waits, so output
-    /// that blocks (a full, undrained stderr) cannot stop database writes. A
-    /// line that does not fit is dropped and counted
-    /// (`hopae_events_log_dropped_total`).
+    /// `LogSink::emit` only queues the line on the bounded output channel and
+    /// never waits, so blocked output cannot stop the store writer.
     pub fn set_diagnostic_log(&self, log: Arc<crate::event::sinks::LogSink>) {
-        let (tx, rx) = mpsc::sync_channel::<Event>(LOG_QUEUE_CAP);
-        let spawned = std::thread::Builder::new()
-            .name("hopae-diag-log".into())
-            .spawn(move || {
-                while let Ok(ev) = rx.recv() {
-                    log.emit(&ev);
-                }
-            });
-        if spawned.is_ok() {
-            *self
-                .inner
-                .shared
-                .diag_log
-                .lock()
-                .unwrap_or_else(|p| p.into_inner()) = Some(tx);
-        }
+        *self
+            .inner
+            .shared
+            .diag_log
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(log);
     }
 
     /// Count diagnostic events whose batch could not be persisted in `drops`.
