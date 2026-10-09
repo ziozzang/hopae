@@ -1,0 +1,21 @@
+{
+  "listen": {
+    "portal": "127.0.0.1:8700",
+    "gateway": "127.0.0.1:8701"
+  },
+  "state_dir": "/var/lib/hopae",
+  "store": {
+    "kind": "sqlite"
+  },
+  "portal": {
+    "public_url": "https://auth.example.test"
+  },
+  "gateway": {
+    "kind": "hangang",
+    "caller_key_env": "HOPAE_GATEWAY_KEY",
+    "allow_unauthenticated_caller": false
+  },
+  "log": {
+    "level": "info"
+  }
+}

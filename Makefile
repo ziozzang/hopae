@@ -23,10 +23,14 @@ define rust
 endef
 endif
 
-.PHONY: check test audit check-docs scenario-coverage gates e2e coverage static release-assets tools-test
+.PHONY: check check-boundary test audit check-docs scenario-coverage gates e2e coverage static release-assets tools-test
 
-check:
+check: check-boundary
 	$(call rust,check,cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings)
+
+# ADR-0013: gateway wire names stay inside src/gateway/. Needs no crate.
+check-boundary:
+	@$(PYTHON) tools/check_boundary.py
 
 test:
 	$(call rust,test,cargo test --locked --all-targets)
@@ -46,8 +50,8 @@ scenario-coverage:
 gates: check test audit check-docs scenario-coverage
 
 e2e:
-ifeq ($(CARGO_PRESENT),)
-	@echo "skip: e2e: no Cargo.toml yet"
+ifeq ($(wildcard tests/scenarios.rs),)
+	@echo "skip: e2e: no tests/scenarios.rs yet (gateway-layer scenarios arrive with M1)"
 else
 	@test -n "$${HOPAE_E2E_GATEWAY_BINARY:-}" || { echo "e2e: HOPAE_E2E_GATEWAY_BINARY must name the gateway binary" >&2; exit 1; }
 	cargo test --locked --test scenarios -- --ignored gateway

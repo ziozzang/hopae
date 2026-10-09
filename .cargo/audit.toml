@@ -1,0 +1,4 @@
+# Accepted advisories are listed here with a reason and an expiry date
+# (docs/PROCESS.md, G6). None are accepted.
+[advisories]
+ignore = []
