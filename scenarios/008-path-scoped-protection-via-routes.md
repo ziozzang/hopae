@@ -5,8 +5,8 @@
 - Area: core
 - Milestone: M1
 - ADRs: 0005, 0008, 0012, 0013
-- Threat model: TM-06, TM-19, TM-27
-- Gateway contract: Hangang route fragments (path-scoped), Proposed gateway changes (HC-3 required, HC-6 optional)
+- Threat model: TM-06, TM-19, TM-27, TM-39
+- Gateway contract: Hangang route fragments (path-scoped), Proposed gateway changes (HC-3 required, HC-6 and HC-10 optional)
 
 ## Goal
 
@@ -74,11 +74,11 @@ manual registration of phase 0 (ADR-0012) is checked by preflight.
 | Downgrade | S008-A4 | yes |
 | Enumeration | — | no |
 
-### S008-A1 Path tricks do not escape the protected prefix
+### S008-A1 Path tricks against the protected prefix: observed gateway behavior and the case-variant exposure
 
-- Given: no cookie.
-- When: `GET /admin%2Fx`, `GET /ADMIN/x`, `GET /admin/../admin/x`, `GET //admin/x` through the gateway.
-- Then: each either matches `site-admin` (→ `302`) or is rejected by the gateway's path normalization; none reaches the upstream under `/admin` without a session. The exact outcome per form is recorded from the gateway's behavior at G8 and fed back into this case.
+- Given: no cookie; the echo upstream is case-sensitive (it records the raw path and serves nothing).
+- When: `GET /admin%2Fx`, `GET /admin/../admin/x`, `GET //admin/x`, then `GET /ADMIN/x`, through the gateway.
+- Then: the first three are rejected by the gateway before routing with `400` (encoded separator, traversal, repeated slash — `resource_policy::canonical_path`), nothing reaches the upstream and Hopae is not called. `/ADMIN/x` is **not** protected on a gateway without HC-10: `resource_guard::path_matches` compares bytes, the request misses `site-admin`, selects `site-public` and reaches the echo upstream with path `/ADMIN/x` and no identity headers; the test asserts exactly this (one upstream request, no `x-forwarded-user`, no verify call) so the exposure stays visible, and the contract and threat model TM-39 require whole-host protection in front of case-insensitive upstreams until HC-10. When the gateway reports HC-10 (route field `path_case` accepted by its validation), the assertion flips: `/ADMIN/x` selects `site-admin`, Hopae answers `302` and the upstream records nothing.
 
 ### S008-A2 Identity headers on the public route are stripped too
 
