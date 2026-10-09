@@ -5,7 +5,7 @@
 - Area: providers
 - Milestone: M1
 - ADRs: 0004, 0008, 0009, 0010, 0011
-- Threat model: TM-03, TM-04, TM-08, TM-09, TM-12, TM-25
+- Threat model: TM-03, TM-04, TM-08, TM-09, TM-12, TM-25, TM-31
 - Gateway contract: Portal entry points (`/login/<p>`, `/callback/<p>`), Cookies
 
 ## Goal
@@ -63,6 +63,12 @@ mixed-up callback never creates a session.
 - Given: the browser holds portal handle `H0` for session `s_1` whose binding passes; a new transaction `T2` for `other.example.org`.
 - When: `GET /login?txn=T2` with cookie `__Host-hopae=H0`.
 - Then: `302` directly to `https://other.example.org/?_hopae_handoff=K2`; no provider call; `auth_time` unchanged; event `session.handoff` with `sso=true`.
+
+### S002-7 Portal binding race recovers through one retry
+
+- Given: a browser with no portal cookie opens `GET /login?txn=TA` and `GET /login?txn=TB` concurrently with a single enabled provider (immediate redirect); the responses plant `P1` then `P2`, so the jar ends with `P2`; `TA.portal_bind_sha256 = sha256(P1)` was recorded when its provider redirect was issued and is immutable; the provider completes for `TA` first.
+- When: `GET /callback/mock?code=ACA&state=SA` arrives with `cookie: __Host-hopae_portal=P2`.
+- Then: no token exchange; `TA` is consumed with `reason=portal_bind_mismatch`; `200` "sign-in was interrupted" page with a CSRF-protected `POST /login/retry` form; the `POST` (with `P2`) creates `TA3` for the same return target at `recovery_depth = 1` and redirects to the provider; the second callback (with `P2`) succeeds and the session is created; `TB`'s callback then reuses that session (same user, valid portal handle) and hands off normally. A `POST /login/retry` without the CSRF token, from a cross-site `Origin`, or for a transaction that did not fail with `portal_bind_mismatch` answers `403`; beyond `handoff.max_recoveries` the page offers no retry (`handoff_recovery_exhausted`). A lure visit to `/login?txn=T9` after the attacker's provider redirect was issued does **not** change `T9`'s recorded digest, so S002-A5 still holds.
 
 ## Abuse cases
 
@@ -147,6 +153,7 @@ mixed-up callback never creates a session.
 | S002-4 | `s002_4_email_collision_refuses_with_link_notice` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 | S002-5 | `s002_5_authoritative_email_auto_links_when_opted_in` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 | S002-6 | `s002_6_sso_from_portal_handle` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
+| S002-7 | `s002_7_portal_binding_race_recovers` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 | S002-A1 | `s002_a1_replayed_callback_rejected` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 | S002-A2 | `s002_a2_tampered_token_artifacts_rejected` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 | S002-A3 | `s002_a3_concurrent_callbacks_single_session` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |

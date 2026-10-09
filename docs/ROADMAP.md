@@ -1,6 +1,6 @@
 # Roadmap
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/ROADMAP.md)
 
@@ -77,7 +77,7 @@ Goal: the process can run end to end on an empty crate.
 - [ ] Spawn-and-probe integration harness for the Hopae binary; gateway layer behind `HOPAE_E2E_GATEWAY_BINARY`; echo upstream; cookie-jar client with `__Host-` and `SameSite` rules.
 - [x] `docs/ARCHITECTURE.md`, `docs/GATEWAY_CONTRACT.md` and `docs/THREAT_MODEL.md` v0 drafted (G1).
 - [ ] ADR-0002 to ADR-0013 accepted after adversarial design review (G2): storage, HTTP stack, session model and cross-domain handoff, gateway contract and versioning, verify caching and invalidation, context binding, second-factor extension point, event model, provider abstraction, account linking, service registration and gateway configuration ownership, adapter boundary.
-- [ ] `docs/CONFIG.md` skeleton listing every key named in the ADRs.
+- [x] `docs/CONFIG.md` listing the M0 keys and every key scheduled by the ADRs.
 
 Exit: `make gates` green on the empty crate; one template scenario runs against the harness; ADRs accepted.
 
@@ -90,17 +90,17 @@ is deliberately narrow and lands before any breadth.
 Scope (scenarios 001–099):
 
 - [ ] Generic OIDC authorization-code client with PKCE and nonce and the user-info subject consistency check; Google as the first configured provider (ADR-0010).
-- [ ] Server-side sessions in the SQLite store; per-host opaque handles in `__Host-hopae` with per-handle timers and issued level; login transactions located by `state`; stable per-browser binding cookies on application hosts (`__Host-hopae_bind`) and on the portal (`__Host-hopae_portal`); single-use cross-domain handoff codes carrying their issuance level and the session's credential generation; document-only redemption with the idempotent already-redeemed case; the `/switch` account-switch confirmation; lifetime state machine (ADR-0002, ADR-0004, ADR-0007).
+- [ ] Server-side sessions in the SQLite store; per-host opaque handles in `__Host-hopae` with per-handle timers and issued level; login transactions located by `state`; stable per-browser binding cookies on application hosts (`__Host-hopae_bind`) and on the portal (`__Host-hopae_portal`) with depth-bounded recovery from the first-use race; single-use cross-domain handoff codes carrying their issuance level and the session's credential generation; document-only redemption with the idempotent already-redeemed case and a relayed `403` for non-document requests carrying the parameter; the `/switch` account-switch confirmation; lifetime state machine (ADR-0002, ADR-0004, ADR-0007).
 - [ ] Two listeners: gateway (`/_hopae/verify`, caller key required, current-plus-next key rotation) and portal (login, provider callback, switch, logout, health) (ADR-0005).
 - [ ] Gateway change HC-3 (static request headers with the caller key) implemented in the gateway's repository and verified by scenarios 004-A8 and 013-A1 against the built gateway.
 - [ ] `GET /_hopae/verify` per the contract: `200` with the identity header set plus `x-hopae-fresh-until` and `x-hopae-gen`; `302` with a return target that is an exact registered origin; `401` naming the application URL as the document bootstrap and creating nothing; `403` for denials and rate limits; `400`/`503` fail closed; `cache-control: no-store` everywhere (ADR-0006 default); 400 ms verify budget.
 - [ ] Application registry (`apps[]`) with exact host names, ports, lifetimes and binding policy; client-IP binding with session termination on mismatch, configurable per application (ADR-0007); canonical path and the reserved parameter recognition rule in the decision input (ADR-0013).
 - [ ] Account creation rules with explicit linking by default: an email collision refuses with a notice (ADR-0011); the completion flow is M3.
 - [ ] Session schema records factors and `aal`; handles record `issued_aal`; verify emits `x-hopae-aal` and `x-hopae-factors`; users carry `authz_version` read at every verify (ADR-0008 schema only).
-- [ ] Event model as a transactional outbox: required events and per-sink delivery rows committed with their state change, at-least-once delivery with `event_id` deduplication, bounded per-sink backlog with dead-lettering, structured log sink, retention (ADR-0009).
+- [ ] Event model as a transactional outbox: required events and per-sink delivery rows committed with their state change, at-least-once delivery with `event_id` deduplication, bounded per-sink backlog with dead-lettering, delivery rows that die with their event, quantified prune cadence, structured log sink (ADR-0009).
 - [ ] Header-injection contract: the identity header set, their declaration in the gateway route so client copies are stripped gateway-wide, and a gateway-layer test proving a spoofed header never reaches the upstream.
 - [ ] Path-scoped protection via gateway routes (public prefix, protected prefix, higher-priority `/admin`) documented with a working route example; phase-0 manual registration (ADR-0012); Hopae-side per-path rules deferred to M2.
-- [ ] Configuration file, `hopae --check` preflight, structured logs with reason codes.
+- [ ] JSON configuration file documented in `docs/CONFIG.md`, `hopae --check` preflight, structured logs with reason codes.
 - [ ] `deploy/` Compose template placing Hopae behind the gateway; deployment to the reference environment.
 
 Scenarios (draft at G1, approved at G3):
@@ -137,7 +137,7 @@ Scope (scenarios 100–199):
 - [ ] Blacklists: subject, email, email domain and client IP (CIDR); checked at login and at verify; administrator-managed.
 - [ ] Login-attempt throttling and lockout per account and per client IP with synchronous atomic counters and constant-work responses; interaction with the gateway's failure bans documented.
 - [ ] PostgreSQL backend for the primary store (ADR-0002) so two instances share one directory.
-- [ ] Redis/Valkey for the generation-stamped invalidation channel and the throttling counters only (50 ms operations, breaker, counters fail closed); no session or decision state in Redis; opt-in bounded Hopae-local cache of authoritative reads with generation provenance (ADR-0006); `verify_cache_seconds`, `x-hopae-fresh-until` and `x-hopae-gen` per application; `authz_version` and `cred_gen` invalidation on group, status, revocation or elevation change.
+- [ ] Redis/Valkey for the generation-stamped invalidation channel and the throttling counters only (50 ms operations, breaker, counters fail closed); no session or decision state in Redis; opt-in bounded Hopae-local cache of authoritative reads with generation provenance (ADR-0006); `verify_cache_seconds`, `x-hopae-fresh-until` and `x-hopae-gen` per application; `authz_version` and `cred_gen` invalidation on group, status, revocation or elevation change; database epoch and `hopae store mark-restored` so a restore to lower generations is recovered by every cache (ADR-0006 decision 8).
 - [ ] Logout everywhere and administrator revocation; session listing per subject.
 - [ ] Hopae-side path and host policy rules evaluated from the original URL (allow, require login, require group); such rules mark the application's decisions `no-store`.
 - [ ] Phase 1 of gateway configuration ownership (ADR-0012): `hopae gateway render` and the read-only drift report.

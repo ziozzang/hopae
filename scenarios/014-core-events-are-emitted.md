@@ -21,7 +21,7 @@ the storage bound.
 
 ## Preconditions and fixtures
 
-- Configuration `tests/fixtures/m1-basic.json` with `events.retention_days = 1`, `events.max_rows = 500`, `events.max_pending_per_sink = 100`; the log sink enabled.
+- Configuration `tests/fixtures/m1-basic.json` with `events.retention_days = 1`, `events.max_rows = 500`, `events.prune_every = 100`, `events.max_pending_per_sink = 100`, `events.delivery_terminal_retention_days = 1`; the log sink enabled.
 - A log capture on the spawned process; a direct read of the `events` table through the harness.
 - Injected clock and ids.
 
@@ -48,8 +48,8 @@ the storage bound.
 ### S014-4 Retention
 
 - Given: 600 events; the clock advanced past one day for 100 of them.
-- When: the hourly prune runs.
-- Then: rows older than one day are deleted, then the oldest beyond 500 rows; `login.*`/`session.*` are pruned by the same rules (retention is a policy, loss-prevention is about the write path).
+- When: the prune runs (it runs after every 100 inserts or 60 s, whichever first; the harness triggers it).
+- Then: rows older than one day are deleted, then the oldest beyond 500 rows; their delivery rows are deleted with them (cascade), terminal ones included; `login.*`/`session.*` are pruned by the same rules (retention is a policy, loss-prevention is about the write path); `delivered`/`failed` delivery rows older than one day are deleted even when their event remains.
 
 ## Alternative flows
 
@@ -73,9 +73,9 @@ the storage bound.
 
 ### S014-8 A stalled sink never removes the storage bound
 
-- Given: the log sink is held by the harness (never acknowledges); `events.max_pending_per_sink = 100`, `events.max_rows = 500`.
-- When: 2,000 required events are produced.
-- Then: at most 100 deliveries for the sink are `pending`; older ones are `failed` with `last_error = backlog_overflow` and one `sink.backlog_overflow` event is recorded per overflow batch (metric `hopae_event_deliveries_failed_total{sink="log",reason="backlog_overflow"}`); the `events` table never exceeds 500 rows plus one batch; pruning removes the oldest rows and marks their non-terminal deliveries `failed` (`pruned`); authentication transactions keep succeeding throughout; once the sink is released, the remaining `pending` rows are delivered and `failed` rows are listed for administrator re-queue (M4).
+- Given: the log sink is held by the harness (never acknowledges); `events.max_pending_per_sink = 100`, `events.max_rows = 500`, `events.prune_every = 100`, `events.delivery_terminal_retention_days = 1`.
+- When: 2,000 required events are produced, then the clock advances one day and another 2,000 are produced.
+- Then: at every instant the `events` table holds at most `500 + 100 = 600` rows (pruning runs after every 100 inserts); at most 100 deliveries for the sink are `pending`; the rest are `failed` with `last_error = backlog_overflow` and one `sink.backlog_overflow` event is recorded per overflow batch (metric `hopae_event_deliveries_failed_total{sink="log",reason="backlog_overflow"}`); pruning removes the oldest events together with **all** their delivery rows, so the `event_deliveries` table holds at most `100 pending + terminal rows of the retained ≤ 600 events`, and after the day advances the terminal rows older than one day are gone even where their events remain; authentication transactions keep succeeding throughout; once the sink is released, the remaining `pending` rows are delivered and the surviving `failed` rows are listed for administrator re-queue (M4). Both tables are asserted after every 100 inserts, not only at the end.
 
 ## Abuse cases
 
@@ -106,7 +106,7 @@ the storage bound.
 
 - Given: `events.max_rows = 500` and a 10,000-event burst of diagnostic kinds, then a 10,000-event burst of required kinds through the login path with the sink stalled.
 - When: run.
-- Then: the table never exceeds 500 + one batch in either burst; the SQLite file size stays bounded after a checkpoint; the diagnostic burst is recorded as `events.dropped`/`events.pruned`; the required burst is bounded by the transaction-rate limits of scenario 001 and by the per-sink backlog cap of S014-8, never by dropping a required row before commit.
+- Then: the table never exceeds `max_rows + prune_every` (600 here) in either burst; the SQLite file size stays bounded after a checkpoint; the diagnostic burst is recorded as `events.dropped`/`events.pruned`; the required burst is bounded by the transaction-rate limits of scenario 001 and by the per-sink backlog cap of S014-8, never by dropping a required row before commit.
 
 ### S014-A4 Spoofed request id
 

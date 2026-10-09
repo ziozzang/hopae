@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=3 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=4 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -27,6 +27,7 @@ Hangang 게이트웨이가 최우선(first-class) 통합 대상이며, 페이지
 | Hopae | `gateway.verify_budget_ms` | verify 한 번에 Hopae가 스스로에게 허용하는 총 시간. 기본값 `400`. 게이트웨이의 `auth.timeout_ms`보다 작아야 합니다 |
 | Hopae | `apps[]` | 애플리케이션 호스트(정확한 소문자 이름만, 패턴 없음), `ports`(기본값 `[443]`), 정책. 이들의 합집합이 돌아갈 출처 허용 목록이며, 각 항목은 운영자가 보증하는 자격 증명 목적지입니다. 나열되지 않은 호스트는 거부합니다(`unknown_app`) |
 | Hopae | `portal.sso_confirm_new_host` | 기본값 `false`. `true`이면 세션이 각 호스트로 처음 싱글 사인온 핸드오프를 하기 전에 포털이 한 번의 클릭을 요구합니다 |
+| Hopae | `handoff.max_recoveries` | 기본값 `3`. 바인딩 쿠키 경쟁에서 복구하기 위해 브라우저를 포털로 되돌려 보낼 수 있는 횟수. 이를 넘으면 종료 페이지를 보여 줍니다 |
 | 게이트웨이 | 라우트 `auth.url` | `http://127.0.0.1:8701/_hopae/verify` |
 | 게이트웨이 | 라우트 `auth.static_request_headers` | `{"x-hopae-contract": "1", "x-hopae-gateway-key": {"env": "HANGANG_HOPAE_KEY"}}`(HC-3) |
 | 게이트웨이 | 라우트 `auth.request_headers` | `cookie`, `user-agent`, `accept`, `sec-fetch-dest`, `sec-fetch-mode`, `sec-fetch-site` |
@@ -138,7 +139,7 @@ Hangang 게이트웨이가 최우선(first-class) 통합 대상이며, 페이지
 | `200` | 허용 | 신원 헤더, `cache-control: no-store`(HC-1이 적용되면 `private, max-age=N`), `x-hopae-reason: ok` | 나열된 헤더를 업스트림 요청에 주입합니다. |
 | `302` | 문서 탐색에 대한 로그인, 단계 상승, 핸드오프 리디렉션 | `location`(포털 URL 또는 핸드오프 대상), `set-cookie`(바인딩 쿠키나 핸들을 심거나 지움), `cache-control: no-store`, `x-hopae-reason` | `referrer-policy: no-referrer`와 함께 클라이언트로 중계합니다. 업스트림에는 접속하지 않습니다. |
 | `401` | 인증 필요 또는 단계 상승 필요, 문서가 아닌 요청 | `content-type: application/json`, 본문 `{"error":"login_required","login":"https://app.example.test/admin/x"}`(또는 `"step_up_required"`): `login`은 **요청된 애플리케이션 URL 그대로**입니다. 애플리케이션 호스트의 문서 탐색만이 바인딩 쿠키를 심고 트랜잭션을 시작할 수 있기 때문입니다. `401`은 트랜잭션을 만들지 않고 쿠키도 설정하지 않습니다. `www-authenticate: Hopae realm="auth.example.test"`, `cache-control: no-store` | 클라이언트로 중계합니다. 이를 받은 페이지 스크립트는 창을 `login`으로 이동시킵니다. |
-| `403` | 거부: 호출자 키 누락이나 불일치(`caller_unauthorized`), 허용 목록 밖의 호스트(`unknown_app`), 차단된 사용자나 IP, 비활성화된 애플리케이션, 그룹 규칙, 단계 상승 불가, **또는 속도 제한**(`{"error":"rate_limited","retry_after":30}`) | `error`를 담은 JSON 본문, `x-hopae-reason` | 본문과 함께 클라이언트로 중계합니다. 수정하지 않은 게이트웨이는 `429`를 `503`으로 바꾸고 `retry-after`를 버리므로 속도 제한에 `403`을 사용합니다. 게이트웨이 변경 HC-8이 있으면 Hopae는 대신 `retry-after`를 실은 `429`로 답합니다(`gateway.rate_limit_status`). |
+| `403` | 거부: 호출자 키 누락이나 불일치(`caller_unauthorized`), 허용 목록 밖의 호스트(`unknown_app`), 차단된 사용자나 IP, 비활성화된 애플리케이션, 그룹 규칙, 단계 상승 불가, 예약 핸드오프 매개변수를 실은 문서가 아닌 요청(`handoff_parameter_not_allowed`), 모호한 예약 매개변수(`handoff_ambiguous`), **또는 속도 제한**(`{"error":"rate_limited","retry_after":30}`) | `error`를 담은 JSON 본문, `x-hopae-reason` | 업스트림에 접속하지 않고 본문과 함께 클라이언트로 중계합니다. 수정하지 않은 게이트웨이는 `429`를 `503`으로 바꾸고 `retry-after`를 버리므로 속도 제한에 `403`을 사용합니다. 게이트웨이 변경 HC-8이 있으면 Hopae는 대신 `retry-after`를 실은 `429`로 답합니다(`gateway.rate_limit_status`). |
 | `400` | 계약 위반 | `x-hopae-reason` | 클라이언트에 `503`(거부 처리). |
 | `503` | Hopae가 결정할 수 없음(저장소 사용 불가, 과부하, verify 예산 초과) | `retry-after`, `x-hopae-reason` | 클라이언트에 `503`(거부 처리). |
 
@@ -146,11 +147,13 @@ Hangang 게이트웨이가 최우선(first-class) 통합 대상이며, 페이지
 들어가지 않으며 업스트림이나 클라이언트에 절대 도달하지 않습니다.
 
 Hopae 내부의 결정 순서는 다음과 같습니다. 호출자 키 → 계약 검사 → 정규 경로 →
-예약 매개변수 인식 → 핸드오프 소비(문서 탐색만, 바인딩 쿠키 필요, 새 핸들을
-심을 수 있음) → 쿠키 핸들 → 세션 조회 → 핸들과 세션 타이머 → 바인딩 정책 →
-사용자 상태와 `authz_version` → 애플리케이션 정책(활성화, 차단, 그룹) → 단계
-상승 규칙 → 신원 헤더. 이 모든 과정은 verify 예산(`gateway.verify_budget_ms`,
-기본값 400 ms) 안에서 실행되며, 예산을 다 쓰면 `503`으로 답합니다.
+예약 매개변수 인식(매개변수를 실은 문서가 아닌 요청은 여기서
+`403 handoff_parameter_not_allowed`로 멈춥니다) → 핸드오프 소비(문서 탐색만,
+바인딩 쿠키 필요, 새 핸들을 심을 수 있음) → 쿠키 핸들 → 세션 조회 → 핸들과
+세션 타이머 → 바인딩 정책 → 사용자 상태와 `authz_version` → 애플리케이션
+정책(활성화, 차단, 그룹) → 단계 상승 규칙 → 신원 헤더. 이 모든 과정은 verify
+예산(`gateway.verify_budget_ms`, 기본값 400 ms) 안에서 실행되며, 예산을 다
+쓰면 `503`으로 답합니다.
 
 ### 신원 헤더
 
@@ -184,8 +187,8 @@ Hopae 내부의 결정 순서는 다음과 같습니다. 호출자 키 → 계�
 | 쿠키 | 호스트 | 속성 | 내용 |
 | --- | --- | --- | --- |
 | `__Host-hopae` | 각 애플리케이션 호스트와 포털 호스트 | `Path=/; Secure; HttpOnly; SameSite=Lax`, `Domain` 없음, `Max-Age`는 핸들의 남은 절대 수명과 같음 | `v1.` + 무작위 32바이트의 base64url. 세션 하나, 호스트 하나, 발급 수준 하나에 묶인 핸들 |
-| `__Host-hopae_bind` | 애플리케이션 호스트. 로그인이나 단계 상승을 시작하는 미인증 `302`가 **요청에 올바른 형식의 값이 없을 때** 심음. 있으면 기존 값을 유지하고 `Max-Age`만 갱신 | `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` | 무작위 16바이트의 base64url. 이 호스트의 모든 핸드오프 코드가 묶이는 브라우저별 안정적 비밀. 동시 트랜잭션이 공유하며, 어떤 응답도 지우거나 교체하지 않고 `Max-Age`로 만료 |
-| `__Host-hopae_portal` | 포털 호스트. 첫 포털 방문 시 심고 방문마다 갱신 | `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` | 무작위 16바이트의 base64url. 브라우저별 안정적 포털 비밀. 각 트랜잭션은 첫 방문 시 그 다이제스트를 기록하고, 콜백과 모든 포털 `POST`는 일치를 요구함. 트랜잭션별 쿠키는 없음 |
+| `__Host-hopae_bind` | 애플리케이션 호스트. 로그인이나 단계 상승을 시작하는 미인증 `302`가 **요청에 올바른 형식의 값이 없을 때** 심음. 있으면 기존 값을 유지하고 `Max-Age`만 갱신 | `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` | 무작위 16바이트의 base64url. 이 호스트의 모든 핸드오프 코드가 묶이는 브라우저별 안정적 비밀. 동시 트랜잭션이 공유하며, 어떤 응답도 지우거나 교체하지 않고 `Max-Age`로 만료. 어느 응답도 도착하기 전에 시작한 두 탭은 서로 다른 값을 받고 마지막 응답이 이기며, 진 쪽은 통상의 미인증 `302`로 복구함(핸드오프 절 참조). 최대 `handoff.max_recoveries`회 |
+| `__Host-hopae_portal` | 포털 호스트. 첫 포털 방문 시 심고 방문마다 갱신 | `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` | 무작위 16바이트의 base64url. 브라우저별 안정적 포털 비밀. 각 트랜잭션은 제공자 리디렉션을 내보내는 순간 그 다이제스트를 기록하고 이후 절대 바꾸지 않으며, 콜백과 모든 포털 `POST`는 일치를 요구함. 트랜잭션별 쿠키는 없음. 올바른 형식이지만 다른 쿠키를 가진 콜백(첫 접촉 경쟁)은 트랜잭션을 소비하고 CSRF로 보호된 재시도를 한 번 제공함 |
 
 지울 때는 같은 이름과 속성에 `Max-Age=0`을 사용합니다. `SameSite`는 항상
 `Lax`입니다. 포털 → 애플리케이션 리디렉션은 교차 사이트 최상위 탐색이므로
@@ -203,33 +206,44 @@ https://app.example.test/admin/x?_hopae_handoff=<code>
 ```
 
 그 요청에 대한 게이트웨이의 포워드 인증 호출은 매개변수를 `x-original-url`에
-담고 그 호스트의 쿠키를 함께 보냅니다. 문서 탐색만이 코드를 소비하며, 문서가
-아닌 요청은 매개변수가 없는 것처럼 검증합니다. Hopae는 다음이 모두 성립할 때만
-코드를 소비합니다. 1회용이며 60초 이내일 것, 호스트와 경로가 일치할 것,
-클라이언트 IP가 일치할 것, 요청에 코드와 함께 저장된 다이제스트와 SHA-256이
-같은 `__Host-hopae_bind`가 실려 있을 것(이 쿠키는 이 브라우저가 로그인을 시작할
-때 이 호스트에 심은 것이므로 그 브라우저만 갖고 있습니다), 코드의 `cred_gen`이
-세션의 현재 세대와 같을 것(소비하는 갱신문 안에서 검사하므로 단계 상승이나
-취소 전에 만든 코드는 죽습니다), 그리고 요청에 **다른** 사용자의 유효한
-`__Host-hopae`가 없을 것. 새 핸들의 수준은 `min(code.issued_aal, session.aal)`이며
-소비가 권한을 높이는 일은 결코 없습니다. 같은 세션의 유효한 핸들은 교체되며,
-단계 상승이 핸들을 다시 발급하는 방식이 바로 이것입니다. 그러면 매개변수를 뺀
-같은 URL로 `302`를 답하고 그 호스트용 `__Host-hopae`를 심으며,
-`__Host-hopae_bind`는 손대지 않습니다. 업스트림은 매개변수를 절대 보지
-못합니다. `302`는 게이트웨이가 업스트림에 접속하지 않고 중계하며, 아래 인식
-규칙에 맞는 요청에는 어떤 결정 캐시도 우회합니다.
+담고 그 호스트의 쿠키를 함께 보냅니다. 문서 탐색만이 코드를 소비합니다.
+매개변수를 실은 **문서가 아닌** 요청은 어떤 쿠키를 갖고 있든, 유효한 핸들이
+있더라도 `403 {"error":"handoff_parameter_not_allowed"}`로 답합니다. 그러지
+않으면 게이트웨이가 코드를 포함한 요청을 업스트림으로 전달하기 때문입니다.
+코드와 모든 쿠키는 손대지 않으므로 사용자의 문서 탐색은 여전히 성공합니다.
+Hopae는 다음이 모두 성립할 때만 코드를 소비합니다. 1회용이며 60초 이내일 것,
+호스트와 경로가 일치할 것, 클라이언트 IP가 일치할 것, 요청에 코드와 함께 저장된
+다이제스트와 SHA-256이 같은 `__Host-hopae_bind`가 실려 있을 것(이 쿠키는 이
+브라우저가 로그인을 시작할 때 이 호스트에 심은 것이므로 그 브라우저만 갖고
+있습니다), 코드의 `cred_gen`이 세션의 현재 세대와 같을 것(소비하는 갱신문
+안에서 검사하므로 단계 상승이나 취소 전에 만든 코드는 죽습니다), 그리고 요청에
+**다른** 사용자의 유효한 `__Host-hopae`가 없을 것. 새 핸들의 수준은
+`min(code.issued_aal, session.aal)`이며 소비가 권한을 높이는 일은 결코
+없습니다. 같은 세션의 유효한 핸들은 교체되며, 단계 상승이 핸들을 다시 발급하는
+방식이 바로 이것입니다. 그러면 매개변수를 뺀 같은 URL로 `302`를 답하고 그
+호스트용 `__Host-hopae`를 심으며, `__Host-hopae_bind`는 손대지 않습니다.
+업스트림은 매개변수를 절대 보지 못합니다. 문서 탐색은 중계되는 `302`로, 문서가
+아닌 요청은 중계되는 `403`으로 답하며 둘 다 업스트림에 접속하지 않고, 아래 인식
+규칙에 맞는 요청에는 어떤 결정 캐시도 우회합니다. (바인딩 쿠키 값 자체는
+인증된 요청의 통상적인 `cookie` 헤더로 업스트림에 도달합니다. 장악된
+애플리케이션 호스트는 같은 호스트 안의 신뢰 문제입니다.)
 
-성공이 아닌 결과는 세 가지로 구분됩니다. **소비된** 코드가 그 코드로 만든
+성공이 아닌 결과는 네 가지로 구분됩니다. **소비된** 코드가 그 코드로 만든
 유효한 핸들과 함께 제시되면(프리페치나 재시도된 탐색이 이미 소비한 경우)
 쿠키를 전혀 바꾸지 않고 깨끗한 `302`로 답합니다(`code_already_redeemed`).
 **다른 사용자**의 유효한 핸들이 있으면
 `https://auth.example.test/switch?txn=…`(목적 `switch`)으로 `302`를 답하고,
-코드를 태워 버리며, 모든 쿠키를 그대로 둡니다(`session_conflict`). 그 밖의
-모든 실패는 코드를 태워 버리고, 포털로 가는 인증되지 않은 `302`(기존 바인딩
-쿠키는 유지)로 답하며, 사유(`code_consumed`, `code_expired`,
-`code_stale_generation`, `code_host_mismatch`, `code_path_mismatch`,
-`bind_mismatch`, `handoff_ambiguous`)와 함께 `handoff.rejected`를
-발생시킵니다.
+코드를 태워 버리며, 모든 쿠키를 그대로 둡니다(`session_conflict`). 바인딩
+다이제스트가 제시된 바인딩과 다른데 브라우저에 유효한 핸들이 **없으면**(탭
+사이의 첫 사용 경쟁) 코드를 태워 버리고, 제시된 바인딩을 유지하며
+`recovery_depth + 1`을 물려받는 새 트랜잭션으로 가는 통상의 미인증 `302`로
+답하므로 포털이 싱글 사인온으로 다시 핸드오프합니다. `handoff.max_recoveries`를
+넘는 트랜잭션에는 또 다른 리디렉션 대신 종료 `200`
+페이지(`handoff_recovery_exhausted`)로 답합니다. 그 밖의 모든 실패는 코드를
+태워 버리고, 포털로 가는 인증되지 않은 `302`(기존 바인딩 쿠키는 유지)로
+답하며, 사유(`code_consumed`, `code_expired`, `code_stale_generation`,
+`code_host_mismatch`, `code_path_mismatch`, `bind_mismatch`,
+`handoff_ambiguous`)와 함께 `handoff.rejected`를 발생시킵니다.
 
 ### 예약 매개변수 인식
 
@@ -253,7 +267,8 @@ Hopae의 소비와 게이트웨이의 캐시 우회(HC-1)가 공유하는 규칙
 | --- | --- | --- |
 | `GET /login?txn=<id>` | 제공자 선택. 제공자가 하나만 활성화되어 있으면 즉시 리디렉션 | `txn`이 존재하고, 만료되지 않았으며, 클라이언트 IP 정책에 맞아야 함. `__Host-hopae_portal`을 심거나 갱신하고 첫 방문 시 그 다이제스트를 트랜잭션에 기록 |
 | `POST /login/<provider>` | 제공자 흐름 시작 | 포털 바인딩 쿠키에 묶인 CSRF 토큰. `Origin`은 포털 출처여야 함 |
-| `GET /callback/<provider>` | 제공자 리디렉션 URI | `state`로 트랜잭션을 찾음. 포털 바인딩 쿠키가 트랜잭션의 다이제스트와 일치해야 함. 제공자 일치, PKCE, nonce, 발급자 |
+| `GET /callback/<provider>` | 제공자 리디렉션 URI | `state`로 트랜잭션을 찾음. 포털 바인딩 쿠키가 제공자 리디렉션을 내보낼 때 기록한 다이제스트와 일치해야 함. 제공자 일치, PKCE, nonce, 발급자. 올바른 형식이지만 다른 쿠키는 트랜잭션을 소비하고 재시도 페이지를 표시함 |
+| `POST /login/retry` | 포털 바인딩 경쟁 뒤에 같은 돌아갈 대상으로 `recovery_depth + 1`의 새 트랜잭션을 시작 | CSRF 토큰, `Origin` 검사. 소비된 트랜잭션이 `portal_bind_mismatch`로 실패했어야 함. `handoff.max_recoveries`로 제한 |
 | `GET /switch?txn=<id>` | `session_conflict` 뒤의 계정 전환 확인. 호스트와 두 계정을 표시 | 폼만 표시. 상태 변경 없음 |
 | `POST /switch` | 확인(브라우저가 그 호스트에서 제시한 핸들을 취소하고, 새 코드를 발급하고, 리디렉션) 또는 거절(기존 사용자로 깨끗한 URL로 리디렉션) | CSRF 토큰, `Origin` 검사, 포털 바인딩 쿠키. 트랜잭션의 목적이 `switch`여야 함 |
 | `GET /logout` | 확인 페이지 | 폼만 표시. 상태 변경 없음 |
@@ -312,6 +327,15 @@ Hopae는 세션 종료와 핸들 취소(둘 다 세션의 `cred_gen`을 올림),
 해당 ID로 태그된 항목을 제거합니다. 전달은 최선 노력이며, 신선도 마감이
 보장입니다. 연결이 끊긴 구독자는 다시 연결할 때 캐시 전체를 비웁니다.
 
+캐시를 출시하는 마일스톤부터 세대는 데이터베이스 **에포크**의 범위 안에
+있습니다([ADR-0006](../adr/0006-verify-caching-and-invalidation.md)).
+`x-hopae-gen`은 `e<16진수 8자리>.s<n>.u<n>.c<n>`이 되고, 모든 메시지는
+`"epoch"`를 실으며, 구독자는 최고 세대 표시를 에포크별로 유지하고, 본 적 없는
+에포크를 만나면 그 Hopae에서 온 모든 항목을 제거하고 표시를 재설정합니다.
+운영자의 복원 절차는 에포크를 다시 생성하므로(`hopae store mark-restored`),
+더 낮은 세대로 복원된 데이터베이스가 접근을 넓히지도, 캐싱을 억누르지도
+않습니다.
+
 ### 버전 관리
 
 | 변경 | 계약 버전 | 비고 |
@@ -365,8 +389,8 @@ HC-5, HC-7입니다. 식별자는 고정이며, 순서는 권장 사항입니다
 | HC-6 | 정규 경로 맥락: 외부 인증 호출에 생성 헤더 `x-hangang-canonical-path`(라우트 선택에 사용한 `canonical_path` 결과. 라우트가 원시 경로로 선택되었으면 없음)와 `x-hangang-route-id`를 실음 | `forward_auth_context` | 게이트웨이가 정규 경로를 사용했을 때만 정확히 존재함. 라우트 선택에 쓴 값과 같음. 클라이언트가 보낸 복사본은 교체함. `/%61dmin/x` 단위 테스트. 이름은 `x-original-*`처럼 예약됨. |
 | HC-8 | `forward_response`로 외부 인증 서비스의 `429`를 `retry-after`, `content-type`, `cache-control`, 제한된 본문과 함께 중계 | `authorize` 응답 처리 | `forward_response`가 켜져 있을 때만. `retry-after`는 `429`에서만 중계함. 그 밖의 예상 밖 상태는 여전히 `503`. `path_failure_bans`가 `429`를 셀 수 있음. 중계와 변하지 않은 `503` 매핑에 대한 테스트. |
 | HC-4 | 쿠키 필터링: `auth.request_cookies: ["__Host-hopae", "__Host-hopae_bind"]`가 `cookie` 헤더 중 지정한 쿠키만 인증 서비스로 전달 | `authorize` 요청 구성 | 나열된 쿠키 이름만 전송됨. 업스트림은 여전히 모든 쿠키를 받음. HTTP/2로 분할된 쿠키는 먼저 결합함. 형식이 잘못된 쿠키 쌍은 전달하지 않고 버림. 순서와 부재를 다루는 테스트. |
-| HC-1 | 라우트별 결정 마이크로캐시: `auth.decision_cache_ms`(기본값 `0` = 끔, 최대 `30000`). `2xx`만 캐시하며 **(설정 세대, 라우트 ID, 해석된 클라이언트 IP, 정규화한 외부 스킴과 호스트, 나열된 요청 헤더와 정적 요청 헤더의 SHA-256)**을 키로 사용. `cache-control: max-age`와 `x-hopae-fresh-until`을 상한으로, `no-store`를 거부권으로 존중. 요청이 예약 매개변수 인식 규칙(디코딩된 쿼리 이름, 모호한 형태, 경로 안의 원시 또는 인코딩된 이름)에 맞으면 조회도 저장도 하지 않음. 항목은 `x-hopae-session`과 `x-forwarded-user`로 태그하고 응답의 `x-hopae-gen`을 찍음. 라우트별 항목 수 제한. 선택적 `stale_if_error_ms`(기본값 `0`) | `authorize`, 새 캐시 모듈, 지표 | 기본적으로 꺼져 있음. 꺼져 있으면 동작 변화 없음. `no-store`는 절대 캐시하지 않음. 적중 시 동일한 신원 헤더를 재생하되 갱신 쿠키는 절대 재생하지 않음. `set-cookie` 응답은 절대 캐시하지 않음. 핸드오프 요청은 미리 채워진 항목이 있어도 `?%5Fhopae%5Fhandoff=K`와 중복 매개변수를 포함해 항상 인증 서비스에 도달함(회귀 테스트). 다른 클라이언트 IP나 다른 호스트에서 온 요청은 항목에 절대 적중하지 않음(테스트). 항목은 TTL과 `x-hopae-fresh-until` 중 작은 쪽으로 만료. 태그 중 하나에 대해 마지막으로 본 세대보다 `x-hopae-gen` 구성 요소가 오래된 저장은 버림(테스트). 메모리 제한 강제. 지표 `auth_cache_hits`, `auth_cache_misses`, `auth_cache_evictions`, `auth_cache_stale_fills_rejected`. 설정 활성화 시 캐시를 비움. |
-| HC-2 | 무효화 구독자: `auth.invalidation: {"redis_env": "HANGANG_HOPAE_REDIS_URL", "channel": "hopae:prod:invalidate"}`가 HC-1 항목을 태그로 제거하고 메시지의 `gen`을 태그별로 기록 | `security_redis` 연결 패턴을 쓰는 새 구독자 태스크 | `security_redis`와 동일한 TLS 규칙으로 구독. `session`/`user`/`all` 메시지가 루프백 테스트에서 100 ms 안에 해당 항목을 제거하고 태그의 세대를 올림. 다시 연결하면 모든 항목을 제거. 형식이 잘못된 메시지는 세고 무시. 구독자 장애는 조기 제거를 잃는 것 외에 요청 처리에 영향을 주지 않음. |
+| HC-1 | 라우트별 결정 마이크로캐시: `auth.decision_cache_ms`(기본값 `0` = 끔, 최대 `30000`). `2xx`만 캐시하며 **(설정 세대, 라우트 ID, 해석된 클라이언트 IP, 정규화한 외부 스킴과 호스트, 나열된 요청 헤더와 정적 요청 헤더의 SHA-256)**을 키로 사용. `cache-control: max-age`와 `x-hopae-fresh-until`을 상한으로, `no-store`를 거부권으로 존중. 요청이 예약 매개변수 인식 규칙(디코딩된 쿼리 이름, 모호한 형태, 경로 안의 원시 또는 인코딩된 이름)에 맞으면 조회도 저장도 하지 않음. 항목은 `x-hopae-session`과 `x-forwarded-user`로 태그하고 응답의 `x-hopae-gen`을 찍음. 라우트별 항목 수 제한. 선택적 `stale_if_error_ms`(기본값 `0`) | `authorize`, 새 캐시 모듈, 지표 | 기본적으로 꺼져 있음. 꺼져 있으면 동작 변화 없음. `no-store`는 절대 캐시하지 않음. 적중 시 동일한 신원 헤더를 재생하되 갱신 쿠키는 절대 재생하지 않음. `set-cookie` 응답은 절대 캐시하지 않음. 핸드오프 요청은 미리 채워진 항목이 있어도 `?%5Fhopae%5Fhandoff=K`와 중복 매개변수를 포함해 항상 인증 서비스에 도달함(회귀 테스트). 다른 클라이언트 IP나 다른 호스트에서 온 요청은 항목에 절대 적중하지 않음(테스트). 항목은 TTL과 `x-hopae-fresh-until` 중 작은 쪽으로 만료. 태그 중 하나에 대해 마지막으로 본 세대보다 `x-hopae-gen` 구성 요소가 오래된 저장은 버림(테스트). 최고 세대 표시는 에포크별로 유지하며, 본 적 없는 에포크의 응답은 그 인증 서비스에서 온 모든 항목을 제거하고 표시를 재설정함(복원 테스트). 메모리 제한 강제. 지표 `auth_cache_hits`, `auth_cache_misses`, `auth_cache_evictions`, `auth_cache_stale_fills_rejected`. 설정 활성화 시 캐시를 비움. |
+| HC-2 | 무효화 구독자: `auth.invalidation: {"redis_env": "HANGANG_HOPAE_REDIS_URL", "channel": "hopae:prod:invalidate"}`가 HC-1 항목을 태그로 제거하고 메시지의 `gen`을 태그별, 에포크별로 기록 | `security_redis` 연결 패턴을 쓰는 새 구독자 태스크 | `security_redis`와 동일한 TLS 규칙으로 구독. `session`/`user`/`all` 메시지가 루프백 테스트에서 100 ms 안에 해당 항목을 제거하고 태그의 세대를 올림. 본 적 없는 에포크의 메시지는 모든 항목을 제거하고 표시를 재설정함. 다시 연결하면 모든 항목을 제거. 형식이 잘못된 메시지는 세고 무시. 구독자 장애는 조기 제거를 잃는 것 외에 요청 처리에 영향을 주지 않음. |
 | HC-9 | `x-forwarded-*`처럼 모든 라우트에서 클라이언트 요청의 `x-original-*`를 제거 | 수신 헤더 처리 | 클라이언트가 보낸 `x-original-*`는 업스트림이나 인증 서비스에 절대 도달하지 않음. 생성된 값은 영향 없음. 외부 인가가 없는 라우트에 대한 테스트. |
 | HC-5 | 애플리케이션 호스트의 네이티브 진입점: `auth.entrypoints: {"login": "/_hopae/login", "logout": "/_hopae/logout"}`. 게이트웨이가 `x-hopae-phase: login \| logout`을 실은 verify 호출을 거쳐, 원래 URL을 돌아갈 대상으로 담은 포털행 `302`로 답함 | `authorize` 호출 지점 | 선택 사항. 바인딩 쿠키를 포함해 Hopae 측 구현과 관찰 가능한 동작이 동일. 로그아웃 진입점의 verify 호출은 쿠키를 실음. 게이트웨이 측 상태 없음. 두 진입점과 애플리케이션 라우트와의 경로 충돌에 대한 테스트. |
 | HC-7 | 필드 범위 라우트 쓰기: `auth` 블록만 받는 `PUT /v1/routes/http/<id>/auth`와, 그 엔드포인트와 라우트 ID 목록으로 범위가 제한된 API 자격 증명 범위 | 관리 API, 자격 증명 범위 | 범위가 제한된 자격 증명은 다른 어떤 쓰기 엔드포인트도 호출할 수 없고 다른 라우트나 필드를 건드릴 수 없음(테스트). 리비전 CAS 적용. 감사가 범위를 기록. 설정 소유권 2단계의 전제 조건([ADR-0012](../adr/0012-service-registration-and-gateway-config-ownership.md)). |
@@ -380,7 +404,7 @@ HC-5, HC-7입니다. 식별자는 고정이며, 순서는 권장 사항입니다
 
 - 시나리오 007은 실제 게이트웨이를 통해 신원 헤더 주입과 클라이언트 복사본 제거를 증명합니다.
 - 시나리오 008은 위 라우트 조각을 게이트웨이 설정 스키마에 대해 검증하고, 경로 범위 지정을 증명하며, 퍼센트 인코딩된 접두사 사례(`/%61dmin/x`)를 다룹니다.
-- 시나리오 003은 서로 다른 등록 도메인의 두 호스트에서 게이트웨이를 통한 핸드오프를 증명하며, 같은 IP의 두 브라우저 거부, 인코딩된 매개변수 별칭, 단계 상승 전 코드 경쟁, 계정 전환 확인을 포함합니다.
+- 시나리오 003은 서로 다른 등록 도메인의 두 호스트에서 게이트웨이를 통한 핸드오프를 증명하며, 같은 IP의 두 브라우저 거부, 인코딩된 매개변수 별칭, 단계 상승 전 코드 경쟁, 계정 전환 확인, 첫 사용 탭 경쟁 복구, 매개변수를 실은 문서가 아닌 요청에 대한 `403`을 포함합니다.
 - 시나리오 004는 호출자 키 검사(키 교체 중복 기간 포함)와, 멈춘 의존성 아래에서의 verify 예산을 증명합니다.
 - 시나리오 014는 최소 1회 전달과 멈춘 싱크에서의 제한된 적체를 증명합니다.
 - 각 HC는 자체 게이트웨이 테스트와 함께 들어가며, Hopae는 그것을 사용하는 첫 릴리스에서 HC마다 게이트웨이 계층 시나리오를 추가합니다.

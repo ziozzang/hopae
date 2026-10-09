@@ -46,17 +46,12 @@ Delivery is a **transactional outbox**, not a bus (review finding R10):
 - Security counters are **not** derived from events: throttling and lockout (M2) update their counters synchronously and atomically (an SQL `UPDATE … RETURNING` or a Redis script, as the gateway's counters do) before an attempt is admitted; the `login.failed` event is written in the same transaction for history.
 
 Backlog and retention are bounded, and the storage bound wins (review
-finding N05): per sink, `events.max_pending_per_sink` (default 10,000)
-pending or retrying deliveries are kept; beyond that the oldest are moved to
-`state = failed` with `last_error = backlog_overflow`, and a
-`sink.backlog_overflow` event plus metric `hopae_event_deliveries_failed_total{sink,reason}`
-report it. Retries use exponential backoff capped at 24 h total, after
-which a delivery is `failed` (`retries_exhausted`). `events.retention_days`
-(default 90) and `events.max_rows` (default 1,000,000) prune rows hourly
-oldest-first **regardless of delivery state**; pruning a row with a
-non-terminal delivery marks that delivery `failed` (`pruned`) first and
-counts it. `failed` deliveries are visible in the console (M4) and can be
-re-queued by an administrator while the event row still exists.
+findings N05, N14):
+
+- Per sink, `events.max_pending_per_sink` (default 10,000) pending or retrying deliveries are kept; beyond that the oldest are moved to `state = failed` with `last_error = backlog_overflow`, and a `sink.backlog_overflow` event (one per overflow batch) plus metric `hopae_event_deliveries_failed_total{sink,reason}` report it. Retries use exponential backoff capped at 24 h total, after which a delivery is `failed` (`retries_exhausted`).
+- Pruning runs whenever `events.prune_every` (default 1,000) rows have been inserted since the last prune or 60 s have elapsed, whichever comes first. It deletes event rows older than `events.retention_days` (default 90) and then the oldest rows beyond `events.max_rows` (default 1,000,000), **regardless of delivery state**; a row with a non-terminal delivery has it marked `failed` (`pruned`) and counted before deletion. The event table therefore never exceeds `events.max_rows + events.prune_every` rows.
+- Delivery rows are deleted with their parent event in the same prune statement (foreign key with cascade), terminal rows included. Independently, `delivered` and `failed` delivery rows older than `events.delivery_terminal_retention_days` (default 7) are deleted even while their event remains, so a stalled sink accumulates at most the pending cap plus seven days of terminal rows. Failure visibility survives deletion through the metric and the `sink.*` events, which are ordinary events under the same retention.
+- `failed` deliveries are visible in the console (M4) and can be re-queued by an administrator while the event row still exists.
 
 Consumers defined now, implemented later: login history queries (M2) read
 the table; webhooks (M5) deliver HMAC-signed JSON per destination from the
@@ -100,8 +95,11 @@ separately in M5), log shipping.
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 0 | 1 | 0 | 0 | 1 × FIX_FIRST applied (R10) |
 | 2 | 2026-10-09 | 1 | 1 | 0 | 0 | R10 PARTIAL → N04, N05 FIX_FIRST applied (per-sink delivery rows, at-least-once with dedup, bounded backlog with dead-letter) |
+| 3 | 2026-10-09 | 0 | 1 | 0 | 0 | R10, N04 CLOSED; N05 PARTIAL → N14 FIX applied (delivery rows die with their event, terminal-row retention, quantified prune cadence). Awaiting confirmation pass. |
 
 Findings and dispositions:
+
+- N14 (S2, pass 3): terminal delivery rows had no collection rule and the hourly sweep contradicted the scenario's instantaneous cap. FIX: cascade deletion with the parent event, `delivery_terminal_retention_days`, prune every `prune_every` inserts or 60 s, bound stated as `max_rows + prune_every`; scenario 014-8 restated.
 
 - N04 (S1, pass 2): a time-ordered id cursor could skip a late-committing event, and "exactly once" was unachievable. FIX_FIRST: `event_deliveries` rows in the event's transaction, claimed by workers; at-least-once with `event_id` deduplication; scenario 014-7 rewritten.
 - N05 (S2, pass 2): cursor-protected retention let a stalled sink grow the table without bound. FIX_FIRST: `max_pending_per_sink`, retry cap, dead-letter `failed` state, pruning regardless of delivery state; scenario 014-8.

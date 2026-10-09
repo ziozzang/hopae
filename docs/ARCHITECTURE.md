@@ -1,6 +1,6 @@
 # Architecture
 
-<!-- doc-rev: 3 -->
+<!-- doc-rev: 4 -->
 
 [Documentation](README.md) · [한국어](ko/ARCHITECTURE.md)
 
@@ -26,10 +26,10 @@ nothing is retrofitted.
 | Redis/Valkey | Optional, from M2, for the invalidation channel and throttling counters only; it never holds session or decision state |
 | Provider | One OIDC provider (Google in M1) with a client ID and a client secret read from the environment |
 
-Hopae is configured by one file (`hopae.json` or `hopae.yaml`, reference in
-`docs/CONFIG.md` from M1) plus environment variables for secrets. Every
-configuration key is validated at start and by `hopae --check`; unknown keys
-are rejected.
+Hopae is configured by one JSON file (see the
+[configuration reference](CONFIG.md); YAML is not supported) plus
+environment variables for secrets. Every configuration key is validated at
+start and by `hopae --check`; unknown keys are rejected.
 
 ## Components
 
@@ -192,14 +192,18 @@ portal finds a valid portal handle `H0`, skips the provider (single sign-on)
 and immediately answers Flow 3's redirect with a new code for
 `other.example.org` bound to that cookie. A code can therefore be redeemed
 only by the browser that started the login on that host, and only by a
-document navigation; another browser behind the same IP is refused, and a
-browser already holding a different user's valid handle is sent to the
-portal's `/switch` confirmation instead of being switched silently. A
-consumed code presented again together with the handle it produced (a
-prefetch redeemed it) answers the clean redirect without changing cookies.
-The binding cookie is shared by every transaction of that browser on that
-host, so concurrent tabs do not invalidate each other, and no response ever
-clears it.
+document navigation; a non-document request carrying the parameter is
+stopped with a relayed `403` so the gateway never forwards the code
+upstream; another browser behind the same IP is refused, and a browser
+already holding a different user's valid handle is sent to the portal's
+`/switch` confirmation instead of being switched silently. A consumed code
+presented again together with the handle it produced (a prefetch redeemed
+it) answers the clean redirect without changing cookies. The binding cookie
+is shared by every transaction of that browser on that host, so concurrent
+tabs do not invalidate each other, and no response ever clears it; when two
+tabs start before either cookie arrives, the losing tab is simply sent back
+to the portal, which hands off again by single sign-on, at most
+`handoff.max_recoveries` times.
 
 ### Flow 5 — Steady-state verify
 
@@ -303,10 +307,10 @@ not columns.
 | `apps` | `app_id` | `display_name`, `hosts` (JSON array of exact lower-case host names; no patterns), `ports` (JSON array, default `[443]`), `enabled`, `session_policy` (idle, absolute), `binding_policy` (ip, ua, on_mismatch), `step_up` (JSON rules, *later*), `allowed_groups` (*later*), `on_authz_change` (refresh, terminate), `gateway_ref` (informational route id), `created_at`, `updated_at` | Verify resolves the app from `x-forwarded-host`; the union of all `hosts` and `ports` is the return-origin allowlist and every entry is an exact credential destination the operator vouches for. A host that is not listed is denied; there is no "any host" and no suffix mode. The reserved app `default` carries policy defaults only. |
 | `sessions` | `session_id` | `user_id`, `provider_id`, `auth_time`, `factors` (JSON array of `{kind, provider?, at}`), `aal` (1 or 2), `authz_version` (of the user at snapshot time), `cred_gen`, `bound_ip`, `bound_ua_sha256`, `bound_country` (*later*), `created_at`, `last_seen_at`, `absolute_expires_at`, `terminated_at`, `terminated_reason` | One row per browser login. Self-contained identity snapshot (`snapshot` JSON: email, name, username, groups) refreshed when `users.authz_version` moves. `cred_gen` increments in the same transaction as any handle revocation or elevation, which also consumes the session's outstanding handoff codes; it is reported in `x-hopae-gen` and in invalidation messages. |
 | `session_handles` | `handle_sha256` | `session_id`, `host`, `issued_aal`, `created_at`, `last_seen_at`, `absolute_expires_at`, `revoked_at`, `revoked_reason` | One per (session, host). The cookie carries the handle; different hosts never share a handle. `issued_aal` is the level the handle grants; elevation revokes and reissues handles. Idle and absolute timers are per handle ([ADR-0007](adr/0007-context-binding-policy.md)). |
-| `login_txns` | `txn_sha256` | `created_at`, `expires_at` (10 min), `app_id`, `return_target` (absolute URL from the gateway, an exact entry of the return-origin allowlist), `bind_sha256` (digest of the browser's stable binding cookie on the application host), `portal_bind_sha256` (digest of the browser's stable portal binding cookie, set at first portal visit), `client_ip`, `ua_sha256`, `provider_id`, `state_sha256` (the callback locates the transaction by it), `nonce`, `pkce_verifier`, `portal_session_id` (when SSO), `purpose` (login, stepup, link, switch), `conflicting_handle_sha256` (for `switch`), `pending_identity` (JSON, for `link_required`), `consumed_at` | Server-side state for one login attempt; several may be open per browser. |
+| `login_txns` | `txn_sha256` | `created_at`, `expires_at` (10 min), `app_id`, `return_target` (absolute URL from the gateway, an exact entry of the return-origin allowlist), `bind_sha256` (digest of the browser's stable binding cookie on the application host), `portal_bind_sha256` (digest of the browser's stable portal binding cookie, set at first portal visit), `client_ip`, `ua_sha256`, `provider_id`, `state_sha256` (the callback locates the transaction by it), `nonce`, `pkce_verifier`, `portal_session_id` (when SSO), `purpose` (login, stepup, link, switch), `conflicting_handle_sha256` (for `switch`), `pending_identity` (JSON, for `link_required`), `recovery_depth`, `consumed_at` | Server-side state for one login attempt; several may be open per browser; `recovery_depth` bounds binding-race recovery. |
 | `handoff_codes` | `code_sha256` | `session_id`, `host`, `return_target`, `client_ip`, `bind_sha256`, `issued_aal`, `cred_gen`, `created_at`, `expires_at` (60 s), `consumed_at`, `consumed_reason` | Single use; consumption is an atomic conditional update that also checks the binding cookie, the session's current `cred_gen` and the absence of another user's valid handle; the handle it mints gets `min(issued_aal, session.aal)`. |
-| `events` | `event_id` | `at`, `kind`, `outcome`, `reason`, `user_id`, `session_id`, `app_id`, `provider_id`, `client_ip`, `ua_sha256`, `request_id`, `attrs` (JSON, bounded) | Append-only login history and audit source ([ADR-0009](adr/0009-event-model.md)). Required kinds and their delivery rows are written in the same transaction as the state change (transactional outbox); retention pruned by age and count regardless of delivery state. |
-| `event_deliveries` | (`sink`, `event_id`) | `state` (pending, delivered, failed), `attempts`, `next_attempt_at`, `last_error`, `updated_at` | One row per subscribed sink per required event, inserted in the event's transaction and claimed by delivery workers; at-least-once delivery, bounded backlog per sink with dead-lettering. |
+| `events` | `event_id` | `at`, `kind`, `outcome`, `reason`, `user_id`, `session_id`, `app_id`, `provider_id`, `client_ip`, `ua_sha256`, `request_id`, `attrs` (JSON, bounded) | Append-only login history and audit source ([ADR-0009](adr/0009-event-model.md)). Required kinds and their delivery rows are written in the same transaction as the state change (transactional outbox); pruned by age and count every `events.prune_every` inserts or 60 s regardless of delivery state, so the table never exceeds `max_rows + prune_every`. |
+| `event_deliveries` | (`sink`, `event_id`) | `state` (pending, delivered, failed), `attempts`, `next_attempt_at`, `last_error`, `updated_at` | One row per subscribed sink per required event, inserted in the event's transaction and claimed by delivery workers; at-least-once delivery, bounded backlog per sink with dead-lettering; deleted with the parent event (cascade), and terminal rows also expire after `events.delivery_terminal_retention_days`. |
 | `blocks` (*M2*) | `block_id` | `kind` (user, email, email_domain, ip_cidr), `value`, `reason`, `created_by`, `created_at`, `expires_at` | Checked at login and at verify. |
 | `attempts` (*M2*) | (`scope`, `key`) | `failures`, `window_started_at`, `locked_until` | Per-account and per-IP throttling counters; in Redis when configured. |
 | `factors` (*M5*) | `factor_id` | `user_id`, `kind` (totp, webauthn, recovery), `label`, `secret_env_or_encrypted`, `public_key`, `counter`, `created_at`, `last_used_at`, `disabled_at` | Enrollments ([ADR-0008](adr/0008-second-factor-extension-point.md)). |
@@ -403,6 +407,7 @@ a counter per reason, and no secret in any message.
 - One gateway family is supported in M1 (Hangang through the versioned contract, including gateway change HC-3 for the caller key). Other forward-auth gateways share the core but need their adapter and their own verification run.
 - A login must be started and finished in the same browser on the same application host (binding cookie); browsers that block cookies on the application host cannot sign in.
 - Every protected host is registered by its exact name; wildcard or suffix hosts cannot receive a session. Clients that cannot perform a document navigation cannot obtain a session until the API-client mode (M7).
+- The configuration file is JSON; there is no YAML or TOML loader and no reload before M6.
 - Cookies are host-only. A cookie shared across sibling subdomains (`Domain=`) is deliberately not offered in M1 because of cookie tossing; the handoff covers that case ([ADR-0004](adr/0004-session-model-and-cross-domain-handoff.md)).
 - Verify is called on every request. Until the gateway micro-cache (HC-1) exists, Hopae's per-request budget is the whole budget: no provider calls, no unbounded queries, and a bounded local cache.
 - Multi-instance deployments require PostgreSQL (M2) and Redis for invalidation; SQLite deployments are single-instance with fast restart.

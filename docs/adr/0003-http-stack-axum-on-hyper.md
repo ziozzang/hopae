@@ -61,6 +61,7 @@ Rules that bound the choice:
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 0 | 0 | 0 | 0 | No finding against this record in pass 1. |
 | 2 | 2026-10-09 | 0 | 0 | 0 | 0 | No finding against this record in pass 2. |
+| 3 | 2026-10-09 | 0 | 0 | 0 | 0 | No finding; the reviewer notes that the frame-security headers this record requires must be verified by an explicit browser framing test (scenario 9xx). Accepted pending confirmation pass. |
 
 ## References
 

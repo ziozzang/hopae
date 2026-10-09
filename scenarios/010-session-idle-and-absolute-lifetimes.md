@@ -77,7 +77,7 @@ anything.
 ### S010-9 Expiry sweep prunes terminated rows
 
 - Given: 1,000 terminated sessions and their handles.
-- When: the hourly sweep runs (triggered by the harness).
+- When: the session-retention sweep runs (triggered by the harness; it is independent of the event prune cadence).
 - Then: rows older than `sessions.retention_days` (default 30) are deleted; handles cascade; events remain and are pruned only by their own retention.
 
 ## Abuse cases

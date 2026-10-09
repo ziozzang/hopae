@@ -1,6 +1,6 @@
 # Documentation
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 3 -->
 
 [한국어 목차](ko/README.md)
 
@@ -22,7 +22,7 @@ translations of their English sources and are updated in the same change. The
 - [Architecture](ARCHITECTURE.md) — components, trust boundaries, request flows, data model, storage, crate layout, failure behavior
 - [Gateway contract](GATEWAY_CONTRACT.md) — the versioned verify protocol, identity headers, cookies, handoff, cache and invalidation semantics, proposed gateway changes
 - [Threat model](THREAT_MODEL.md) — assets, actors, entry points, STRIDE per flow, mitigations
+- [Configuration reference](CONFIG.md) — every key, default and constraint; scheduled keys by milestone
 
-Further reference pages (configuration, providers, sessions, management) are
-added as milestones land. The [roadmap](ROADMAP.md) describes the intended
-shape.
+Further reference pages (providers, sessions, management) are added as
+milestones land. The [roadmap](ROADMAP.md) describes the intended shape.

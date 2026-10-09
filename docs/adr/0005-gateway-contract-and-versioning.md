@@ -73,6 +73,7 @@ Applications that need more than these headers wait for `x-hopae-claims`
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 1 | 1 | 2 | 0 | 4 × FIX_FIRST applied (R04 shared, R09, R17, R18) |
 | 2 | 2026-10-09 | 0 | 1 | 1 | 0 | R04, R09, R17, R18 CLOSED; new N06 (shared), N11: FIX_FIRST applied |
+| 3 | 2026-10-09 | 0 | 0 | 0 | 0 | N06, N11 CLOSED (a `401` from a POST/PUT API call recovers through a GET document navigation; the client replays its own operation). Accepted pending confirmation pass. |
 
 Findings and dispositions:
 

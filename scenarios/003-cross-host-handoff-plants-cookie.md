@@ -66,17 +66,23 @@ yields a session handle and never replaces another user's session.
 - When: verify (document navigation) with `cookie: __Host-hopae=H1; __Host-hopae_bind=B1` and the consumed `K1`.
 - Then: `302 location: https://app.example.test/admin/x`; no `set-cookie` at all; `x-hopae-reason: code_already_redeemed`; no event beyond a sampled diagnostic; the following `GET /admin/x` is `200`.
 
-### S003-7 Non-document requests never redeem and never touch cookies
+### S003-7 Non-document requests carrying the parameter are terminated without touching code or cookies
 
-- Given: `K1` unconsumed; the browser holds `B1`.
-- When: verify with `sec-fetch-dest: empty`, `sec-fetch-mode: cors` and `x-original-url` carrying `K1`, then the same with an invalid code.
-- Then: both answer `401 login_required` (the parameter is ignored); `K1` stays unconsumed; no `set-cookie`; `B1` is untouched; the user's later document navigation with `K1` succeeds as S003-1.
+- Given: `K1` unconsumed; the browser holds `B1`; in the second half it also holds a valid handle `H1` for the same session (another tab finished first).
+- When: verify with `sec-fetch-dest: empty`, `sec-fetch-mode: cors` and `x-original-url` carrying `K1`: first without a handle, then with `cookie: __Host-hopae=H1; __Host-hopae_bind=B1`, then with an invalid code and the valid handle.
+- Then: all three answer `403` with body `{"error":"handoff_parameter_not_allowed"}` and `x-hopae-reason: handoff_parameter_not_allowed` — the valid handle does **not** turn it into a `200`, so the gateway never forwards the query to the upstream (gateway-layer assertion: the echo upstream records no request); `K1` stays unconsumed; no `set-cookie`; `B1` and `H1` are untouched; the user's later document navigation with `K1` succeeds as S003-1 (or as S003-6 if already redeemed).
 
 ### S003-8 Concurrent transactions share the binding cookie
 
-- Given: tab A started a login on `app.example.test` (transaction `TA`, bind `B1`); before it completes, tab B starts another (`TB`).
+- Given: tab A started a login on `app.example.test` (transaction `TA`, bind `B1`) and its `302` has arrived; then tab B starts another (`TB`).
 - When: tab B's unauthenticated verify arrives with `cookie: __Host-hopae_bind=B1`.
 - Then: the `302` keeps `B1` (refreshes `Max-Age`, no new value); `TB.bind_sha256 = sha256(B1)`; both `KA` and `KB` redeem successfully in either order, the second replacing the handle of the same session; at the portal both transactions coexist under the same `__Host-hopae_portal` value.
+
+### S003-9 Two tabs start before either cookie arrives and recover
+
+- Given: no cookie on `app.example.test`; tabs A and B send their first document navigations concurrently; the harness delivers the `302` responses in the order A (`B1`) then B (`B2`), so the jar ends with `B2`; `TA.bind_sha256 = sha256(B1)`, `TB.bind_sha256 = sha256(B2)`; tab A completes the provider login first (session `s_1`, portal handle `H0`), producing `KA` bound to `sha256(B1)`.
+- When: tab A navigates to `…?_hopae_handoff=KA` with `cookie: __Host-hopae_bind=B2` and no handle.
+- Then: `KA` is burned (`handoff.rejected`, `reason=bind_mismatch`); the response is the ordinary unauthenticated `302` to `/login?txn=TA2` **keeping `B2`** (no new bind value), with `TA2.recovery_depth = 1` and `TA2.bind_sha256 = sha256(B2)`; the portal holds `H0`, so it hands off immediately with `KA2` bound to `sha256(B2)`; the next navigation plants `H1`; the user saw two extra redirects and no error. Tab B's callback then completes with the same portal cookie: because the browser already holds `H0` for the same user, no second session is created and `KB` (bound to `sha256(B2)`) redeems normally, replacing `H1` with a handle of the same session. The same test with the response order reversed ends identically.
 
 ## Abuse cases
 
@@ -85,7 +91,7 @@ yields a session handle and never replaces another user's session.
 | Replay | S003-A1 | yes |
 | Tampering | S003-A2, S003-A12 | yes |
 | Race / timing | S003-A3, S003-A11 | yes |
-| Resource exhaustion | S003-A4 | yes |
+| Resource exhaustion | S003-A4, S003-A13 | yes |
 | Confused deputy | S003-A5, S003-A9, S003-A10 | yes |
 | Spoofed or duplicated headers | S003-A6 | yes |
 | Downgrade | S003-A7 | yes |
@@ -163,6 +169,12 @@ yields a session handle and never replaces another user's session.
 - When: verify (document navigation) with `x-original-url` carrying `?_hopae_handoff=K1&_hopae_handoff=K2`, then `?_hopae_handoff=K1&%5Fhopae%5Fhandoff=K1`, then `?%5Fhopae%ZZhandoff=K1`.
 - Then: `403` with `x-hopae-reason: handoff_ambiguous` for the first two (duplicate decoded name) and the third (malformed escape in a candidate name); `K1` remains unconsumed; no cookie changes; event `handoff.rejected` with `reason=handoff_ambiguous`. A later well-formed navigation with `K1` succeeds as S003-1.
 
+### S003-A13 Binding-race recovery cannot loop
+
+- Given: a harness client that discards every `set-cookie` for `__Host-hopae_bind` and always presents a bind that matches no code (a browser with a broken cookie jar, or an attacker trying to make Hopae redirect forever); the portal holds a valid `H0`.
+- When: the client follows the redirects: navigation with a code → unauthenticated `302` (depth 1) → portal SSO → code → `302` (depth 2) → … 
+- Then: at depth `handoff.max_recoveries + 1` (default: the fourth attempt) Hopae answers a terminal `200` page with `x-hopae-reason: handoff_recovery_exhausted` instead of another redirect; no code is minted for that transaction; the event records the depth; the client's existing cookies are untouched; a fresh navigation without a code starts over at depth 0. The redirect count per browser is therefore bounded by `3 × (portal round trip)` and the store writes per recovery are one transaction and one code.
+
 ## Observability expectations
 
 - Log: `session.handoff` with `session_id`, `host`, `sso`; `handoff.rejected` with `reason`, `client_ip`, `host`.
@@ -179,8 +191,9 @@ yields a session handle and never replaces another user's session.
 | S003-4 | `s003_4_second_domain_via_sso` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-5 | `s003_5_handoff_through_live_gateway` | `tests/scenarios/s003_handoff.rs` | gateway | planned |
 | S003-6 | `s003_6_already_redeemed_code_clean_redirect` | `tests/scenarios/s003_handoff.rs` | integration | planned |
-| S003-7 | `s003_7_non_document_never_redeems` | `tests/scenarios/s003_handoff.rs` | integration | planned |
+| S003-7 | `s003_7_non_document_with_parameter_terminated` | `tests/scenarios/s003_handoff.rs` | gateway | planned |
 | S003-8 | `s003_8_concurrent_transactions_share_bind` | `tests/scenarios/s003_handoff.rs` | integration | planned |
+| S003-9 | `s003_9_first_use_tab_race_recovers` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A1 | `s003_a1_replayed_code_rejected` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A2 | `s003_a2_moved_code_rejected_and_burned` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A3 | `s003_a3_concurrent_redemption_single_handle` | `tests/scenarios/s003_handoff.rs` | integration | planned |
@@ -193,6 +206,7 @@ yields a session handle and never replaces another user's session.
 | S003-A10 | `s003_a10_other_users_handle_requires_explicit_switch` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A11 | `s003_a11_pre_elevation_code_never_elevated` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A12 | `s003_a12_ambiguous_parameter_refused` | `tests/scenarios/s003_handoff.rs` | integration | planned |
+| S003-A13 | `s003_a13_recovery_bounded` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 
 ## Live verification
 

@@ -5,15 +5,24 @@ Repository tooling. Python 3 standard library only.
 | File | Purpose |
 | --- | --- |
 | `check_docs.py` | Documentation checks, publication policy and scenario coverage |
+| `check_boundary.py` | Gateway adapter boundary lint (ADR-0013) |
 | `test_check_docs.py` | Unit tests for `check_docs.py` |
 
 ## Commands
 
 ```sh
 make check-docs          # documentation + publication checks over the Git index
+make check-boundary      # gateway wire names must stay inside src/gateway/
 make scenario-coverage   # scenario case table <-> test functions
 make tools-test          # python3 -m unittest tools/test_check_docs.py
 ```
+
+### check-boundary
+
+Fails when `x-original-`, `x-forwarded-` or `x-hangang` appears in any file
+under `src/` outside `src/gateway/`; comments and strings count. `tests/` is
+not scanned because gateway-layer tests legitimately name gateway headers.
+`make check` runs it first; it needs no crate.
 
 `check_docs.py` reads the Git index, so stage the intended changes first. Use
 `--worktree` to walk the directory instead and `--only docs|publish` to run half.

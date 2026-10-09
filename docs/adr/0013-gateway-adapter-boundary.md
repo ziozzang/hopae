@@ -53,7 +53,7 @@ names, ambiguity rejected) and sets `VerifyInput.handoff` to `None`,
 
 Rules:
 
-- `verify/`, `session/`, `policy/`, `identity/` and `provider/` never mention a gateway header name, a status code to send to a gateway, or a cookie attribute. A compile-time test in `gateway/` asserts the core modules do not import `gateway::*`, and a `grep`-based check in `make check-docs`' sibling target `make check-boundary` fails on the strings `x-original-`, `x-forwarded-` and `x-hangang` outside `gateway/` and `tests/`.
+- `verify/`, `session/`, `policy/`, `identity/` and `provider/` never mention a gateway header name, a status code to send to a gateway, or a cookie attribute. `make check-boundary` (`tools/check_boundary.py`, run first by `make check`) fails when `x-original-`, `x-forwarded-` or `x-hangang` appears in any file under `src/` outside `src/gateway/`, comments and strings included; `tests/` is not scanned because gateway-layer tests legitimately name gateway headers. A compile-time test asserting that core modules do not import `gateway::*` is M1 work.
 - `gateway::hangang` implements contract v1 ([ADR-0005](0005-gateway-contract-and-versioning.md)). It is the only adapter in M1 and the only one with gateway-layer scenarios.
 - `gateway::forward_auth` (later) implements the generic forward-auth form with per-gateway profiles (`nginx`, `traefik`, `caddy`, `envoy`) that differ only in header names and in whether redirects are relayed; profiles are data, not code paths.
 - The OIDC-provider mode (later) is a different kind of adapter: it issues tokens and does not use `Decision`; it is listed here only so it is not mistaken for a forward-auth profile.
@@ -93,6 +93,7 @@ Out of scope: writing any non-Hangang adapter in M1–M6; a plugin ABI.
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2026-10-09 | 1 | 0 | 0 | 0 | 1 × FIX_FIRST applied (R04, shared) |
 | 2 | 2026-10-09 | 0 | 0 | 1 | 0 | R04 CLOSED; N12 (shared) FIX_FIRST applied: the recognition rule lives in the adapter and `VerifyInput.handoff` carries the result |
+| 3 | 2026-10-09 | 0 | 0 | 0 | 0 | N12 CLOSED; lint description aligned with the M0 implementation (scans `src/` outside `src/gateway/`). Accepted pending confirmation pass. |
 
 Findings and dispositions:
 
