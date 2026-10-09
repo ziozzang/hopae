@@ -24,6 +24,7 @@
         "x-hopae-contract": "1",
         "x-hopae-gateway-key": {"env": "HANGANG_HOPAE_KEY"}
       },
+      "strip_request_cookies": ["__Host-hopae", "__Host-hopae_bind"],
       "timeout_ms": 500,
       "forward_response": true
     }

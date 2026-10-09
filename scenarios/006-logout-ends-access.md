@@ -126,7 +126,7 @@ cross-site request cannot log a user out.
 
 ## Open questions
 
-- Should applications get a documented link target (`https://auth.example.test/logout`) and an optional `?app=<id>` to show which application the user came from (display only)?
+- Should applications get a documented link target (`https://auth.example.test/logout`) and an optional `?app=<id>` to show which application the user came from (display only)? Answered by ADR-0015 and scenario 015: the link target is `/_hopae/logout` on the application host itself, and the logout ticket names the application on the confirmation page.
 - Logout everywhere (`scope=all`, one `session.terminated` per session, reason `logout_all`) and the invalidation message on termination are specified in ADR-0004/ADR-0006 and are exercised by M2 scenarios in the 100–199 range, not here.
 
 ## 한국어 요약

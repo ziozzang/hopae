@@ -20,6 +20,11 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 - Development process, documentation system, ADR and scenario templates, and roadmap.
 - Architecture design, gateway contract v1 (with proposed gateway changes HC-1 to HC-9), threat model v0, ADR-0002 to ADR-0013 (Proposed), and draft scenarios 001–014 for milestone M1.
 - `docs/CONFIG.md` configuration reference (M0 keys and the keys scheduled by the ADRs).
+- Design after the first live deployment (ADR-0015, Proposed; not implemented yet): application-host entry points `/_hopae/login` and `/_hopae/logout` answered by Hopae inside the verify call with a relayed `302` or `403` (never `2xx`), a server-side logout ticket so a browser without a valid portal handle can still end its session, the `apps[].logout_confirm` key (scheduled), gateway change HC-12 (`auth.strip_request_cookies`) with acceptance criteria, gateway contract v1.1 (rev 8), threat model entries TM-40 and TM-41, and draft scenario 015.
+
+### Changed
+
+- Gateway contract v1.1 reserves the `/_hopae/` namespace on every protected application host: an application route under it is no longer supported and is answered `403 reserved_path` once ADR-0015 is implemented. The route fragments in the contract, `deploy/hangang-routes.example.json` and the `hopae --check` output gain `strip_request_cookies`; a gateway without HC-12 rejects the key.
 
 ### Security
 
@@ -27,3 +32,4 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 - Design revised after adversarial design review pass 2: handoff codes carry issuance level and credential generation and are consumed on elevation; Redis never caches session state and allows carry generation provenance; credential destinations are exact registered hosts only; per-sink delivery rows with at-least-once delivery and bounded backlog; the `401` names the application URL as the document bootstrap; stable per-browser binding and portal cookies; explicit account-switch confirmation; provider deletion tombstones; caller-key rotation overlap; one reserved-parameter recognition rule.
 - Design revised after adversarial design review pass 3: depth-bounded recovery from the first-use binding-cookie race on both hosts; non-document requests carrying the reserved parameter are terminated with a relayed `403`; delivery rows die with their event and terminal rows have their own retention, with a quantified prune cadence; a database epoch for generation rollback after restore (deferred to the first cache milestone).
 - Design revised after adversarial design review pass 4: on the gateway listener only an authenticated allow is ever `2xx` (recovery exhaustion is a relayed `403`); recovery depth travels on handoff codes and is never read from the client; the portal retry matches the replacement cookie recorded on the interrupted transaction.
+- Live finding on the reference deployment: the session handle and the binding cookie reached the application in the `cookie` header of every authenticated request. Mitigation designed as gateway change HC-12 (threat TM-40); until it ships the exposure is same-host trust and the route fragments document it.

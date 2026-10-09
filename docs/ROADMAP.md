@@ -1,6 +1,6 @@
 # Roadmap
 
-<!-- doc-rev: 5 -->
+<!-- doc-rev: 6 -->
 
 [Documentation](README.md) · [한국어](ko/ROADMAP.md)
 
@@ -102,6 +102,7 @@ Scope (scenarios 001–099):
 - [ ] Path-scoped protection via gateway routes (public prefix, protected prefix, higher-priority `/admin`) documented with a working route example; phase-0 manual registration (ADR-0012); Hopae-side per-path rules deferred to M2.
 - [ ] JSON configuration file documented in `docs/CONFIG.md`, `hopae --check` preflight, structured logs with reason codes.
 - [ ] `deploy/` Compose template placing Hopae behind the gateway; deployment to the reference environment.
+- [ ] After the first live deployment (ADR-0015, Proposed): application-host entry points `/_hopae/login` and `/_hopae/logout` answered by Hopae inside the verify call with the reserved `/_hopae/` namespace, the logout ticket and `apps[].logout_confirm`; gateway change HC-12 (`auth.strip_request_cookies`) so the session handle no longer reaches the upstream; contract v1.1.
 
 Scenarios (draft at G1, approved at G3):
 
@@ -121,6 +122,7 @@ Scenarios (draft at G1, approved at G3):
 | 012 | Provider failure modes |
 | 013 | Configuration preflight and startup |
 | 014 | Core flows emit events with the fixed schema |
+| 015 | Application-host entry points never reach the upstream, and Hopae cookies are stripped from upstream requests |
 
 Exit: a browser on a protected route of the live gateway completes login with
 the real provider, the upstream sees the identity headers, a client-supplied
@@ -214,7 +216,9 @@ Proposed changes to the gateway are listed with acceptance criteria in the
 [gateway contract](GATEWAY_CONTRACT.md#proposed-gateway-changes). They are
 separate tasks in the gateway's repository, done in a worktree. HC-3 (static
 request headers carrying the caller key) is required by M1 and is built with
-it. Recommended order afterwards: HC-6 (canonical path and route id on the
+it; HC-12 (Hopae cookies stripped from the upstream request) follows
+immediately, after the live finding that the session handle reached the
+upstream (ADR-0015). Recommended order afterwards: HC-6 (canonical path and route id on the
 verify call), HC-8 (`429` relay with `retry-after`), HC-4 (cookie
 filtering), HC-1 (decision micro-cache with the full key), HC-2
 (generation-stamped invalidation subscriber), HC-9 (strip `x-original-*`
@@ -242,4 +246,5 @@ Not scheduled; recorded so they are not re-discussed from scratch:
 - Redis as a positive session cache (rejected: a stale entry that still answers outlives every revocation bound).
 - Negative-decision caching in the gateway micro-cache.
 - Geographic and new-device risk signals feeding step-up; `max_auth_age` per application.
+- Forwarding `sec-purpose` on the verify call so prefetch and prerender never count as a document navigation (relevant to `apps[].logout_confirm = false`); a contract minor that changes every route fragment.
 - Encrypted-at-rest provider secrets entered from the console.

@@ -6,6 +6,7 @@
 - Scenarios: 001, 004, 007, 008, 013
 - Threat model: TM-06, TM-14, TM-19
 - Supersedes: none
+- Extended by: [ADR-0015](0015-app-host-entry-points-and-upstream-cookie-stripping.md) (contract v1.1: application-host entry points, reserved `/_hopae/` namespace, gateway change HC-12)
 
 ## Context
 
