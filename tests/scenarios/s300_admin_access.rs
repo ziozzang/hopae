@@ -7,10 +7,6 @@
 //! on the command line; the gateway's calls are made through the harness's
 //! verify endpoint client (the real gateway layer is W2's).
 //!
-//! Cases that need W1-B's handlers or pages (the disable form and its token,
-//! the `/v1/users`, `/v1/sessions`, `/v1/events` answers, the actor fence
-//! through a mutation) are `#[ignore]`d with the reason; the listener's own
-//! part of each is covered by an `extra_s300_*` test that runs now.
 #![allow(dead_code, unused_imports)]
 
 use std::time::Duration;
@@ -611,7 +607,6 @@ fn s300_3_user_without_grant_is_refused_and_named() {
 }
 
 #[test]
-#[ignore = "needs W1-B: /v1/users, /v1/sessions and /v1/events answer 200 only once their handlers exist"]
 fn s300_4_read_only_administrator_reads_but_cannot_change() {
     let (_idp, h, u) = setup();
     for path in ["/v1/users", "/v1/sessions", "/v1/events", "/v1/status"] {
@@ -768,7 +763,6 @@ fn s300_7_console_app_policy_applies_to_console_handle() {
 }
 
 #[test]
-#[ignore = "needs W1-B: the user page that issues the form token and the disable handler"]
 fn s300_9_mutations_carry_form_token_or_api_header() {
     let (_idp, h, u) = setup();
     let a = admin(&h).with_handle(&u.a.handle);
@@ -858,7 +852,7 @@ fn extra_s300_9_the_listener_checks_every_mutation_before_its_handler() {
         ),
         "foreign origin",
     );
-    // With the API requirements the request is the handler's (W1-B), not a refusal.
+    // With the API requirements the request is the handler's, not a refusal.
     for extra in [
         vec![],
         vec![
@@ -873,7 +867,9 @@ fn extra_s300_9_the_listener_checks_every_mutation_before_its_handler() {
         ];
         headers.extend(extra);
         let r = a.post_json_raw(&path, &headers, b"{}");
-        assert_ne!(r.status, 403, "{r:?}");
+        // The handler ran: enabling an active user is the documented no-op.
+        assert_eq!(r.status, 200, "{r:?}");
+        assert_eq!(r.json()["changed"], false, "{r:?}");
     }
     // A form without a token, with a forged one, or without the origin.
     let form_path = format!("/users/{}/enable", u.n.user_id);
@@ -1210,7 +1206,6 @@ fn s300_14_listener_denials_recorded_like_gateway_denials() {
 // ---- abuse cases -------------------------------------------------------------
 
 #[test]
-#[ignore = "needs W1-B: the form token is issued on W1-B's user page"]
 fn s300_a1_terminated_handle_and_foreign_token_useless() {
     let (idp, h, u) = setup();
     let page = admin(&h)
@@ -1352,7 +1347,6 @@ fn s300_a2_forged_identity_tampered_cookie_wrong_host() {
 }
 
 #[test]
-#[ignore = "needs W1-B: the disable handler runs the actor fence (W0's unit matrix covers the store side)"]
 fn s300_a3_change_between_check_and_write_wins() {
     let (_idp, h, u) = setup();
     // Control run: no intervening change commits the write.
@@ -2438,11 +2432,38 @@ mod reauth {
         };
         let b = enter(&h, 300);
         assert_eq!(b.verify(&h).status, 200);
+        // The listener reads the same predicate: the engine's `Reauth` is `403 auth_too_old`.
+        super::kit::grant(&h, &session(&h).user_id, "admin");
+        let listener = |h: &Hopae| {
+            h.admin_client()
+                .client_ip(IP)
+                .with_handle(&b.handle)
+                .get("/v1/me")
+        };
+        {
+            let r = listener(&h);
+            assert_eq!(r.status, 200, "{r:?} {}", r.body);
+        }
         at(&h, auth0 + N - 1);
         assert_eq!(b.verify(&h).status, 200, "N - 1 s is fresh");
+        assert_eq!(listener(&h).status, 200, "N - 1 s is fresh on the listener");
         at(&h, auth0 + N);
+        let r = listener(&h);
+        assert_eq!(r.status, 403, "{r:?}");
+        assert_eq!(r.json()["error"], "auth_too_old", "{r:?}");
+        let denied = events(&h, "admin.denied");
+        assert_eq!(denied.last().unwrap()["reason"], "auth_too_old");
         let _ = expect_reauth(&h, &b); // equality is not fresh
         at(&h, auth0 + N + 1);
+        let r = listener(&h);
+        assert_eq!(
+            (
+                r.status,
+                r.json()["error"].as_str().unwrap_or_default().to_string()
+            ),
+            (403, "auth_too_old".to_string()),
+            "{r:?}"
+        );
         let _ = expect_reauth(&h, &b);
         let r = b.verify_other(&h);
         assert_eq!(r.status, 401, "{r:?}");
@@ -2456,6 +2477,16 @@ mod reauth {
     #[test]
     fn s300_16_unsupported_provider_freshness_is_hopae_login_age() {
         let (idp, h) = spawn_unsupported("auth_time_missing", long_handles());
+        // `--check` reports the stored capability, not the file's default.
+        let o = h.cli(&["--check"]);
+        assert_eq!(o.status, 0, "{}", o.all());
+        assert!(
+            o.stdout.contains(
+                "mock: reauth unsupported: console freshness is Hopae login age; enforce a second factor at the provider for administrators"
+            ),
+            "{}",
+            o.all()
+        );
         let b = sign_in(&h, &idp, &console_url());
         let s0 = session(&h);
         assert_eq!(s0.source, "hopae_completion", "the mock sent no claim");
@@ -2930,7 +2961,7 @@ mod reauth {
 }
 
 #[test]
-fn s300_6b_stored_reauth_prompt_none_asks_for_max_age_only() {
+fn s300_6_stored_reauth_prompt_none_asks_for_max_age_only() {
     let (idp, h) = reauth::spawn_stored(
         "m4-admin",
         "auth_time_present",
@@ -2946,4 +2977,239 @@ fn s300_6b_stored_reauth_prompt_none_asks_for_max_age_only() {
     assert_eq!(last.max_age.as_deref(), Some("43200"));
     assert_eq!(last.prompt, None, "reauth_prompt = none");
     assert_eq!(cb.status, 302, "{cb:?}");
+}
+
+// ---- W2: the gateway layer (`make e2e`) --------------------------------------
+
+mod gateway_layer {
+    use std::time::Duration;
+
+    use crate::support::gateway::{Edge, GatewayRoutes, PORTAL_HOST, Stack};
+    use crate::support::{Fixture, Req};
+
+    const CONSOLE: &str = "hopae-admin.example.test";
+    const HANDLE: &str = "__Host-hopae";
+    const BIND: &str = "__Host-hopae_bind";
+
+    fn start(test: &str, routes: GatewayRoutes) -> Option<Stack> {
+        Stack::start(test, Fixture::new("m4-admin"), routes, Edge::Terminator)
+    }
+
+    fn console_routes() -> GatewayRoutes {
+        GatewayRoutes::new()
+            .portal(PORTAL_HOST)
+            .with_console(CONSOLE)
+    }
+
+    fn db(s: &Stack) -> rusqlite::Connection {
+        let c = rusqlite::Connection::open(s.hopae.state_dir.path().join("state/hopae.db"))
+            .expect("open the store");
+        c.busy_timeout(Duration::from_secs(5)).unwrap();
+        c
+    }
+
+    fn cookie(r: &crate::support::Response, name: &str) -> Option<String> {
+        r.set_cookies().iter().find_map(|c| {
+            c.strip_prefix(&format!("{name}="))
+                .map(|rest| rest.split(';').next().unwrap_or("").to_string())
+        })
+    }
+
+    /// Sign in at the console host through the gateway; returns the browser,
+    /// the console handle and the user id.
+    fn sign_in(s: &Stack) -> (crate::support::gateway::Browser, String, String) {
+        let b = s.gw.browser();
+        let first = b.get(CONSOLE, "/users");
+        assert_eq!(first.status, 302, "{first:?}");
+        let code = b.login_from(&s.idp, first);
+        let handoff = b.redeem(&code);
+        assert_eq!(handoff.status, 302, "{handoff:?}");
+        let handle = cookie(&handoff, HANDLE).expect("the console handle is planted");
+        let user: String = db(s)
+            .query_row(
+                "SELECT user_id FROM sessions WHERE terminated_at IS NULL ORDER BY created_at DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (b, handle, user)
+    }
+
+    fn grant(s: &Stack, user: &str) {
+        let now = s.hopae.hooks.now_ms() / 1000;
+        db(s)
+            .execute(
+                "INSERT INTO admin_grants (user_id, role, managed_by, granted_at, granted_by) VALUES (?1, 'admin', 'api', ?2, 'cli')",
+                rusqlite::params![user, now],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn s300_1_first_visit_logs_in_and_lands_with_console_handle() {
+        let Some(s) = start("s300_1", console_routes()) else {
+            return;
+        };
+        let b = s.gw.browser();
+        let first = b.get(CONSOLE, "/users");
+        assert_eq!(first.status, 302, "{first:?}");
+        assert!(
+            first
+                .location()
+                .unwrap()
+                .starts_with("https://auth.example.test/login?txn="),
+            "{first:?}"
+        );
+        assert!(
+            cookie(&first, BIND).is_some(),
+            "bind cookie on the console host"
+        );
+        let code = b.login_from(&s.idp, first);
+        assert!(
+            code.handoff_location
+                .starts_with("https://hopae-admin.example.test/_hopae/login?"),
+            "{}",
+            code.handoff_location
+        );
+        assert!(code.handoff_location.contains("return="));
+        assert!(code.handoff_location.contains("_hopae_handoff="));
+        // Nothing reached the listener before the handoff: no administrator event.
+        assert!(s.hopae.hooks.events(Some("admin.denied"), None).is_empty());
+        let handoff = b.redeem(&code);
+        assert_eq!(handoff.status, 302, "{handoff:?}");
+        let handle = cookie(&handoff, HANDLE).expect("__Host-hopae planted");
+        assert!(!handle.is_empty());
+        // The handle reaches the listener (no stripping): the user is named, not asked to log in.
+        let page = b.get(CONSOLE, "/users");
+        assert_eq!(page.status, 403, "{page:?}");
+        assert!(page.body.contains("not_admin"), "{}", page.body);
+        let user: String = db(&s)
+            .query_row("SELECT user_id FROM sessions LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(page.body.contains(&user), "the page names the user");
+        grant(&s, &user);
+        let page = b.get(CONSOLE, "/users");
+        assert_eq!(page.status, 200, "{page:?}");
+        let (app, src, at): (String, String, i64) = {
+            let c = db(&s);
+            let app: String = c
+                .query_row(
+                    "SELECT app_id FROM login_txns ORDER BY created_at LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let (src, at) = c
+                .query_row(
+                    "SELECT auth_time_source, auth_time FROM sessions LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            (app, src, at)
+        };
+        assert_eq!(app, "admin");
+        assert_eq!(src, "provider_claim");
+        let now = s.hopae.hooks.now_ms() / 1000;
+        assert!((now - at).abs() <= 30, "auth_time {at} vs now {now}");
+        let created = s.hopae.hooks.events(Some("session.created"), None);
+        assert_eq!(
+            created.last().unwrap()["attrs"]["auth_time_source"],
+            "provider_claim"
+        );
+    }
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn s300_10_sign_out_from_console_ends_session_everywhere() {
+        let Some(s) = start("s300_10", console_routes()) else {
+            return;
+        };
+        let (b, handle, user) = sign_in(&s);
+        grant(&s, &user);
+        assert_eq!(b.get(CONSOLE, "/users").status, 200);
+        // The sign-out link of the page (015-1 to 015-3).
+        let r = b.get_with(
+            CONSOLE,
+            "/_hopae/logout",
+            &[("sec-fetch-site", "same-origin")],
+        );
+        assert_eq!(r.status, 302, "{r:?}");
+        let loc = r.location().unwrap().to_string();
+        assert!(
+            loc.starts_with("https://auth.example.test/logout?txn="),
+            "{loc}"
+        );
+        let txn = loc.split("txn=").nth(1).unwrap().to_string();
+        let page = b.get_cross_site(PORTAL_HOST, &format!("/logout?txn={txn}"));
+        assert_eq!(page.status, 200, "{page:?}");
+        let csrf = page
+            .body
+            .split("name=\"csrf\" value=\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .expect("csrf")
+            .to_string();
+        let out = b.send(
+            PORTAL_HOST,
+            Req::post("/logout")
+                .form(&[("csrf", &csrf), ("txn", &txn)])
+                .header("origin", "https://auth.example.test"),
+        );
+        assert_eq!(out.status, 200, "{out:?}");
+        let reason: Option<String> = db(&s)
+            .query_row(
+                "SELECT terminated_reason FROM sessions WHERE user_id = ?1",
+                [&user],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason.as_deref(), Some("logout"));
+        // The next navigation is the unauthenticated 302; the listener sees nothing.
+        let denied_before = s.hopae.hooks.events(Some("admin.denied"), None).len();
+        let next = b.get(CONSOLE, "/");
+        assert_eq!(next.status, 302, "{next:?}");
+        assert!(
+            next.location()
+                .unwrap()
+                .starts_with("https://auth.example.test/login?txn=")
+        );
+        assert_eq!(
+            s.hopae.hooks.events(Some("admin.denied"), None).len(),
+            denied_before
+        );
+        // A stale handle sent straight to the listener is refused.
+        let direct = s.hopae.admin_client().with_handle(&handle).get("/v1/me");
+        assert_eq!(direct.status, 403, "{direct:?}");
+        assert_eq!(direct.json()["error"], "login_required", "{direct:?}");
+    }
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn s300_12_console_route_without_auth_is_403_not_a_loop() {
+        let routes = GatewayRoutes::new()
+            .portal(PORTAL_HOST)
+            .with_public_console(CONSOLE);
+        let Some(s) = start("s300_12", routes) else {
+            return;
+        };
+        let b = s.gw.browser();
+        let r = b.get(CONSOLE, "/");
+        assert_eq!(r.status, 403, "{r:?}");
+        assert!(r.body.contains("login_required"), "{}", r.body);
+        assert!(
+            r.body.contains("https://hopae-admin.example.test/"),
+            "the console URL is the link: {}",
+            r.body
+        );
+        let txns: i64 = db(&s)
+            .query_row("SELECT COUNT(*) FROM login_txns", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(txns, 0, "no login was started");
+        assert!(
+            s.gw.tap.calls().is_empty(),
+            "the gateway made no verify call"
+        );
+    }
 }

@@ -110,16 +110,17 @@ contacting a provider.
 
 | Case | Test | File | Kind | Status |
 | --- | --- | --- | --- | --- |
-| S304-1 | `s304_1_applications_listed_with_policy` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
-| S304-2 | `s304_2_providers_with_health_and_secret_presence` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
-| S304-3 | `s304_3_store_build_and_configuration` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
-| S304-4 | `s304_4_page_and_endpoint_change_nothing` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
-| S304-5 | `s304_5_read_only_administrators_see_the_status_too` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
-| S304-A1 | `s304_a1_query_strings_and_bodies_ignored` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
-| S304-A2 | `s304_a2_consistent_snapshot_while_things_change` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
-| S304-A3 | `s304_a3_status_is_cheap` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
-| S304-A4 | `s304_a4_page_cannot_trigger_provider_or_gateway_call` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
-| S304-A5 | `s304_a5_nothing_leaks_to_the_unauthorized` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
+| S304-1 | `s304_1_applications_listed_with_policy` | `tests/scenarios/s304_admin_status.rs` | integration | passing |
+| S304-1 | `s304_1_admin_defaults_are_the_pinned_ones` | `tests/scenarios/s304_admin_status.rs` | integration | passing |
+| S304-2 | `s304_2_providers_with_health_and_secret_presence` | `tests/scenarios/s304_admin_status.rs` | integration | passing |
+| S304-3 | `s304_3_store_build_and_configuration` | `tests/scenarios/s304_admin_status.rs` | integration | passing |
+| S304-4 | `s304_4_page_and_endpoint_change_nothing` | `tests/scenarios/s304_admin_status.rs` | integration | passing |
+| S304-5 | `s304_5_read_only_administrators_see_the_status_too` | `tests/scenarios/s304_admin_status.rs` | integration | passing |
+| S304-A1 | `s304_a1_query_strings_and_bodies_ignored` | `tests/scenarios/s304_admin_status.rs` | integration | passing |
+| S304-A2 | `s304_a2_consistent_snapshot_while_things_change` | `tests/scenarios/s304_admin_status.rs` | integration | passing |
+| S304-A3 | `s304_a3_status_is_cheap` | `tests/scenarios/s304_admin_status.rs` | integration | passing |
+| S304-A4 | `s304_a4_page_cannot_trigger_provider_or_gateway_call` | `tests/scenarios/s304_admin_status.rs` | integration | passing |
+| S304-A5 | `s304_a5_nothing_leaks_to_the_unauthorized` | `tests/scenarios/s304_admin_status.rs` | integration | passing |
 
 ## Live verification
 

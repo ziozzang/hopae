@@ -75,7 +75,15 @@ fn binding(b: &BindingPolicy) -> String {
 
 /// Everything a clean `--check` prints on stdout, ending with `config ok`.
 pub fn report(cfg: &Config) -> String {
-    let snap = cfg.snapshot(0);
+    report_with(cfg, &[])
+}
+
+/// `report` with the stored provider rows applied: a stored `reauth` setting
+/// (an api-managed row) overrides the file's default capability, as it does
+/// at start.
+pub fn report_with(cfg: &Config, stored: &[crate::store::types::ProviderRow]) -> String {
+    let mut snap = cfg.snapshot(0);
+    crate::provider::apply_stored_reauth(&mut snap.providers, stored);
     let mut out = String::new();
     let _ = writeln!(
         out,

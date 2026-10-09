@@ -198,7 +198,10 @@ fn check(cfg: &Config, strict: bool) -> ExitCode {
         );
         return ExitCode::from(EXIT_CONFIG);
     }
-    print!("{}", preflight::report(cfg));
+    let stored = runtime()
+        .map(|rt| rt.block_on(app::check_stored_providers(cfg)))
+        .unwrap_or_default();
+    print!("{}", preflight::report_with(cfg, &stored));
     ExitCode::SUCCESS
 }
 

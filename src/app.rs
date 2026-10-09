@@ -1546,6 +1546,19 @@ async fn import_admin_grants_at_start(
     Ok(())
 }
 
+/// `hopae --check`: the provider rows of an existing, migrated store (empty
+/// without one), so the report can show the stored `reauth` capability.
+pub async fn check_stored_providers(cfg: &Config) -> Vec<crate::store::types::ProviderRow> {
+    if !cfg.store_path().exists() {
+        return Vec::new();
+    }
+    let env = env();
+    match open_cli_store(cfg, &env).await {
+        Ok(store) => store.directory().providers().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// `hopae --check`: what resolving `admin.users[]` against an existing store
 /// would complain about. Without entries, without a store, or with a store an
 /// instance has not migrated yet, there is nothing to say.

@@ -3,9 +3,9 @@
 //! a second process beside a running instance on the same `state_dir`.
 //!
 //! The console-side effects ("the next `GET /v1/me` is `200` with
-//! `role: admin`") need the admin listener's authentication (W1-A); here the
-//! instance's own view of the table (`hooks.grants()`, read through the
-//! instance's connection without a restart) is asserted instead.
+//! `role: admin`") are asserted through the admin listener with a console
+//! handle of the user's real sign-in; the instance's own view of the table
+//! (`hooks.grants()`, read without a restart) is asserted beside them.
 #![allow(dead_code)]
 
 use std::io::{BufRead, BufReader};
@@ -16,14 +16,27 @@ use std::time::{Duration, Instant};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
+use crate::scenarios::s301_admin_users::kit::Console;
 use crate::support::*;
 
 const GW_KEY: &str = "gwkey-value-0123456789";
 const MOCK_SECRET: &str = "mock-secret-value-9876543210";
 
 struct Rig {
-    h: Hopae,
-    _idp: MockIdp,
+    c: Console,
+}
+
+impl std::ops::DerefMut for Rig {
+    fn deref_mut(&mut self) -> &mut Console {
+        &mut self.c
+    }
+}
+
+impl std::ops::Deref for Rig {
+    type Target = Console;
+    fn deref(&self) -> &Console {
+        &self.c
+    }
 }
 
 impl Rig {
@@ -34,7 +47,21 @@ impl Rig {
     fn with(f: Fixture) -> Rig {
         let idp = MockIdp::start("default");
         let h = Hopae::spawn(f, &idp, &[]);
-        Rig { h, _idp: idp }
+        Rig {
+            c: Console { h, idp },
+        }
+    }
+
+    /// Sign `sub` in at the console host (the user exists already, so the
+    /// identity resolves to it); returns the console handle.
+    fn console(&self, sub: &str, email: &str) -> String {
+        self.c.login(sub, email, sub).handle
+    }
+
+    /// `GET /v1/me` with `handle`: the status and the JSON body.
+    fn me(&self, handle: &str) -> (u16, Value) {
+        let r = self.h.admin_client().with_handle(handle).get("/v1/me");
+        (r.status, r.json())
     }
 
     fn db_path(&self) -> PathBuf {
@@ -192,7 +219,18 @@ fn s305_1_bootstrap_first_grant_by_user_id_prints_resolution() {
     let r = Rig::new();
     r.standard_users();
     assert!(r.grants().is_empty());
+    let ha = r.console("sub-1", "a@example.test");
+    let (st, body) = r.me(&ha);
+    assert_eq!(
+        (st, body["error"].as_str()),
+        (403, Some("not_admin")),
+        "{body}"
+    );
     let o = r.ok(&["admin", "grant", "u_a"]);
+    // The very next request is the administrator's, with no restart.
+    let (st, body) = r.me(&ha);
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["role"], "admin", "{body}");
     for needle in [
         "user_id u_a",
         "display_name Alice A",
@@ -313,8 +351,27 @@ fn s305_3_revoke_takes_effect_and_leaves_tombstone() {
     let r = Rig::new();
     r.standard_users();
     r.ok(&["admin", "grant", "u_a"]);
+    let ha = r.console("sub-1", "a@example.test");
+    assert_eq!(r.me(&ha).0, 200);
     let o = r.ok(&["admin", "revoke", "u_a"]);
     assert!(o.stdout.contains("revoked admin from u_a"), "{}", o.all());
+    let (st, body) = r.me(&ha);
+    assert_eq!(
+        (st, body["error"].as_str()),
+        (403, Some("not_admin")),
+        "{body}"
+    );
+    // The session itself is live: only the grant ended.
+    assert_eq!(
+        r.sql()
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE user_id = 'u_a' AND terminated_at IS NULL",
+                [],
+                |x| x.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
     let g = r.grant("u_a").unwrap();
     assert!(g["revoked_at"].is_i64(), "{g}");
     assert_eq!(g["revoked_by"], "cli");
@@ -385,8 +442,13 @@ fn s305_5_regrant_clears_revocation_and_changes_role() {
     let r = Rig::new();
     r.standard_users();
     r.ok(&["admin", "grant", "u_a"]);
+    let ha = r.console("sub-1", "a@example.test");
+    assert_eq!(r.me(&ha).1["role"], "admin");
     r.ok(&["admin", "revoke", "u_a"]);
+    assert_eq!(r.me(&ha).0, 403);
     r.ok(&["admin", "grant", "u_a", "--role", "viewer"]);
+    let (st, body) = r.me(&ha);
+    assert_eq!((st, body["role"].as_str()), (200, Some("viewer")), "{body}");
     let g = r.grant("u_a").unwrap();
     assert_eq!(g["role"], "viewer");
     assert!(g["revoked_at"].is_null(), "{g}");
@@ -394,6 +456,7 @@ fn s305_5_regrant_clears_revocation_and_changes_role() {
     assert_eq!(ev.len(), 2, "{ev:?}");
     assert_eq!(ev[1]["attrs"]["previous_role"], "admin");
     r.ok(&["admin", "grant", "u_a"]);
+    assert_eq!(r.me(&ha).1["role"], "admin");
     let g = r.grant("u_a").unwrap();
     assert_eq!(g["role"], "admin");
     let ev = r.events("admin.grant");
@@ -437,15 +500,19 @@ fn s305_7_recovery_when_every_administrator_is_gone() {
     // u_d plays the disabled administrator.
     r.refused(&["admin", "grant", "u_d"], "user is disabled: enable first");
     assert!(r.grants().is_empty());
+    let hb = r.console("sub-b", "b@example.test");
+    assert_eq!(r.me(&hb).1["error"], "not_admin");
     let o = r.ok(&["admin", "grant", "u_b"]);
     assert!(o.stdout.contains("granted admin to u_b"), "{}", o.all());
-    // Once enabled (a console action; here the row), the disabled user can be granted.
-    r.db()
-        .execute(
-            "UPDATE users SET status = 'active' WHERE user_id = 'u_d'",
-            [],
-        )
-        .unwrap();
+    // u_b opens the console without a restart and enables the disabled user
+    // (a console action, 301-5); then the disabled user can be granted.
+    assert_eq!(r.me(&hb).1["role"], "admin");
+    let e =
+        r.h.admin_client()
+            .with_handle(&hb)
+            .post_json("/v1/users/u_d/enable", json!({}));
+    assert_eq!(e.status, 200, "{e:?}");
+    assert_eq!(e.json()["changed"], true, "{e:?}");
     r.ok(&["admin", "grant", "u_d"]);
 }
 
@@ -987,6 +1054,37 @@ fn s305_a3_grant_and_revoke_racing_each_other_and_console() {
     );
     // Revoke-then-grant gives grant, revoke, grant; grant-then-revoke gives grant, revoke.
     assert!(ev.len() == 2 || ev.len() == 3, "{ev:?}");
+
+    // The console mutation of the scenario: in flight (held between its check
+    // and its write) while the command revokes the actor; the fenced write
+    // re-reads the grant and refuses.
+    r.ok(&["admin", "grant", "u_a"]);
+    let ha = r.console("sub-1", "a@example.test");
+    assert_eq!(r.me(&ha).1["role"], "admin");
+    h.hooks.hold("admin_mutation");
+    let refused = std::thread::scope(|s| {
+        let w = s.spawn(|| {
+            h.admin_client()
+                .with_handle(&ha)
+                .post_json("/v1/users/u_h/disable", json!({}))
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        let o = h.cli(&["admin", "revoke", "u_a"]);
+        assert_eq!(o.status, 0, "{}", o.all());
+        h.hooks.release("admin_mutation");
+        w.join().unwrap()
+    });
+    assert_eq!(refused.status, 403, "{refused:?}");
+    assert_eq!(refused.json()["error"], "actor_revoked", "{refused:?}");
+    let status: String = r
+        .db()
+        .query_row("SELECT status FROM users WHERE user_id = 'u_h'", [], |x| {
+            x.get(0)
+        })
+        .unwrap();
+    assert_eq!(status, "active");
+    assert!(r.events("admin.user_disable").is_empty());
+    assert_eq!(r.events("admin.denied").len(), 1);
 }
 
 #[test]

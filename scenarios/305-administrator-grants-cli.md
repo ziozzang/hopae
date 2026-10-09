@@ -146,21 +146,21 @@ validated foundation, with no backup written before the validation.
 
 | Case | Test | File | Kind | Status |
 | --- | --- | --- | --- | --- |
-| S305-1 | `s305_1_bootstrap_first_grant_by_user_id_prints_resolution` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-2 | `s305_2_grant_by_email_resolves_once_and_needs_confirm_unless_authoritative` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-3 | `s305_3_revoke_takes_effect_and_leaves_tombstone` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-4 | `s305_4_list_shows_live_grants_and_all_shows_tombstones` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-5 | `s305_5_regrant_clears_revocation_and_changes_role` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-6 | `s305_6_command_works_beside_running_instance` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-7 | `s305_7_recovery_when_every_administrator_is_gone` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-8 | `s305_8_grants_seeded_from_file_by_original_keys` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-9 | `s305_9_schema_v3_only_on_validated_foundation_and_no_backup_before` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-A1 | `s305_a1_repeating_a_grant_is_a_noop` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-A2 | `s305_a2_malformed_identifiers_addresses_and_entries` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-A3 | `s305_a3_grant_and_revoke_racing_each_other_and_console` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-A4 | `s305_a4_email_grant_not_hijacked_by_claim_stale_account_reassigned_mailbox_or_revoked_binding` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-A5 | `s305_a5_command_reveals_nothing_beyond_own_store` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
-| S305-A6 | `s305_a6_file_cannot_resurrect_revoke_present_or_grant_ambiguous` | `tests/scenarios/s305_admin_grants.rs` | integration | planned |
+| S305-1 | `s305_1_bootstrap_first_grant_by_user_id_prints_resolution` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-2 | `s305_2_grant_by_email_resolves_once_and_needs_confirm_unless_authoritative` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-3 | `s305_3_revoke_takes_effect_and_leaves_tombstone` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-4 | `s305_4_list_shows_live_grants_and_all_shows_tombstones` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-5 | `s305_5_regrant_clears_revocation_and_changes_role` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-6 | `s305_6_command_works_beside_running_instance` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-7 | `s305_7_recovery_when_every_administrator_is_gone` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-8 | `s305_8_grants_seeded_from_file_by_original_keys` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-9 | `s305_9_schema_v3_only_on_validated_foundation_and_no_backup_before` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-A1 | `s305_a1_repeating_a_grant_is_a_noop` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-A2 | `s305_a2_malformed_identifiers_addresses_and_entries` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-A3 | `s305_a3_grant_and_revoke_racing_each_other_and_console` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-A4 | `s305_a4_email_grant_not_hijacked_by_claim_stale_account_reassigned_mailbox_or_revoked_binding` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-A5 | `s305_a5_command_reveals_nothing_beyond_own_store` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-A6 | `s305_a6_file_cannot_resurrect_revoke_present_or_grant_ambiguous` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
 
 The migration-guard case (305-9) also keeps scenario 013-6's pre-release
 rejection test green: `s013_6_*` asserts the refusal, 305-9 additionally

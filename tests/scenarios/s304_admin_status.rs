@@ -54,7 +54,7 @@ fn spawn_status() -> (MockIdp, Hopae, Users) {
 /// A status body without the parts that move by themselves (event and
 /// delivery counts change as the background workers run).
 fn stable(mut v: Value) -> Value {
-    for k in ["events", "deliveries", "live_sessions"] {
+    for k in ["events", "deliveries", "live_sessions", "last_prune_at"] {
         v["store"].as_object_mut().unwrap().remove(k);
     }
     v
@@ -234,7 +234,17 @@ fn s304_2_providers_with_health_and_secret_presence() {
 #[test]
 fn s304_3_store_build_and_configuration() {
     let (_idp, h, u) = spawn_status();
-    // Three failed deliveries on the `log` sink, as the test hooks would inject.
+    // Three failed deliveries on the `log` sink, as the test hooks would inject
+    // (the sink delivers asynchronously: wait for three delivered rows).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while count(
+        &h,
+        "SELECT COUNT(*) FROM event_deliveries WHERE sink = 'log' AND state = 'delivered'",
+    ) < 3
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     db(&h)
         .execute(
             "UPDATE event_deliveries SET state = 'failed', last_error = 'injected' WHERE rowid IN (SELECT rowid FROM event_deliveries WHERE sink = 'log' AND state = 'delivered' LIMIT 3)",
@@ -398,7 +408,11 @@ fn s304_a1_query_strings_and_bodies_ignored() {
     let a = admin(&h).with_handle(&u.a.handle);
     let plain = a.get("/v1/status");
     let with_query = a.get("/v1/status?provider=mock&reveal=secret");
-    assert_eq!(stable(plain.json()), stable(with_query.json()));
+    assert_eq!(
+        stable(plain.json()),
+        stable(with_query.json()),
+        "the query string changed the answer"
+    );
     let host = h.console_host();
     let cookie = format!("{}={}", h.cookie_name(), u.a.handle);
     let mut req = RawReq::new("GET", "/v1/status", &host)

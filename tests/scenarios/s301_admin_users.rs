@@ -174,14 +174,6 @@ pub(crate) mod kit {
                 .and_then(|e| e["user_id"].as_str())
                 .expect("a login.succeeded event")
                 .to_string();
-            // The provider is a `max_age` one: the console demands a provider claim.
-            // Until freshness provenance is recorded by the login itself, state it.
-            self.sql()
-                .execute(
-                    "UPDATE sessions SET auth_time_source = 'provider_claim' WHERE user_id = ?1",
-                    [&user_id],
-                )
-                .expect("provenance");
             Who { user_id, handle }
         }
 
@@ -1247,7 +1239,7 @@ fn s301_a4_listing_and_search_examine_bounded_window() {
 }
 
 #[test]
-fn s301_a4b_budget_interrupts_and_rolls_back() {
+fn s301_a4_budget_interrupts_and_rolls_back() {
     let k = Console::with(json!({"admin": {"query_budget_ms": 100}}));
     let a = k.admin("sub-a", AdminRole::Admin);
     k.h.hooks.bulk_users(20_000);
@@ -1308,7 +1300,7 @@ fn s301_a4b_budget_interrupts_and_rolls_back() {
 }
 
 #[test]
-fn s301_a4c_terminate_of_five_thousand_sessions_with_a_large_budget() {
+fn s301_a4_terminate_of_five_thousand_sessions_with_a_large_budget() {
     let k = Console::with(json!({"admin": {"query_budget_ms": 30000}}));
     let a = k.admin("sub-a", AdminRole::Admin);
     k.add_user("u_big", "big@example.test", "Big");

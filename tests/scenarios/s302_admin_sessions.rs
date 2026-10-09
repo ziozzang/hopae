@@ -277,8 +277,7 @@ fn s302_3_terminate_one_ends_it_everywhere_with_record() {
         3
     );
     assert_eq!(
-        // Known divergence (reported): the store records the termination reason (`admin`), not `session_terminated`.
-        k.count("SELECT COUNT(*) FROM handoff_codes WHERE session_id = 's_1' AND consumed_at IS NOT NULL"),
+        k.count("SELECT COUNT(*) FROM handoff_codes WHERE session_id = 's_1' AND consumed_at IS NOT NULL AND consumed_reason = 'session_terminated'"),
         1,
         "K1 consumed"
     );

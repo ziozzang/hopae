@@ -817,7 +817,14 @@ pub(super) fn terminate_in(
         params![id.as_str(), at.secs(), reason.0],
     )?;
     revoke_session_handles(tx, id, reasons::SESSION_TERMINATED.0, at)?;
-    consume_session_codes(tx, id, reason.0, at)?;
+    // A code consumed by an administrator's termination reads like the
+    // revoked handles (scenario 302-3); every other ending keeps its own reason.
+    let code_reason = if reason == reasons::ADMIN {
+        reasons::SESSION_TERMINATED
+    } else {
+        reason
+    };
+    consume_session_codes(tx, id, code_reason.0, at)?;
     insert_events(tx, shared, events)?;
     Ok(())
 }

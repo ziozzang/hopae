@@ -128,19 +128,21 @@ query examines more than a bounded window of the directory per request.
 
 | Case | Test | File | Kind | Status |
 | --- | --- | --- | --- | --- |
-| S301-1 | `s301_1_users_listed_newest_first_in_pages` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
-| S301-2 | `s301_2_search_prefix_and_substring_inside_window` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
-| S301-3 | `s301_3_detail_shows_bounded_previews_totals_and_links` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
-| S301-4 | `s301_4_disable_ends_sessions_with_audit_in_one_transaction` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
-| S301-5 | `s301_5_enable_restores_sign_in_and_revives_nothing` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
-| S301-6 | `s301_6_changing_nothing_writes_nothing` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
-| S301-7 | `s301_7_disabled_administrator_loses_the_console` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
-| S301-A1 | `s301_a1_replayed_disable_is_noop_and_token_rules` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
-| S301-A2 | `s301_a2_malformed_ids_and_parameters_rejected` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
-| S301-A3 | `s301_a3_concurrent_admins_and_in_flight_login` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
-| S301-A4 | `s301_a4_listing_and_search_examine_bounded_window` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
-| S301-A5 | `s301_a5_no_self_disable_and_viewer_cannot_disable` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
-| S301-A6 | `s301_a6_directory_enumeration_needs_grant_and_is_bounded` | `tests/scenarios/s301_admin_users.rs` | integration | planned |
+| S301-1 | `s301_1_users_listed_newest_first_in_pages` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-2 | `s301_2_search_prefix_and_substring_inside_window` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-3 | `s301_3_detail_shows_bounded_previews_totals_and_links` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-4 | `s301_4_disable_ends_sessions_with_audit_in_one_transaction` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-5 | `s301_5_enable_restores_sign_in_and_revives_nothing` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-6 | `s301_6_changing_nothing_writes_nothing` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-7 | `s301_7_disabled_administrator_loses_the_console` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-A1 | `s301_a1_replayed_disable_is_noop_and_token_rules` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-A2 | `s301_a2_malformed_ids_and_parameters_rejected` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-A3 | `s301_a3_concurrent_admins_and_in_flight_login` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-A4 | `s301_a4_listing_and_search_examine_bounded_window` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-A4 | `s301_a4_budget_interrupts_and_rolls_back` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-A4 | `s301_a4_terminate_of_five_thousand_sessions_with_a_large_budget` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-A5 | `s301_a5_no_self_disable_and_viewer_cannot_disable` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-A6 | `s301_a6_directory_enumeration_needs_grant_and_is_bounded` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
 
 ## Live verification
 
