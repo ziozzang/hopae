@@ -96,6 +96,21 @@ pub fn assert_only_allow_is_2xx() {
             clear_handle: false,
             cause: None,
         },
+        // ADR-0016: a session too old for the console (the handle is kept).
+        Decision::Login {
+            transaction: Some(tok()),
+            bind: BindAction::Keep,
+            kind: LoginKind::Reauth,
+            clear_handle: false,
+            cause: None,
+        },
+        Decision::Login {
+            transaction: None,
+            bind: BindAction::Keep,
+            kind: LoginKind::Reauth,
+            clear_handle: false,
+            cause: None,
+        },
         Decision::Handoff {
             location: url(),
             handle: tok(),

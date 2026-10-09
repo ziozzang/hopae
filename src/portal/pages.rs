@@ -170,6 +170,17 @@ pub struct LinkNotice<'a> {
     pub via_provider: Option<&'a str>,
 }
 
+/// `reauth_provider_unavailable`: the provider the session signed in with is
+/// disabled or removed; only the sign-out link is offered.
+#[derive(Template)]
+#[template(path = "reauth_provider_unavailable.html")]
+pub struct ReauthProviderUnavailable<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub provider: &'a str,
+    pub sign_out: &'a str,
+}
+
 #[derive(Template)]
 #[template(path = "error.html")]
 pub struct Error<'a> {

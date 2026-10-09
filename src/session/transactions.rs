@@ -120,12 +120,14 @@ impl Service {
             state_sha256: None,
             nonce: None,
             pkce_verifier: None,
-            portal_session_id: None,
+            // A retried reauthentication stays one (the freshness demand is
+            // server-owned and never dropped).
+            portal_session_id: old.portal_session_id.clone(),
             purpose: TxnPurpose::Login,
             conflicting_handle_sha256: None,
             pending_identity: None,
             recovery_depth: depth,
-            reauth_max_age: None,
+            reauth_max_age: old.reauth_max_age,
         };
         // Admission: the per-IP count (against the transaction's application
         // IP, the address it is inserted with, ADR-0014) and the insert are

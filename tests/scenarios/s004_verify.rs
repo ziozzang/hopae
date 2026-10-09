@@ -935,6 +935,66 @@ async fn s004_11_no_non_allow_path_is_2xx() {
         f.decide(f.req(APP_URL).cookie(&h1).ip("198.51.100.7"))
             .await,
     ));
+    // ADR-0016: a console session that fails the freshness predicate is sent to
+    // a reauthentication (the handle kept), never allowed: `302` for a document
+    // navigation, `401` otherwise.
+    {
+        use hopae::verify::LoginKind;
+        let a = Fx::new("m4-admin");
+        let au = a.user("c@example.test", None, None).await;
+        let stale = a.session(&au).await; // auth_time_source = hopae_completion
+        let ah = a.handle(&stale, "hopae-admin.example.test").await;
+        a.at(60);
+        let console = "https://hopae-admin.example.test/users";
+        let doc = a.decide(a.req(console).cookie(&ah)).await;
+        assert!(
+            matches!(
+                &doc,
+                Decision::Login {
+                    kind: LoginKind::Reauth,
+                    transaction: Some(_),
+                    clear_handle: false,
+                    ..
+                }
+            ),
+            "{}",
+            show(&doc)
+        );
+        outcomes.push(("reauth, document", doc));
+        let other = a.decide(a.req(console).other().cookie(&ah)).await;
+        assert!(
+            matches!(
+                &other,
+                Decision::Login {
+                    kind: LoginKind::Reauth,
+                    transaction: None,
+                    clear_handle: false,
+                    ..
+                }
+            ),
+            "{}",
+            show(&other)
+        );
+        outcomes.push(("reauth, other", other));
+        // The same session on the application host is not asked for it, and a
+        // provider-verified session is let into the console.
+        let ok = a.handle(&stale, "app.example.test").await;
+        assert!(matches!(
+            a.decide(a.req(APP_URL).cookie(&ok)).await,
+            Decision::Allow { .. }
+        ));
+        let au2 = a.user("d@example.test", None, None).await;
+        let claimed = a
+            .session_with(&au2, |r| {
+                r.auth_time_source = hopae::store::types::AuthTimeSource::ProviderClaim
+            })
+            .await;
+        let ch = a.handle(&claimed, "hopae-admin.example.test").await;
+        assert!(matches!(
+            a.decide(a.req(console).cookie(&ch)).await,
+            Decision::Allow { .. }
+        ));
+    }
     for (what, d) in &outcomes {
         assert!(!matches!(d, Decision::Allow { .. }), "{what}: {}", show(d));
     }

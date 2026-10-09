@@ -108,6 +108,7 @@ pub(crate) mod kit {
             username: None,
             picture: None,
             raw_claims: serde_json::json!({"sub": sub}),
+            auth_time: None,
         }
     }
 

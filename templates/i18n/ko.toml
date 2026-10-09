@@ -38,6 +38,10 @@
 "link.body" = "이 이메일 주소는 이미 다른 계정에 속해 있습니다. 연결하려면 {provider}(으)로 로그인하세요."
 "link.body_generic" = "이 이메일 주소는 이미 다른 계정에 속해 있습니다. 연결하려면 이전에 사용한 방법으로 로그인하세요."
 
+"reauth.unavailable_title" = "다시 로그인하세요"
+"reauth.unavailable_body" = "이 작업에는 {provider}(으)로 새로 로그인해야 하지만 더 이상 사용할 수 없습니다. 로그아웃한 뒤 다시 로그인하세요."
+"reauth.sign_out" = "로그아웃"
+
 "error.expired.title" = "로그인 링크가 만료되었습니다"
 "error.expired.body" = "애플리케이션으로 돌아가 다시 시도하세요."
 "error.failed.title" = "로그인에 실패했습니다"

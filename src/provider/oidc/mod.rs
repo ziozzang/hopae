@@ -31,7 +31,7 @@ use crate::event::types::Reason;
 use crate::provider::presets;
 use crate::provider::types::{
     AuthorizationRequest, CallbackQuery, Provider, ProviderError, ProviderHealth, ProviderId,
-    ProviderIdentity, ProviderKind,
+    ProviderIdentity, ProviderKind, ReauthCapability, ReauthPrompt, ReauthRequest,
 };
 use crate::store::types::{ProviderRow, TransactionRow};
 
@@ -69,6 +69,9 @@ pub struct OidcSettings {
     pub authoritative_domains: Vec<String>,
     pub trust_email: bool,
     pub userinfo: bool,
+    /// Whether a reauthentication request also carries `prompt=login`
+    /// (stored setting `reauth_prompt`, default `login`).
+    pub reauth_prompt: ReauthPrompt,
     /// Required `typ` header of the ID token, when the provider sets one.
     pub id_token_typ: Option<String>,
     /// Where the client may send requests (G7-IDP-03).
@@ -82,22 +85,44 @@ fn cfg_str(cfg: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The preset a row names (`preset`), is called after (no `issuer`), or whose
+/// issuer matches.
+fn preset_of(row: &ProviderRow) -> Option<&'static presets::Preset> {
+    let cfg = &row.config;
+    cfg_str(cfg, "preset")
+        .and_then(|n| presets::by_name(&n))
+        .or_else(|| {
+            if cfg_str(cfg, "issuer").is_none() {
+                presets::by_name(row.provider_id.as_str())
+            } else {
+                None
+            }
+        })
+        .or_else(|| cfg_str(cfg, "issuer").and_then(|i| presets::by_issuer(&i)))
+}
+
+/// The reauthentication settings a row resolves to: the stored settings
+/// `reauth` and `reauth_prompt` win, then the preset's capability, then
+/// `max_age` and `login` (ADR-0016 decision 15). An unreadable stored value
+/// is ignored.
+pub fn reauth_settings(row: &ProviderRow) -> (ReauthCapability, ReauthPrompt) {
+    let capability = cfg_str(&row.config, "reauth")
+        .and_then(|s| ReauthCapability::parse(&s))
+        .or_else(|| preset_of(row).map(|p| p.reauth))
+        .unwrap_or(ReauthCapability::MaxAge);
+    let prompt = cfg_str(&row.config, "reauth_prompt")
+        .and_then(|s| ReauthPrompt::parse(&s))
+        .unwrap_or(ReauthPrompt::Login);
+    (capability, prompt)
+}
+
 impl OidcSettings {
     /// Read the row. `env` resolves `client_secret_env`; an absent or empty
     /// variable disables the provider (ADR-0010). Never fails: an unusable
     /// row becomes a disabled provider with a reason.
     pub fn from_row(row: &ProviderRow, env: &dyn Fn(&str) -> Option<String>) -> OidcSettings {
         let cfg = &row.config;
-        let preset = cfg_str(cfg, "preset")
-            .and_then(|n| presets::by_name(&n))
-            .or_else(|| {
-                if cfg_str(cfg, "issuer").is_none() {
-                    presets::by_name(row.provider_id.as_str())
-                } else {
-                    None
-                }
-            })
-            .or_else(|| cfg_str(cfg, "issuer").and_then(|i| presets::by_issuer(&i)));
+        let preset = preset_of(row);
         let issuer = cfg_str(cfg, "issuer")
             .or_else(|| preset.map(|p| p.issuer.to_string()))
             .unwrap_or_default();
@@ -155,6 +180,7 @@ impl OidcSettings {
                 .collect(),
             trust_email: row.trust_email,
             userinfo,
+            reauth_prompt: reauth_settings(row).1,
             id_token_typ: cfg_str(cfg, "id_token_typ"),
             endpoints,
         }
@@ -692,9 +718,19 @@ impl Provider for OidcProvider {
 
     async fn begin(
         &self,
+        txn: &TransactionRow,
+        redirect_uri: &url::Url,
+        rng: &dyn Rng,
+    ) -> Result<AuthorizationRequest, ProviderError> {
+        self.begin_reauth(txn, redirect_uri, rng, None).await
+    }
+
+    async fn begin_reauth(
+        &self,
         _txn: &TransactionRow,
         redirect_uri: &url::Url,
         rng: &dyn Rng,
+        reauth: Option<ReauthRequest>,
     ) -> Result<AuthorizationRequest, ProviderError> {
         if !self.usable() {
             return Err(ProviderError::ProviderDisabled);
@@ -713,6 +749,13 @@ impl Provider for OidcProvider {
             .append_pair("nonce", &nonce)
             .append_pair("code_challenge", &pkce_challenge(verifier.expose()))
             .append_pair("code_challenge_method", "S256");
+        if let Some(r) = reauth {
+            let mut q = url.query_pairs_mut();
+            q.append_pair("max_age", &r.max_age.as_secs().to_string());
+            if self.s.reauth_prompt == ReauthPrompt::Login {
+                q.append_pair("prompt", "login");
+            }
+        }
         Ok(AuthorizationRequest {
             url,
             state,
@@ -843,6 +886,69 @@ mod tests {
             pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
+    }
+
+    fn stored(id: &str, config: serde_json::Value) -> ProviderRow {
+        ProviderRow {
+            provider_id: ProviderId::new(id),
+            kind: ProviderKind::Oidc,
+            display_name: id.into(),
+            enabled: true,
+            managed_by: crate::store::types::ManagedBy::Api,
+            deleted_at: None,
+            sort_order: 0,
+            config,
+            client_secret_env: None,
+            allowed_email_domains: vec![],
+            authoritative_domains: vec![],
+            auto_link: false,
+            trust_email: false,
+        }
+    }
+
+    #[test]
+    fn stored_settings_override_the_preset_and_default_capability() {
+        use serde_json::json;
+        let cfg = json!({"client_id": "c", "issuer": "https://idp.example.test"});
+        // Default: max_age with prompt=login.
+        assert_eq!(
+            reauth_settings(&stored("x", cfg.clone())),
+            (ReauthCapability::MaxAge, ReauthPrompt::Login)
+        );
+        // The preset (Google) is unsupported; a stored `reauth` beats it.
+        assert_eq!(
+            reauth_settings(&stored("google", json!({"client_id": "c"}))).0,
+            ReauthCapability::Unsupported
+        );
+        assert_eq!(
+            reauth_settings(&stored(
+                "google",
+                json!({"client_id": "c", "reauth": "max_age", "reauth_prompt": "none"})
+            )),
+            (ReauthCapability::MaxAge, ReauthPrompt::None)
+        );
+        // A stored value on a generic provider, and an unreadable one.
+        let mut c = cfg.clone();
+        c["reauth"] = json!("unsupported");
+        assert_eq!(
+            reauth_settings(&stored("x", c)).0,
+            ReauthCapability::Unsupported
+        );
+        let mut c = cfg;
+        c["reauth"] = json!("sometimes");
+        c["reauth_prompt"] = json!(5);
+        assert_eq!(
+            reauth_settings(&stored("x", c)),
+            (ReauthCapability::MaxAge, ReauthPrompt::Login)
+        );
+        let s = OidcSettings::from_row(
+            &stored(
+                "x",
+                json!({"client_id": "c", "issuer": "https://i.example.test", "reauth_prompt": "none"}),
+            ),
+            &|_| None,
+        );
+        assert_eq!(s.reauth_prompt, ReauthPrompt::None);
     }
 
     #[test]

@@ -551,7 +551,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     } else {
         directory.config_generation().await?
     };
-    let snapshot = cfg.snapshot(generation);
+    let mut snapshot = cfg.snapshot(generation);
     let listeners_attr = match cfg.admin_addr() {
         Some(a) => format!(
             "portal={} gateway={} admin={a}",
@@ -584,6 +584,8 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     // The provider registry, from the rows the import just settled (the
     // database is authoritative). Its reporter writes `provider.error`.
     let rows = directory.providers().await.context("reading providers")?;
+    // A stored `reauth` setting (an api-managed row) overrides the file's default.
+    crate::provider::apply_stored_reauth(&mut snapshot.providers, &rows);
     let registry = Arc::new(Registry::from_snapshot(
         &rows,
         &|n| std::env::var(n).ok(),

@@ -85,6 +85,21 @@ impl Registry {
     }
 }
 
+/// Make a snapshot's provider capabilities agree with the stored rows: a
+/// stored `reauth` / `reauth_prompt` setting (an api-managed row's override)
+/// beats the file's preset default (ADR-0016 decision 15). A provider with no
+/// row keeps what the configuration resolved.
+pub fn apply_stored_reauth(
+    providers: &mut [crate::policy::types::ProviderConfig],
+    rows: &[ProviderRow],
+) {
+    for p in providers {
+        if let Some(row) = rows.iter().find(|r| r.provider_id == p.provider_id) {
+            (p.reauth, p.reauth_prompt) = crate::provider::oidc::reauth_settings(row);
+        }
+    }
+}
+
 impl crate::session::service::ProviderLookup for Registry {
     fn get(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
         Registry::get(self, id)
@@ -157,6 +172,41 @@ mod tests {
             assert!(!p.enabled(), "{id}");
         }
         assert!(reg.get(&ProviderId::new("nope")).is_none());
+    }
+
+    #[test]
+    fn stored_reauth_settings_update_the_snapshot() {
+        use crate::policy::types::ProviderConfig;
+        use crate::provider::types::{ReauthCapability, ReauthPrompt};
+        let cfg = |id: &str| ProviderConfig {
+            provider_id: ProviderId::new(id),
+            kind: ProviderKind::Oidc,
+            display_name: id.into(),
+            enabled: true,
+            client_id: "c".into(),
+            client_secret_env: None,
+            issuer: None,
+            scope: String::new(),
+            endpoint_hosts: vec![],
+            allow_private_endpoints: None,
+            allowed_email_domains: vec![],
+            authoritative_domains: vec![],
+            auto_link: false,
+            trust_email: false,
+            sort_order: 0,
+            reauth: ReauthCapability::MaxAge,
+            reauth_prompt: ReauthPrompt::Login,
+        };
+        let mut api = row("a", 0);
+        api.config = serde_json::json!({"client_id": "c", "issuer": "https://i.example.test", "reauth": "unsupported", "reauth_prompt": "none"});
+        let mut providers = vec![cfg("a"), cfg("b"), cfg("rowless")];
+        apply_stored_reauth(&mut providers, &[api, row("b", 1)]);
+        assert_eq!(
+            (providers[0].reauth, providers[0].reauth_prompt),
+            (ReauthCapability::Unsupported, ReauthPrompt::None)
+        );
+        assert_eq!(providers[1].reauth, ReauthCapability::MaxAge);
+        assert_eq!(providers[2].reauth, ReauthCapability::MaxAge);
     }
 
     #[test]

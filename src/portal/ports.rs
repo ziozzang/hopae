@@ -104,6 +104,12 @@ pub enum LoginVisit {
         /// Origin of the transaction's return target (`form-action`, R-5).
         form_origin: Origin,
     },
+    /// A reauthentication whose session's own provider is disabled or removed:
+    /// the page names it and offers only the sign-out link (ADR-0016, P3-04).
+    ReauthProviderUnavailable {
+        provider: String,
+        sign_out: String,
+    },
     Failed(Failure),
 }
 

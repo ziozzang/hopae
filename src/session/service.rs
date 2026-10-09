@@ -30,15 +30,19 @@ use crate::event::types::{Event, EventBuilder, EventKind, Outcome, Reason, reaso
 use crate::identity::linking::LinkingPolicy;
 use crate::identity::service::{EventCtx, PendingIdentity, Resolution, Service as IdentityService};
 use crate::identity::types::UserId;
+use crate::policy::freshness;
 use crate::policy::types::{
     AppPolicy, ConfigSnapshot, Host, IpBinding, OnMismatch, SessionPolicy, UaBinding,
 };
-use crate::provider::types::{CallbackQuery, Provider, ProviderError, ProviderId, ProviderKind};
+use crate::provider::types::{
+    CallbackQuery, Provider, ProviderError, ProviderId, ProviderKind, ReauthCapability,
+    ReauthRequest,
+};
 use crate::session::handoff::MintRequest;
 use crate::session::types::{Aal, FactorEntry, FactorKind, SessionId};
 use crate::store::types::{
-    Admission, CreateSession, HandleRow, HandleView, IdentitySnapshot, NewTransaction, SessionRow,
-    TransactionBinding, TransactionRow, TxnPurpose, User, UserStatus,
+    Admission, AuthTimeSource, CreateSession, Deadline, HandleRow, HandleView, IdentitySnapshot,
+    NewTransaction, SessionRow, TransactionBinding, TransactionRow, TxnPurpose, User, UserStatus,
 };
 use crate::store::{Directory, Events, Sessions, StoreError};
 use crate::verify::lifetimes::{self, LifetimeVerdict};
@@ -202,6 +206,10 @@ pub enum LoginEntry {
     },
     /// Show the providers (the portal redirects at once when there is exactly one).
     Chooser { providers: Vec<ProviderChoice> },
+    /// A reauthentication transaction whose session's own provider is
+    /// disabled or removed: name it and offer only the sign-out link
+    /// (ADR-0016, P3-04).
+    ReauthProviderUnavailable { provider: String, sign_out: Url },
 }
 
 #[derive(Debug)]
@@ -727,6 +735,29 @@ impl Service {
         if row.state_sha256.is_some() {
             return Err(SessionError::AlreadyBound);
         }
+        // A reauthentication belongs to the session's own provider: another
+        // provider's evidence only ever arrives with a new session (P3-04).
+        let mut reauth = None;
+        if let Some(n) = row.reauth_max_age {
+            if let Some(session) = self.reauth_session(row).await?
+                && &session.provider_id != provider_id
+            {
+                return Err(self
+                    .refuse(
+                        ctx,
+                        Some(row),
+                        Some(provider_id),
+                        reasons::PROVIDER_MISMATCH,
+                    )
+                    .await);
+            }
+            // An `unsupported` provider gets an ordinary authorize request.
+            if self.reauth_capability(provider_id) == ReauthCapability::MaxAge {
+                reauth = Some(ReauthRequest {
+                    max_age: Duration::from_secs(u64::from(n)),
+                });
+            }
+        }
         let provider = self
             .providers
             .get(provider_id)
@@ -735,7 +766,9 @@ impl Service {
             return Err(SessionError::Refused(reasons::PROVIDER_DISABLED));
         }
         let redirect_uri = self.redirect_uri(provider_id)?;
-        let auth = provider.begin(row, &redirect_uri, &*self.rng).await?;
+        let auth = provider
+            .begin_reauth(row, &redirect_uri, &*self.rng, reauth)
+            .await?;
         // PKCE and nonce are not negotiable for OIDC (S002-A7): a provider
         // that cannot supply them is refused rather than weakened.
         if provider.kind() == ProviderKind::Oidc
@@ -760,6 +793,61 @@ impl Service {
             Ok(()) => Ok(auth.url),
             Err(StoreError::Conflict(_)) => Err(SessionError::AlreadyBound),
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The reauthentication capability the snapshot resolved for a provider
+    /// (a stored `reauth` setting already applied); `max_age` when unknown.
+    pub(crate) fn reauth_capability(&self, id: &ProviderId) -> ReauthCapability {
+        self.snapshot
+            .load()
+            .providers
+            .iter()
+            .find(|p| &p.provider_id == id)
+            .map_or(ReauthCapability::MaxAge, |p| p.reauth)
+    }
+
+    /// The live session a reauthentication transaction was started for.
+    async fn reauth_session(
+        &self,
+        row: &TransactionRow,
+    ) -> Result<Option<SessionRow>, SessionError> {
+        let (Some(_), Some(sid)) = (row.reauth_max_age, &row.portal_session_id) else {
+            return Ok(None);
+        };
+        Ok(self
+            .sessions
+            .session(sid)
+            .await?
+            .filter(|s| s.terminated_at.is_none()))
+    }
+
+    /// What a callback records as the session's `auth_time` and where it came
+    /// from (ADR-0016 decision 15): the validated claim, else Hopae's own
+    /// completion time; a reauthentication of a `max_age` provider demands a
+    /// claim fresh enough for the first console verify after the handoff.
+    fn auth_time_for(
+        txn: &TransactionRow,
+        capability: ReauthCapability,
+        ident: &crate::provider::types::ProviderIdentity,
+        at: crate::crypto::Timestamp,
+    ) -> Result<(crate::crypto::Timestamp, AuthTimeSource), Reason> {
+        let claim = freshness::validate_claim(ident.auth_time.as_ref(), at)?;
+        match (txn.reauth_max_age, capability) {
+            (Some(n), ReauthCapability::MaxAge) => {
+                let t = claim.ok_or(reasons::REAUTH_AUTH_TIME_MISSING)?;
+                let bound = freshness::callback_bound(Duration::from_secs(u64::from(n)));
+                if !freshness::is_fresh(t, at, bound) {
+                    return Err(reasons::REAUTH_NOT_FRESH);
+                }
+                Ok((t, AuthTimeSource::ProviderClaim))
+            }
+            // The provider cannot be asked for a fresh credential: Hopae's own
+            // completion time is what the console can honestly demand.
+            (Some(_), ReauthCapability::Unsupported) => Ok((at, AuthTimeSource::HopaeCompletion)),
+            (None, _) => Ok(claim.map_or((at, AuthTimeSource::HopaeCompletion), |t| {
+                (t, AuthTimeSource::ProviderClaim)
+            })),
         }
     }
 
@@ -807,6 +895,9 @@ impl Service {
         if row.state_sha256.is_some() {
             return Err(SessionError::AlreadyBound);
         }
+        if row.reauth_max_age.is_some() {
+            return self.reauth_chooser(&row).await;
+        }
         if let Some(view) = self.portal_session(ctx, portal_handle).await? {
             let host = host_of(&row.return_target)?;
             if self.cfg.sso_confirm_new_host
@@ -835,6 +926,54 @@ impl Service {
             return Err(SessionError::NoProviders);
         }
         Ok(LoginEntry::Chooser { providers })
+    }
+
+    /// The chooser of a reauthentication transaction: never single sign-on, and
+    /// only the provider of the session being reauthenticated.
+    async fn reauth_chooser(&self, row: &TransactionRow) -> Result<LoginEntry, SessionError> {
+        let Some(session) = self.reauth_session(row).await? else {
+            // No live session to reauthenticate: an ordinary sign-in whose
+            // callback still demands the freshness evidence.
+            let providers: Vec<ProviderChoice> = self
+                .providers
+                .enabled_sorted()
+                .into_iter()
+                .map(|p| ProviderChoice {
+                    provider_id: p.id().clone(),
+                    display_name: p.display_name().to_string(),
+                })
+                .collect();
+            if providers.is_empty() {
+                return Err(SessionError::NoProviders);
+            }
+            return Ok(LoginEntry::Chooser { providers });
+        };
+        let own = self.providers.get(&session.provider_id);
+        let usable = match &own {
+            Some(p) => p.enabled() && self.provider_row_live(&session.provider_id).await?,
+            None => false,
+        };
+        match own {
+            Some(p) if usable => Ok(LoginEntry::Chooser {
+                providers: vec![ProviderChoice {
+                    provider_id: p.id().clone(),
+                    display_name: p.display_name().to_string(),
+                }],
+            }),
+            other => {
+                let mut sign_out = row.return_target.clone();
+                sign_out.set_path("/_hopae/logout");
+                sign_out.set_query(None);
+                sign_out.set_fragment(None);
+                Ok(LoginEntry::ReauthProviderUnavailable {
+                    provider: other.map_or_else(
+                        || session.provider_id.to_string(),
+                        |p| p.display_name().to_string(),
+                    ),
+                    sign_out,
+                })
+            }
+        }
     }
 
     async fn sso(
@@ -1036,6 +1175,18 @@ impl Service {
                 )
                 .await);
         };
+        // The authentication time is decided before anything is created: an
+        // invalid claim is never replaced by `now`, and a reauthentication
+        // that is not fresh changes nothing (ADR-0016).
+        let (auth_time, auth_source) = match Self::auth_time_for(
+            &txn,
+            self.reauth_capability(provider_id),
+            &ident,
+            self.clock.now(),
+        ) {
+            Ok(v) => v,
+            Err(reason) => return Err(self.refuse_consuming(ctx, &txn, reason).await),
+        };
         let mut resolution = self.identity.resolve(&ident, &row).await?;
         let ectx = self.event_ctx(ctx, Some(&txn));
 
@@ -1097,7 +1248,49 @@ impl Service {
         // A callback that completes while the browser already holds a valid
         // portal handle for the same user reuses that session; there is no
         // session to create, so the consume is its own call.
-        if let Some(view) = self.portal_session(ctx, portal_handle).await?
+        let portal_view = self.portal_session(ctx, portal_handle).await?;
+        // A reauthentication of the same user's live session, by the same
+        // provider: the elevation-shaped transaction of ADR-0008.
+        if txn.reauth_max_age.is_some()
+            && let Some(view) = portal_view
+                .clone()
+                .filter(|v| v.session.user_id == user.user_id)
+                .filter(|v| {
+                    txn.portal_session_id
+                        .as_ref()
+                        .is_none_or(|s| *s == v.session.session_id)
+                })
+        {
+            if &view.session.provider_id != provider_id {
+                return Err(self
+                    .refuse_consuming(ctx, &txn, reasons::PROVIDER_MISMATCH)
+                    .await);
+            }
+            let (location, issued) = self
+                .reauthenticate(
+                    ctx,
+                    &txn,
+                    app_bind,
+                    &view,
+                    provider_id,
+                    (auth_time, auth_source),
+                )
+                .await?;
+            return Ok(CallbackOutcome::LoggedIn {
+                location,
+                session_id: view.session.session_id,
+                user_id: user.user_id,
+                portal_handle: Some(issued),
+                created_user: resolved.created,
+                auto_linked: resolved.auto_linked,
+                notice_separate: resolved.notice_separate,
+                reused_session: false,
+            });
+        }
+        // The M1 rule, unchanged for an ordinary callback: the session is
+        // reused as it is (no `auth_time`, source or provider change).
+        if txn.reauth_max_age.is_none()
+            && let Some(view) = portal_view
             && view.session.user_id == user.user_id
         {
             if !self
@@ -1146,7 +1339,14 @@ impl Service {
         }
 
         let (session, issued) = match self
-            .create_session(ctx, &txn, provider.kind(), provider_id, &user)
+            .create_session(
+                ctx,
+                &txn,
+                provider.kind(),
+                provider_id,
+                &user,
+                (auth_time, auth_source),
+            )
             .await
         {
             Ok(v) => v,
@@ -1179,6 +1379,117 @@ impl Service {
             notice_separate: resolved.notice_separate,
             reused_session: false,
         })
+    }
+
+    /// Reauthenticate `view`'s session after a fresh sign-in by its own
+    /// provider: one store transaction rotates every handle and consumes the
+    /// transaction, then the browser is handed off at the new generation.
+    async fn reauthenticate(
+        &self,
+        ctx: &RequestCtx,
+        txn: &TransactionRow,
+        app_bind: Digest,
+        view: &HandleView,
+        provider_id: &ProviderId,
+        (auth_time, source): (crate::crypto::Timestamp, AuthTimeSource),
+    ) -> Result<(Url, IssuedHandle), SessionError> {
+        let now = self.clock.now();
+        let snap = self.snapshot.load_full();
+        let session = &view.session;
+        let deadline = Deadline::after(Duration::from_secs(5));
+        let old_handles = self
+            .sessions
+            .session_summary(&session.session_id, deadline)
+            .await?
+            .map(|(_, handles)| handles)
+            .unwrap_or_default();
+        let handle = handle_value(&*self.rng);
+        let digest = handle.digest();
+        let handle_abs = now
+            .add(snap.default_app.session.absolute)
+            .min(session.absolute_expires_at);
+        let portal_handle = HandleRow {
+            handle_sha256: digest,
+            session_id: session.session_id.clone(),
+            host: self.cfg.portal_host.clone(),
+            issued_aal: view.handle.issued_aal,
+            created_at: now,
+            last_seen_at: now,
+            absolute_expires_at: handle_abs,
+            revoked_at: None,
+            revoked_reason: None,
+        };
+        let mut events = vec![
+            self.ev(ctx, EventKind::LoginSucceeded, Outcome::Success)
+                .user(&session.user_id)
+                .session(&session.session_id)
+                .provider(provider_id)
+                .app(&txn.app_id)
+                .attr("reauth", true)
+                .attr("auth_time_source", source.as_str())
+                .build(),
+        ];
+        for h in old_handles.iter().filter(|h| h.revoked_at.is_none()) {
+            events.push(
+                self.ev(ctx, EventKind::HandleRevoked, Outcome::Success)
+                    .user(&session.user_id)
+                    .session(&session.session_id)
+                    .reason(reasons::REAUTH)
+                    .attr("host", h.host.as_str())
+                    .build(),
+            );
+        }
+        let factor = FactorEntry {
+            kind: factor_kind(ProviderKind::Oidc),
+            provider: Some(provider_id.clone()),
+            at: auth_time,
+        };
+        match self
+            .sessions
+            .reauthenticate_session(
+                &session.session_id,
+                provider_id,
+                auth_time,
+                source,
+                factor,
+                portal_handle,
+                (txn.txn_sha256, reasons::REAUTH),
+                deadline,
+                events,
+            )
+            .await
+        {
+            Ok(()) => {}
+            Err(StoreError::Conflict("provider_mismatch")) => {
+                return Err(self
+                    .refuse_consuming(ctx, txn, reasons::PROVIDER_MISMATCH)
+                    .await);
+            }
+            Err(StoreError::Conflict(_)) => {
+                return Err(self
+                    .refuse(ctx, Some(txn), Some(provider_id), reasons::TXN_CONSUMED)
+                    .await);
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let minted = self
+            .mint_handoff(MintRequest {
+                session_id: session.session_id.clone(),
+                aal_cap: view.handle.issued_aal,
+                target: txn.return_target.clone(),
+                client_ip: txn.client_ip,
+                bind_sha256: app_bind,
+                recovery_depth: txn.recovery_depth,
+                events: vec![],
+            })
+            .await?;
+        Ok((
+            minted.location,
+            IssuedHandle {
+                value: handle,
+                max_age: handle_abs.since(now),
+            },
+        ))
     }
 
     /// The first-use race at the portal: consume the transaction with
@@ -1301,6 +1612,7 @@ impl Service {
         kind: ProviderKind,
         provider_id: &ProviderId,
         user: &User,
+        (auth_time, auth_source): (crate::crypto::Timestamp, AuthTimeSource),
     ) -> Result<(SessionRow, IssuedHandle), SessionError> {
         let now = self.clock.now();
         let snap = self.snapshot.load_full();
@@ -1313,7 +1625,7 @@ impl Service {
             session_id: session_id.clone(),
             user_id: user.user_id.clone(),
             provider_id: provider_id.clone(),
-            auth_time: now,
+            auth_time,
             factors: vec![FactorEntry {
                 kind: factor_kind(kind),
                 provider: Some(provider_id.clone()),
@@ -1336,8 +1648,7 @@ impl Service {
             terminated_at: None,
             terminated_reason: None,
             authz_version_at_auth: user.authz_version,
-            // W1-D fills the provider claim and its source here.
-            auth_time_source: crate::store::types::AuthTimeSource::HopaeCompletion,
+            auth_time_source: auth_source,
             bound_ua_prefix: ctx
                 .user_agent
                 .as_deref()
@@ -1363,7 +1674,10 @@ impl Service {
         };
         let events = vec![
             base(EventKind::LoginSucceeded).build(),
-            base(EventKind::SessionCreated).attr("aal", 1).build(),
+            base(EventKind::SessionCreated)
+                .attr("aal", 1)
+                .attr("auth_time_source", auth_source.as_str())
+                .build(),
         ];
         self.sessions
             .create_session(CreateSession {
@@ -1509,6 +1823,108 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    fn txn(reauth: Option<u32>) -> TransactionRow {
+        TransactionRow {
+            txn_sha256: sha256(b"t"),
+            created_at: crate::crypto::Timestamp(0),
+            expires_at: crate::crypto::Timestamp(600_000),
+            consumed_at: None,
+            consumed_reason: None,
+            app_id: crate::policy::types::AppId::new("admin"),
+            return_target: Url::parse("https://hopae-admin.example.test/").unwrap(),
+            bind_sha256: None,
+            portal_bind_sha256: None,
+            retry_bind_sha256: None,
+            client_ip: ip("203.0.113.9"),
+            ua_sha256: None,
+            provider_id: None,
+            state_sha256: None,
+            nonce: None,
+            pkce_verifier: None,
+            portal_session_id: None,
+            purpose: TxnPurpose::Login,
+            conflicting_handle_sha256: None,
+            pending_identity: None,
+            recovery_depth: 0,
+            reauth_max_age: reauth,
+        }
+    }
+
+    fn ident(claim: Option<serde_json::Value>) -> crate::provider::types::ProviderIdentity {
+        crate::provider::types::ProviderIdentity {
+            subject: "s".into(),
+            email: None,
+            email_verified: false,
+            email_authoritative: false,
+            name: None,
+            username: None,
+            picture: None,
+            raw_claims: serde_json::json!({}),
+            auth_time: claim,
+        }
+    }
+
+    #[test]
+    fn auth_time_rules_of_a_callback() {
+        use crate::crypto::Timestamp;
+        use serde_json::json;
+        let now = Timestamp::from_secs(1_700_000_000);
+        let n = 43_200u32;
+        let at = |claim: Option<serde_json::Value>, reauth, cap| {
+            Service::auth_time_for(&txn(reauth), cap, &ident(claim), now)
+        };
+        let (max, uns) = (ReauthCapability::MaxAge, ReauthCapability::Unsupported);
+        let claim = |ago: i64| Some(json!(now.secs() - ago));
+        // Ordinary logins: the claim when valid, now otherwise; invalid fails.
+        assert_eq!(
+            at(claim(100), None, max),
+            Ok((
+                Timestamp::from_secs(now.secs() - 100),
+                AuthTimeSource::ProviderClaim
+            ))
+        );
+        assert_eq!(
+            at(None, None, max),
+            Ok((now, AuthTimeSource::HopaeCompletion))
+        );
+        for bad in [json!("x"), json!(-1), json!(now.secs() + 61)] {
+            assert_eq!(at(Some(bad), None, max), Err(reasons::INVALID_AUTH_TIME));
+        }
+        // A max_age reauthentication demands a claim within N - 600 s.
+        let bound = i64::from(n) - 600;
+        assert!(at(claim(bound - 1), Some(n), max).is_ok());
+        assert_eq!(
+            at(claim(bound), Some(n), max),
+            Err(reasons::REAUTH_NOT_FRESH)
+        );
+        assert_eq!(
+            at(claim(i64::from(n) - 30), Some(n), max),
+            Err(reasons::REAUTH_NOT_FRESH)
+        );
+        assert_eq!(
+            at(None, Some(n), max),
+            Err(reasons::REAUTH_AUTH_TIME_MISSING)
+        );
+        assert_eq!(
+            at(Some(json!(now.secs() + 61)), Some(n), max),
+            Err(reasons::INVALID_AUTH_TIME)
+        );
+        // An unsupported provider: Hopae's completion time whatever it sent,
+        // an invalid claim still fails.
+        assert_eq!(
+            at(claim(5 * 86_400), Some(n), uns),
+            Ok((now, AuthTimeSource::HopaeCompletion))
+        );
+        assert_eq!(
+            at(None, Some(n), uns),
+            Ok((now, AuthTimeSource::HopaeCompletion))
+        );
+        assert_eq!(
+            at(Some(json!("x")), Some(n), uns),
+            Err(reasons::INVALID_AUTH_TIME)
+        );
     }
 
     #[test]
