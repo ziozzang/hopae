@@ -1,0 +1,24 @@
+# 문서
+
+<!-- translation-status: source=../README.md source-rev=1 status=current -->
+
+[English](../README.md)
+
+영어가 기준 언어입니다. `ko/` 아래의 한국어 문서는 영문 원문의 완역이며, 같은
+변경에서 함께 갱신합니다. [프로젝트 README](../../README.ko.md)에 제품의 목적과
+상태가 있습니다.
+
+## 프로젝트
+
+- [개발 프로세스](PROCESS.md) — 역할, 단계 게이트, 적대적 검토, 시나리오 기반 TDD, 릴리스, 보안 규칙
+- [문서 체계](DOCUMENTATION.md) — 구성, 언어 규칙, 문체 지침, 필수 문서, 검증
+- [로드맵](ROADMAP.md) — 제품 형태, 마일스톤, 시나리오 번호 범위
+- [아키텍처 결정 기록 · 영문](../adr/) — 번호가 붙은 결정. [ADR-0001](../adr/0001-record-architecture-decisions.md)부터 시작합니다.
+- [시나리오 명세 · 영문](../../scenarios/README.md) — 번호 체계, 상태, 테스트 이름 규칙
+- [변경 이력 · 영문](../../CHANGELOG.md)
+
+## 제품
+
+제품 참조 문서(설정, 게이트웨이 계약, 위협 모델, 제공자, 세션, 관리)는 마일스톤이
+완료될 때마다 추가됩니다. 그때까지는 [로드맵](ROADMAP.md)이 의도한 형태를
+설명합니다.
