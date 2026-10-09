@@ -6,6 +6,7 @@
 - Scenarios: 002, 012 (M1 generic OIDC); 200–299 (M3)
 - Threat model: TM-08, TM-09, TM-12, TM-17
 - Supersedes: none
+- Amended by: [ADR-0016](0016-management-console-minimum.md) (reauthentication transactions send `max_age` and `prompt=login` and require a fresh `auth_time`; every OIDC session's `auth_time` comes from the ID token claim when present)
 
 ## Context
 

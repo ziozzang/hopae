@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 11 -->
+<!-- doc-rev: 12 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -176,10 +176,13 @@ the milestone shown. Until then `hopae --check` rejects them as unknown.
 | `listen.admin` | M4-min | `127.0.0.1:8702` | Admin listener, bound only when `admin.public_url` is set; must differ from the other listeners; non-loopback warns ([ADR-0016](adr/0016-management-console-minimum.md), [administration](ADMIN.md)) |
 | `admin.public_url` | M4-min | none | Externally visible origin of the console; registers the implicit application `admin` (reserved id) with the policy below ([ADR-0016](adr/0016-management-console-minimum.md)) |
 | `admin.session.idle`, `admin.session.absolute`, `admin.binding.ip`, `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6`, `admin.binding.ua`, `admin.binding.on_mismatch` | M4-min | `30m`, `12h`, `strict`, `24`, `64`, `off`, `terminate_session` | Lifetimes and binding of the console host, same types and constraints as `apps[].session.*` and `apps[].binding.*` |
-| `admin.max_auth_age` | M4-min | `12h` | Oldest first-factor authentication a console request may rely on; older sessions are refused with `auth_too_old` |
+| `admin.max_auth_age` | M4-min | `12h` | Oldest provider authentication (`sessions.auth_time`) a console session may rely on, evaluated at every console verify; an older session is sent to reauthenticate at the provider with `max_age` and `prompt=login`, and the returned `auth_time` is checked ([ADR-0016](adr/0016-management-console-minimum.md) decision 15) |
 | `admin.require_aal` | M4-min | `1` | Minimum assurance level of the console handle (`1` or `2`); `2` also sets the implicit application's step-up rule and, before M5, makes `--check` warn that every request will be refused |
+| `admin.untrusted_peers` | M4-min | `refuse` | What the admin listener does with a TCP peer outside `trusted_proxies`: `refuse` answers `403 untrusted_peer` before reading a cookie (logged, counted); `as_client` treats the peer as the client, as the portal does |
+| `admin.query_budget_ms` | M4-min | `2000` | Deadline of one console listing or search (100 to 30000); a query that reaches it is interrupted inside the store and answered `503` |
+| `admin.users[]` | M4-min | `[]` | Grants seeded from the file at start and by `hopae admin import`: entries `{user_id?, email?, role?, note?}` with at least one of `user_id` and `email`, `role` `admin` (default) or `viewer`; an entry given by email alone applies only when exactly one user holds the verified address and it is authoritative; imported under the provider rule with `managed_by` and tombstones ([administration](ADMIN.md)) |
 | `limits.admin_max_concurrent` | M4-min | `16` | In-flight cap of the admin listener |
-| `hopae admin grant <user_id or email> [--role admin\|viewer] [--note <text>]`, `hopae admin revoke <user_id or email>`, `hopae admin list` (commands) | M4-min | — | Administrator grants from the command line against the store; an email must be a verified `primary_email` of an existing user; records `admin.grant` / `admin.revoke` ([administration](ADMIN.md)) |
+| `hopae admin grant <user_id or email> [--role admin\|viewer] [--note <text>] [--confirm <user_id>]`, `hopae admin revoke <user_id or email>`, `hopae admin list [--all]`, `hopae admin import [--force <user_id or email>]` (commands) | M4-min | — | Administrator grants from the command line and the file against the store; `grant` prints the resolved user and, for a non-authoritative email, requires `--confirm` naming the resolved id; a grant binds to that user id and is never re-resolved; records `admin.grant` / `admin.revoke` ([administration](ADMIN.md)) |
 
 ## Behavior
 

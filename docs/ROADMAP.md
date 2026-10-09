@@ -1,6 +1,6 @@
 # Roadmap
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/ROADMAP.md)
 
@@ -141,8 +141,10 @@ below. Later versions shift by one minor accordingly.
 
 Scope (scenarios 300–305 of the 300–399 range):
 
-- [ ] Third listener `listen.admin` serving the console host, which is the implicit application `admin` registered by `admin.public_url` behind the gateway's protected route (standard `auth` block, no `strip_request_cookies`); every request authenticated by Hopae from the `__Host-hopae` handle through the verify engine; injected identity headers never read.
-- [ ] Administrators as granted users: table `admin_grants` (roles `admin`, `viewer`) in migration `0003`; `hopae admin grant|revoke|list` for bootstrap and recovery; grant read on every request; `admin.max_auth_age` and `admin.require_aal`.
+- [ ] Third listener `listen.admin` serving the console host, which is the implicit application `admin` registered by `admin.public_url` behind the gateway's protected route (standard `auth` block, no `strip_request_cookies`); every request authenticated by Hopae from the `__Host-hopae` handle through the verify engine with the gateway listener's denial observation; injected identity headers never read; peers outside `trusted_proxies` refused by default (`admin.untrusted_peers`).
+- [ ] Administrators as granted users: table `admin_grants` (roles `admin`, `viewer` as read-only administrator; `managed_by`, `source_email`) in migration `0003`; `hopae admin grant|revoke|list|import` and `admin.users[]` seeded under the provider import rule with tombstones; a grant binds once to the resolved user id, the CLI prints the resolved user and requires `--confirm` for a non-authoritative email; grant read on every request; `admin.require_aal`.
+- [ ] Real console freshness (`admin.max_auth_age`): evaluated at every console verify; the login transaction carries `reauth_max_age`, the provider receives `max_age` and `prompt=login`, the ID token's `auth_time` is required and checked, the session is reauthenticated through the elevation transaction; every OIDC session's `auth_time` comes from the claim when present (amends ADR-0010).
+- [ ] Mutations fenced inside their write transaction (deadlines, host, user status, authorization baseline, freshness, level, grant); listings bounded to 10,000-row index windows in immutable order with cursors past the last candidate examined, interrupted at `admin.query_budget_ms`; the migration runner validates the recorded version's structures before applying `0003`.
 - [ ] Users: list and search, detail with identities, sessions and recent events; disable (status, `authz_version`, every live session terminated) and enable.
 - [ ] Sessions: live sessions with user, hosts, created, last seen, client address, user-agent prefix (`sessions.bound_ua_prefix`), level; terminate one; terminate every session of a user.
 - [ ] Login history and audit: `events` browsing with filters (kind, outcome, user, session, client address, time range), keyset pagination, indexes `events(kind, at)`, `sessions(terminated_at, last_seen_at)`, `users(created_at)`.

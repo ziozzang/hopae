@@ -56,7 +56,8 @@ case says so. Secrets are environment variable names only.
 | `tests/fixtures/m1-lifetimes.json` | `m1-basic.json` plus application `short` (`short.example.test`, `session: {idle: "1h", absolute: "1d"}`); `default` with `session: {idle: "2h", absolute: "30d"}`. |
 | `tests/fixtures/m1-dev-insecure.json` | `m1-basic.json` with `cookie: {name: "hopae", secure: false}` and `portal.public_url: "http://auth.example.test"`. |
 | `tests/fixtures/return-targets.json` | The table of scenario 005-2 as `[{"url": "...", "expect": "accept" \| "<reason>"}]`, in the order printed there. |
-| `tests/fixtures/m4-admin.json` | `m1-basic.json` plus `listen.admin: "127.0.0.1:0"` and `admin: {public_url: "https://hopae-admin.example.test", session: {idle: "30m", absolute: "12h"}, binding: {ip: "strict", ua: "off", on_mismatch: "terminate_session"}, max_auth_age: "12h", require_aal: 1}`; the implicit application `admin` therefore exists beside `app`. Cases that need another value state the override (M4-min, scenarios 300–305). |
+| `tests/fixtures/m4-admin.json` | `m1-basic.json` plus `listen.admin: "127.0.0.1:0"` and `admin: {public_url: "https://hopae-admin.example.test", session: {idle: "30m", absolute: "12h"}, binding: {ip: "strict", ua: "off", on_mismatch: "terminate_session"}, max_auth_age: "12h", require_aal: 1, untrusted_peers: "refuse", query_budget_ms: 2000, users: []}`; the implicit application `admin` therefore exists beside `app`. Cases that need another value state the override (M4-min, scenarios 300–305). |
+| `tests/fixtures/m4-admin-seeded.json` | `m4-admin.json` with `admin.users: [{user_id: "<u_a>", role: "admin", note: "seed"}, {email: "v@example.test", role: "viewer"}, {email: "n@example.test", user_id: "<u_n>", role: "viewer"}]`; the harness substitutes the ids it created (scenario 305). |
 | `tests/fixtures/config/*.json` | One file per case of scenario 013, named as the case lists them (`valid.json`, `unknown_key.json`, `missing_secret.json`, `insecure_cookie.json`, `missing_caller_key.json`, `unauthenticated_caller.json`, `public_gateway_listener.json`, `cache_too_long.json`, `bad_app_host.json`, `duplicate_host.json`), each `valid.json` plus the one deviation the case names. |
 
 Mock provider (`tests/support/mock_idp`) profiles. `default` is a standard
@@ -86,6 +87,9 @@ Every other profile changes exactly one thing:
 | `token_malformed` | Token endpoint answers invalid JSON, then JSON with a numeric `id_token`, then a JWT with invalid base64 (cycling) |
 | `userinfo_500` | User-info endpoint answers `500` |
 | `id_token_missing` | Token response has no `id_token` |
+| `auth_time_stale` | ID token carries `auth_time` two hours in the past whatever `max_age` was requested (M4-min, scenario 300) |
+| `auth_time_missing` | ID token omits `auth_time` even when `max_age` was requested (M4-min, scenario 300) |
+| `auth_time_present` | ID token carries `auth_time` equal to the moment the mock issued the code; the mock records `max_age` and `prompt` of every authorize request (M4-min, scenario 300) |
 
 Environment variable names used by tests: `HOPAE_TEST_MOCK_SECRET`,
 `HOPAE_TEST_GATEWAY_KEY`, `HOPAE_GW_KEY_A`, `HOPAE_GW_KEY_B` (values are

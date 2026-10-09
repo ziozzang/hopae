@@ -20,7 +20,7 @@ contacting a provider.
 ## Preconditions and fixtures
 
 - Configuration `tests/fixtures/m4-admin.json` with two providers: `mock` (secret variable set) and `mock2` (`client_secret_env` naming an unset variable, so the provider is disabled at start, 013-3) and `mock3` (`managed_by = api`, disabled through the store by the test hooks to stand in for a later runtime change); applications `app`, `default` and the implicit `admin`.
-- Administrator `u_a` (`Ha`), viewer `u_v` (`Hv`); events and sessions from earlier scenarios; the `log` sink with 3 `failed` deliveries injected by the test hooks.
+- Administrator `u_a` (`Ha`), read-only administrator `u_v` (`Hv`); events and sessions from earlier scenarios; the `log` sink with 3 `failed` deliveries injected by the test hooks.
 - The mock provider's discovery document is reachable at start and then switched to `discovery_down`.
 
 ## Main flow
@@ -29,7 +29,7 @@ contacting a provider.
 
 - Given: `Ha`.
 - When: `GET /v1/status` and `GET /`.
-- Then: `apps` lists `app`, `default` and `admin` with `display_name`, `hosts`, `ports`, `enabled`, `session` (idle, absolute), `binding` (ip, ua, on_mismatch), `on_authz_change`, `verify_cache_seconds`, `logout_confirm` and the count of `step_up` rules; `admin` shows `hosts: ["hopae-admin.example.test"]`, `session: {idle: "30m", absolute: "12h"}`, `binding.ip: strict`, `on_authz_change: terminate`; `default` shows no hosts; the page renders the same as a table.
+- Then: `apps` lists `app`, `default` and `admin` with `display_name`, `hosts`, `ports`, `enabled`, `session` (idle, absolute), `binding` (ip, ua, on_mismatch), `on_authz_change`, `verify_cache_seconds`, `logout_confirm`, `max_auth_age` and the count of `step_up` rules; `admin` shows `hosts: ["hopae-admin.example.test"]`, `session: {idle: "30m", absolute: "12h"}`, `binding.ip: strict`, `on_authz_change: terminate`, `max_auth_age: "12h"`; `app` and `default` show `max_auth_age: null`; `default` shows no hosts; the page renders the same as a table.
 
 ### S304-2 Providers with health and secret presence
 
@@ -51,11 +51,11 @@ contacting a provider.
 
 ## Alternative flows
 
-### S304-5 Viewers see the status too
+### S304-5 Read-only administrators see the status too
 
 - Given: `Hv`.
 - When: `GET /v1/status`, `GET /`.
-- Then: `200` with the same body as for an administrator (the secret variable name and presence included: a name is not a secret).
+- Then: `200` with the same body as for an administrator (the secret variable name and presence included: a name is not a secret); the page renders no form for either role.
 
 ## Abuse cases
 
@@ -114,7 +114,7 @@ contacting a provider.
 | S304-2 | `s304_2_providers_with_health_and_secret_presence` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
 | S304-3 | `s304_3_store_build_and_configuration` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
 | S304-4 | `s304_4_page_and_endpoint_change_nothing` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
-| S304-5 | `s304_5_viewers_see_the_status_too` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
+| S304-5 | `s304_5_read_only_administrators_see_the_status_too` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
 | S304-A1 | `s304_a1_query_strings_and_bodies_ignored` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
 | S304-A2 | `s304_a2_consistent_snapshot_while_things_change` | `tests/scenarios/s304_admin_status.rs` | integration | planned |
 | S304-A3 | `s304_a3_status_is_cheap` | `tests/scenarios/s304_admin_status.rs` | integration | planned |

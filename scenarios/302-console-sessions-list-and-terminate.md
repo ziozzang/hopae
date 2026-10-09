@@ -11,30 +11,32 @@
 ## Goal
 
 An administrator sees every live session with its user, hosts, timing,
-client address, user-agent prefix and level, ends one session or every
-session of a user, the ended sessions are denied on every host from the next
-request and their outstanding handoff codes die with them, and each
-termination has its audit record in the same transaction.
+client address, user-agent prefix and level, listed in an immutable order so
+that a walk neither skips nor repeats a session however active it is, ends
+one session or every session of a user, the ended sessions are denied on
+every host from the next request and their outstanding handoff codes die
+with them, and each termination has its audit record in the same
+transaction.
 
 ## Preconditions and fixtures
 
-- Configuration `tests/fixtures/m4-admin.json`; administrator `u_a` (`Ha`), viewer `u_v` (`Hv`).
+- Configuration `tests/fixtures/m4-admin.json`; administrator `u_a` (`Ha`), read-only administrator `u_v` (`Hv`).
 - User `u_x` with three live sessions: `s_1` (provider `mock`, handles on the portal, `app.example.test` and `other.example.org`, bound to `203.0.113.9`, `user-agent: Mozilla/5.0 (X11; Linux) Alpha`), `s_2` (handle on `app.example.test` only, bound to `198.51.100.7`, created after migration `0003` so `bound_ua_prefix` is set), `s_3` (expired by its absolute lifetime but not yet swept); one terminated session `s_0`; `s_1` has an unconsumed handoff code `K1` for `other.example.org`.
-- 40 other users with one live session each; injected clock; `AdminClient` with the mutation requirements of 300-9.
+- 40 other users with one live session each, created at distinct times; injected clock; `AdminClient` with the mutation requirements of 300-9.
 
 ## Main flow
 
-### S302-1 Live sessions are listed by last activity with their context
+### S302-1 Live sessions are listed by creation with their context
 
 - Given: the sessions above.
 - When: `GET /v1/sessions`, `GET /v1/sessions?user_id=u_x`, `GET /sessions`.
-- Then: the unfiltered list has 42 items (`s_1`, `s_2` and the 40 others), ordered by `last_seen_at DESC, session_id DESC`, never `s_0` (terminated) nor `s_3` (`absolute_expires_at` in the past); each item carries `session_id`, `user_id`, `primary_email`, `provider_id`, `aal`, `factors`, `hosts` (the non-revoked handles' hosts, `auth.example.test` included), `created_at`, `last_seen_at`, `absolute_expires_at`, `bound_ip`, `ua_prefix` (`Mozilla/5.0 (X11; Linux) Alpha` for `s_1`, cut to 64 bytes; `null` for a session created before `0003`); the filter returns `s_1` and `s_2`; the page shows the same rows with a terminate form per row for an administrator; the query uses `sessions(terminated_at, last_seen_at)` (EXPLAIN QUERY PLAN unit test).
+- Then: the unfiltered list has 42 items (`s_1`, `s_2` and the 40 others), ordered by `created_at DESC, session_id DESC`, never `s_0` (terminated) nor `s_3` (`absolute_expires_at` in the past); each item carries `session_id`, `user_id`, `primary_email`, `provider_id`, `aal`, `factors`, `hosts` (the non-revoked handles' hosts, `auth.example.test` included), `created_at`, `last_seen_at`, `absolute_expires_at`, `auth_time`, `bound_ip`, `ua_prefix` (`Mozilla/5.0 (X11; Linux) Alpha` for `s_1`, cut to 64 bytes; `null` for a session created before `0003`); the filter returns `s_1` and `s_2`; the page shows the same rows, `last_seen_at` as a column, and a terminate form per row for an administrator; the unfiltered query is one range scan of the partial index `sessions(created_at, session_id) WHERE terminated_at IS NULL`, the filtered one of `sessions(user_id, created_at, session_id) WHERE terminated_at IS NULL` (test-hooks `/explain`).
 
 ### S302-2 A session's detail shows its handles
 
 - Given: `s_1`.
 - When: `GET /v1/sessions/s_1` and `GET /sessions/s_1`.
-- Then: the summary plus `handles` with one entry per host (`issued_aal`, `created_at`, `last_seen_at`, `absolute_expires_at`, `revoked_at`, `revoked_reason`), `terminated_at: null`; never a handle digest, a handoff code or the user agent beyond the prefix; `GET /v1/sessions/s_0` answers the terminated session with `terminated_reason`.
+- Then: the summary plus `handles` with one entry per host (`issued_aal`, `created_at`, `last_seen_at`, `absolute_expires_at`, `revoked_at`, `revoked_reason`), at most 100 of them, `terminated_at: null`; never a handle digest, a handoff code or the user agent beyond the prefix; `GET /v1/sessions/s_0` answers the terminated session with `terminated_reason`.
 
 ### S302-3 Terminating one session ends it on every host with its record
 
@@ -68,7 +70,7 @@ termination has its audit record in the same transaction.
 | --- | --- | --- |
 | Replay | S302-A1 | yes |
 | Tampering | S302-A2 | yes |
-| Race / timing | S302-A3 | yes |
+| Race / timing | S302-A3, S302-A7 | yes |
 | Resource exhaustion | S302-A4 | yes |
 | Confused deputy | S302-A5 | yes |
 | Spoofed or duplicated headers | — | no: covered by 300-A2 and 300-A6; every request here carries a valid administrator handle |
@@ -93,13 +95,13 @@ termination has its audit record in the same transaction.
 - When: the gate is released.
 - Then: in the first order the redemption fails with `code_stale_generation` (the terminate bumped `cred_gen` and consumed the code) and no handle is minted; in the second the handle minted by the redemption is revoked by the termination that follows and its next verify is denied; in both exactly one `session.terminated` event exists for `s_1` (003-A11's ordering machinery, reused).
 
-### S302-A4 Terminate-all is one bounded transaction
+### S302-A4 Terminate-all is one bounded transaction and listings examine a bounded window
 
-- Given: a user with 500 live sessions (bulk-created by the test hooks).
-- When: `POST /v1/users/<id>/sessions/terminate` while 16 verifies of those sessions run concurrently.
-- Then: `{"terminated":500}` within the request budget; the store's single writer serializes the verifies, which either precede the termination (allow) or follow it (deny); the events table gains 500 `session.terminated` and one `admin.sessions_terminate`; the listing page of that user is bounded at 200 items per page as everywhere.
+- Given: a user with 500 live sessions (bulk-created by the test hooks); 100,000 live sessions of other users.
+- When: `POST /v1/users/<id>/sessions/terminate` while 16 verifies of those sessions run concurrently; then `GET /v1/sessions?user_id=<a user with no live session>`; then `GET /v1/sessions` paged with `limit=200`.
+- Then: `{"terminated":500}` within the request budget; the store's single writer serializes the verifies, which either precede the termination (allow) or follow it (deny); the events table gains 500 `session.terminated` and one `admin.sessions_terminate`; the empty user filter answers at once with an empty page and no cursor (the partial index range is empty: zero candidates examined); each unfiltered page examines at most 10,000 candidates and returns 200 items with a cursor (`hopae_admin_rows_examined_total{list="sessions"}` grows by at most 10,000 per request).
 
-### S302-A5 A viewer cannot terminate; an administrator cannot be stopped by the target
+### S302-A5 A read-only administrator cannot terminate; an administrator cannot be stopped by the target
 
 - Given: `Hv`; `Ha`; `u_x`'s session `s_2`.
 - When: `POST /v1/sessions/s_2/terminate` with `Hv`; then with `Ha` while `u_x` keeps verifying on `app.example.test` every 10 ms.
@@ -111,17 +113,23 @@ termination has its audit record in the same transaction.
 - When: `GET /v1/sessions/s_1`, `POST /v1/sessions/s_1/terminate`.
 - Then: `403 login_required` resp. `403 not_admin`, identical for existing and unknown ids; session ids are 128-bit random values and appear only to grant holders; the console never shows a handle value or digest.
 
+### S302-A7 Activity during a walk neither skips nor repeats a session
+
+- Given: sessions `A`, `B`, `C` created at `t=100`, `90`, `80` (and nothing else live); `limit=2`.
+- When: page 1 (`A`, `B`); then `C` becomes very active (`last_seen_at` advanced to `110`) and a new session `D` is created at `t=120`; then page 2 with page 1's cursor; then page 3.
+- Then: page 2 contains exactly `C` (creation order is immutable; the cursor `(90, B)` excludes nothing that existed), page 3 is empty without a cursor; `D` is on no page of this walk and on page 1 of a fresh walk; terminating `B` between page 1 and page 2 removes nothing but `B` itself, and `C` is still found; the displayed `last_seen_at` of `C` is `110` on page 2.
+
 ## Observability expectations
 
 - Log: `admin.session_terminate`, `admin.sessions_terminate` with `attrs.actor`; `session.terminated` with `reason=admin`.
 - Audit: the pairs above in one transaction (crash point tested); `admin.denied` for viewers.
-- Metrics: `hopae_admin_mutations_total{kind="session_terminate"|"sessions_terminate"}`, `hopae_session_terminated_total{reason="admin"}`.
+- Metrics: `hopae_admin_mutations_total{kind="session_terminate"|"sessions_terminate"}`, `hopae_session_terminated_total{reason="admin"}`, `hopae_admin_rows_examined_total{list="sessions"}`.
 
 ## Test mapping
 
 | Case | Test | File | Kind | Status |
 | --- | --- | --- | --- | --- |
-| S302-1 | `s302_1_live_sessions_listed_by_activity_with_context` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
+| S302-1 | `s302_1_live_sessions_listed_by_creation_with_context` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
 | S302-2 | `s302_2_session_detail_shows_handles` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
 | S302-3 | `s302_3_terminate_one_ends_it_everywhere_with_record` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
 | S302-4 | `s302_4_terminate_every_session_of_a_user` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
@@ -130,9 +138,10 @@ termination has its audit record in the same transaction.
 | S302-A1 | `s302_a1_terminating_ended_session_changes_nothing` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
 | S302-A2 | `s302_a2_identifiers_validated_before_store` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
 | S302-A3 | `s302_a3_termination_racing_redemption_and_step_up` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-A4 | `s302_a4_terminate_all_is_one_bounded_transaction` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
+| S302-A4 | `s302_a4_terminate_all_bounded_and_listings_examine_bounded_window` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
 | S302-A5 | `s302_a5_viewer_cannot_terminate_target_cannot_resist` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
 | S302-A6 | `s302_a6_session_ids_reveal_nothing_to_unauthorized` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
+| S302-A7 | `s302_a7_activity_during_walk_neither_skips_nor_repeats` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
 
 ## Live verification
 
@@ -142,13 +151,14 @@ termination has its audit record in the same transaction.
 
 ## Open questions
 
-- Should the list offer terminated sessions behind a filter (`include_terminated`) in M4-min, or is the user detail's "20 most recent terminated" enough?
+- Should the list offer terminated sessions behind a filter (`include_terminated`) in M4-min, or is the user detail's "20 most recent terminated" preview enough?
 
 ## 한국어 요약
 
 관리자는 살아 있는 세션을 사용자, 호스트, 시각, 클라이언트 주소, user-agent 접두사,
-수준과 함께 보고 하나 또는 사용자의 전부를 종료합니다. 종료는 `cred_gen`을 올리고
-모든 핸들을 취소하며 미소비 핸드오프 코드를 소비하므로 모든 호스트의 다음 요청이
-거부되고, `session.terminated`와 `admin.session_terminate`가 같은 트랜잭션에
-기록됩니다. 핵심 남용 사례는 종료와 핸드오프 교환의 경합에서 어느 순서든 세션이
-되살아나지 않는 것입니다.
+수준과 함께 불변인 생성 순서로 보고(마지막 활동은 열로 표시) 하나 또는 사용자의
+전부를 종료합니다. 종료는 `cred_gen`을 올리고 모든 핸들을 취소하며 미소비 핸드오프
+코드를 소비하므로 모든 호스트의 다음 요청이 거부되고, `session.terminated`와
+`admin.session_terminate`가 같은 트랜잭션에 기록됩니다. 핵심 남용 사례는 순회 중의
+활동이 세션을 건너뛰게 하지 못하는 것과, 종료와 핸드오프 교환의 경합에서 어느
+순서든 세션이 되살아나지 않는 것입니다.
