@@ -57,8 +57,38 @@ const PROVIDER: Node = Obj(&[
     ("trust_email", Leaf),
 ]);
 
+const ADMIN_USER: Node = Obj(&[
+    ("user_id", Leaf),
+    ("email", Leaf),
+    ("role", Leaf),
+    ("note", Leaf),
+]);
+
+const ADMIN: Node = Obj(&[
+    ("public_url", Leaf),
+    ("session", Obj(&[("idle", Leaf), ("absolute", Leaf)])),
+    (
+        "binding",
+        Obj(&[
+            ("ip", Leaf),
+            ("ip_prefix_v4", Leaf),
+            ("ip_prefix_v6", Leaf),
+            ("ua", Leaf),
+            ("on_mismatch", Leaf),
+        ]),
+    ),
+    ("max_auth_age", Leaf),
+    ("require_aal", Leaf),
+    ("untrusted_peers", Leaf),
+    ("query_budget_ms", Leaf),
+    ("users", Arr(&ADMIN_USER)),
+]);
+
 pub(super) const ROOT: Node = Obj(&[
-    ("listen", Obj(&[("portal", Leaf), ("gateway", Leaf)])),
+    (
+        "listen",
+        Obj(&[("portal", Leaf), ("gateway", Leaf), ("admin", Leaf)]),
+    ),
     ("state_dir", Leaf),
     ("store", Obj(&[("kind", Leaf), ("path", Leaf)])),
     (
@@ -117,9 +147,11 @@ pub(super) const ROOT: Node = Obj(&[
         Obj(&[
             ("gateway_max_concurrent", Leaf),
             ("portal_max_concurrent", Leaf),
+            ("admin_max_concurrent", Leaf),
         ]),
     ),
     ("sessions", Obj(&[("retention_days", Leaf)])),
+    ("admin", ADMIN),
 ]);
 
 /// Collect one message per unknown key, in document order.

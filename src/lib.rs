@@ -36,6 +36,7 @@ macro_rules! string_newtype {
     };
 }
 
+pub mod admin;
 pub mod app;
 pub mod cache;
 pub mod config;

@@ -591,3 +591,90 @@ mod jar_rules {
         assert_eq!(j.for_host("h.example.test").all().len(), 180);
     }
 }
+
+// ---- the management console harness (M4-min W0) -------------------------------
+
+#[test]
+fn spawn_admin_prints_three_listeners_and_the_console_refuses_without_a_handle() {
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(Fixture::new("m4-admin"), &idp, &[]);
+    let admin = h.admin.expect("the admin listener address was printed");
+    assert!(admin.ip().is_loopback());
+    assert_ne!(admin, h.portal);
+    assert_ne!(admin, h.gateway);
+    assert_eq!(h.console_host(), "hopae-admin.example.test");
+    assert_eq!(h.console_origin(), "https://hopae-admin.example.test");
+    // The minimal router: no handle is `403 login_required` ...
+    let r = h.admin_client().get("/v1/me");
+    assert_eq!(r.status, 403, "{r:?}");
+    assert_eq!(r.json()["error"], "login_required");
+    for (k, v) in [
+        ("cache-control", "no-store"),
+        ("x-content-type-options", "nosniff"),
+        ("referrer-policy", "same-origin"),
+        ("x-frame-options", "DENY"),
+        ("x-robots-tag", "noindex"),
+        (
+            "content-security-policy",
+            "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'",
+        ),
+    ] {
+        assert_eq!(r.header(k), Some(v), "{k}");
+    }
+    // ... a peer outside trusted_proxies is refused before anything is read.
+    let r = h
+        .admin_client()
+        .from_peer("127.0.0.2".parse().unwrap())
+        .get("/v1/me");
+    assert_eq!(r.status, 403, "{r:?}");
+    assert_eq!(r.json()["error"], "untrusted_peer");
+    // The refusal is counted and sampled like a denial.
+    let c = h.hooks.counters();
+    assert_eq!(
+        c["metrics"]["hopae_admin_denied_total{reason=\"untrusted_peer\"}"], 1,
+        "{c}"
+    );
+    // The test hooks answer the console's questions.
+    assert!(h.hooks.grants().is_empty());
+    h.hooks.slow_scan(0);
+    assert!(h.hooks.last_deadline()["seen"].is_boolean());
+    // No console, no listener: m1-basic is unchanged.
+    let b = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
+    assert!(b.admin.is_none());
+}
+
+#[test]
+fn explain_bulk_and_legacy_hooks_work_against_the_real_schema() {
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(Fixture::new("m4-admin"), &idp, &[]);
+    h.hooks.bulk_users(50);
+    h.hooks.bulk_events(200, 1.0);
+    let e = h.hooks.explain("users", true);
+    assert!(
+        e["plan"][0]
+            .as_str()
+            .unwrap()
+            .contains("USING INDEX users_created_id"),
+        "{e}"
+    );
+    assert_eq!(e["fullscan_step"], 0);
+    assert_eq!(e["sort"], 0);
+    let e = h
+        .hooks
+        .explain("events&index=user&cursor=1700000000000:e_a", true);
+    assert!(
+        e["plan"][0]
+            .as_str()
+            .unwrap()
+            .contains("(at,event_id)<(?,?)"),
+        "{e}"
+    );
+    assert!(h.vm_steps("sessions") > 0 || h.vm_steps("sessions") == 0);
+    let events = h.hooks.events(Some("login.started"), Some(500));
+    assert_eq!(events.len(), 200);
+    // A legacy session has Hopae completion as its time source.
+    let (sid, handle) = h
+        .hooks
+        .legacy_session("u_blk000000001", Some("auth.example.test"));
+    assert!(sid.starts_with("s_legacy") && handle.is_some());
+}

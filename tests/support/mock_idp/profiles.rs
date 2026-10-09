@@ -28,6 +28,23 @@ pub enum Profile {
     TokenMalformed,
     Userinfo500,
     IdTokenMissing,
+    /// `auth_time` is the code issue time (a `max_age` provider).
+    AuthTimePresent,
+    /// `auth_time` is two days old.
+    AuthTimeStale,
+    /// The ID token carries no `auth_time` claim.
+    AuthTimeMissing,
+}
+
+/// What the ID token's `auth_time` claim holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthTime {
+    /// The time the code was issued (the provider's own clock).
+    IssueTime,
+    /// This many seconds before the code was issued.
+    Stale(i64),
+    /// No claim.
+    Missing,
 }
 
 /// What a profile changes. `Behavior::standard()` is the `default` profile.
@@ -65,6 +82,7 @@ pub struct Behavior {
     pub token_malformed: bool,
     pub userinfo_status: Option<u16>,
     pub omit_id_token: bool,
+    pub auth_time: AuthTime,
 }
 
 impl Behavior {
@@ -89,6 +107,7 @@ impl Behavior {
             token_malformed: false,
             userinfo_status: None,
             omit_id_token: false,
+            auth_time: AuthTime::IssueTime,
         }
     }
 }
@@ -96,7 +115,7 @@ impl Behavior {
 const SLOW: Duration = Duration::from_secs(15);
 
 impl Profile {
-    pub const ALL: [Profile; 20] = [
+    pub const ALL: [Profile; 23] = [
         Profile::Default,
         Profile::WrongState,
         Profile::WrongNonce,
@@ -117,6 +136,9 @@ impl Profile {
         Profile::TokenMalformed,
         Profile::Userinfo500,
         Profile::IdTokenMissing,
+        Profile::AuthTimePresent,
+        Profile::AuthTimeStale,
+        Profile::AuthTimeMissing,
     ];
 
     pub fn name(self) -> &'static str {
@@ -141,6 +163,9 @@ impl Profile {
             Profile::TokenMalformed => "token_malformed",
             Profile::Userinfo500 => "userinfo_500",
             Profile::IdTokenMissing => "id_token_missing",
+            Profile::AuthTimePresent => "auth_time_present",
+            Profile::AuthTimeStale => "auth_time_stale",
+            Profile::AuthTimeMissing => "auth_time_missing",
         }
     }
 
@@ -226,6 +251,18 @@ impl Profile {
             },
             Profile::IdTokenMissing => Behavior {
                 omit_id_token: true,
+                ..std
+            },
+            Profile::AuthTimePresent => Behavior {
+                auth_time: AuthTime::IssueTime,
+                ..std
+            },
+            Profile::AuthTimeStale => Behavior {
+                auth_time: AuthTime::Stale(2 * 86_400),
+                ..std
+            },
+            Profile::AuthTimeMissing => Behavior {
+                auth_time: AuthTime::Missing,
                 ..std
             },
         }

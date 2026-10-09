@@ -2,6 +2,8 @@
 //! in the provider's `config`. Kakao and Naver arrive in M3; the table keeps
 //! the shape they need.
 
+use crate::provider::types::ReauthCapability;
+
 /// Defaults for one well-known provider.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Preset {
@@ -16,6 +18,9 @@ pub struct Preset {
     /// legitimately points to (token, keys, user info). Anything else it
     /// names is refused (G7-IDP-03).
     pub endpoint_hosts: &'static [&'static str],
+    /// Whether the provider honors `max_age` and returns `auth_time`. Google
+    /// documents that it does not support reauthentication requests.
+    pub reauth: ReauthCapability,
 }
 
 pub const GOOGLE: Preset = Preset {
@@ -29,6 +34,7 @@ pub const GOOGLE: Preset = Preset {
         "www.googleapis.com",
         "openidconnect.googleapis.com",
     ],
+    reauth: ReauthCapability::Unsupported,
 };
 
 // M3: KAKAO (issuer https://kauth.kakao.com, user-info mapping, secret required)
@@ -55,5 +61,6 @@ mod tests {
         assert_eq!(by_issuer("https://accounts.google.com"), Some(&GOOGLE));
         assert_eq!(by_issuer("https://accounts.google.com/"), None);
         assert_eq!(by_name("kakao"), None);
+        assert_eq!(GOOGLE.reauth, ReauthCapability::Unsupported);
     }
 }

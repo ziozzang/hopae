@@ -190,6 +190,8 @@ pub(crate) mod fx {
                 terminated_at: None,
                 terminated_reason: None,
                 authz_version_at_auth: user.authz_version,
+                auth_time_source: hopae::store::AuthTimeSource::HopaeCompletion,
+                bound_ua_prefix: None,
             };
             let before = row.authz_version;
             f(&mut row);

@@ -5,12 +5,14 @@
 //! `BEGIN IMMEDIATE` transaction together with its events and delivery rows,
 //! so a state change and its audit record commit or vanish together.
 
+mod admin;
 mod directory;
 mod events;
 mod rows;
 mod sessions;
 #[cfg(test)]
 mod tests;
+mod window;
 
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
@@ -20,12 +22,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 
+pub use window::Shape;
+
 use super::hooks::StoreHooks;
-use super::{Directory, Events, Sessions, StoreError, StoreResult};
+use super::{Deadline, Directory, Events, Sessions, StoreError, StoreResult};
 use crate::crypto::{Clock, OsRng, Rng};
 use crate::event::types::Event;
 
@@ -37,6 +41,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         2,
         "0002_m1_schema",
         include_str!("../migrations/0002_m1_schema.sql"),
+    ),
+    (
+        3,
+        "0003_admin",
+        include_str!("../migrations/0003_admin.sql"),
     ),
 ];
 
@@ -62,6 +71,15 @@ pub async fn with_deadline<F: Future>(deadline: tokio::time::Instant, fut: F) ->
 }
 
 type Job = Box<dyn FnOnce(&mut WriterEnv) + Send>;
+
+/// The deadline of a call, captured in the async context: the task-local one
+/// (if any) and the explicit one, whichever is earlier.
+fn captured_deadline(explicit: Option<Deadline>) -> Option<Instant> {
+    earliest_present(
+        STORE_DEADLINE.try_with(|d| d.into_std()).ok(),
+        explicit.map(|d| d.0),
+    )
+}
 
 /// State shared by the handle and the writer thread.
 pub(crate) struct Shared {
@@ -191,6 +209,34 @@ impl Store {
         sinks: Vec<String>,
         hooks: Option<Arc<StoreHooks>>,
     ) -> Result<Self, StoreError> {
+        Self::open_with(path, clock, sinks, hooks, false)
+    }
+
+    /// Open an existing, current database for a command-line administrator
+    /// (ADR-0016): the read-only [`precheck`] runs first, the file is never
+    /// created and never migrated (an older database is refused: "start the
+    /// instance once to migrate"), no instance lock is taken, and no backup is
+    /// written. Busy waits are bounded at five seconds.
+    pub fn open_cli(
+        path: &Path,
+        clock: Arc<dyn Clock>,
+        sinks: Vec<String>,
+    ) -> Result<Self, StoreError> {
+        let found = precheck(path)?;
+        let latest = supported_version();
+        if found < latest {
+            return Err(StoreError::SchemaTooOld { found, latest });
+        }
+        Self::open_with(path, clock, sinks, None, true)
+    }
+
+    fn open_with(
+        path: &Path,
+        clock: Arc<dyn Clock>,
+        sinks: Vec<String>,
+        hooks: Option<Arc<StoreHooks>>,
+        cli: bool,
+    ) -> Result<Self, StoreError> {
         let io = |p: &Path| {
             let p = p.display().to_string();
             move |source| StoreError::Io {
@@ -198,26 +244,40 @@ impl Store {
                 source,
             }
         };
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)
-                .map_err(io(dir))?;
+        if !cli {
+            // A refused database is left byte for byte as it is: validate
+            // read-only before the journal mode or anything else is touched.
+            precheck(path)?;
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(dir)
+                    .map_err(io(dir))?;
+            }
+            // Create the file with a restrictive mode before SQLite does; the WAL
+            // and shared-memory files inherit the main file's permissions.
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(io(path))?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .map_err(io(path))?;
         }
-        // Create the file with a restrictive mode before SQLite does; the WAL
-        // and shared-memory files inherit the main file's permissions.
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(io(path))?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(io(path))?;
-        let util = Connection::open(path)?;
+        let util = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
         configure(&util)?;
-        migrate(&util)?;
-        let writer = Connection::open(path)?;
+        if !cli {
+            migrate(&util)?;
+        }
+        let writer = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
         configure(&writer)?;
 
         let shared = Arc::new(Shared {
@@ -321,6 +381,29 @@ impl Store {
         self.inner.util.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Test support (`store/hold_write_lock`): a second connection takes the
+    /// write lock for `ms` milliseconds, then rolls back. Returns once the
+    /// lock is held.
+    pub fn hold_write_lock(&self, ms: u64) -> Result<(), StoreError> {
+        let conn = Connection::open_with_flags(
+            &self.inner.path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(DEFAULT_BUSY)?;
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        std::thread::Builder::new()
+            .name("hopae-hold-lock".into())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_millis(ms));
+                let _ = conn.execute_batch("ROLLBACK");
+            })
+            .map_err(|source| StoreError::Io {
+                path: "hold_write_lock".into(),
+                source,
+            })?;
+        Ok(())
+    }
+
     /// Highest applied migration version.
     pub fn schema_version(&self) -> Result<u32, StoreError> {
         current_version(&self.conn())
@@ -364,12 +447,37 @@ impl Store {
         method: &'static str,
         f: impl FnOnce(&mut WriterEnv) -> StoreResult<T> + Send + 'static,
     ) -> StoreResult<T> {
+        self.write_checked(method, None, move |env, _| f(env)).await
+    }
+
+    /// As [`Store::write`], with an explicit deadline and the job's [`Check`].
+    /// The deadline is captured HERE, in the async context, with the
+    /// earliest-present combiner, and travels into the job as a plain value
+    /// (task-locals do not cross the dispatch boundary).
+    pub(crate) async fn write_checked<T: Send + 'static>(
+        &self,
+        method: &'static str,
+        explicit: Option<Deadline>,
+        f: impl FnOnce(&mut WriterEnv, &Check) -> StoreResult<T> + Send + 'static,
+    ) -> StoreResult<T> {
+        let deadline = captured_deadline(explicit);
         let tx = self.inner.tx.clone();
         self.run(method, async move {
             let (reply, rx) = tokio::sync::oneshot::channel();
             let job: Job = Box::new(move |env| {
-                let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(env)))
-                    .unwrap_or_else(|_| Err(StoreError::Unavailable("internal error".into())));
+                let hooks = env.shared.hooks.clone();
+                let out = match arm(&env.conn, deadline, &hooks) {
+                    Err(e) => Err(e),
+                    Ok(check) => {
+                        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            f(env, &check)
+                        }))
+                        .unwrap_or_else(|_| Err(StoreError::Unavailable("internal error".into())))
+                        .map_err(|e| map_interrupt(e, &check));
+                        disarm(&env.conn, deadline.is_some());
+                        out
+                    }
+                };
                 let _ = reply.send(out);
             });
             tx.send(job)
@@ -386,6 +494,17 @@ impl Store {
         method: &'static str,
         f: impl FnOnce(&Connection) -> StoreResult<T> + Send + 'static,
     ) -> StoreResult<T> {
+        self.read_checked(method, None, move |c, _| f(c)).await
+    }
+
+    /// As [`Store::read`], with an explicit deadline and the job's [`Check`].
+    pub(crate) async fn read_checked<T: Send + 'static>(
+        &self,
+        method: &'static str,
+        explicit: Option<Deadline>,
+        f: impl FnOnce(&Connection, &Check) -> StoreResult<T> + Send + 'static,
+    ) -> StoreResult<T> {
+        let deadline = captured_deadline(explicit);
         let inner = self.inner.clone();
         self.run(method, async move {
             tokio::task::spawn_blocking(move || {
@@ -398,10 +517,26 @@ impl Store {
                     Some(c) => c,
                     None => open_reader(&inner.path)?,
                 };
-                let out = f(&conn);
-                let mut pool = inner.readers.lock().unwrap_or_else(|p| p.into_inner());
-                if pool.len() < READER_POOL_MAX {
-                    pool.push(conn);
+                let hooks = inner.shared.hooks.clone();
+                let out = match arm(&conn, deadline, &hooks) {
+                    Err(e) => Err(e),
+                    Ok(check) => {
+                        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            f(&conn, &check)
+                        }))
+                        .unwrap_or_else(|_| Err(StoreError::Unavailable("internal error".into())))
+                        .map_err(|e| map_interrupt(e, &check));
+                        disarm(&conn, deadline.is_some());
+                        out
+                    }
+                };
+                // A connection that failed mid-statement may hold an open
+                // transaction or a temp table; only a clean one is reused.
+                if conn.is_autocommit() {
+                    let mut pool = inner.readers.lock().unwrap_or_else(|p| p.into_inner());
+                    if pool.len() < READER_POOL_MAX {
+                        pool.push(conn);
+                    }
                 }
                 out
             })
@@ -422,24 +557,6 @@ impl Store {
     }
 }
 
-fn open_reader(path: &Path) -> StoreResult<Connection> {
-    let conn = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    conn.busy_timeout(Duration::from_millis(5000))?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    Ok(conn)
-}
-
-fn configure(conn: &Connection) -> Result<(), StoreError> {
-    conn.busy_timeout(Duration::from_millis(5000))?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
-    Ok(())
-}
-
 fn current_version(conn: &Connection) -> Result<u32, StoreError> {
     let v: Option<u32> = conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
         r.get(0)
@@ -447,8 +564,130 @@ fn current_version(conn: &Connection) -> Result<u32, StoreError> {
     Ok(v.unwrap_or(0))
 }
 
+/// The newest schema version this binary knows.
+fn supported_version() -> u32 {
+    MIGRATIONS.last().map_or(0, |m| m.0)
+}
+
+/// Structures a database at `version` must have (public: the CLI and the
+/// backup step call it too). A version-2 database written before migration
+/// 0002 was finalized lacks later additions and no migration would add them:
+/// it is refused as [`StoreError::DevelopmentSchema`]; a later version missing
+/// its own structures is [`StoreError::Corrupt`] naming the structure.
+pub fn validate_foundation(conn: &Connection, version: u32) -> Result<(), StoreError> {
+    let count = |sql: &str, arg: &str, arg2: &str| -> Result<bool, StoreError> {
+        Ok(conn.query_row(sql, rusqlite::params![arg, arg2], |r| r.get::<_, i64>(0))? > 0)
+    };
+    let table = |name: &str| {
+        count(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1 AND ?2=?2",
+            name,
+            "",
+        )
+    };
+    let index = |name: &str| {
+        count(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1 AND ?2=?2",
+            name,
+            "",
+        )
+    };
+    let column = |tbl: &str, col: &str| {
+        count(
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
+            tbl,
+            col,
+        )
+    };
+    if version >= 2 {
+        let complete = column("sessions", "authz_version_at_auth")?
+            && index("users_primary_email")?
+            && index("event_deliveries_event_id")?
+            && table("txn_admissions")?
+            && conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='login_txns' AND sql LIKE '%''logout''%'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )? > 0;
+        if !complete {
+            return Err(StoreError::DevelopmentSchema);
+        }
+    }
+    if version >= 3 {
+        let missing = |what: String| StoreError::Corrupt(format!("schema v3 is missing {what}"));
+        if !table("admin_grants")? {
+            return Err(missing("admin_grants".into()));
+        }
+        for (t, c) in [
+            ("sessions", "bound_ua_prefix"),
+            ("sessions", "auth_time_source"),
+            ("login_txns", "reauth_max_age"),
+        ] {
+            if !column(t, c)? {
+                return Err(missing(format!("{t}.{c}")));
+            }
+        }
+        for ix in [
+            "events_at_id",
+            "events_user_at_id",
+            "events_ip_at_id",
+            "events_kind_at_id",
+            "events_session_at_id",
+            "users_created_id",
+            "sessions_live_created",
+            "sessions_live_user_created",
+            "admin_grants_source_email",
+        ] {
+            if !index(ix)? {
+                return Err(missing(ix.into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read-only pre-check used by `bind` and by every CLI command BEFORE any
+/// backup or write: opens the file read-only, reads the recorded version,
+/// refuses a newer one, validates the foundation and returns the version. A
+/// missing or empty file is a fresh database (version 0).
+pub fn precheck(path: &Path) -> Result<u32, StoreError> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.len() > 0 => {}
+        Ok(_) => return Ok(0),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(source) => {
+            return Err(StoreError::Io {
+                path: path.display().to_string(),
+                source,
+            });
+        }
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(DEFAULT_BUSY)?;
+    let has_table: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_table == 0 {
+        return Ok(0);
+    }
+    let found = current_version(&conn)?;
+    let supported = supported_version();
+    if found > supported {
+        return Err(StoreError::SchemaTooNew { found, supported });
+    }
+    validate_foundation(&conn, found)?;
+    Ok(found)
+}
+
 /// Apply every migration newer than the recorded version, each in its own
-/// transaction. Idempotent. Refuses a database from a newer binary.
+/// transaction. Idempotent. Refuses a database from a newer binary, validates
+/// the foundation before applying anything and the structures again at the
+/// final version.
 pub fn migrate(conn: &Connection) -> Result<u32, StoreError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -458,9 +697,13 @@ pub fn migrate(conn: &Connection) -> Result<u32, StoreError> {
          ) STRICT;",
     )?;
     let found = current_version(conn)?;
-    let supported = MIGRATIONS.last().map_or(0, |m| m.0);
+    let supported = supported_version();
     if found > supported {
         return Err(StoreError::SchemaTooNew { found, supported });
+    }
+    validate_foundation(conn, found)?;
+    if found > 0 && found < supported {
+        tracing::info!("schema foundation validated (v{found})");
     }
     for &(version, name, sql) in MIGRATIONS.iter().filter(|m| m.0 > found) {
         let tx = conn.unchecked_transaction()?;
@@ -472,36 +715,171 @@ pub fn migrate(conn: &Connection) -> Result<u32, StoreError> {
         tx.commit()?;
     }
     let version = current_version(conn)?;
-    refuse_pre_release_schema(conn, version)?;
+    validate_foundation(conn, version)?;
     Ok(version)
 }
 
-/// Migration 0002 gained `sessions.authz_version_at_auth`, the
-/// `users_primary_email`, `event_deliveries_event_id` index, the
-/// `txn_admissions` table and the `logout` transaction purpose while still
-/// unreleased (no new migration). A
-/// version-2 database written before that has neither, and no migration will
-/// add them: refuse it rather than fail later in a session query.
-fn refuse_pre_release_schema(conn: &Connection, version: u32) -> Result<(), StoreError> {
-    if version != 2 {
-        return Ok(());
+// ---- deadlines and interruption (P2-05, P3-03) ------------------------------
+
+/// Default SQLite busy timeout of every connection.
+pub(crate) const DEFAULT_BUSY: Duration = Duration::from_millis(5000);
+
+/// Earliest PRESENT deadline: either sole source is kept; `Option::min` would
+/// drop a present one (`None < Some`).
+pub fn earliest_present(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
     }
-    let present = |sql: &str| -> Result<bool, StoreError> {
-        Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))? > 0)
+}
+
+/// What a job checks between statements: the deadline it was handed, and the
+/// test hook that slows each step down.
+pub struct Check {
+    deadline: Option<Instant>,
+    /// The busy timeout was shortened to the deadline: a busy result after it
+    /// is the deadline, not contention.
+    bounded_busy: bool,
+    hooks: Option<Arc<StoreHooks>>,
+}
+
+impl Check {
+    /// No deadline: every check passes.
+    pub fn none() -> Check {
+        Check {
+            deadline: None,
+            bounded_busy: false,
+            hooks: None,
+        }
+    }
+
+    /// Time left, or `None` without a deadline.
+    pub fn remaining(&self) -> Option<Duration> {
+        self.deadline
+            .map(|d| d.saturating_duration_since(Instant::now()))
+    }
+
+    /// Fail with `Unavailable("deadline")` once the deadline has passed.
+    pub fn now(&self) -> StoreResult<()> {
+        match self.deadline {
+            Some(d) if Instant::now() >= d => Err(StoreError::Unavailable("deadline".into())),
+            _ => Ok(()),
+        }
+    }
+
+    /// A statement boundary inside a loop: the slow-scan hook sleeps, then the deadline is checked.
+    pub fn step(&self) -> StoreResult<()> {
+        if let Some(h) = &self.hooks {
+            let d = h.slow_scan();
+            if !d.is_zero() {
+                std::thread::sleep(d);
+            }
+        }
+        self.now()
+    }
+}
+
+/// Install the deadline on `conn` for one job: refuse before the first
+/// statement when it has passed, bound the busy timeout, install the progress
+/// handler. Always paired with [`disarm`].
+fn arm(
+    conn: &Connection,
+    deadline: Option<Instant>,
+    hooks: &Option<Arc<StoreHooks>>,
+) -> StoreResult<Check> {
+    if let Some(h) = hooks {
+        h.record_deadline(deadline);
+    }
+    let Some(d) = deadline else {
+        return Ok(Check {
+            deadline: None,
+            bounded_busy: false,
+            hooks: hooks.clone(),
+        });
     };
-    let complete = present(
-        "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='authz_version_at_auth'",
-    )? && present(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='users_primary_email'",
-    )? && present(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='event_deliveries_event_id'",
-    )? && present(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='txn_admissions'",
-    )? && present(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='login_txns' AND sql LIKE '%''logout''%'",
-    )?;
-    if !complete {
-        return Err(StoreError::DevelopmentSchema);
+    let remaining = d.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(StoreError::Unavailable("deadline".into()));
     }
+    conn.busy_timeout(remaining.min(DEFAULT_BUSY))?;
+    let slow = hooks.clone();
+    conn.progress_handler(
+        1000,
+        Some(move || {
+            if let Some(h) = &slow {
+                let s = h.slow_scan();
+                if !s.is_zero() {
+                    std::thread::sleep(s);
+                }
+            }
+            Instant::now() >= d
+        }),
+    );
+    Ok(Check {
+        deadline: Some(d),
+        bounded_busy: remaining <= DEFAULT_BUSY,
+        hooks: hooks.clone(),
+    })
+}
+
+/// Undo [`arm`]: the connection is reused only without a handler and with the default busy timeout.
+fn disarm(conn: &Connection, armed: bool) {
+    if armed {
+        conn.progress_handler(0, None::<fn() -> bool>);
+    }
+    let _ = conn.busy_timeout(DEFAULT_BUSY);
+}
+
+fn map_interrupt(e: StoreError, check: &Check) -> StoreError {
+    match &e {
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(f, _))
+            if f.code == rusqlite::ErrorCode::OperationInterrupted =>
+        {
+            crate::telemetry::counters::inc(
+                crate::telemetry::counters::STORE_INTERRUPTS_TOTAL,
+                &[],
+            );
+            StoreError::Unavailable("interrupted".into())
+        }
+        StoreError::Busy if check.deadline.is_some() && check.bounded_busy => {
+            StoreError::Unavailable("deadline".into())
+        }
+        _ => e,
+    }
+}
+
+/// Run `f` on `conn` under `deadline` (P3-03): refused before the first
+/// statement when it has passed, a held lock cannot block past it, the
+/// statement is interrupted inside SQLite, and the connection is restored
+/// (handler cleared, default busy timeout) before it is reused.
+pub fn with_job_deadline<T>(
+    conn: &Connection,
+    deadline: Option<Instant>,
+    f: impl FnOnce(&Connection, &Check) -> StoreResult<T>,
+) -> StoreResult<T> {
+    let check = arm(conn, deadline, &None)?;
+    let out = f(conn, &check).map_err(|e| map_interrupt(e, &check));
+    disarm(conn, deadline.is_some());
+    out
+}
+
+fn open_reader(path: &Path) -> StoreResult<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(DEFAULT_BUSY)?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    Ok(conn)
+}
+
+fn configure(conn: &Connection) -> Result<(), StoreError> {
+    conn.busy_timeout(DEFAULT_BUSY)?;
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
 }

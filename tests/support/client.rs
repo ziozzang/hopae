@@ -48,7 +48,48 @@ pub fn send(addr: SocketAddr, req: RawReq) -> Response {
 }
 
 pub fn try_send(addr: SocketAddr, req: RawReq) -> std::io::Result<Response> {
-    let mut s = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10))?;
+    try_send_from(addr, None, req)
+}
+
+/// As [`send`], connecting from the loopback address `source` (another peer
+/// than the usual 127.0.0.1: every 127.0.0.0/8 address is local on Linux).
+pub fn send_from(addr: SocketAddr, source: IpAddr, req: RawReq) -> Response {
+    try_send_from(addr, Some(source), req)
+        .unwrap_or_else(|e| panic!("request to {addr} from {source} failed: {e}"))
+}
+
+fn connect(addr: SocketAddr, source: Option<IpAddr>) -> std::io::Result<std::net::TcpStream> {
+    let Some(source) = source else {
+        return std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(10));
+    };
+    // A std socket cannot choose its source address before connecting; tokio's can.
+    std::thread::spawn(move || -> std::io::Result<std::net::TcpStream> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async {
+            let sock = if source.is_ipv4() {
+                tokio::net::TcpSocket::new_v4()?
+            } else {
+                tokio::net::TcpSocket::new_v6()?
+            };
+            sock.bind(SocketAddr::new(source, 0))?;
+            let stream = sock.connect(addr).await?;
+            let std = stream.into_std()?;
+            std.set_nonblocking(false)?;
+            Ok(std)
+        })
+    })
+    .join()
+    .map_err(|_| std::io::Error::other("connect thread panicked"))?
+}
+
+pub fn try_send_from(
+    addr: SocketAddr,
+    source: Option<IpAddr>,
+    req: RawReq,
+) -> std::io::Result<Response> {
+    let mut s = connect(addr, source)?;
     s.set_read_timeout(Some(req.timeout))?;
     s.set_write_timeout(Some(Duration::from_secs(10)))?;
     let mut head = format!("{} {} HTTP/1.1\r\n", req.method, req.path);

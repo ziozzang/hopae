@@ -172,6 +172,7 @@ fn txn_for(provider: &str, req: &AuthorizationRequest, now: Timestamp) -> Transa
         recovery_depth: 0,
         consumed_at: None,
         consumed_reason: None,
+        reauth_max_age: None,
     }
 }
 

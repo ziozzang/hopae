@@ -118,6 +118,8 @@ mod tests {
             terminated_at: None,
             terminated_reason: None,
             authz_version_at_auth: 1,
+            auth_time_source: crate::store::types::AuthTimeSource::HopaeCompletion,
+            bound_ua_prefix: None,
         };
         let handle = HandleRow {
             handle_sha256: Digest([0; 32]),

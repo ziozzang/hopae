@@ -28,6 +28,8 @@ pub enum Purpose {
     Switch,
     Continue,
     Logout,
+    /// A console form (ADR-0016), bound to the handle value.
+    Admin,
 }
 
 impl Purpose {
@@ -38,6 +40,7 @@ impl Purpose {
             Purpose::Switch => "switch",
             Purpose::Continue => "continue",
             Purpose::Logout => "logout",
+            Purpose::Admin => "admin",
         }
     }
 }
@@ -210,6 +213,33 @@ mod tests {
             Purpose::Retry,
             Purpose::Switch,
             Purpose::Continue,
+            Purpose::Admin,
+        ] {
+            assert_eq!(
+                verify(&key(), P1, other, &t, now),
+                Err(CsrfError::Invalid),
+                "{other:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_admin_token_is_its_own_purpose_bound_to_the_handle() {
+        let rng = SeededRng::new(2);
+        let now = Timestamp(1_800_000_000_000);
+        assert_eq!(Purpose::Admin.as_str(), "admin");
+        let t = issue(&key(), P1, Purpose::Admin, now, &rng);
+        assert_eq!(verify(&key(), P1, Purpose::Admin, &t, now), Ok(()));
+        assert_eq!(
+            verify(&key(), P2, Purpose::Admin, &t, now),
+            Err(CsrfError::Invalid)
+        );
+        for other in [
+            Purpose::Login,
+            Purpose::Retry,
+            Purpose::Switch,
+            Purpose::Continue,
+            Purpose::Logout,
         ] {
             assert_eq!(
                 verify(&key(), P1, other, &t, now),

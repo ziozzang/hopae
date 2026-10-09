@@ -138,6 +138,7 @@ pub(super) async fn redeem(cx: &Cx<'_>, app: &AppPolicy, target: &Url, code: &Se
                 conflicting_handle_sha256: conflicting,
                 pending_identity: None,
                 recovery_depth: code.recovery_depth,
+                reauth_max_age: None,
             };
             // Post-authentication: no per-address cap, but `txn.max_rows` holds.
             let admission = ctx
@@ -326,6 +327,8 @@ mod tests {
                 terminated_at: None,
                 terminated_reason: None,
                 authz_version_at_auth: user.authz_version,
+                auth_time_source: crate::store::types::AuthTimeSource::HopaeCompletion,
+                bound_ua_prefix: None,
             };
             let portal = handle_value(&*self.rng);
             let h = self.handle_row(&row, "auth.example.test", &portal);
@@ -883,6 +886,7 @@ mod tests {
                     conflicting_handle_sha256: None,
                     pending_identity: None,
                     recovery_depth: 0,
+                    reauth_max_age: None,
                 },
                 vec![],
                 now,

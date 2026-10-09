@@ -42,6 +42,57 @@ impl ProviderKind {
     }
 }
 
+/// Whether a provider honors the OpenID Connect `max_age` parameter and
+/// returns `auth_time`, so a console reauthentication is a provider-verified
+/// challenge (ADR-0016 decision 15). Stored provider setting `reauth`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ReauthCapability {
+    MaxAge,
+    Unsupported,
+}
+
+impl ReauthCapability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReauthCapability::MaxAge => "max_age",
+            ReauthCapability::Unsupported => "unsupported",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ReauthCapability> {
+        match s {
+            "max_age" => Some(ReauthCapability::MaxAge),
+            "unsupported" => Some(ReauthCapability::Unsupported),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a reauthentication authorize request to a `max_age` provider also
+/// carries `prompt=login`. Stored provider setting `reauth_prompt`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ReauthPrompt {
+    Login,
+    None,
+}
+
+impl ReauthPrompt {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReauthPrompt::Login => "login",
+            ReauthPrompt::None => "none",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ReauthPrompt> {
+        match s {
+            "login" => Some(ReauthPrompt::Login),
+            "none" => Some(ReauthPrompt::None),
+            _ => None,
+        }
+    }
+}
+
 pub struct AuthorizationRequest {
     pub url: url::Url,
     pub state: Secret,

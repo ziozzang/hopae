@@ -17,9 +17,9 @@ use tokio::sync::Semaphore;
 
 use crate::app::CallerKeys;
 use crate::event::bus::Emitter;
-use crate::event::sampling::Scope;
 use crate::event::types::{Reason, reasons};
 use crate::gateway::hangang::{self, GatewayConfig, RenderEnv};
+use crate::http::denials::{self, DenialCounters};
 use crate::telemetry::counters;
 use crate::verify::types::{Decision, DenyKind, Navigation, VerifyContext};
 
@@ -85,18 +85,6 @@ impl GatewayState {
         }
     }
 
-    /// The `verify.denied` reason of a decision, when it is a denial: a
-    /// `Deny`, or a `Login` that refused a presented handle.
-    fn denial(decision: &Decision, cause: Option<Reason>) -> Option<Reason> {
-        match decision {
-            // The primary reason wins: a bad handle that was then rate limited
-            // is still a bad-handle denial.
-            Decision::Deny { reason, .. } => Some(cause.unwrap_or(*reason)),
-            Decision::Login { cause, .. } | Decision::LogoutEntry { cause, .. } => *cause,
-            _ => None,
-        }
-    }
-
     /// Record a denial (counted always, one sampled event per scope and reason).
     fn denied(
         &self,
@@ -107,24 +95,16 @@ impl GatewayState {
         app: Option<&crate::policy::types::AppId>,
         request_id: &str,
     ) {
-        let (Some(emitter), Some(reason)) = (&self.emitter, Self::denial(decision, cause)) else {
-            return;
-        };
-        let scope = match (session, client_ip) {
-            (Some(s), _) => Scope::Session(s.clone()),
-            (None, Some(ip)) => Scope::Ip(ip),
-            (None, None) => Scope::None,
-        };
-        emitter.verify_denied(scope, reason, request_id, |b| {
-            let b = match client_ip {
-                Some(ip) => b.ip(ip),
-                None => b,
-            };
-            match app {
-                Some(a) => b.app(a),
-                None => b,
-            }
-        });
+        denials::record_denial(
+            self.emitter.as_ref(),
+            &DenialCounters::GATEWAY,
+            decision,
+            cause,
+            client_ip,
+            session,
+            app,
+            request_id,
+        );
     }
 }
 

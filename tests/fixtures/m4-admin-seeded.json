@@ -1,0 +1,120 @@
+{
+  "listen": {
+    "portal": "127.0.0.1:0",
+    "gateway": "127.0.0.1:0",
+    "admin": "127.0.0.1:0"
+  },
+  "state_dir": "state",
+  "portal": {
+    "public_url": "https://auth.example.test"
+  },
+  "gateway": {
+    "kind": "hangang",
+    "caller_key_env": "HOPAE_TEST_GATEWAY_KEY",
+    "verify_budget_ms": 400
+  },
+  "session": {
+    "idle": "24h",
+    "absolute": "30d"
+  },
+  "cookie": {
+    "name": "__Host-hopae",
+    "secure": true
+  },
+  "apps": [
+    {
+      "app_id": "app",
+      "display_name": "app",
+      "hosts": [
+        "app.example.test"
+      ],
+      "ports": [
+        443
+      ],
+      "session": {
+        "idle": "12h",
+        "absolute": "7d"
+      },
+      "binding": {
+        "ip": "strict",
+        "ua": "off",
+        "on_mismatch": "terminate_session"
+      },
+      "on_authz_change": "refresh",
+      "verify_cache_seconds": 0
+    },
+    {
+      "app_id": "default",
+      "display_name": "default"
+    }
+  ],
+  "providers": [
+    {
+      "provider_id": "mock",
+      "kind": "oidc",
+      "display_name": "Mock",
+      "client_id": "hopae-test",
+      "client_secret_env": "HOPAE_TEST_MOCK_SECRET",
+      "issuer": "http://127.0.0.1:0",
+      "allow_private_endpoints": true,
+      "scope": "openid email profile",
+      "auto_link": false
+    }
+  ],
+  "linking": {
+    "on_conflict": "link_required"
+  },
+  "txn": {
+    "max_rows": 1000,
+    "per_ip_per_minute": 30
+  },
+  "handoff": {
+    "per_ip_failures_per_minute": 10,
+    "max_recoveries": 3
+  },
+  "events": {
+    "retention_days": 90,
+    "max_rows": 1000000,
+    "prune_every": 1000,
+    "max_pending_per_sink": 10000,
+    "delivery_terminal_retention_days": 7
+  },
+  "trusted_proxies": [
+    "127.0.0.1/32"
+  ],
+  "log": {
+    "level": "debug"
+  },
+  "admin": {
+    "public_url": "https://hopae-admin.example.test",
+    "session": {
+      "idle": "30m",
+      "absolute": "12h"
+    },
+    "binding": {
+      "ip": "strict",
+      "ua": "off",
+      "on_mismatch": "terminate_session"
+    },
+    "max_auth_age": "12h",
+    "require_aal": 1,
+    "untrusted_peers": "refuse",
+    "query_budget_ms": 2000,
+    "users": [
+      {
+        "user_id": "<u_a>",
+        "role": "admin",
+        "note": "seed"
+      },
+      {
+        "email": "v@example.test",
+        "role": "viewer"
+      },
+      {
+        "email": "n@example.test",
+        "user_id": "<u_n>",
+        "role": "viewer"
+      }
+    ]
+  }
+}

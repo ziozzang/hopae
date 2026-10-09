@@ -19,6 +19,9 @@ use crate::session::types::{Aal, FactorEntry, FactorKind, SessionId};
 use crate::store::types::*;
 use crate::store::{Directory, Events, Sessions, StoreError, StoreHooks};
 
+#[path = "tests_admin.rs"]
+mod admin_tests;
+
 const T0: i64 = 1_700_000_000_000;
 const APP_HOST: &str = "app.example.test";
 const PORTAL_HOST: &str = "auth.example.test";
@@ -142,6 +145,8 @@ impl Fx {
             terminated_at: None,
             terminated_reason: None,
             authz_version_at_auth: user.authz_version,
+            auth_time_source: crate::store::types::AuthTimeSource::HopaeCompletion,
+            bound_ua_prefix: None,
         }
     }
 
@@ -1346,6 +1351,7 @@ fn new_txn(f: &Fx, secret: &Secret, who: &str) -> NewTransaction {
         conflicting_handle_sha256: None,
         pending_identity: None,
         recovery_depth: 2,
+        reauth_max_age: None,
     }
 }
 
@@ -2080,6 +2086,7 @@ fn schema_has_the_documented_tables_and_indexes() {
     };
     let tables = names("table");
     for t in [
+        "admin_grants",
         "apps",
         "event_deliveries",
         "events",
@@ -2102,9 +2109,15 @@ fn schema_has_the_documented_tables_and_indexes() {
         "identities_email",
         "sessions_user_terminated",
         "session_handles_session",
-        "events_at",
-        "events_user_at",
-        "events_ip_at",
+        "events_at_id",
+        "events_user_at_id",
+        "events_ip_at_id",
+        "events_kind_at_id",
+        "events_session_at_id",
+        "users_created_id",
+        "sessions_live_created",
+        "sessions_live_user_created",
+        "admin_grants_source_email",
         "event_deliveries_claim",
         "handoff_codes_session",
         "handoff_codes_expires",

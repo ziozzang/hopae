@@ -27,7 +27,14 @@ pub fn recorded_version(path: &Path) -> anyhow::Result<u32> {
 
 /// When `path` holds a database older than `latest`, write a consistent copy
 /// next to it as `<file>.bak-v<N>` (mode 0600) and return its path. Nothing
-/// is written for a missing, empty, fresh (version 0) or current database.
+/// is written for a missing, empty, fresh (version 0) or current database, and
+/// nothing at all when the read-only [`crate::store::precheck`] refuses the
+/// database (pre-release schema, missing structures, a newer version): a
+/// refused database never gets a backup.
+///
+/// The copy is written to `<file>.bak-v<N>.tmp` and renamed over the previous
+/// backup only after `VACUUM INTO` succeeded; the previous backup is never
+/// deleted first, and no temporary file is left behind on failure.
 pub fn backup_before_migration(path: &Path, latest: u32) -> anyhow::Result<Option<PathBuf>> {
     let Ok(meta) = std::fs::metadata(path) else {
         return Ok(None);
@@ -35,7 +42,8 @@ pub fn backup_before_migration(path: &Path, latest: u32) -> anyhow::Result<Optio
     if meta.len() == 0 {
         return Ok(None);
     }
-    let found = recorded_version(path)?;
+    let found =
+        crate::store::precheck(path).with_context(|| format!("checking {}", path.display()))?;
     if found == 0 || found >= latest {
         return Ok(None);
     }
@@ -44,17 +52,38 @@ pub fn backup_before_migration(path: &Path, latest: u32) -> anyhow::Result<Optio
         .context("database path has no file name")?
         .to_os_string();
     name.push(format!(".bak-v{found}"));
-    let target = path.with_file_name(name);
-    if target.exists() {
-        std::fs::remove_file(&target).with_context(|| format!("replacing {}", target.display()))?;
+    let target = path.with_file_name(&name);
+    name.push(".tmp");
+    let tmp = path.with_file_name(&name);
+    // A leftover of an interrupted run is ours to replace.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("replacing {}", tmp.display())),
     }
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    // VACUUM INTO writes a transactionally consistent copy, WAL content included.
-    let quoted = target.to_string_lossy().replace('\'', "''");
-    conn.execute_batch(&format!("VACUUM INTO '{quoted}'"))
-        .with_context(|| format!("writing backup {}", target.display()))?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))?;
+    let written = (|| -> anyhow::Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Owner-only from the first byte; VACUUM INTO accepts an empty file.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .with_context(|| format!("creating {}", tmp.display()))?;
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        // VACUUM INTO writes a transactionally consistent copy, WAL content included.
+        let quoted = tmp.to_string_lossy().replace('\'', "''");
+        conn.execute_batch(&format!("VACUUM INTO '{quoted}'"))
+            .with_context(|| format!("writing backup {}", tmp.display()))?;
+        std::fs::File::open(&tmp)?.sync_all()?;
+        std::fs::rename(&tmp, &target)
+            .with_context(|| format!("moving {} into place", target.display()))?;
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(Some(target))
 }
 

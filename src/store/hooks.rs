@@ -27,6 +27,10 @@ pub struct StoreHooks {
     calls: Mutex<BTreeMap<String, u64>>,
     /// Diagnostic batches that fail before commit (G7-P03 tests).
     fail_diag_batches: AtomicU64,
+    /// Milliseconds each progress callback and each loop statement sleeps (0 = off).
+    slow_scan_ms: AtomicU64,
+    /// The deadline the most recent store job observed (`Some(None)` = it had none).
+    last_deadline: Mutex<Option<Option<std::time::Instant>>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -50,6 +54,24 @@ impl StoreHooks {
 
     pub fn diag_stall(&self) -> Duration {
         Duration::from_millis(self.diag_stall_ms.load(Ordering::SeqCst))
+    }
+
+    /// Slow every interruptible scan and every loop statement down (`store/slow_scan`).
+    pub fn set_slow_scan(&self, ms: u64) {
+        self.slow_scan_ms.store(ms, Ordering::SeqCst);
+    }
+
+    pub fn slow_scan(&self) -> Duration {
+        Duration::from_millis(self.slow_scan_ms.load(Ordering::SeqCst))
+    }
+
+    pub(crate) fn record_deadline(&self, d: Option<std::time::Instant>) {
+        *lock(&self.last_deadline) = Some(d);
+    }
+
+    /// The deadline the last job observed: `None` before any job, `Some(None)` for a job without one.
+    pub fn last_deadline(&self) -> Option<Option<std::time::Instant>> {
+        *lock(&self.last_deadline)
     }
 
     pub fn stall(&self) -> Duration {

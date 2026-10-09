@@ -55,6 +55,9 @@ impl Fixture {
         let mut v: Value =
             serde_json::from_str(&text).unwrap_or_else(|e| panic!("fixture {}: {e}", self.name));
         v["listen"] = json!({"portal": "127.0.0.1:0", "gateway": "127.0.0.1:0"});
+        if v["admin"]["public_url"].is_string() {
+            v["listen"]["admin"] = json!("127.0.0.1:0");
+        }
         v["state_dir"] = json!(state_dir.join("state"));
         if let Some(providers) = v.get_mut("providers").and_then(Value::as_array_mut) {
             for p in providers.iter_mut().filter(|p| p["provider_id"] == "mock") {
@@ -327,6 +330,8 @@ impl Hooks {
 pub struct Hopae {
     pub portal: SocketAddr,
     pub gateway: SocketAddr,
+    /// The admin listener, when the configuration has `admin.public_url`.
+    pub admin: Option<SocketAddr>,
     pub hooks: Hooks,
     pub state_dir: TempDir,
     child: Child,
@@ -341,7 +346,7 @@ pub struct Hopae {
 
 /// The binary with `test-hooks`: the one cargo built for this test run when the
 /// feature is on, otherwise one built once per test process into a side target dir.
-fn hopae_bin() -> &'static Path {
+pub(super) fn hopae_bin() -> &'static Path {
     static BIN: OnceLock<PathBuf> = OnceLock::new();
     BIN.get_or_init(|| {
         let bundled = PathBuf::from(env!("CARGO_BIN_EXE_hopae"));
@@ -410,10 +415,13 @@ impl Hopae {
         idp.set_client_secret(vars.get(MOCK_SECRET_ENV).map(String::as_str));
 
         let log_path = log_dir.path().join("hopae.stderr");
-        let (child, portal, gateway, hooks) = start_process(&config_path, &vars, &log_path);
+        let expect_admin = config["admin"]["public_url"].is_string();
+        let (child, portal, gateway, admin, hooks) =
+            start_process(&config_path, &vars, &log_path, expect_admin);
         let h = Hopae {
             portal,
             gateway,
+            admin,
             hooks: Hooks { addr: hooks },
             state_dir,
             child,
@@ -582,11 +590,13 @@ impl Hopae {
     /// configuration. The listeners get new ephemeral ports (the fields update).
     pub fn restart(&mut self) {
         self.kill();
-        let (child, portal, gateway, hooks) =
-            start_process(&self.config_path, &self.env, &self.log_path);
+        let expect_admin = self.config["admin"]["public_url"].is_string();
+        let (child, portal, gateway, admin, hooks) =
+            start_process(&self.config_path, &self.env, &self.log_path, expect_admin);
         self.child = child;
         self.portal = portal;
         self.gateway = gateway;
+        self.admin = admin;
         self.hooks = Hooks { addr: hooks };
         self.wait_ready();
     }
@@ -626,6 +636,48 @@ impl Hopae {
         &self.idp
     }
 
+    /// The path of the configuration the process runs with.
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    /// The console host (`admin.public_url`'s host); panics without a console.
+    pub fn console_host(&self) -> String {
+        let u = self.config["admin"]["public_url"]
+            .as_str()
+            .expect("admin.public_url");
+        url::Url::parse(u)
+            .expect("admin.public_url")
+            .host_str()
+            .expect("host")
+            .to_string()
+    }
+
+    /// The origin browsers send for the console (`https://hopae-admin.example.test`).
+    pub fn console_origin(&self) -> String {
+        let u = self.config["admin"]["public_url"]
+            .as_str()
+            .expect("admin.public_url");
+        u.trim_end_matches('/').to_string()
+    }
+
+    /// The handle cookie name (`__Host-hopae` unless configured).
+    pub fn cookie_name(&self) -> String {
+        self.config["cookie"]["name"]
+            .as_str()
+            .unwrap_or(if self.secure() {
+                "__Host-hopae"
+            } else {
+                "hopae"
+            })
+            .to_string()
+    }
+
+    /// Whether the instance serves `https` (`cookie.secure`).
+    pub fn is_secure(&self) -> bool {
+        self.secure()
+    }
+
     /// Set the test clock and keep the mock provider's token clock in step.
     pub fn set_clock_ms(&self, ms: i64) {
         self.hooks.set_clock_ms(ms);
@@ -649,7 +701,14 @@ fn start_process(
     config_path: &Path,
     vars: &BTreeMap<String, String>,
     log_path: &Path,
-) -> (Child, SocketAddr, SocketAddr, SocketAddr) {
+    expect_admin: bool,
+) -> (
+    Child,
+    SocketAddr,
+    SocketAddr,
+    Option<SocketAddr>,
+    SocketAddr,
+) {
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -673,6 +732,7 @@ fn start_process(
             for prefix in [
                 "portal listening on ",
                 "gateway listening on ",
+                "admin listening on ",
                 "hooks listening on ",
             ] {
                 if let Some(rest) = line.strip_prefix(prefix)
@@ -683,14 +743,19 @@ fn start_process(
             }
         }
     });
-    let (mut portal, mut gateway, mut hooks) = (None, None, None);
+    let (mut portal, mut gateway, mut admin, mut hooks) = (None, None, None, None);
     let deadline = Instant::now() + Duration::from_secs(30);
-    while portal.is_none() || gateway.is_none() || hooks.is_none() {
+    while portal.is_none()
+        || gateway.is_none()
+        || hooks.is_none()
+        || (expect_admin && admin.is_none())
+    {
         let left = deadline.saturating_duration_since(Instant::now());
         match rx.recv_timeout(left) {
             Ok((what, a)) => match what.as_str() {
                 "portal" => portal = Some(a),
                 "gateway" => gateway = Some(a),
+                "admin" => admin = Some(a),
                 _ => hooks = Some(a),
             },
             Err(_) => {
@@ -701,5 +766,127 @@ fn start_process(
             }
         }
     }
-    (child, portal.unwrap(), gateway.unwrap(), hooks.unwrap())
+    (
+        child,
+        portal.unwrap(),
+        gateway.unwrap(),
+        admin,
+        hooks.unwrap(),
+    )
+}
+
+impl Hooks {
+    /// Insert `n` users (ids `u_blk…`).
+    pub fn bulk_users(&self, n: u64) {
+        self.call("POST", "/bulk/users", Some(json!({"n": n})));
+    }
+
+    /// Insert `n` live sessions for `user_id`.
+    pub fn bulk_sessions(&self, user_id: &str, n: u64) {
+        self.call(
+            "POST",
+            "/bulk/sessions",
+            Some(json!({"user_id": user_id, "n": n})),
+        );
+    }
+
+    /// Insert `n` events spread over the last `hours` hours.
+    pub fn bulk_events(&self, n: u64, hours: f64) {
+        self.call(
+            "POST",
+            "/bulk/events",
+            Some(json!({"n": n, "hours": hours})),
+        );
+    }
+
+    /// A session whose `auth_time_source` is `hopae_completion`; with `host`
+    /// also a handle for that host, whose cookie value is returned.
+    pub fn legacy_session(&self, user_id: &str, host: Option<&str>) -> (String, Option<String>) {
+        let r = self
+            .call(
+                "POST",
+                "/sessions/legacy",
+                Some(json!({"user_id": user_id, "host": host})),
+            )
+            .json();
+        (
+            r["session_id"].as_str().expect("session_id").to_string(),
+            r["handle"].as_str().map(str::to_string),
+        )
+    }
+
+    /// `admin_grants`, tombstones included.
+    pub fn grants(&self) -> Vec<Value> {
+        self.call("GET", "/grants", None).json()["grants"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Slow every interruptible scan and every loop statement down by `ms`.
+    pub fn slow_scan(&self, ms: u64) {
+        self.call("POST", "/store/slow_scan", Some(json!({"ms": ms})));
+    }
+
+    pub fn slow_scan_off(&self) {
+        self.call("POST", "/store/slow_scan", Some(json!({"off": true})));
+    }
+
+    /// A second connection holds the write lock for `ms` milliseconds.
+    pub fn hold_write_lock(&self, ms: u64) {
+        self.call("POST", "/store/hold_write_lock", Some(json!({"ms": ms})));
+    }
+
+    /// The deadline the last store job observed.
+    pub fn last_deadline(&self) -> Value {
+        self.call("GET", "/store/last_deadline", None).json()
+    }
+
+    /// The plan (and, with `stats`, the work) of a listing's window statement;
+    /// `query` is `users`, `sessions` or `events`, with extra `&k=v` parameters
+    /// such as `&index=user` or `&cursor=<key>:<id>` appended.
+    pub fn explain(&self, query: &str, stats: bool) -> Value {
+        let stats = if stats { "&stats=1" } else { "" };
+        self.call("GET", &format!("/explain?query={query}{stats}"), None)
+            .json()
+    }
+}
+
+impl Hopae {
+    /// VM steps the window statement of `query` takes (see [`Hooks::explain`]).
+    pub fn vm_steps(&self, query: &str) -> u64 {
+        self.hooks.explain(query, true)["vm_step"]
+            .as_u64()
+            .expect("vm_step")
+    }
+
+    /// Run the `hopae` binary as a command-line administrator against this
+    /// instance's configuration and state (`--config` is appended). The
+    /// process gets the instance's environment, without the test-hooks address.
+    pub fn cli(&self, args: &[&str]) -> super::admin::CliOutput {
+        let mut cmd = Command::new(hopae_bin());
+        cmd.args(args)
+            .arg("--config")
+            .arg(&self.config_path)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .envs(
+                self.env
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "HOPAE_TEST_HOOKS"),
+            )
+            .stdin(Stdio::null());
+        let out = cmd.output().expect("run hopae");
+        super::admin::CliOutput {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    }
+
+    /// A client for the admin listener, as the gateway would present a request
+    /// for the console host.
+    pub fn admin_client(&self) -> super::admin::AdminClient<'_> {
+        super::admin::AdminClient::new(self)
+    }
 }

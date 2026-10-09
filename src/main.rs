@@ -207,12 +207,18 @@ fn serve(cfg: Config) -> ExitCode {
                 eprintln!("error: {e}");
                 return ExitCode::from(EXIT_CONFIG);
             }
-            // A development database from a pre-release schema is refused
-            // like an unsafe configuration: exit status 2.
+            // A database the pre-check refuses (a pre-release schema, a missing
+            // structure, a newer or older version) is refused like an unsafe
+            // configuration: exit status 2.
             if e.chain().any(|c| {
                 matches!(
                     c.downcast_ref::<hopae::store::StoreError>(),
-                    Some(hopae::store::StoreError::DevelopmentSchema)
+                    Some(
+                        hopae::store::StoreError::DevelopmentSchema
+                            | hopae::store::StoreError::Corrupt(_)
+                            | hopae::store::StoreError::SchemaTooNew { .. }
+                            | hopae::store::StoreError::SchemaTooOld { .. }
+                    )
                 )
             }) {
                 eprintln!("error: {e:#}");
@@ -231,6 +237,9 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     // Stable, machine-readable lines so supervisors and tests can find the ports.
     println!("portal listening on {}", bound.portal_addr());
     println!("gateway listening on {}", bound.gateway_addr());
+    if let Some(a) = bound.admin_addr() {
+        println!("admin listening on {a}");
+    }
     if let Some(h) = bound.hooks_addr() {
         println!("hooks listening on {h}");
     }
