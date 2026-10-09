@@ -114,7 +114,9 @@ pub fn build(token: &Value, userinfo: Option<&Value>, rules: &Rules<'_>) -> Prov
         username: pick("preferred_username"),
         picture,
         raw_claims: Value::Object(raw),
-        auth_time: token.get("auth_time").filter(|v| !v.is_null()).cloned(),
+        // A present `null` is a present, invalid claim (ADR-0016 decision 15):
+        // it is carried so the validator rejects it, never read as absent.
+        auth_time: token.get("auth_time").cloned(),
     }
 }
 
@@ -219,7 +221,8 @@ mod tests {
                 &rules(&[], false)
             )
             .auth_time,
-            None
+            Some(Value::Null),
+            "a present null stays present, so the validator rejects it"
         );
     }
 

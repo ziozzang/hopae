@@ -202,14 +202,7 @@ fn capability(row: &ProviderRow, st: &AdminState) -> ReauthCapability {
         .get("reauth")
         .and_then(Value::as_str)
         .and_then(ReauthCapability::parse)
-        .or_else(|| {
-            st.snapshot
-                .load()
-                .providers
-                .iter()
-                .find(|p| p.provider_id == row.provider_id)
-                .map(|p| p.reauth)
-        })
+        .or_else(|| Some(st.snapshot.load().reauth_capability(&row.provider_id)))
         .unwrap_or(ReauthCapability::MaxAge)
 }
 

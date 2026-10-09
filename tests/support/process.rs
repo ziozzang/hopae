@@ -863,6 +863,27 @@ impl Hopae {
     /// Run the `hopae` binary as a command-line administrator against this
     /// instance's configuration and state (`--config` is appended). The
     /// process gets the instance's environment, without the test-hooks address.
+    /// As [`Hopae::cli`], but the process is started with both streams piped
+    /// and returned running, so a test can observe what it prints before it
+    /// finishes.
+    pub fn cli_spawn(&self, args: &[&str]) -> std::process::Child {
+        let mut cmd = Command::new(hopae_bin());
+        cmd.args(args)
+            .arg("--config")
+            .arg(&self.config_path)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .envs(
+                self.env
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "HOPAE_TEST_HOOKS"),
+            )
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        cmd.spawn().expect("spawn hopae")
+    }
+
     pub fn cli(&self, args: &[&str]) -> super::admin::CliOutput {
         let mut cmd = Command::new(hopae_bin());
         cmd.args(args)

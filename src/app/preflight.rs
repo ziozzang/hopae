@@ -83,7 +83,7 @@ pub fn report(cfg: &Config) -> String {
 /// at start.
 pub fn report_with(cfg: &Config, stored: &[crate::store::types::ProviderRow]) -> String {
     let mut snap = cfg.snapshot(0);
-    crate::provider::apply_stored_reauth(&mut snap.providers, stored);
+    crate::provider::apply_stored_reauth(&mut snap, stored);
     let mut out = String::new();
     let _ = writeln!(
         out,

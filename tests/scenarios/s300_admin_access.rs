@@ -569,6 +569,8 @@ fn s300_2_granted_user_served_from_handle_not_headers() {
 #[test]
 fn s300_3_user_without_grant_is_refused_and_named() {
     let (_idp, h, u) = setup();
+    let not_admin = "hopae_admin_denied_total{reason=\"not_admin\"}";
+    let n0 = metric(&h, not_admin);
     let page = admin(&h).with_handle(&u.n.handle).get("/users");
     let api = admin(&h).with_handle(&u.n.handle).get("/v1/users");
     assert_eq!(page.status, 403, "{page:?}");
@@ -581,6 +583,11 @@ fn s300_3_user_without_grant_is_refused_and_named() {
         page.body
     );
     assert_eq!(api.json(), json!({"error": "not_admin"}));
+    assert_eq!(
+        metric(&h, not_admin),
+        n0 + 2,
+        "each not_admin refusal is counted once"
+    );
     assert!(page.set_cookies().is_empty() && api.set_cookies().is_empty());
     assert_pinned_headers(&page);
     assert_pinned_headers(&api);
@@ -609,6 +616,8 @@ fn s300_3_user_without_grant_is_refused_and_named() {
 #[test]
 fn s300_4_read_only_administrator_reads_but_cannot_change() {
     let (_idp, h, u) = setup();
+    let role = "hopae_admin_denied_total{reason=\"role_insufficient\"}";
+    let r0 = metric(&h, role);
     for path in ["/v1/users", "/v1/sessions", "/v1/events", "/v1/status"] {
         let a = admin(&h).with_handle(&u.a.handle).get(path);
         let v = admin(&h).with_handle(&u.v.handle).get(path);
@@ -623,6 +632,11 @@ fn s300_4_read_only_administrator_reads_but_cannot_change() {
         .post_json(&format!("/v1/users/{}/disable", u.n.user_id), json!({}));
     assert_eq!(r.status, 403, "{r:?}");
     assert_eq!(r.json(), json!({"error": "role_insufficient"}));
+    assert_eq!(
+        metric(&h, role),
+        r0 + 1,
+        "role_insufficient is counted once"
+    );
     assert_eq!(user_status(&h, &u.n.user_id), "active");
     let denied = events_with_reason(&h, "admin.denied", "role_insufficient");
     assert_eq!(denied.len(), 1, "{denied:?}");
@@ -1361,6 +1375,8 @@ fn s300_a3_change_between_check_and_write_wins() {
     assert_eq!(r.status, 200, "{r:?}");
     // Variant 1: the grant is revoked after the request check and before the
     // write (the commit gate `admin_mutation` holds the transaction).
+    let revoked_series = "hopae_admin_denied_total{reason=\"actor_revoked\"}";
+    let a0 = metric(&h, revoked_series);
     h.hooks.hold("admin_mutation");
     let path = format!("/v1/users/{}/disable", u.n.user_id);
     let handle = u.a.handle.clone();
@@ -1384,6 +1400,11 @@ fn s300_a3_change_between_check_and_write_wins() {
     let r = worker.join().unwrap();
     assert_eq!(r.status, 403, "{r:?}");
     assert_eq!(r.json()["error"], "actor_revoked");
+    assert_eq!(
+        metric(&h, revoked_series),
+        a0 + 1,
+        "counted once, centrally"
+    );
     assert_eq!(user_status(&h, &u.n.user_id), "active");
     assert!(h.hooks.events(Some("admin.user_disable"), None).len() <= 1);
     assert_eq!(
@@ -2448,9 +2469,29 @@ mod reauth {
         assert_eq!(b.verify(&h).status, 200, "N - 1 s is fresh");
         assert_eq!(listener(&h).status, 200, "N - 1 s is fresh on the listener");
         at(&h, auth0 + N);
+        let counted = |h: &Hopae, series: &str| -> i64 {
+            h.hooks.counters()["metrics"][series].as_i64().unwrap_or(0)
+        };
+        let too_old = "hopae_admin_denied_total{reason=\"auth_too_old\"}";
+        let reauth_decisions =
+            "hopae_verify_decisions_total{decision=\"login\",reason=\"reauth_required\"}";
+        let login_decisions =
+            "hopae_verify_decisions_total{decision=\"login\",reason=\"login_required\"}";
+        let (t0, r0, l0) = (
+            counted(&h, too_old),
+            counted(&h, reauth_decisions),
+            counted(&h, login_decisions),
+        );
         let r = listener(&h);
         assert_eq!(r.status, 403, "{r:?}");
         assert_eq!(r.json()["error"], "auth_too_old", "{r:?}");
+        assert_eq!(counted(&h, too_old), t0 + 1, "auth_too_old is counted once");
+        assert_eq!(
+            counted(&h, reauth_decisions),
+            r0 + 1,
+            "the engine's Reauth is labelled reauth_required"
+        );
+        assert_eq!(counted(&h, login_decisions), l0, "and not login_required");
         let denied = events(&h, "admin.denied");
         assert_eq!(denied.last().unwrap()["reason"], "auth_too_old");
         let _ = expect_reauth(&h, &b); // equality is not fresh
@@ -2810,6 +2851,7 @@ mod reauth {
                 Some(json!(now_s(&h) + 120)),
                 Some(json!("1700000000")),
                 Some(json!(-5)),
+                Some(Value::Null),
             ] {
                 idp.set_auth_time(bad.clone());
                 let first = h.verify(
@@ -2829,7 +2871,7 @@ mod reauth {
                 .iter()
                 .filter(|r| *r == "invalid_auth_time")
                 .count();
-            assert_eq!(n, 3);
+            assert_eq!(n, 4, "a present null is invalid too");
         }
 
         // (6) a legacy session (created before migration 0003) is challenged at
@@ -2864,7 +2906,8 @@ mod reauth {
             let (idp, h) = spawn_unsupported("auth_time_missing", long_handles());
             let b = sign_in(&h, &idp, &console_url());
             assert_eq!(b.verify(&h).status, 200);
-            let user = session(&h).user_id;
+            let sb = session(&h);
+            let user = sb.user_id.clone();
             let (_sid, handle) = h.hooks.legacy_session(&user, Some(CONSOLE));
             let r = h.verify(
                 VerifyRequest::document(&console_url())
@@ -2883,6 +2926,55 @@ mod reauth {
             let authorize = to_provider(&c, &txn_of(&first), "mock");
             let cb = c.get(&idp.follow_authorization(&authorize));
             assert_eq!(cb.status, 400, "{cb:?}");
+            // A present null is an invalid claim for this capability too, on an
+            // ordinary login and on a reauthentication.
+            let before = failed_reasons(&h)
+                .iter()
+                .filter(|r| *r == "invalid_auth_time")
+                .count();
+            idp.set_auth_time(Some(Value::Null));
+            let first = h.verify(
+                VerifyRequest::document(&format!("https://{APP}/x"))
+                    .ip("203.0.113.51")
+                    .header("sec-fetch-site", "same-origin"),
+            );
+            let c = h.portal_with(Jar::new()).with_ip("203.0.113.51");
+            let authorize = to_provider(&c, &txn_of(&first), "mock");
+            let cb = c.get(&idp.follow_authorization(&authorize));
+            assert_eq!(cb.status, 400, "null, ordinary login: {cb:?}");
+            at(&h, sb.auth_time + N + 1);
+            let txn = expect_reauth(&h, &b);
+            let cb = round_trip(&h, &idp, &b, &txn);
+            assert_eq!(cb.status, 400, "null, reauthentication: {cb:?}");
+            let after = failed_reasons(&h)
+                .iter()
+                .filter(|r| *r == "invalid_auth_time")
+                .count();
+            assert_eq!(after, before + 2, "{:?}", failed_reasons(&h));
+            let kept: i64 = db(&h)
+                .query_row(
+                    "SELECT auth_time FROM sessions WHERE session_id = ?1",
+                    [&sb.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(kept, sb.auth_time, "nothing changed");
+        }
+
+        // A max_age provider: a null on a reauthentication fails, nothing changes.
+        {
+            let (idp, h) = spawn("m4-admin", "auth_time_present", long_handles());
+            let b = sign_in(&h, &idp, &console_url());
+            let s0 = session(&h);
+            at(&h, s0.auth_time + N + 1);
+            let txn = expect_reauth(&h, &b);
+            idp.set_auth_time(Some(Value::Null));
+            let cb = round_trip(&h, &idp, &b, &txn);
+            assert_eq!(cb.status, 400, "{cb:?}");
+            assert!(failed_reasons(&h).contains(&"invalid_auth_time".to_string()));
+            let s1 = session(&h);
+            assert_eq!((s1.auth_time, s1.cred_gen), (s0.auth_time, s0.cred_gen));
+            let _ = expect_reauth(&h, &b);
         }
     }
 
@@ -2957,6 +3049,122 @@ mod reauth {
         b = run(&h, &idp, b, n, -(19 * 60 + 59), true);
         b = run(&h, &idp, b, n, -(20 * 60), false);
         drop(b);
+    }
+
+    /// The `m4-admin` standing with the provider kept only in the database:
+    /// its row is api-managed and carries `patch`, and the file no longer
+    /// lists it (a decoy stands in, since a configuration needs a provider).
+    /// The instance restarts so the snapshot is built from that state.
+    pub fn spawn_retained(profile: &str, patch: Value) -> (MockIdp, Hopae) {
+        let (idp, mut h) = spawn("m4-admin", profile, long_handles());
+        h.kill();
+        {
+            let n = db(&h)
+                .execute(
+                    "UPDATE providers SET managed_by = 'api', config = json_patch(config, ?1) WHERE provider_id = 'mock'",
+                    [patch.to_string()],
+                )
+                .expect("seed the api-managed row");
+            assert_eq!(n, 1);
+        }
+        let mut cfg: Value =
+            serde_json::from_str(&std::fs::read_to_string(h.config_path()).expect("config"))
+                .expect("config json");
+        cfg["providers"][0]["provider_id"] = json!("decoy");
+        std::fs::write(h.config_path(), cfg.to_string()).expect("rewrite config");
+        h.restart();
+        h.set_clock_ms(h.hooks.now_ms());
+        (idp, h)
+    }
+
+    #[test]
+    fn s300_6_reauthentication_audits_every_handle_it_revokes() {
+        // A session with two live handles (the console's and the portal's)
+        // and 100 newer, already revoked ones: the 100-row summary the old
+        // audit was built from shows none of the live ones.
+        let (idp, h) = spawn("m4-admin", "auth_time_present", long_handles());
+        let b = sign_in(&h, &idp, &console_url());
+        let s0 = session(&h);
+        db(&h)
+            .execute(
+                "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100)
+                 INSERT INTO session_handles (handle_sha256, session_id, host, issued_aal, created_at, last_seen_at, absolute_expires_at, revoked_at, revoked_reason)
+                 SELECT randomblob(32), ?1, 'old.example.test', 1, ?2 + i, ?2 + i, ?2 + 86400, ?2 + i, 'logout' FROM n",
+                rusqlite::params![s0.id, now_s(&h) + 1],
+            )
+            .expect("revoked handles");
+        at(&h, s0.auth_time + N + 1);
+        let txn = expect_reauth(&h, &b);
+        let cb = round_trip(&h, &idp, &b, &txn);
+        assert_eq!(cb.status, 302, "{cb:?}");
+        assert_eq!(
+            count(
+                &h,
+                "SELECT count(*) FROM session_handles WHERE revoked_reason = 'reauth'"
+            ),
+            2,
+            "both live handles are revoked"
+        );
+        let revoked: Vec<_> = events(&h, "handle.revoked")
+            .into_iter()
+            .filter(|e| e["reason"] == "reauth")
+            .collect();
+        assert_eq!(
+            revoked.len(),
+            2,
+            "one audit event per handle actually revoked: {revoked:?}"
+        );
+        let mut hosts: Vec<_> = revoked
+            .iter()
+            .map(|e| e["attrs"]["host"].as_str().unwrap_or("").to_string())
+            .collect();
+        hosts.sort();
+        let mut expect = [CONSOLE.to_string(), PORTAL.to_string()];
+        expect.sort();
+        assert_eq!(hosts, expect);
+    }
+
+    #[test]
+    fn s300_16_a_retained_database_provider_keeps_its_stored_capability() {
+        // The file no longer lists `mock`; its stored row says `unsupported`.
+        // Verify, callback, the listener's fence and the status page must all
+        // read the stored capability, not the `max_age` default.
+        let (idp, h) = spawn_retained("auth_time_missing", json!({"reauth": "unsupported"}));
+        let b = sign_in(&h, &idp, &console_url());
+        let s0 = session(&h);
+        assert_eq!(s0.provider, "mock");
+        assert_eq!(s0.source, "hopae_completion", "the mock sent no claim");
+        // Verify: login age is all an unsupported provider has.
+        assert_eq!(
+            b.verify(&h).status,
+            200,
+            "console entry on login age: {:?}",
+            b.verify(&h)
+        );
+        // Callback: a stale session reauthenticates without a claim.
+        at(&h, s0.auth_time + N + 1);
+        let txn = expect_reauth(&h, &b);
+        let cb = round_trip(&h, &idp, &b, &txn);
+        assert_eq!(cb.status, 302, "{cb:?}");
+        let b = redeem(&h, b, cb.location().unwrap());
+        assert!(!failed_reasons(&h).contains(&"reauth_auth_time_missing".to_string()));
+        assert_eq!(session(&h).source, "hopae_completion");
+        // Fence: a granted administrator is served by the listener.
+        super::kit::grant(&h, &s0.user_id, "admin");
+        idp.set_user("sub-n", "n@example.test", true, "N");
+        idp.set_subject("sub-n");
+        let _other = sign_in(&h, &idp, &format!("https://{APP}/x"));
+        idp.set_subject("sub-1");
+        let target = session(&h).user_id;
+        assert_ne!(target, s0.user_id);
+        let r = super::kit::admin(&h)
+            .client_ip(IP)
+            .with_handle(&b.handle)
+            .post_json(&format!("/v1/users/{target}/disable"), json!({}));
+        assert_eq!(
+            r.status, 200,
+            "the fence does not refuse a retained unsupported provider: {r:?}"
+        );
     }
 }
 

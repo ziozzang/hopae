@@ -276,6 +276,90 @@ fn s305_1_bootstrap_first_grant_by_user_id_prints_resolution() {
 }
 
 #[test]
+fn s305_1_the_resolution_block_is_printed_before_the_grant_is_written() {
+    // The write lock is held by another connection, so the grant cannot
+    // commit; the evidence the operator decides on must already be on stdout.
+    let r = Rig::new();
+    r.standard_users();
+    let lock = r.db();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut child = r.h.cli_spawn(&["admin", "grant", "u_a"]);
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut seen: Vec<String> = Vec::new();
+    let until = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < until && !seen.iter().any(|l| l.starts_with("identities ")) {
+        if let Ok(l) = rx.recv_timeout(Duration::from_millis(100)) {
+            seen.push(l);
+        }
+    }
+    let still_waiting = child.try_wait().unwrap().is_none();
+    lock.execute_batch("ROLLBACK").unwrap();
+    assert!(
+        still_waiting,
+        "the grant write should be waiting for the lock: {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|l| l.starts_with("user_id u_a"))
+            && seen.iter().any(|l| l.starts_with("identities mock:sub-1")),
+        "the resolution block was not printed before the write: {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|l| l.starts_with("granted")),
+        "nothing was granted yet: {seen:?}"
+    );
+    let status = child.wait().unwrap();
+    assert!(status.success(), "{status:?}");
+    seen.extend(rx.iter());
+    assert_eq!(
+        seen.last().map(String::as_str),
+        Some("granted admin to u_a"),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn s305_1_the_resolution_block_lists_every_identity() {
+    // The console preview stops at 50 identities; the operator's evidence
+    // does not.
+    let r = Rig::new();
+    r.standard_users();
+    let subjects: Vec<String> = (0..51).map(|i| format!("s{i:03}")).collect();
+    let ids: Vec<(&str, &str)> = subjects.iter().map(|s| ("mock", s.as_str())).collect();
+    r.user(
+        "u_many",
+        Some("many@example.test"),
+        true,
+        true,
+        "active",
+        "Many M",
+        &ids,
+        1_700_000_000,
+    );
+    let o = r.ok(&["admin", "grant", "u_many"]);
+    let line = o
+        .stdout
+        .lines()
+        .find(|l| l.starts_with("identities "))
+        .unwrap_or_else(|| panic!("{}", o.all()));
+    assert_eq!(line.matches("mock:s").count(), 51, "{line}");
+    assert!(
+        line.contains("mock:s000") && line.contains("mock:s050"),
+        "{line}"
+    );
+    // The listing endpoint's own preview stays bounded at 50.
+    let granted = r.grant("u_many").expect("granted");
+    assert_eq!(granted["role"], "admin");
+}
+
+#[test]
 fn s305_2_grant_by_email_resolves_once_and_needs_confirm_unless_authoritative() {
     let r = Rig::new();
     r.standard_users();
@@ -339,11 +423,50 @@ fn s305_2_grant_by_email_resolves_once_and_needs_confirm_unless_authoritative() 
             [],
         )
         .unwrap();
-    // (g) the address is normalized (ADR-0011): the same user, a no-op.
+    // (g) only the domain is case-normalized (ADR-0011): the same user, a no-op.
     let n = r.admin_events();
-    let o = r.ok(&["admin", "grant", "V@Example.test", "--confirm", "u_v"]);
+    let o = r.ok(&["admin", "grant", "v@Example.TEST", "--confirm", "u_v"]);
     assert!(o.stdout.contains("unchanged"), "{}", o.all());
     assert_eq!(r.admin_events(), n);
+    // The local part is compared exactly: a different case is a different
+    // address, never guessed to be the stored one.
+    r.refused(
+        &["admin", "grant", "V@example.test", "--confirm", "u_v"],
+        "no such user: sign in once first",
+    );
+    assert_eq!(r.admin_events(), n);
+}
+
+#[test]
+fn s305_2_grant_never_guesses_across_local_part_case() {
+    // An authoritative `ops@example.test` exists; `Ops@example.test` is a
+    // different, unknown address. Granting it must not reach the other user.
+    let r = Rig::new();
+    r.standard_users();
+    r.user(
+        "u_ops",
+        Some("ops@example.test"),
+        true,
+        true,
+        "active",
+        "Olga Ops",
+        &[("mock", "sub-ops")],
+        1_700_000_000,
+    );
+    let before = (r.grants().len(), r.admin_events());
+    let o = r.refused(
+        &["admin", "grant", "Ops@example.test"],
+        "no such user: sign in once first",
+    );
+    assert!(!o.stdout.contains("u_ops"), "{}", o.all());
+    assert!(r.grant("u_ops").is_none());
+    assert_eq!((r.grants().len(), r.admin_events()), before);
+    // The exact address still resolves.
+    r.ok(&["admin", "grant", "ops@Example.test"]);
+    assert_eq!(
+        r.grant("u_ops").unwrap()["source_email"],
+        "ops@example.test"
+    );
 }
 
 #[test]
@@ -1035,17 +1158,20 @@ fn s305_a3_grant_and_revoke_racing_each_other_and_console() {
         (t1.join().unwrap(), t2.join().unwrap())
     });
     assert_eq!((a.status, b.status), (0, 0), "{} {}", a.all(), b.all());
-    // The final row equals the last committed command; events follow commit order.
+    // The final row equals the last committed command. Commit order is the
+    // order the event rows were inserted (the writes are serialized); an
+    // event's own `at` is stamped before the command waits for the lock, so it
+    // can disagree with the commit order under this very race.
     let mut ev: Vec<Value> = r.events("admin.grant");
     ev.extend(r.events("admin.revoke"));
-    ev.sort_by(|x, y| {
-        x["at"]
-            .as_f64()
-            .partial_cmp(&y["at"].as_f64())
-            .unwrap()
-            .then(x["event_id"].as_str().cmp(&y["event_id"].as_str()))
-    });
-    let last = ev.last().unwrap()["kind"].as_str().unwrap().to_string();
+    let last: String = r
+        .db()
+        .query_row(
+            "SELECT kind FROM events WHERE kind IN ('admin.grant', 'admin.revoke') ORDER BY rowid DESC LIMIT 1",
+            [],
+            |x| x.get(0),
+        )
+        .unwrap();
     let g = r.grant("u_a").unwrap();
     assert_eq!(
         g["revoked_at"].is_null(),
@@ -1193,6 +1319,131 @@ fn s305_a4_email_grant_not_hijacked_by_claim_stale_account_reassigned_mailbox_or
         "ambiguous binding; use --force <user_id>",
     );
     assert_eq!((r.grants(), r.admin_events()), before);
+}
+
+#[test]
+fn s305_a4_regrant_by_a_new_address_never_replaces_the_binding() {
+    let r = Rig::new();
+    r.standard_users();
+    let t = 1_700_000_000;
+    // The file binds `h@example.test` to u_h.
+    r.set_users(json!([{"email": "h@example.test", "role": "admin"}]));
+    r.ok(&["admin", "import"]);
+    assert_eq!(r.grant("u_h").unwrap()["source_email"], "h@example.test");
+    // The mailbox moves: u_h's primary address changes, another user holds
+    // the old one.
+    r.db()
+        .execute(
+            "UPDATE users SET primary_email = 'h-new@example.test' WHERE user_id = 'u_h'",
+            [],
+        )
+        .unwrap();
+    r.user(
+        "u_h2",
+        Some("h@example.test"),
+        true,
+        true,
+        "active",
+        "Hana Two",
+        &[("mock", "sub-h2")],
+        t,
+    );
+    // A grant by the new address would resolve to u_h and replace the binding.
+    let before = (r.grants(), r.admin_events());
+    let o = r.refused(
+        &["admin", "grant", "h-new@example.test", "--role", "viewer"],
+        "already bound to h@example.test",
+    );
+    assert!(o.stdout.contains("user_id u_h"), "{}", o.all());
+    assert_eq!((r.grants(), r.admin_events()), before, "nothing written");
+    let g = r.grant("u_h").unwrap();
+    assert_eq!(g["source_email"], "h@example.test", "{g}");
+    assert_eq!(g["role"], "admin", "{g}");
+    // The unchanged file still does not reach the new holder of the address.
+    let o = r.ok(&["admin", "import"]);
+    assert!(r.grant("u_h2").is_none(), "{}", o.all());
+    assert_eq!(r.grant("u_h").unwrap()["source_email"], "h@example.test");
+    // A grant by user id remains the way to change the role; the binding stays.
+    r.ok(&["admin", "grant", "u_h", "--role", "viewer"]);
+    let g = r.grant("u_h").unwrap();
+    assert_eq!(
+        (g["role"].as_str(), g["source_email"].as_str()),
+        (Some("viewer"), Some("h@example.test")),
+        "{g}"
+    );
+    let o = r.ok(&["admin", "import"]);
+    assert!(r.grant("u_h2").is_none(), "{}", o.all());
+}
+
+#[test]
+fn s305_a4_force_by_user_id_works_inside_an_ambiguous_binding_set() {
+    let r = Rig::new();
+    r.standard_users();
+    let t = 1_700_000_000;
+    r.set_users(json!([{"email": "h@example.test", "role": "admin"}]));
+    r.ok(&["admin", "import"]);
+    r.db()
+        .execute(
+            "UPDATE users SET primary_email = 'h-old@example.test' WHERE user_id = 'u_h'",
+            [],
+        )
+        .unwrap();
+    r.user(
+        "u_h2",
+        Some("h@example.test"),
+        true,
+        true,
+        "active",
+        "Hana Two",
+        &[("mock", "sub-h2")],
+        t,
+    );
+    r.ok(&["admin", "grant", "h@example.test", "--role", "viewer"]);
+    assert_eq!(r.grant("u_h2").unwrap()["source_email"], "h@example.test");
+    // The runtime changed u_h to `viewer`; the file says `admin`.
+    r.ok(&["admin", "grant", "u_h", "--role", "viewer"]);
+    // Two rows are bound through the address: ambiguous, skipped.
+    let o = r.ok(&["admin", "import"]);
+    assert!(
+        o.stdout
+            .contains("skipped (email_binding_ambiguous): h@example.test \u{2192} u_h, u_h2"),
+        "{}",
+        o.all()
+    );
+    let u_h2_before = r.grant("u_h2").unwrap();
+    let events_before = r.admin_events();
+    // `--force <user_id>` names the row inside the set: the entry is applied
+    // to it, and the other binding is preserved untouched.
+    let o = r.ok(&["admin", "import", "--force", "u_h"]);
+    assert!(o.stdout.contains("forced: u_h"), "{}", o.all());
+    let g = r.grant("u_h").unwrap();
+    assert_eq!(g["role"], "admin", "the file entry is reasserted: {g}");
+    assert_eq!(g["managed_by"], "file", "{g}");
+    assert_eq!(g["source_email"], "h@example.test", "{g}");
+    assert!(g["revoked_at"].is_null(), "{g}");
+    assert_eq!(
+        r.grant("u_h2").unwrap(),
+        u_h2_before,
+        "the other row is untouched"
+    );
+    assert_eq!(
+        r.admin_events(),
+        events_before + 1,
+        "one forced grant event"
+    );
+    let ev = r.events("admin.grant");
+    let last = ev.last().unwrap();
+    assert_eq!(last["user_id"], "u_h");
+    assert_eq!(last["attrs"]["forced"], true, "{last}");
+    // A user id outside the set is still refused.
+    let o = r.cli(&["admin", "import", "--force", "u_a"]);
+    assert_eq!(o.status, 2, "{}", o.all());
+    assert!(
+        o.stderr
+            .contains("force names an entry the file does not list"),
+        "{}",
+        o.all()
+    );
 }
 
 #[test]

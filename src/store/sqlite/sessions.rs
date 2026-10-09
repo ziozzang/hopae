@@ -198,6 +198,36 @@ impl Sessions for Store {
         .await
     }
 
+    async fn lookup_handle_within(
+        &self,
+        handle_sha256: &Digest,
+        host: &Host,
+        deadline: Deadline,
+    ) -> StoreResult<Option<HandleView>> {
+        let (d, host) = (*handle_sha256, host.to_string());
+        self.read_checked("lookup_handle", Some(deadline), move |c, _| {
+            let sql = format!(
+                "SELECT {}, {}, u.status, u.authz_version, u.groups FROM session_handles h JOIN sessions s ON s.session_id = h.session_id JOIN users u ON u.user_id = s.user_id WHERE h.handle_sha256=?1 AND h.host=?2",
+                cols("h", HANDLE_COLS),
+                cols("s", SESSION_COLS),
+            );
+            let hn = HANDLE_COLS.len();
+            let sn = SESSION_COLS.len();
+            c.query_row(&sql, params![blob(&d), host], |r| {
+                Ok((|| {
+                    Ok(HandleView {
+                        handle: rows::handle(r, 0)?,
+                        session: rows::session(r, hn)?,
+                        user: rows::user_authz(r, hn + sn)?,
+                    })
+                })())
+            })
+            .optional()?
+            .transpose()
+        })
+        .await
+    }
+
     async fn touch_handle(&self, handle_sha256: &Digest, at: Timestamp) -> StoreResult<()> {
         let d = *handle_sha256;
         self.write("touch_handle", move |env| {
@@ -402,8 +432,10 @@ impl Sessions for Store {
         consume_txn: (Digest, Reason),
         deadline: Deadline,
         events: Vec<Event>,
+        mk_revoked_event: &(dyn for<'a> Fn(&'a HandleRow) -> Event + Sync),
     ) -> StoreResult<()> {
-        self.reauthenticate_session_impl(
+        let (ask, responder) = super::admin::asker();
+        let job = self.reauthenticate_session_impl(
             id,
             provider,
             auth_time,
@@ -413,8 +445,11 @@ impl Sessions for Store {
             consume_txn,
             deadline,
             events,
-        )
-        .await
+            ask,
+        );
+        responder
+            .drive(job, &|row: HandleRow| mk_revoked_event(&row))
+            .await
     }
 
     async fn refresh_snapshot(

@@ -88,14 +88,28 @@ impl Registry {
 /// Make a snapshot's provider capabilities agree with the stored rows: a
 /// stored `reauth` / `reauth_prompt` setting (an api-managed row's override)
 /// beats the file's preset default (ADR-0016 decision 15). A provider with no
-/// row keeps what the configuration resolved.
+/// row keeps what the configuration resolved; a retained database provider
+/// the file no longer lists gets its stored capability recorded in
+/// `retained_reauth`, so [`ConfigSnapshot::reauth_capability`] answers for it.
 pub fn apply_stored_reauth(
-    providers: &mut [crate::policy::types::ProviderConfig],
+    snapshot: &mut crate::policy::types::ConfigSnapshot,
     rows: &[ProviderRow],
 ) {
-    for p in providers {
+    for p in &mut snapshot.providers {
         if let Some(row) = rows.iter().find(|r| r.provider_id == p.provider_id) {
             (p.reauth, p.reauth_prompt) = crate::provider::oidc::reauth_settings(row);
+        }
+    }
+    for row in rows {
+        if !snapshot
+            .providers
+            .iter()
+            .any(|p| p.provider_id == row.provider_id)
+        {
+            snapshot.retained_reauth.insert(
+                row.provider_id.clone(),
+                crate::provider::oidc::reauth_settings(row).0,
+            );
         }
     }
 }
@@ -199,14 +213,37 @@ mod tests {
         };
         let mut api = row("a", 0);
         api.config = serde_json::json!({"client_id": "c", "issuer": "https://i.example.test", "reauth": "unsupported", "reauth_prompt": "none"});
-        let mut providers = vec![cfg("a"), cfg("b"), cfg("rowless")];
-        apply_stored_reauth(&mut providers, &[api, row("b", 1)]);
+        let mut kept = row("kept", 2);
+        kept.config = serde_json::json!({"client_id": "c", "issuer": "https://i.example.test", "reauth": "unsupported"});
+        let mut snap = crate::policy::types::ConfigSnapshot {
+            generation: 0,
+            apps: vec![],
+            default_app: crate::policy::types::AppPolicy::default_app(),
+            providers: vec![cfg("a"), cfg("b"), cfg("rowless")],
+            retained_reauth: Default::default(),
+        };
+        apply_stored_reauth(&mut snap, &[api, row("b", 1), kept]);
+        let p = &snap.providers;
         assert_eq!(
-            (providers[0].reauth, providers[0].reauth_prompt),
+            (p[0].reauth, p[0].reauth_prompt),
             (ReauthCapability::Unsupported, ReauthPrompt::None)
         );
-        assert_eq!(providers[1].reauth, ReauthCapability::MaxAge);
-        assert_eq!(providers[2].reauth, ReauthCapability::MaxAge);
+        assert_eq!(p[1].reauth, ReauthCapability::MaxAge);
+        assert_eq!(p[2].reauth, ReauthCapability::MaxAge);
+        // A retained database provider absent from the file keeps its stored
+        // capability; an unknown id gets the default.
+        assert_eq!(
+            snap.reauth_capability(&ProviderId::new("kept")),
+            ReauthCapability::Unsupported
+        );
+        assert_eq!(
+            snap.reauth_capability(&ProviderId::new("a")),
+            ReauthCapability::Unsupported
+        );
+        assert_eq!(
+            snap.reauth_capability(&ProviderId::new("nobody")),
+            ReauthCapability::MaxAge
+        );
     }
 
     #[test]

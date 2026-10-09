@@ -18,7 +18,6 @@ use crate::policy::binding::{self, BindingVerdict};
 use crate::policy::freshness;
 use crate::policy::step_up;
 use crate::policy::types::{AppPolicy, AuthzChange, ConfigSnapshot, OnMismatch};
-use crate::provider::types::ReauthCapability;
 use crate::session::types::Generations;
 use crate::session::types::SessionId;
 use crate::store::types::{
@@ -264,12 +263,7 @@ async fn flow(cx: &Cx<'_>) -> Flow {
             // decision 15): one predicate at every verify.
             if let Some(n) = app.max_auth_age {
                 let session = &authed.view.session;
-                let capability = cx
-                    .snapshot
-                    .providers
-                    .iter()
-                    .find(|p| p.provider_id == session.provider_id)
-                    .map_or(ReauthCapability::MaxAge, |p| p.reauth);
+                let capability = cx.snapshot.reauth_capability(&session.provider_id);
                 if !freshness::console_fresh(session, capability, cx.now, n) {
                     return reauth(cx, app, &target, &authed.view, n).await;
                 }

@@ -35,6 +35,11 @@ const TOO_LARGE: Reason = reasons::HEADER_TOO_LARGE;
 pub fn decision_label(decision: &Decision) -> (&'static str, &'static str) {
     match decision {
         Decision::Allow { .. } => ("allow", "ok"),
+        // A reauthentication is its own decision label, not a missing login.
+        Decision::Login {
+            kind: LoginKind::Reauth,
+            ..
+        } => ("login", "reauth_required"),
         Decision::Login { .. } => ("login", "login_required"),
         Decision::Handoff { .. } => ("handoff", "handoff"),
         Decision::CleanRedirect { .. } => ("clean_redirect", "code_already_redeemed"),

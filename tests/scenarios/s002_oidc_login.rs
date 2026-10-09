@@ -419,6 +419,7 @@ pub(crate) mod kit {
                 apps: vec![app_policy("app", APP), app_policy("other", OTHER)],
                 default_app: AppPolicy::default_app(),
                 providers: vec![],
+                retained_reauth: Default::default(),
             }));
             let mock = FakeProvider::new("mock");
             let mock2 = FakeProvider::new("mock2");

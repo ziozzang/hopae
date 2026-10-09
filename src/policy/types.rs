@@ -233,9 +233,31 @@ pub struct ConfigSnapshot {
     pub apps: Vec<AppPolicy>,
     pub default_app: AppPolicy,
     pub providers: Vec<ProviderConfig>,
+    /// The stored capability of every retained database provider the file no
+    /// longer lists (ADR-0016 decision 15); see [`ConfigSnapshot::reauth_capability`].
+    pub retained_reauth: std::collections::HashMap<
+        crate::provider::types::ProviderId,
+        crate::provider::types::ReauthCapability,
+    >,
 }
 
 impl ConfigSnapshot {
+    /// The one authoritative reauthentication capability of a provider, read
+    /// by verify, callback, the write fence and the status page: the file's
+    /// entry (a stored setting already applied), else the stored capability
+    /// of a retained database provider, else `max_age`.
+    pub fn reauth_capability(
+        &self,
+        id: &crate::provider::types::ProviderId,
+    ) -> crate::provider::types::ReauthCapability {
+        self.providers
+            .iter()
+            .find(|p| &p.provider_id == id)
+            .map(|p| p.reauth)
+            .or_else(|| self.retained_reauth.get(id).copied())
+            .unwrap_or(crate::provider::types::ReauthCapability::MaxAge)
+    }
+
     /// Exact match only (no suffix, no wildcard). A disabled application is
     /// still returned so the caller can answer `app_disabled`.
     pub fn app_for_host(&self, host: &Host) -> Option<&AppPolicy> {
@@ -301,6 +323,7 @@ mod tests {
             ],
             default_app: AppPolicy::default_app(),
             providers: vec![],
+            retained_reauth: Default::default(),
         };
         let h = |s: &str| Host::parse(s).unwrap();
         assert_eq!(
