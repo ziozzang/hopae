@@ -182,6 +182,8 @@ pub enum BindAction {
 pub enum LoginKind {
     Login,
     StepUp,
+    /// The session fails the console freshness predicate (ADR-0016 decision 15).
+    Reauth,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,7 +204,7 @@ pub enum Decision {
     Login {
         transaction: Option<Secret>,
         bind: BindAction,
-        kind: LoginKind, /* Login|StepUp */
+        kind: LoginKind, /* Login|StepUp|Reauth */
         clear_handle: bool,
         /// Why a presented handle was refused (`unknown_handle`, `idle`, ...);
         /// `None` when no handle was presented. The `verify.denied` reason.

@@ -114,6 +114,7 @@ pub fn build(token: &Value, userinfo: Option<&Value>, rules: &Rules<'_>) -> Prov
         username: pick("preferred_username"),
         picture,
         raw_claims: Value::Object(raw),
+        auth_time: token.get("auth_time").filter(|v| !v.is_null()).cloned(),
     }
 }
 
@@ -194,6 +195,32 @@ mod tests {
         // An explicit false is not overridden.
         t["email_verified"] = json!(false);
         assert!(!build(&t, None, &rules(&d, true)).email_verified);
+    }
+
+    #[test]
+    fn auth_time_is_carried_raw_for_the_portal_to_validate() {
+        for raw in [
+            json!(1_700_000_000),
+            json!("1700000000"),
+            json!(-5),
+            json!(1.5),
+        ] {
+            let t = json!({"sub": "s", "auth_time": raw});
+            assert_eq!(build(&t, None, &rules(&[], false)).auth_time, Some(raw));
+        }
+        assert_eq!(
+            build(&json!({"sub": "s"}), None, &rules(&[], false)).auth_time,
+            None
+        );
+        assert_eq!(
+            build(
+                &json!({"sub": "s", "auth_time": null}),
+                None,
+                &rules(&[], false)
+            )
+            .auth_time,
+            None
+        );
     }
 
     #[test]

@@ -358,6 +358,8 @@ fn login(
     let (reason, error, page) = match kind {
         LoginKind::Login => (reasons::LOGIN_REQUIRED, "login_required", "login"),
         LoginKind::StepUp => (reasons::STEP_UP_REQUIRED, "step_up_required", "stepup"),
+        // The portal's `login` page; the reauthentication requirement lives in the transaction.
+        LoginKind::Reauth => (reasons::REAUTH_REQUIRED, "reauth_required", "login"),
     };
     // A non-document request starts nothing: the application URL itself is the
     // document bootstrap that plants the binding cookie.

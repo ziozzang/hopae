@@ -404,6 +404,18 @@ pub(crate) async fn login_get(State(st): State<PortalState>, req: Request) -> Re
                 &[form_origin],
             )
         }
+        LoginVisit::ReauthProviderUnavailable { provider, sign_out } => render_page_status(
+            &rq,
+            StatusCode::SERVICE_UNAVAILABLE,
+            pages::ReauthProviderUnavailable {
+                t: rq.t(),
+                request_id: rq.rid(),
+                provider: &provider,
+                sign_out: &sign_out,
+            },
+            &[],
+            &[],
+        ),
         LoginVisit::Failed(f) => fail_response(&rq, f),
     }
 }

@@ -158,6 +158,12 @@ impl PortalServices for Adapter {
             .await
         {
             Ok(LoginEntry::Sso { location, .. }) => LoginVisit::Redirect(redirect(location)),
+            Ok(LoginEntry::ReauthProviderUnavailable { provider, sign_out }) => {
+                LoginVisit::ReauthProviderUnavailable {
+                    provider,
+                    sign_out: sign_out.to_string(),
+                }
+            }
             Ok(LoginEntry::ConfirmNewHost { host, origin }) => LoginVisit::ConfirmNewHost {
                 host: host.to_string(),
                 form_origin: origin,
@@ -207,7 +213,15 @@ impl PortalServices for Adapter {
             .begin_provider(&Self::sctx(ctx), txn, provider, cookies.bind.as_ref())
             .await
             .map(redirect)
-            .map_err(|e| failure(&e))
+            .map_err(|e| match &e {
+                // A crafted POST for another provider on a reauthentication
+                // transaction is a refused action, not a failed sign-in.
+                SessionError::Refused(r) if *r == reasons::PROVIDER_MISMATCH => Failure {
+                    kind: FailKind::Forbidden,
+                    reason: *r,
+                },
+                _ => failure(&e),
+            })
     }
 
     async fn callback(

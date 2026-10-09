@@ -39,6 +39,10 @@
 "link.body" = "This email address already belongs to an account. Sign in with {provider} to connect it."
 "link.body_generic" = "This email address already belongs to an account. Sign in with the method you used before to connect it."
 
+"reauth.unavailable_title" = "Sign in again"
+"reauth.unavailable_body" = "This action needs a fresh sign-in with {provider}, which is no longer available. Sign out, then sign in again."
+"reauth.sign_out" = "Sign out"
+
 "error.expired.title" = "This sign-in link has expired"
 "error.expired.body" = "Go back to the application and try again."
 "error.failed.title" = "Sign-in failed"
