@@ -1,0 +1,31 @@
+[
+  {
+    "id": "hopae-portal",
+    "access_mode": "public",
+    "host": "auth.example.test",
+    "path_prefix": "/",
+    "backends": ["http://127.0.0.1:8700"]
+  },
+  {
+    "id": "app-example",
+    "access_mode": "protected",
+    "host": "app.example.test",
+    "path_prefix": "/",
+    "backends": ["http://127.0.0.1:3000"],
+    "auth": {
+      "url": "http://127.0.0.1:8701/_hopae/verify",
+      "request_headers": ["cookie", "user-agent", "accept", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"],
+      "response_headers": [
+        "x-forwarded-user", "x-forwarded-email", "x-forwarded-preferred-username", "x-forwarded-groups",
+        "x-hopae-session", "x-hopae-provider", "x-hopae-auth-time", "x-hopae-expires",
+        "x-hopae-aal", "x-hopae-factors"
+      ],
+      "static_request_headers": {
+        "x-hopae-contract": "1",
+        "x-hopae-gateway-key": {"env": "HANGANG_HOPAE_KEY"}
+      },
+      "timeout_ms": 500,
+      "forward_response": true
+    }
+  }
+]

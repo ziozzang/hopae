@@ -1,6 +1,6 @@
 # Hopae
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](docs/README.md) · [Roadmap](docs/ROADMAP.md) · [Release notes](CHANGELOG.md) · [한국어](README.ko.md)
 
@@ -14,9 +14,10 @@ can inject verified identity into upstream requests. It is packaged around the
 authentication check, and it stays usable behind any gateway that can forward
 such a check.
 
-> **Status: in design.** No release exists yet. The documents linked below
-> define how the project is built; product documents appear as each milestone
-> lands. See the [roadmap](docs/ROADMAP.md).
+> **Status: milestone M1 (vertical slice), unreleased.** Version 0.1.0 is not
+> cut yet. What works today is described under [What works in M1](#what-works-in-m1);
+> everything under [Not in M1](#not-in-m1) is design only. See the
+> [roadmap](docs/ROADMAP.md).
 
 ## How it fits
 
@@ -34,28 +35,56 @@ This is close to a standard OAuth deployment; the difference is that the
 gateway already owns routing, header injection and stripping, so Hopae
 provides only the portal, providers, sessions and policy.
 
-## Planned scope
+## What works in M1
 
-Sections marked *in design* describe intent, not shipped behavior.
+M1 is one complete path, nothing more: **Google sign-in, server-side sessions
+and Hangang forward-authentication**.
 
-- **Sign-in providers** *(in design)* — OIDC/OAuth 2.0 (Google first), Kakao,
-  Naver, email magic link, email and password.
-- **Sessions** *(in design)* — server-side sessions, logout everywhere, optional
-  Redis/Valkey shared cache for multi-instance deployments.
-- **Gateway integration** *(in design)* — a forward-authentication endpoint that
-  returns verified identity headers for the gateway to inject, with path-scoped
-  protection and login/logout entry points.
-- **Abuse controls** *(in design)* — login history, blacklists, login-attempt
-  throttling and lockout.
-- **Management** *(in design)* — a web console and management API for users,
-  sessions, providers, policies and audit.
-- **Extension points** *(in design)* — Lua hooks, login-notification webhooks,
-  and a pluggable second-factor mechanism (TOTP, WebAuthn, and others).
-- **Lifecycle** *(in design)* — signed self-update from GitHub releases.
+- **Sign-in** — OpenID Connect against Google (authorization code flow with PKCE, ID-token validation, discovery and key caching). Providers are defined in the JSON configuration file; a provider whose secret variable is missing is disabled, not fatal.
+- **Sessions** — server-side sessions stored in SQLite, per-host handle cookies bound to the browser, configurable idle and absolute timers and client IP/User-Agent binding per application, logout, and explicit account linking by verified email.
+- **Gateway integration** — the verify endpoint (`/_hopae/verify`) of the [gateway contract](docs/GATEWAY_CONTRACT.md): caller-key authentication with rotation, fail-closed answers, identity headers for the gateway to inject, and cross-domain single sign-on between registered hosts through a browser-bound handoff.
+- **Operations** — `hopae --check` preflight (prints the route fragment and redirect URIs to register), single-instance lock, backup before a schema migration, graceful shutdown, structured event log with transactional audit events, `/healthz`. See [operations](docs/OPERATIONS.md).
+- **Packaging** — a static binary and a hardened Docker Compose template in [`deploy/`](deploy/).
+
+Production use needs a gateway that sends the caller key (Hangang change HC-3);
+an unmodified gateway works for development only with caller authentication
+turned off. See the compatibility matrix in the contract.
+
+## Not in M1
+
+Everything here is planned, not shipped; see the [roadmap](docs/ROADMAP.md).
+
+- Other providers (Kakao, Naver, email magic link, email and password), second factors, step-up enforcement.
+- Logout everywhere from a console, login history, blacklists and throttling beyond the per-IP bounds, shared state for several instances (PostgreSQL, Redis/Valkey).
+- A web console and management API, Lua hooks, webhooks, Prometheus metrics, configuration reload, signed self-update.
+
+## Quick start
+
+Build (Rust 1.96 or newer) or use the container image, write a configuration
+file, and check it before running:
+
+```sh
+cargo build --release --locked
+export HOPAE_GATEWAY_KEY=change-me                    # the caller key shared with the gateway
+export HOPAE_PROVIDER_GOOGLE_CLIENT_SECRET=change-me  # Google OAuth client secret
+target/release/hopae --check --config deploy/hopae.example.json
+target/release/hopae run     --config deploy/hopae.example.json
+```
+
+`--check` prints what to register elsewhere: the gateway route `auth`
+fragment, the return origins and the provider redirect URI
+(`<portal.public_url>/callback/google`). Then register the portal route and
+your protected routes on the gateway (examples in
+[`deploy/hangang-routes.example.json`](deploy/hangang-routes.example.json)) and
+open a protected host in a browser. For a hardened container deployment follow
+[`deploy/README.md`](deploy/README.md).
 
 ## Documentation
 
 - [Documentation index](docs/README.md)
+- [Gateway contract](docs/GATEWAY_CONTRACT.md) — the verify protocol, headers, cookies and route fragments
+- [Configuration reference](docs/CONFIG.md) — every key, default and CLI command
+- [Operations](docs/OPERATIONS.md) — running, state, backups, key rotation, logs, health, failure behavior
 - [Development process](docs/PROCESS.md) — roles, phase gates, scenario-based TDD, release and security rules
 - [Documentation system](docs/DOCUMENTATION.md) — layout, translation rules, style, required documents
 - [Architecture decision records](docs/adr/)

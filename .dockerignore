@@ -1,0 +1,20 @@
+# Keep the build context to what the build reads.
+.git
+target
+dist
+docs
+scenarios
+tests
+tools
+examples
+deploy
+internal
+TODO.md
+*.md
+!README.md
+.env
+.env.*
+*.db
+*.sqlite*
+*.pem
+*.key
