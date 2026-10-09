@@ -1,6 +1,6 @@
 # Operations
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 3 -->
 
 [Documentation](README.md) · [한국어](ko/OPERATIONS.md)
 
@@ -94,7 +94,8 @@ backup is made for a new, empty or already current database. An existing
 backup of the same version is replaced. A database written by a newer binary is
 refused (the start fails). So is a database of schema version 2 written by a
 pre-release development build, recognizable by a missing
-`sessions.authz_version_at_auth` column or `users_primary_email` index: the
+`sessions.authz_version_at_auth` column, `users_primary_email` or
+`event_deliveries_event_id` index, or `txn_admissions` table: the
 start fails with exit status 2 and the message "development database from a
 pre-release schema; delete it". Before the first release schema version 2 was
 edited in place, so such a database cannot be upgraded; delete it.

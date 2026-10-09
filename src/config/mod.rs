@@ -930,6 +930,21 @@ impl Config {
                 errs.push(format!("{name} must be at least 1"));
             }
         }
+        // Whole-second activity writes are only safe against idle timers of a
+        // minute or more (the touch window is half the timer, G7 C03).
+        const MIN_IDLE: Duration = Duration::from_secs(60);
+        if self.session.idle.is_some_and(|d| d.0 < MIN_IDLE) {
+            errs.push("session.idle must be at least 60s".to_string());
+        }
+        for (i, a) in self.apps.iter().enumerate() {
+            if a.session
+                .as_ref()
+                .and_then(|s| s.idle)
+                .is_some_and(|d| d.0 < MIN_IDLE)
+            {
+                errs.push(format!("apps[{i}].session.idle must be at least 60s"));
+            }
+        }
         for (i, p) in self.trusted_proxies.iter().enumerate() {
             if parse_proxy(p).is_none() {
                 errs.push(format!(
@@ -1323,6 +1338,25 @@ mod tests {
         assert_eq!(short.session.absolute, Duration::from_secs(86400));
         assert!(snap.return_origin_allowed(&Host::parse("short.example.test").unwrap(), 8443));
         assert!(c.warnings().iter().any(|w| w.contains("apps[1].hosts[0]")));
+    }
+
+    #[test]
+    fn idle_policies_below_a_minute_are_rejected() {
+        // Activity is persisted in whole seconds; a shorter idle timer could
+        // expire between two writes of continuous activity (G7 C03).
+        for extra in [
+            r#"{"session": {"idle": "59s"}}"#,
+            r#"{"apps": [{"app_id": "a", "hosts": ["a.example.test"], "session": {"idle": "30s"}}]}"#,
+            r#"{"apps": [{"app_id": "default", "session": {"idle": "1s"}}]}"#,
+        ] {
+            let e = invalid(extra);
+            assert!(e.contains("idle must be at least 60s"), "{extra}: {e}");
+        }
+        assert!(with(r#"{"session": {"idle": "60s"}}"#).is_ok());
+        assert!(
+            with(r#"{"apps": [{"app_id": "a", "hosts": ["a.example.test"], "session": {"idle": "1m"}}]}"#)
+                .is_ok()
+        );
     }
 
     #[test]

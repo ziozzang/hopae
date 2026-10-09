@@ -1,6 +1,6 @@
 # 운영
 
-<!-- translation-status: source=../OPERATIONS.md source-rev=2 status=current -->
+<!-- translation-status: source=../OPERATIONS.md source-rev=3 status=current -->
 
 [문서 목차](README.md) · [English](../OPERATIONS.md)
 
@@ -87,8 +87,8 @@ import`는 잠금을 잡지 않습니다.
 내용이 포함됩니다. 새 데이터베이스, 빈 데이터베이스, 이미 최신인 데이터베이스는
 백업하지 않습니다. 같은 버전의 기존 백업은 교체됩니다. 더 새 바이너리가 쓴
 데이터베이스는 거부됩니다(시작이 실패합니다). 릴리스 이전 개발 빌드가 쓴 스키마 버전 2
-데이터베이스도 마찬가지입니다. `sessions.authz_version_at_auth` 열이나
-`users_primary_email` 인덱스가 없으면 알아볼 수 있으며, 종료 상태 2와 함께
+데이터베이스도 마찬가지입니다. `sessions.authz_version_at_auth` 열,
+`users_primary_email` 또는 `event_deliveries_event_id` 인덱스, `txn_admissions` 테이블이 없으면 알아볼 수 있으며, 종료 상태 2와 함께
 "development database from a pre-release schema; delete it" 메시지로 시작이
 실패합니다. 첫 릴리스 전에는 스키마 버전 2를 제자리에서 수정했으므로 그런
 데이터베이스는 업그레이드할 수 없습니다. 삭제하십시오.

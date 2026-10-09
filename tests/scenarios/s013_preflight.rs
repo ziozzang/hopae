@@ -951,6 +951,42 @@ fn extra_s013_pre_release_v2_database_is_refused() {
         stderr.contains("development database from a pre-release schema; delete it"),
         "{stderr}"
     );
+    // The shape pass 2 left behind (column and email index, but no
+    // `event_deliveries(event_id)` index and no admissions table) is refused too.
+    let dir3 = tempfile::tempdir().unwrap();
+    let cfg3 = fixture_in(dir3.path(), "valid");
+    std::fs::create_dir_all(dir3.path().join("state")).unwrap();
+    {
+        let c = Connection::open(db_path(dir3.path())).unwrap();
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY NOT NULL, name TEXT NOT NULL, applied_at INTEGER NOT NULL) STRICT;",
+        )
+        .unwrap();
+        c.execute_batch(include_str!("../../src/store/migrations/0001_meta.sql"))
+            .unwrap();
+        c.execute_batch(include_str!(
+            "../../src/store/migrations/0002_m1_schema.sql"
+        ))
+        .unwrap();
+        c.execute_batch(
+            "DROP INDEX event_deliveries_event_id; DROP TABLE txn_admissions;
+             INSERT OR IGNORE INTO schema_migrations VALUES (1,'0001_meta',0);
+             INSERT OR IGNORE INTO schema_migrations VALUES (2,'0002_m1_schema',0);",
+        )
+        .unwrap();
+    }
+    let mut c = hopae();
+    c.arg("run").arg("--config").arg(&cfg3);
+    for (k, v) in BOTH {
+        c.env(k, v);
+    }
+    let o = c.output().unwrap();
+    assert_eq!(
+        o.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&o.stderr)
+    );
     // A current database starts normally.
     let dir2 = tempfile::tempdir().unwrap();
     let cfg2 = fixture_in(dir2.path(), "valid");

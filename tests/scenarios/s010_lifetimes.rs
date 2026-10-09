@@ -419,7 +419,7 @@ async fn s010_a4_keepalive_flood_no_growth() {
 /// passed while `terminated_at` is still NULL.
 #[tokio::test]
 async fn g7_c01_code_does_not_revive_idle_expired_session() {
-    let f = Fx::with("m1-lifetimes", |v| v["session"]["idle"] = "30s".into());
+    let f = Fx::with("m1-lifetimes", |v| v["session"]["idle"] = "60s".into());
     let user = f.user("a@example.test", Some("alice"), None).await;
     let s = f.session(&user).await;
     let l = Life {
@@ -430,6 +430,11 @@ async fn g7_c01_code_does_not_revive_idle_expired_session() {
         s,
     };
     let (code, bind) = mint_code(&l, "https://app.example.test/admin/x").await;
+    // The session was last seen long ago (idle policy 60 s) while the code is fresh.
+    l.f.exec(&format!(
+        "UPDATE sessions SET last_seen_at = last_seen_at - 3600, created_at = created_at - 3600 WHERE session_id = '{}'",
+        l.s.row.session_id
+    ));
     l.f.at(31);
     let handles_before: i64 = l.f.sql("SELECT COUNT(*) FROM session_handles");
     let d =
@@ -453,4 +458,78 @@ async fn g7_c01_code_does_not_revive_idle_expired_session() {
     let ev = l.f.events(EventKind::SessionTerminated).await;
     assert_eq!(ev.len(), 1);
     assert_eq!(ev[0].reason, Some(reasons::IDLE));
+}
+
+/// G7-B05 (perf, `--ignored`): a handoff redemption whose success event
+/// crosses `prune_every` with `events.max_rows = 50000` and ~50k delivered
+/// delivery rows. The prune runs inside the redemption's transaction, so it
+/// is on the request's critical path and must stay far below the 400 ms
+/// verify budget. (Set `HOPAE_PERF_DROP_INDEX=1` to measure without the
+/// `event_deliveries(event_id)` index.)
+#[tokio::test]
+#[ignore = "perf: run with --ignored (see G7-B05)"]
+async fn extra_s010_perf_redemption_that_triggers_a_retention_sized_prune() {
+    use hopae::event::types::{EventBuilder, Outcome};
+    let l = life().await;
+    l.f.store
+        .set_event_retention(hopae::store::types::EventRetention {
+            retention: std::time::Duration::from_secs(90 * 86_400),
+            max_rows: 50_000,
+            prune_every: 1000,
+            max_pending_per_sink: 1_000_000,
+            terminal_retention: std::time::Duration::from_secs(7 * 86_400),
+        });
+    if std::env::var("HOPAE_PERF_DROP_INDEX").is_ok() {
+        l.f.exec("DROP INDEX event_deliveries_event_id");
+    }
+    let t = T0 as f64 / 1000.0;
+    l.f.exec(&format!(
+        "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 50000)
+         INSERT INTO events (event_id, at, kind, outcome, request_id)
+           SELECT printf('e_0%08d', i), {t} - 100000.0 + i * 0.001, 'login.succeeded', 'success', 'r' FROM n;
+         INSERT INTO event_deliveries (sink, event_id, state, attempts, next_attempt_at, updated_at)
+           SELECT 'log', event_id, 'delivered', 1, 0, {} FROM events;",
+        T0 / 1000
+    ));
+    let (code, bind) = mint_code(&l, "https://app.example.test/admin/x").await;
+    for _ in 0..999 {
+        let ev = EventBuilder::new(
+            &*l.f.clock,
+            &*l.f.rng,
+            hopae::event::types::EventKind::LoginSucceeded,
+            Outcome::Success,
+            "r",
+        )
+        .build();
+        l.f.store
+            .directory()
+            .import_providers(vec![], None, vec![ev])
+            .await
+            .unwrap();
+    }
+    let rows_before: i64 = l.f.sql("SELECT COUNT(*) FROM events");
+    let started = std::time::Instant::now();
+    let d =
+        l.f.decide(
+            l.f.req("https://app.example.test/admin/x")
+                .code(&code)
+                .bind(&bind),
+        )
+        .await;
+    let took = started.elapsed();
+    eprintln!("redemption took {took:?}");
+    assert!(
+        matches!(d, Decision::Handoff { .. }),
+        "redemption succeeded"
+    );
+    let rows_after: i64 = l.f.sql("SELECT COUNT(*) FROM events");
+    eprintln!("redemption with prune: {took:?} (events {rows_before} -> {rows_after})");
+    assert!(
+        rows_after < rows_before,
+        "the redemption triggered the prune"
+    );
+    assert!(
+        took < std::time::Duration::from_millis(100),
+        "redemption took {took:?} against a 400 ms verify budget"
+    );
 }

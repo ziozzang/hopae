@@ -45,6 +45,8 @@ pub const LATEST_SCHEMA_VERSION: u32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 
 /// Bound of the best-effort diagnostic event queue.
 pub const DIAGNOSTIC_QUEUE_CAP: usize = 4096;
+/// Diagnostic log lines queued for the logging thread.
+const LOG_QUEUE_CAP: usize = 1024;
 /// Read connections kept for reuse.
 const READER_POOL_MAX: usize = 4;
 
@@ -74,7 +76,7 @@ pub(crate) struct Shared {
     /// Retention policy enforced inline by the writer (ADR-0009, G7-P01).
     /// Structured log output of persisted diagnostic events: written after the
     /// batch that holds them commits, never before (G7 B02).
-    pub(crate) diag_log: Mutex<Option<Arc<crate::event::sinks::LogSink>>>,
+    pub(crate) diag_log: Mutex<Option<mpsc::SyncSender<Event>>>,
     /// Where diagnostic events lost at the persistence boundary are counted.
     pub(crate) drops: Mutex<Option<Arc<crate::event::bus::DropCounts>>>,
     pub(crate) retention: Mutex<Option<crate::store::types::EventRetention>>,
@@ -271,13 +273,29 @@ impl Store {
 
     /// Write each persisted diagnostic event as a JSON line to `log`, after
     /// the batch transaction that stores it has committed.
+    ///
+    /// The output happens on a logging thread of its own, behind a bounded
+    /// queue: the store writer only tries to enqueue, never waits, so output
+    /// that blocks (a full, undrained stderr) cannot stop database writes. A
+    /// line that does not fit is dropped and counted
+    /// (`hopae_events_log_dropped_total`).
     pub fn set_diagnostic_log(&self, log: Arc<crate::event::sinks::LogSink>) {
-        *self
-            .inner
-            .shared
-            .diag_log
-            .lock()
-            .unwrap_or_else(|p| p.into_inner()) = Some(log);
+        let (tx, rx) = mpsc::sync_channel::<Event>(LOG_QUEUE_CAP);
+        let spawned = std::thread::Builder::new()
+            .name("hopae-diag-log".into())
+            .spawn(move || {
+                while let Ok(ev) = rx.recv() {
+                    log.emit(&ev);
+                }
+            });
+        if spawned.is_ok() {
+            *self
+                .inner
+                .shared
+                .diag_log
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(tx);
+        }
     }
 
     /// Count diagnostic events whose batch could not be persisted in `drops`.
@@ -474,24 +492,27 @@ pub fn migrate(conn: &Connection) -> Result<u32, StoreError> {
 }
 
 /// Migration 0002 gained `sessions.authz_version_at_auth` and the
-/// `users_primary_email` index while still unreleased (no new migration). A
+/// `users_primary_email`, `event_deliveries_event_id` index and `txn_admissions`
+/// table while still unreleased (no new migration). A
 /// version-2 database written before that has neither, and no migration will
 /// add them: refuse it rather than fail later in a session query.
 fn refuse_pre_release_schema(conn: &Connection, version: u32) -> Result<(), StoreError> {
     if version != 2 {
         return Ok(());
     }
-    let column: i64 = conn.query_row(
+    let present = |sql: &str| -> Result<bool, StoreError> {
+        Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))? > 0)
+    };
+    let complete = present(
         "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name='authz_version_at_auth'",
-        [],
-        |r| r.get(0),
-    )?;
-    let index: i64 = conn.query_row(
+    )? && present(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='users_primary_email'",
-        [],
-        |r| r.get(0),
+    )? && present(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='event_deliveries_event_id'",
+    )? && present(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='txn_admissions'",
     )?;
-    if column == 0 || index == 0 {
+    if !complete {
         return Err(StoreError::DevelopmentSchema);
     }
     Ok(())

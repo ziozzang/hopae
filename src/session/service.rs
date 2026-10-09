@@ -1097,7 +1097,13 @@ impl Service {
         {
             if !self
                 .sessions
-                .consume_transaction(&txn.txn_sha256, CONSUMED_COMPLETED, now, vec![])
+                .consume_transaction_for_provider(
+                    &txn.txn_sha256,
+                    provider_id,
+                    CONSUMED_COMPLETED,
+                    now,
+                    vec![],
+                )
                 .await?
             {
                 return Err(self

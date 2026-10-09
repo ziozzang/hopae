@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -71,7 +71,7 @@ default applies.
 | `portal.sso_confirm_new_host` | boolean | `false` | One-click confirmation before the first handoff of a session to a host ([ADR-0004](adr/0004-session-model-and-cross-domain-handoff.md)). |
 | `cookie.name` | string | `__Host-hopae` (`hopae` when `cookie.secure` is `false`) | 1 to 64 characters of letters, digits, `_` and `-`. The binding and portal cookies append `_bind` and `_portal`. Must start with `__Host-` when `cookie.secure` is `true` and must not when it is `false`. |
 | `cookie.secure` | boolean | `true` | `false` is development only: a loud warning at `--check` and at start, `insecure_mode` in the health body, default application port `80`. |
-| `session.idle` | duration | `24h` | Session-wide idle timeout: a session unused through any of its handles for this long is terminated. |
+| `session.idle` | duration | `24h` | Session-wide idle timeout: a session unused through any of its handles for this long is terminated. At least `60s` (activity is recorded in whole seconds). |
 | `session.absolute` | duration | `30d` | Session-wide absolute lifetime; the session is terminated at this age. |
 | `linking.on_conflict` | `link_required`, `separate`, `deny` | `link_required` | What happens when a sign-in's verified email matches an existing user through another provider ([ADR-0011](adr/0011-account-linking-policy.md)). |
 | `linking.mode` | `verified_email`, `off` | `verified_email` | Account linking policy. |
@@ -106,7 +106,7 @@ for. A host not listed is denied (`unknown_app`).
 | `apps[].hosts` | array of strings | required (except `default`) | Exact lower-case host names: no scheme, wildcard, port, path or trailing dot. A host may belong to one application only. Upper-case input is normalized with a warning. |
 | `apps[].ports` | array of integers | `[443]` (`[80]` when `cookie.secure` is `false`) | Non-empty when set, no `0`. |
 | `apps[].enabled` | boolean | `true` | A disabled application is denied (`app_disabled`). |
-| `apps[].session.idle`, `apps[].session.absolute` | duration | `12h`, `7d` (inherited from the `default` application when it sets them) | Per-handle timers: a handle idle for `idle` or older than `absolute` is revoked; the session and its other handles continue ([ADR-0007](adr/0007-context-binding-policy.md)). |
+| `apps[].session.idle`, `apps[].session.absolute` | duration | `12h`, `7d` (inherited from the `default` application when it sets them) | Per-handle timers: a handle idle for `idle` or older than `absolute` is revoked; the session and its other handles continue; `idle` must be at least `60s` ([ADR-0007](adr/0007-context-binding-policy.md)). |
 | `apps[].binding.ip` | `strict`, `prefix`, `off` | `strict` | Client IP binding of a handle ([ADR-0007](adr/0007-context-binding-policy.md)). |
 | `apps[].binding.ip_prefix_v4`, `apps[].binding.ip_prefix_v6` | integer | `24`, `64` | Prefix length for `prefix` mode: 1 to 32 and 1 to 128. |
 | `apps[].binding.ua` | `strict`, `off` | `off` | User-agent binding. |

@@ -16,6 +16,7 @@ use super::{Shared, Store, WriterEnv, commit, require_provider_live};
 use crate::crypto::{Digest, Timestamp};
 use crate::event::types::{Event, Reason, reasons};
 use crate::policy::types::Host;
+use crate::provider::types::ProviderId;
 use crate::session::types::{Aal, SessionId};
 use crate::store::types::*;
 use crate::store::{Sessions, StoreError, StoreResult};
@@ -365,7 +366,7 @@ impl Sessions for Store {
             // Count and insert in one write transaction: parallel callers
             // are serialized here, so the cap cannot be overshot.
             let n: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM login_txns WHERE client_ip=?1 AND created_at >= ?2",
+                "SELECT COUNT(*) FROM txn_admissions WHERE ip=?1 AND at >= ?2",
                 params![t.client_ip.to_string(), since.secs()],
                 |r| r.get(0),
             )?;
@@ -510,21 +511,26 @@ impl Sessions for Store {
         at: Timestamp,
         events: Vec<Event>,
     ) -> StoreResult<bool> {
-        let d = *txn_sha256;
-        self.write("consume_transaction", move |env| {
-            let shared = env.shared.clone();
-            let tx = env.begin()?;
-            let n = tx.execute(
-                "UPDATE login_txns SET consumed_at=?2, consumed_reason=?3 WHERE txn_sha256=?1 AND consumed_at IS NULL",
-                params![blob(&d), at.secs(), reason.0],
-            )?;
-            if n == 0 {
-                return Ok(false);
-            }
-            insert_events(&tx, &shared, &events)?;
-            finish(tx, &shared, None)?;
-            Ok(true)
-        })
+        self.consume_txn("consume_transaction", txn_sha256, None, reason, at, events)
+            .await
+    }
+
+    async fn consume_transaction_for_provider(
+        &self,
+        txn_sha256: &Digest,
+        provider: &ProviderId,
+        reason: Reason,
+        at: Timestamp,
+        events: Vec<Event>,
+    ) -> StoreResult<bool> {
+        self.consume_txn(
+            "consume_transaction",
+            txn_sha256,
+            Some(provider.clone()),
+            reason,
+            at,
+            events,
+        )
         .await
     }
 
@@ -576,7 +582,7 @@ impl Sessions for Store {
     async fn count_transactions_since(&self, ip: IpAddr, since: Timestamp) -> StoreResult<u32> {
         self.read("count_transactions_since", move |c| {
             let n: i64 = c.query_row(
-                "SELECT COUNT(*) FROM login_txns WHERE client_ip=?1 AND created_at >= ?2",
+                "SELECT COUNT(*) FROM txn_admissions WHERE ip=?1 AND at >= ?2",
                 params![ip.to_string(), since.secs()],
                 |r| r.get(0),
             )?;
@@ -646,7 +652,51 @@ impl Sessions for Store {
     }
 }
 
+impl Store {
+    /// Consume a transaction; with `provider`, in the same write transaction
+    /// that checks the provider row is enabled and not tombstoned.
+    async fn consume_txn(
+        &self,
+        method: &'static str,
+        txn_sha256: &Digest,
+        provider: Option<ProviderId>,
+        reason: Reason,
+        at: Timestamp,
+        events: Vec<Event>,
+    ) -> StoreResult<bool> {
+        let d = *txn_sha256;
+        self.write(method, move |env| {
+            let shared = env.shared.clone();
+            let tx = env.begin()?;
+            if let Some(p) = &provider {
+                require_provider_live(&tx, p.as_str())?;
+            }
+            let n = tx.execute(
+                "UPDATE login_txns SET consumed_at=?2, consumed_reason=?3 WHERE txn_sha256=?1 AND consumed_at IS NULL",
+                params![blob(&d), at.secs(), reason.0],
+            )?;
+            if n == 0 {
+                return Ok(false);
+            }
+            insert_events(&tx, &shared, &events)?;
+            finish(tx, &shared, None)?;
+            Ok(true)
+        })
+        .await
+    }
+}
+
 fn insert_txn(tx: &Transaction<'_>, t: &NewTransaction) -> StoreResult<()> {
+    // Admission history lives in its own small table so that evicting
+    // transaction rows never erases rate-limit evidence (G7 C07).
+    tx.execute(
+        "INSERT INTO txn_admissions (ip, at) VALUES (?1, ?2)",
+        params![t.client_ip.to_string(), t.created_at.secs()],
+    )?;
+    tx.execute(
+        "DELETE FROM txn_admissions WHERE at < ?1",
+        [t.created_at.secs() - 3600],
+    )?;
     tx.execute(
         "INSERT INTO login_txns (txn_sha256, created_at, expires_at, app_id, return_target, bind_sha256, portal_bind_sha256, retry_bind_sha256, client_ip, ua_sha256, provider_id, state_sha256, nonce, pkce_verifier, portal_session_id, purpose, conflicting_handle_sha256, pending_identity, recovery_depth) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         params![

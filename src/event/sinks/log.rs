@@ -16,14 +16,14 @@ use crate::store::StoreHooks;
 pub const NAME: &str = "log";
 
 pub struct LogSink {
-    out: Mutex<Box<dyn Write + Send>>,
+    out: Arc<Mutex<Box<dyn Write + Send>>>,
     hooks: Option<Arc<StoreHooks>>,
 }
 
 impl LogSink {
     pub fn new(out: Box<dyn Write + Send>, hooks: Option<Arc<StoreHooks>>) -> Self {
         LogSink {
-            out: Mutex::new(out),
+            out: Arc::new(Mutex::new(out)),
             hooks,
         }
     }
@@ -57,12 +57,16 @@ impl Sink for LogSink {
     async fn deliver(&self, event: &Event) -> Result<(), String> {
         let mut line = Self::line(event);
         line.push('\n');
-        {
-            let mut out = self.out.lock().unwrap_or_else(|p| p.into_inner());
+        // Output may block (a full pipe): keep it off the async workers.
+        let out = self.out.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut out = out.lock().unwrap_or_else(|p| p.into_inner());
             out.write_all(line.as_bytes())
                 .and_then(|()| out.flush())
-                .map_err(|_| "write_failed".to_string())?;
-        }
+                .map_err(|_| "write_failed".to_string())
+        })
+        .await
+        .map_err(|_| "write_failed".to_string())??;
         // Test hook: die between writing the line and marking the row delivered.
         if let Some(h) = &self.hooks {
             h.crash_point("after_log_line");

@@ -57,6 +57,7 @@ fn open_applies_migration_and_sets_pragmas() {
             "schema_migrations",
             "session_handles",
             "sessions",
+            "txn_admissions",
             "users"
         ]
     );

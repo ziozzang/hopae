@@ -2103,3 +2103,114 @@ async fn g7_idp01_disable_between_the_last_read_and_the_write() {
     assert_eq!(e.reason().0, "provider_disabled");
     assert_eq!(k.count("SELECT COUNT(*) FROM sessions"), sessions_before);
 }
+
+/// G7-IDP-01 (pass 3): the session-reuse completion (existing identity, valid
+/// portal handle of the same user) consumes the transaction in a write that
+/// also checks the provider row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn g7_idp01_reuse_path_checks_the_provider_in_its_write() {
+    let hooks = Arc::new(hopae::store::StoreHooks::new());
+    let k = Arc::new(
+        Kit::with(Opts {
+            hooks: Some(hooks.clone()),
+            ..Opts::default()
+        })
+        .await,
+    );
+    let first = k.login().await;
+    k.advance(5);
+    let t = k.start(APP, "/admin/y", Some(&k.b1)).await;
+    let state = k.redirect(&t.transaction, &k.p1).await;
+    let baseline = hooks
+        .calls()
+        .get("consume_transaction")
+        .copied()
+        .unwrap_or(0);
+    hooks.set_stall(500);
+    let (kk, p1, h, st) = (
+        k.clone(),
+        k.p1.clone(),
+        first.portal_handle.clone(),
+        state.clone(),
+    );
+    let cb = tokio::spawn(async move { kk.callback(&st, Some(&p1), Some(&h)).await });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while hooks
+        .calls()
+        .get("consume_transaction")
+        .copied()
+        .unwrap_or(0)
+        <= baseline
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "reuse consume never called"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    g7_set_provider_row(&k, "enabled = 0");
+    let e = cb.await.unwrap().unwrap_err();
+    assert_eq!(e.reason().0, "provider_disabled");
+    assert_eq!(
+        k.count("SELECT COUNT(*) FROM login_txns WHERE consumed_at IS NOT NULL AND consumed_reason='completed'"),
+        1,
+        "only the first login completed"
+    );
+}
+
+/// G7-C07 (pass 3): eviction must not erase rate-limit evidence. With
+/// `txn.max_rows = 5` and `per_ip_per_minute = 5`, five recent interrupted
+/// transactions exhaust the cap: retrying them admits nothing.
+#[tokio::test]
+async fn g7_c07_eviction_does_not_erase_admission_history() {
+    const PORTAL_IP: &str = "198.51.100.77";
+    let k = Kit::with(Opts {
+        txn_per_ip: 5,
+        txn_max_rows: 5,
+        ..Opts::default()
+    })
+    .await;
+    let mut snap = (**k.verify.snapshot.load()).clone();
+    for a in snap.apps.iter_mut() {
+        a.binding.ip = hopae::policy::types::IpBinding::Off;
+    }
+    k.verify.snapshot.store(Arc::new(snap));
+    let p2 = hopae::crypto::random_token(&hopae::crypto::OsRng, 16);
+    let mut refs = Vec::new();
+    for i in 0..5 {
+        let t = k.start(APP, &format!("/p{i}"), Some(&k.b1)).await;
+        let state = k.redirect(&t.transaction, &k.p1).await;
+        let out = k
+            .svc
+            .complete_callback(
+                &k.ctx_ip(PORTAL_IP),
+                &k.mock_id(),
+                CallbackQuery {
+                    code: Some("AC1".into()),
+                    state: Some(state.expose().to_string()),
+                    error: None,
+                    error_description: None,
+                },
+                Some(&p2),
+                None,
+            )
+            .await
+            .unwrap();
+        let CallbackOutcome::Interrupted { retry_ref, .. } = out else {
+            panic!("expected Interrupted")
+        };
+        refs.push(retry_ref);
+    }
+    let mut admitted = 0;
+    for r in &refs {
+        match k.svc.retry(&k.ctx_ip(PORTAL_IP), r, Some(&p2)).await {
+            Ok(_) => admitted += 1,
+            Err(SessionError::RateLimited { .. }) => {}
+            Err(e) => panic!("unexpected: {e:?}"),
+        }
+    }
+    assert_eq!(
+        admitted, 0,
+        "five creations in this minute already used the cap"
+    );
+}

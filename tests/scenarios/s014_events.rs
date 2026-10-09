@@ -1560,3 +1560,65 @@ async fn g7_b03_inline_pruning_counts_delivery_failures() {
         "the metric counts what the inline prune did"
     );
 }
+
+/// A `Write` that parks every write until released (a stderr nobody drains).
+#[derive(Clone)]
+struct ParkedOutput(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+impl std::io::Write for ParkedOutput {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        let (m, cv) = &*self.0;
+        let mut open = m.lock().unwrap();
+        while !*open {
+            open = cv.wait(open).unwrap();
+        }
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// G7-B04: blocked log output (a full stderr pipe nobody drains) must never
+/// stop the store writer: unrelated writes still complete, and what could not
+/// be queued for output is dropped and counted.
+#[tokio::test(flavor = "multi_thread")]
+async fn g7_b04_blocked_log_output_does_not_stop_the_store_writer() {
+    let (_dir, store, clock, rng) = g7_store(1_000_000, 1_000_000);
+    let gate = ParkedOutput(Arc::new((Mutex::new(false), std::sync::Condvar::new())));
+    store.set_diagnostic_log(Arc::new(LogSink::new(Box::new(gate.clone()), None)));
+    let dropped_before = counters::get("hopae_events_log_dropped_total", &[]);
+    let mk = |kind| EventBuilder::new(&*clock, &*rng, kind, Outcome::Success, "r").build();
+    for _ in 0..3000 {
+        let _ = store
+            .events()
+            .append_diagnostic(mk(EventKind::ProviderError))
+            .await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // An unrelated write (a redemption would be one) completes within the budget.
+    let started = std::time::Instant::now();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        store
+            .directory()
+            .import_providers(vec![], None, vec![mk(EventKind::LoginSucceeded)]),
+    )
+    .await
+    .expect("the store writer is blocked by log output")
+    .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_millis(400),
+        "{:?}",
+        started.elapsed()
+    );
+    store.barrier().await.unwrap();
+    assert!(
+        counters::get("hopae_events_log_dropped_total", &[]) > dropped_before,
+        "log lines that could not be queued are counted"
+    );
+    // Release the output so the worker can finish.
+    let (m, cv) = &*gate.0;
+    *m.lock().unwrap() = true;
+    cv.notify_all();
+}

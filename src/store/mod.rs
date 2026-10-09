@@ -205,6 +205,17 @@ pub trait Sessions: Send + Sync {
         at: Timestamp,
         events: Vec<Event>,
     ) -> StoreResult<bool>;
+    /// As `consume_transaction`, in a write transaction that also refuses
+    /// (`StoreError::ProviderDisabled`) when `provider` is disabled or
+    /// tombstoned in the database.
+    async fn consume_transaction_for_provider(
+        &self,
+        txn_sha256: &Digest,
+        provider: &ProviderId,
+        reason: Reason,
+        at: Timestamp,
+        events: Vec<Event>,
+    ) -> StoreResult<bool>;
     async fn mint_handoff_code(&self, code: HandoffCodeRow, events: Vec<Event>) -> StoreResult<()>;
     /// ADR-0004 redemption rule as ONE atomic statement sequence.
     async fn redeem_handoff_code(

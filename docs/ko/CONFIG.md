@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=6 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=7 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -70,7 +70,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `portal.sso_confirm_new_host` | 불리언 | `false` | 세션이 어떤 호스트로 처음 핸드오프되기 전에 한 번 클릭해 확인하게 합니다([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)). |
 | `cookie.name` | 문자열 | `__Host-hopae`(`cookie.secure`가 `false`면 `hopae`) | 영문자, 숫자, `_`, `-` 1~64자. 바인딩 쿠키와 포털 쿠키는 `_bind`, `_portal`을 덧붙입니다. `cookie.secure`가 `true`이면 `__Host-`로 시작해야 하고 `false`이면 시작하면 안 됩니다. |
 | `cookie.secure` | 불리언 | `true` | `false`는 개발 전용입니다. `--check`와 시작 시 큰 경고를 내고, 상태 확인 본문에 `insecure_mode`가 나타나며, 기본 애플리케이션 포트가 `80`이 됩니다. |
-| `session.idle` | 기간 | `24h` | 세션 전체의 유휴 타임아웃. 핸들 중 어느 것으로도 이 기간 동안 쓰이지 않은 세션은 종료됩니다. |
+| `session.idle` | 기간 | `24h` | 세션 전체의 유휴 타임아웃. 핸들 중 어느 것으로도 이 기간 동안 쓰이지 않은 세션은 종료됩니다. 최소 `60s`입니다(활동은 초 단위로 기록됩니다). |
 | `session.absolute` | 기간 | `30d` | 세션 전체의 절대 수명. 이 나이에 세션이 종료됩니다. |
 | `linking.on_conflict` | `link_required`, `separate`, `deny` | `link_required` | 로그인의 검증된 이메일이 다른 제공자를 통한 기존 사용자와 일치할 때의 동작([ADR-0011](../adr/0011-account-linking-policy.md)). |
 | `linking.mode` | `verified_email`, `off` | `verified_email` | 계정 연결 정책. |
@@ -105,7 +105,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `apps[].hosts` | 문자열 배열 | 필수(`default` 제외) | 정확한 소문자 호스트 이름. 스킴, 와일드카드, 포트, 경로, 끝의 점은 안 됩니다. 호스트는 애플리케이션 하나에만 속할 수 있습니다. 대문자 입력은 경고와 함께 정규화됩니다. |
 | `apps[].ports` | 정수 배열 | `[443]`(`cookie.secure`가 `false`면 `[80]`) | 지정했다면 비어 있으면 안 되며 `0`은 안 됩니다. |
 | `apps[].enabled` | 불리언 | `true` | 비활성 애플리케이션은 거부됩니다(`app_disabled`). |
-| `apps[].session.idle`, `apps[].session.absolute` | 기간 | `12h`, `7d`(`default` 애플리케이션이 설정했다면 그 값을 상속) | 핸들별 타이머. `idle` 동안 쓰이지 않았거나 `absolute`보다 오래된 핸들은 취소되며, 세션과 다른 핸들은 계속됩니다([ADR-0007](../adr/0007-context-binding-policy.md)). |
+| `apps[].session.idle`, `apps[].session.absolute` | 기간 | `12h`, `7d`(`default` 애플리케이션이 설정했다면 그 값을 상속) | 핸들별 타이머. `idle` 동안 쓰이지 않았거나 `absolute`보다 오래된 핸들은 취소되며, 세션과 다른 핸들은 계속됩니다. `idle`은 최소 `60s`여야 합니다([ADR-0007](../adr/0007-context-binding-policy.md)). |
 | `apps[].binding.ip` | `strict`, `prefix`, `off` | `strict` | 핸들의 클라이언트 IP 바인딩([ADR-0007](../adr/0007-context-binding-policy.md)). |
 | `apps[].binding.ip_prefix_v4`, `apps[].binding.ip_prefix_v6` | 정수 | `24`, `64` | `prefix` 모드의 접두사 길이. 각각 1~32, 1~128. |
 | `apps[].binding.ua` | `strict`, `off` | `off` | User-Agent 바인딩. |

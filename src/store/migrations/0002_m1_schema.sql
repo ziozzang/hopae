@@ -137,6 +137,15 @@ CREATE TABLE login_txns (
 CREATE INDEX login_txns_state ON login_txns (state_sha256);
 CREATE INDEX login_txns_expires ON login_txns (expires_at);
 
+-- Admission history for `txn.per_ip_per_minute`, independent of the (evictable)
+-- login_txns rows: one row per created transaction, pruned by time.
+CREATE TABLE txn_admissions (
+    ip TEXT NOT NULL,
+    at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX txn_admissions_ip_at ON txn_admissions (ip, at);
+CREATE INDEX txn_admissions_at ON txn_admissions (at);
+
 -- return_path is derived from return_target (its URL path) and is what the
 -- redemption statement compares against the presented path.
 CREATE TABLE handoff_codes (
@@ -188,4 +197,7 @@ CREATE TABLE event_deliveries (
     updated_at      INTEGER NOT NULL,
     PRIMARY KEY (sink, event_id)
 ) STRICT;
+-- The foreign key's own index: deleting events cascades to their deliveries
+-- (pruning), which would otherwise scan the whole table once per event.
+CREATE INDEX event_deliveries_event_id ON event_deliveries (event_id);
 CREATE INDEX event_deliveries_claim ON event_deliveries (sink, state, next_attempt_at);

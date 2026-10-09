@@ -113,7 +113,13 @@ pub(super) fn flush_diagnostics(env: &mut WriterEnv) {
                 .clone();
             if let Some(log) = log {
                 for ev in &batch {
-                    log.emit(ev);
+                    // Never wait for output on the writer thread.
+                    if log.try_send(ev.clone()).is_err() {
+                        crate::telemetry::counters::inc(
+                            crate::telemetry::counters::EVENTS_LOG_DROPPED_TOTAL,
+                            &[],
+                        );
+                    }
                 }
             }
         }
