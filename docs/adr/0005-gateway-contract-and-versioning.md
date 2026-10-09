@@ -1,6 +1,6 @@
 # ADR-0005: The gateway contract is versioned, header-based and fails closed
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 001, 004, 007, 008, 013

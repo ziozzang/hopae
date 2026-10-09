@@ -1,6 +1,6 @@
 # ADR-0002: SQLite is the primary store; PostgreSQL for shared deployments; Redis is cache and bus only
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 004, 010, 013, 014

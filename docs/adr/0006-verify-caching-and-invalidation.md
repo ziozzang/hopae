@@ -1,6 +1,6 @@
 # ADR-0006: Zero-trust by default; Hopae declares cacheability and an absolute freshness deadline; the cache key carries every decision input
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 004, 006, 011 (M1); 1xx (M2 cache); gateway HC-1/HC-2 tasks

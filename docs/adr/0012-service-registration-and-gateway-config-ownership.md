@@ -1,6 +1,6 @@
 # ADR-0012: The gateway owns routes, Hopae owns authentication policy; gateway configuration is proposed before it is written
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator, maintainer
 - Scenarios: 008 (M1 manual registration); later milestones add 3xx/6xx scenarios per phase

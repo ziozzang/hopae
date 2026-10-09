@@ -1,6 +1,6 @@
 # ADR-0008: Second factors are pluggable; the session records satisfied factors and an assurance level; step-up is a per-application rule evaluated at verify
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 002, 004 (schema and headers in M1); 470–499 (M5)

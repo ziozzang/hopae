@@ -1,6 +1,6 @@
 # ADR-0009: One typed event model feeds logs, login history, throttling and webhooks
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 014 (M1); 1xx (history, throttling, M2); 440–469 (webhooks, M5)

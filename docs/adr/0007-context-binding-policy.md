@@ -1,6 +1,6 @@
 # ADR-0007: Sessions are bound to client context under a per-application policy; mismatch terminates by default
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 010, 011

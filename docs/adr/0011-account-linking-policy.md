@@ -1,6 +1,6 @@
 # ADR-0011: Identities link to an existing user only after fresh authentication to that user; automatic linking is an opt-in for authoritative emails
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 002 (M1 creation and conflict rules); 2xx (M3 explicit linking flow)

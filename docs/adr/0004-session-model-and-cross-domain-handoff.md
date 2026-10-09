@@ -1,6 +1,6 @@
 # ADR-0004: Server-side sessions, host-only handle cookies and a browser-bound single-use cross-domain handoff
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 001, 002, 003, 005, 006, 009, 010

@@ -1,6 +1,6 @@
 # ADR-0003: HTTP stack is axum on hyper 1, tokio and rustls
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 004, 013

@@ -1,6 +1,6 @@
 # ADR-0013: The core decides in gateway-neutral types; adapters own every gateway-specific name
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 004 (core decision types exercised without a gateway); 6xx or backlog for other adapters

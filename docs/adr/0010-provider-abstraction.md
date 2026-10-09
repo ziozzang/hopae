@@ -1,6 +1,6 @@
 # ADR-0010: One `Provider` trait with a generic OIDC client; Kakao and Naver as declared quirks; secrets by environment reference
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 002, 012 (M1 generic OIDC); 200–299 (M3)
