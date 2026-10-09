@@ -1,6 +1,11 @@
 //! The provider abstraction and its implementations.
-//! W0 provides the shared types; the OIDC client arrives in M1 (W1-C).
+//! `types` is frozen (W0); `oidc` is the generic OpenID Connect client,
+//! `presets` the built-in defaults, `registry` the configured set.
 
+pub mod oidc;
+pub mod presets;
+pub mod registry;
 pub mod types;
 
+pub use registry::Registry;
 pub use types::*;
