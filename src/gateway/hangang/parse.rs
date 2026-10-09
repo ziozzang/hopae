@@ -1,0 +1,438 @@
+//! Verify request parsing: the contract's request headers, in the order the
+//! contract evaluates them, into a gateway-neutral `VerifyInput`.
+
+use std::net::IpAddr;
+
+use axum::http::{HeaderMap, HeaderValue};
+
+use super::{CONTRACT_VERSION, GatewayConfig, Parsed, Rejected, RenderEnv};
+use crate::crypto::{Secret, ct_eq, is_well_formed_bind, is_well_formed_handle};
+use crate::event::types::{Reason, reasons};
+use crate::gateway::{canonical, recognition};
+use crate::policy::types::Host;
+use crate::verify::types::Decision;
+use crate::verify::types::{
+    CallerAuth, DenyKind, Handoff, KeySlot, Navigation, Scheme, VerifyInput,
+};
+
+const H_KEY: &str = "x-hopae-gateway-key";
+const H_CONTRACT: &str = "x-hopae-contract";
+const H_URL: &str = "x-original-url";
+const H_CANON: &str = "x-hangang-canonical-path";
+const H_ROUTE: &str = "x-hangang-route-id";
+const H_HOST: &str = "x-forwarded-host";
+const H_PROTO: &str = "x-forwarded-proto";
+const H_FOR: &str = "x-forwarded-for";
+const H_REAL_IP: &str = "x-real-ip";
+const H_METHOD: &str = "x-original-method";
+
+/// `x-original-url` upper bound in bytes.
+const MAX_URL: usize = 2048;
+/// All `cookie` header bytes together.
+const MAX_COOKIE: usize = 8 * 1024;
+/// `user-agent` bytes kept.
+const MAX_UA: usize = 1024;
+/// `x-hangang-route-id` bytes kept.
+const MAX_ROUTE: usize = 128;
+
+const HEADER_TOO_LARGE: Reason = Reason("header_too_large");
+
+/// Constant-time comparison of a presented key with a configured one.
+pub fn key_matches(configured: &Secret, presented: &[u8]) -> bool {
+    ct_eq(configured.expose().as_bytes(), presented)
+}
+
+fn refuse(
+    request_id: &str,
+    reason: Reason,
+    kind: DenyKind,
+    detail: Option<&'static str>,
+    metric: Option<&'static str>,
+) -> Box<Rejected> {
+    Box::new(Rejected {
+        decision: Decision::Deny { reason, kind },
+        env: RenderEnv {
+            request_id: request_id.to_string(),
+            detail,
+            ..RenderEnv::default()
+        },
+        metric,
+    })
+}
+
+/// The value of a header that must occur at most once.
+fn single<'a>(h: &'a HeaderMap, name: &str) -> Result<Option<&'a HeaderValue>, ()> {
+    let mut it = h.get_all(name).iter();
+    let first = it.next();
+    if it.next().is_some() {
+        return Err(());
+    }
+    Ok(first)
+}
+
+fn match_caller(cfg: &GatewayConfig, h: &HeaderMap) -> Option<CallerAuth> {
+    if cfg.allow_unauthenticated {
+        return Some(CallerAuth::Unauthenticated);
+    }
+    let mut values = h.get_all(H_KEY).iter();
+    let first = values.next()?;
+    let duplicated = values.next().is_some();
+    // Both comparisons always run, so the time does not depend on which key matched.
+    let current = cfg
+        .caller_current
+        .as_ref()
+        .is_some_and(|k| key_matches(k, first.as_bytes()));
+    let next = cfg
+        .caller_next
+        .as_ref()
+        .is_some_and(|k| key_matches(k, first.as_bytes()));
+    if duplicated {
+        None
+    } else if current {
+        Some(CallerAuth::Keyed {
+            which: KeySlot::Current,
+        })
+    } else if next {
+        Some(CallerAuth::Keyed {
+            which: KeySlot::Next,
+        })
+    } else {
+        None
+    }
+}
+
+fn parse_contract(h: &HeaderMap) -> Result<u8, Option<Reason>> {
+    match single(h, H_CONTRACT) {
+        Err(()) => Err(None),
+        Ok(None) => Ok(CONTRACT_VERSION),
+        Ok(Some(v)) => {
+            let s = v.to_str().map_err(|_| None)?;
+            if s.is_empty() || s.len() > 3 || !s.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(None);
+            }
+            match s.parse::<u16>() {
+                Ok(0) | Err(_) => Err(None),
+                Ok(n) if n == u16::from(CONTRACT_VERSION) => Ok(CONTRACT_VERSION),
+                Ok(_) => Err(Some(reasons::CONTRACT_UNSUPPORTED)),
+            }
+        }
+    }
+}
+
+/// The path component of `url` exactly as written (the URL parser would
+/// resolve dot segments and hide the very thing the canonical check rejects).
+fn raw_path(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let from_authority = rest.find(['/', '?']).map_or("", |i| &rest[i..]);
+    let path = from_authority.split('?').next().unwrap_or("");
+    if path.is_empty() { "/" } else { path }
+}
+
+fn raw_query(url: &str) -> &str {
+    url.split_once('?').map_or("", |(_, q)| q)
+}
+
+fn client_ip(h: &HeaderMap) -> Result<IpAddr, &'static str> {
+    let read = |name: &'static str| -> Result<Option<IpAddr>, &'static str> {
+        match single(h, name) {
+            Err(()) => Err(name),
+            Ok(None) => Ok(None),
+            Ok(Some(v)) => v
+                .to_str()
+                .ok()
+                .and_then(|s| s.trim().parse::<IpAddr>().ok())
+                .map(Some)
+                .ok_or(name),
+        }
+    };
+    match (read(H_FOR)?, read(H_REAL_IP)?) {
+        (Some(a), Some(b)) if a != b => Err(H_REAL_IP),
+        (Some(a), _) | (None, Some(a)) => Ok(a),
+        (None, None) => Err(H_FOR),
+    }
+}
+
+fn accepts_html(accept: &HeaderValue) -> bool {
+    let Ok(s) = accept.to_str() else {
+        return false;
+    };
+    s.split(',').any(|range| {
+        let media = range.split(';').next().unwrap_or("").trim();
+        media.eq_ignore_ascii_case("text/html")
+            || media.eq_ignore_ascii_case("application/xhtml+xml")
+    })
+}
+
+fn navigation(h: &HeaderMap) -> Navigation {
+    let document = if let Some(dest) = h.get("sec-fetch-dest") {
+        dest.as_bytes().eq_ignore_ascii_case(b"document")
+    } else if let Some(mode) = h.get("sec-fetch-mode") {
+        mode.as_bytes().eq_ignore_ascii_case(b"navigate")
+    } else {
+        h.get_all("accept").iter().any(accepts_html)
+    };
+    if document {
+        Navigation::Document
+    } else {
+        Navigation::Other
+    }
+}
+
+struct Cookies {
+    handle: Option<String>,
+    bind: Option<String>,
+    bind_well_formed: Option<String>,
+}
+
+/// The handle and binding cookies by exact name. The first well-formed pair
+/// of each wins and parsing stops once both are found; when none is well
+/// formed the first pair is passed on so the core can name it.
+fn read_cookies(cfg: &GatewayConfig, h: &HeaderMap) -> Result<Cookies, ()> {
+    let total: usize = h.get_all("cookie").iter().map(|v| v.len()).sum();
+    if total > MAX_COOKIE {
+        return Err(());
+    }
+    let (mut handle, mut handle_ok) = (None::<String>, false);
+    let (mut bind, mut bind_ok) = (None::<String>, false);
+    'all: for value in h.get_all("cookie").iter() {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        for pair in value.split(';') {
+            let Some((name, val)) = pair.trim().split_once('=') else {
+                continue;
+            };
+            if name == cfg.cookies.handle && !handle_ok {
+                if is_well_formed_handle(val) {
+                    handle = Some(val.to_string());
+                    handle_ok = true;
+                } else if handle.is_none() {
+                    handle = Some(val.to_string());
+                }
+            } else if name == cfg.cookies.bind && !bind_ok {
+                if is_well_formed_bind(val) {
+                    bind = Some(val.to_string());
+                    bind_ok = true;
+                } else if bind.is_none() {
+                    bind = Some(val.to_string());
+                }
+            }
+            if handle_ok && bind_ok {
+                break 'all;
+            }
+        }
+    }
+    Ok(Cookies {
+        bind_well_formed: if bind_ok { bind.clone() } else { None },
+        handle,
+        bind,
+    })
+}
+
+fn truncate_utf8(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Parse a verify request. `Err` carries a ready denial; nothing but the
+/// caller key has been trusted or looked up by then.
+pub fn parse(
+    cfg: &GatewayConfig,
+    h: &HeaderMap,
+    request_id: String,
+) -> Result<Parsed, Box<Rejected>> {
+    let violation = |detail: &'static str| {
+        refuse(
+            &request_id,
+            reasons::CONTRACT_VIOLATION,
+            DenyKind::ContractViolation,
+            Some(detail),
+            None,
+        )
+    };
+
+    // 1. Caller key, before any other header is read.
+    let Some(caller) = match_caller(cfg, h) else {
+        return Err(refuse(
+            &request_id,
+            reasons::CALLER_UNAUTHORIZED,
+            DenyKind::Forbidden,
+            None,
+            Some("hopae_verify_unauthorized_total"),
+        ));
+    };
+
+    // 2. Contract version.
+    let contract = match parse_contract(h) {
+        Ok(v) => v,
+        Err(Some(reason)) => {
+            return Err(refuse(
+                &request_id,
+                reason,
+                DenyKind::ContractViolation,
+                Some(H_CONTRACT),
+                None,
+            ));
+        }
+        Err(None) => return Err(violation(H_CONTRACT)),
+    };
+
+    // 3. The requested URL.
+    let raw_url = match single(h, H_URL) {
+        Ok(Some(v)) => v.to_str().map_err(|_| violation(H_URL))?,
+        _ => return Err(violation(H_URL)),
+    };
+    if raw_url.len() > MAX_URL || raw_url.contains('#') {
+        return Err(violation(H_URL));
+    }
+    let original_url = url::Url::parse(raw_url).map_err(|_| violation(H_URL))?;
+    if !matches!(original_url.scheme(), "http" | "https")
+        || !original_url.username().is_empty()
+        || original_url.password().is_some()
+    {
+        return Err(violation(H_URL));
+    }
+    let Some(url_host) = original_url.host_str() else {
+        return Err(violation(H_URL));
+    };
+
+    // 4. Transport.
+    let proto = match single(h, H_PROTO) {
+        Ok(Some(v)) => match v.as_bytes() {
+            b"https" => Scheme::Https,
+            b"http" => Scheme::Http,
+            _ => return Err(violation(H_PROTO)),
+        },
+        _ => return Err(violation(H_PROTO)),
+    };
+    if proto == Scheme::Http && cfg.secure {
+        return Err(refuse(
+            &request_id,
+            reasons::INSECURE_TRANSPORT,
+            DenyKind::ContractViolation,
+            Some(H_PROTO),
+            None,
+        ));
+    }
+    let scheme_matches = matches!(
+        (proto, original_url.scheme()),
+        (Scheme::Https, "https") | (Scheme::Http, "http")
+    );
+    if !scheme_matches {
+        return Err(violation(H_PROTO));
+    }
+
+    // 5. Host agreement.
+    let fwd_host = match single(h, H_HOST) {
+        Ok(Some(v)) => v.to_str().map_err(|_| violation(H_HOST))?,
+        _ => return Err(violation(H_HOST)),
+    };
+    let port = original_url
+        .port_or_known_default()
+        .ok_or_else(|| violation(H_URL))?;
+    let (fwd_name, fwd_port) = match fwd_host.rsplit_once(':') {
+        Some((n, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => {
+            (n, Some(p.parse::<u16>().map_err(|_| violation(H_HOST))?))
+        }
+        _ => (fwd_host, None),
+    };
+    if !fwd_name.eq_ignore_ascii_case(url_host) || fwd_port.is_some_and(|p| p != port) {
+        return Err(violation(H_HOST));
+    }
+    let host = Host::parse(url_host).map_err(|_| violation(H_HOST))?;
+
+    // 6. Client address.
+    let client_ip = client_ip(h).map_err(violation)?;
+
+    // 7. Canonical path, and agreement with the gateway's own value.
+    let canonical_path = match canonical::canonical_path(raw_path(raw_url)) {
+        Ok(p) => p,
+        Err(()) => {
+            return Err(refuse(
+                &request_id,
+                reasons::PATH_NOT_CANONICAL,
+                DenyKind::Forbidden,
+                None,
+                None,
+            ));
+        }
+    };
+    match single(h, H_CANON) {
+        Err(()) => return Err(violation(H_CANON)),
+        Ok(None) => {}
+        Ok(Some(v)) => {
+            if v.as_bytes() != canonical_path.as_str().as_bytes() {
+                return Err(refuse(
+                    &request_id,
+                    reasons::CANONICAL_PATH_MISMATCH,
+                    DenyKind::Forbidden,
+                    None,
+                    Some("hopae_verify_canonical_mismatch_total"),
+                ));
+            }
+        }
+    }
+
+    // 8. Optional context.
+    let route_id = match single(h, H_ROUTE) {
+        Err(()) => return Err(violation(H_ROUTE)),
+        Ok(v) => v
+            .and_then(|v| v.to_str().ok())
+            .map(|s| truncate_utf8(s, MAX_ROUTE).to_string()),
+    };
+    let method = match single(h, H_METHOD) {
+        Err(()) => return Err(violation(H_METHOD)),
+        Ok(None) => http::Method::GET,
+        Ok(Some(v)) => http::Method::from_bytes(v.as_bytes()).map_err(|_| violation(H_METHOD))?,
+    };
+    let cookies = read_cookies(cfg, h).map_err(|()| {
+        refuse(
+            &request_id,
+            HEADER_TOO_LARGE,
+            DenyKind::ContractViolation,
+            Some("cookie"),
+            None,
+        )
+    })?;
+    let user_agent = h.get("user-agent").map(|v| {
+        let s = String::from_utf8_lossy(v.as_bytes());
+        truncate_utf8(&s, MAX_UA).to_string()
+    });
+
+    // 9. Reserved parameter, from the query exactly as written.
+    let handoff = recognition::find_handoff(raw_query(raw_url));
+    let handoff_seen = !matches!(handoff, Handoff::None);
+
+    let env = RenderEnv {
+        request_id: request_id.clone(),
+        original_url: Some(original_url.clone()),
+        bind_cookie: cookies.bind_well_formed,
+        handoff_seen,
+        detail: None,
+    };
+    let input = VerifyInput {
+        original_url,
+        canonical_path,
+        client_ip,
+        host,
+        port,
+        proto,
+        method,
+        route_id,
+        cookie_handle: cookies.handle.map(Secret::new),
+        bind_cookie: cookies.bind.map(Secret::new),
+        user_agent,
+        navigation: navigation(h),
+        handoff,
+        contract,
+        caller,
+        request_id,
+    };
+    Ok(Parsed { input, env })
+}

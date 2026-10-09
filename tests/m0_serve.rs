@@ -35,8 +35,9 @@ async fn serves_portal_and_gateway_routes_and_shuts_down() {
         assert_eq!(h.status, 200);
 
         let v = get(gateway, "/_hopae/verify");
-        assert_eq!(v.status, 503);
-        assert_eq!(v.header("x-hopae-reason"), Some("not_implemented"));
+        // No caller key: refused before anything else is read.
+        assert_eq!(v.status, 403);
+        assert_eq!(v.header("x-hopae-reason"), Some("caller_unauthorized"));
         assert_eq!(v.header("cache-control"), Some("no-store"));
 
         // Disjoint routers: nothing else exists on either listener.
@@ -83,7 +84,7 @@ fn binary_serves_and_exits_cleanly_on_sigterm() {
     let portal = addr_of("portal listening on ");
     let gateway = addr_of("gateway listening on ");
     assert_eq!(get(portal, "/healthz").status, 200);
-    assert_eq!(get(gateway, "/_hopae/verify").status, 503);
+    assert_eq!(get(gateway, "/_hopae/verify").status, 403);
 
     let status = Command::new("kill")
         .arg("-TERM")
