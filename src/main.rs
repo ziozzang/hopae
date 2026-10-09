@@ -292,7 +292,8 @@ fn admin(cfg: &Config, action: AdminAction) -> ExitCode {
     telemetry::output::Output::global().flush(std::time::Duration::from_secs(2));
     match result {
         Ok(out) => {
-            print!("{}", out.stdout);
+            // A closed or full stdout is not a panic (the evidence step reports it).
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), out.stdout.as_bytes());
             eprint!("{}", out.stderr);
             ExitCode::from(out.code)
         }

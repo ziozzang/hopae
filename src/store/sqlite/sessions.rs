@@ -12,7 +12,7 @@ use super::events::insert_events;
 use super::rows::{
     self, CODE_COLS, HANDLE_COLS, SESSION_COLS, TXN_COLS, blob, cols, opt_blob, snapshot_json,
 };
-use super::{Shared, Store, WriterEnv, commit, require_provider_live};
+use super::{Shared, Store, WriterEnv, commit, commit_checked, require_provider_live};
 use crate::crypto::{Digest, Timestamp};
 use crate::event::types::{Event, Reason, reasons};
 use crate::identity::types::UserId;
@@ -333,11 +333,12 @@ impl Sessions for Store {
         events: Vec<Event>,
     ) -> StoreResult<()> {
         let id = id.clone();
-        self.write("terminate_session", move |env| {
+        self.write_checked("terminate_session", None, move |env, check| {
             let shared = env.shared.clone();
             let tx = env.begin()?;
+            check.now()?; // the lock may have been waited for
             terminate_in(&tx, &shared, &id, reason, at, &events)?;
-            finish(tx, &shared, None)
+            commit_checked(tx, &shared, None, check)
         })
         .await
     }

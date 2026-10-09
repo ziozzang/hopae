@@ -1435,6 +1435,22 @@ fn s305_a4_force_by_user_id_works_inside_an_ambiguous_binding_set() {
     let last = ev.last().unwrap();
     assert_eq!(last["user_id"], "u_h");
     assert_eq!(last["attrs"]["forced"], true, "{last}");
+    // A non-first member: the selection is by id, not by position.
+    r.ok(&["admin", "grant", "u_h", "--role", "viewer"]);
+    let u_h_before = r.grant("u_h").unwrap();
+    let o = r.ok(&["admin", "import", "--force", "u_h2"]);
+    assert!(o.stdout.contains("forced: u_h2"), "{}", o.all());
+    assert_eq!(
+        r.grant("u_h").unwrap(),
+        u_h_before,
+        "the first member is untouched"
+    );
+    let g2 = r.grant("u_h2").unwrap();
+    assert_eq!(
+        (g2["role"].as_str(), g2["managed_by"].as_str()),
+        (Some("admin"), Some("file")),
+        "{g2}"
+    );
     // A user id outside the set is still refused.
     let o = r.cli(&["admin", "import", "--force", "u_a"]);
     assert_eq!(o.status, 2, "{}", o.all());
@@ -1444,6 +1460,96 @@ fn s305_a4_force_by_user_id_works_inside_an_ambiguous_binding_set() {
         "{}",
         o.all()
     );
+}
+
+#[test]
+fn s305_a4_the_first_email_binding_is_recorded_and_pins_the_address() {
+    // id grant -> same-role email grant -> unchanged import -> the mailbox is
+    // reassigned -> unchanged import: the new holder gets nothing.
+    let r = Rig::new();
+    r.standard_users();
+    r.ok(&["admin", "grant", "u_h"]);
+    assert!(r.grant("u_h").unwrap()["source_email"].is_null());
+    let events = r.admin_events();
+    let o = r.ok(&["admin", "grant", "h@example.test"]);
+    assert!(
+        !o.stdout.contains("unchanged"),
+        "recording the first binding is a change: {}",
+        o.all()
+    );
+    assert_eq!(r.grant("u_h").unwrap()["source_email"], "h@example.test");
+    assert_eq!(r.admin_events(), events + 1, "and it is audited");
+    // Repeating it is now a no-op.
+    let o = r.ok(&["admin", "grant", "h@example.test"]);
+    assert!(o.stdout.contains("unchanged"), "{}", o.all());
+    r.set_users(json!([{"email": "h@example.test", "role": "admin"}]));
+    r.ok(&["admin", "import"]);
+    reassign_h(&r);
+    r.ok(&["admin", "import"]);
+    assert!(r.grant("u_h2").is_none());
+    assert_eq!(r.grant("u_h").unwrap()["source_email"], "h@example.test");
+}
+
+#[test]
+fn s305_a4_an_import_records_a_missing_binding_of_an_api_row() {
+    // id grant -> email-only entry imported (the api row is not changed, its
+    // binding is recorded) -> the mailbox is reassigned -> import again.
+    let r = Rig::new();
+    r.standard_users();
+    r.ok(&["admin", "grant", "u_h", "--role", "viewer"]);
+    r.set_users(json!([{"email": "h@example.test", "role": "admin"}]));
+    let o = r.ok(&["admin", "import"]);
+    assert!(
+        o.stdout.contains("skipped (changed at run time)"),
+        "{}",
+        o.all()
+    );
+    let g = r.grant("u_h").unwrap();
+    assert_eq!(g["source_email"], "h@example.test", "{g}");
+    assert_eq!(
+        (g["role"].as_str(), g["managed_by"].as_str()),
+        (Some("viewer"), Some("api"))
+    );
+    reassign_h(&r);
+    r.ok(&["admin", "import"]);
+    assert!(r.grant("u_h2").is_none());
+}
+
+fn reassign_h(r: &Rig) {
+    r.db()
+        .execute(
+            "UPDATE users SET primary_email = 'h-new@example.test' WHERE user_id = 'u_h'",
+            [],
+        )
+        .unwrap();
+    r.user(
+        "u_h2",
+        Some("h@example.test"),
+        true,
+        true,
+        "active",
+        "Hana Two",
+        &[("mock", "sub-h2")],
+        1_700_000_000,
+    );
+}
+
+#[test]
+fn s305_1_a_failed_evidence_write_aborts_before_the_grant() {
+    // stdout is /dev/full: every write fails. The operator never saw the
+    // user the grant would go to, so nothing is granted.
+    let r = Rig::new();
+    r.standard_users();
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("/dev/full");
+    let o =
+        r.h.cli_with_stdout(&["admin", "grant", "u_a"], std::process::Stdio::from(full));
+    assert_eq!(o.status, 2, "{}", o.all());
+    assert!(o.stderr.contains("evidence"), "{}", o.all());
+    assert!(r.grant("u_a").is_none(), "nothing was granted");
+    assert_eq!(r.admin_events(), 0);
 }
 
 #[test]

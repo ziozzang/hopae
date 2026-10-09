@@ -1046,14 +1046,15 @@ pub struct AdminCliOutput {
 impl AdminCliOutput {
     /// A live run prints what is buffered now and flushes it; otherwise the
     /// text stays for the caller to print (tests read it whole).
-    fn emit(&mut self) {
+    fn emit(&mut self) -> std::io::Result<()> {
         if self.live {
             use std::io::Write as _;
             let mut so = std::io::stdout().lock();
-            let _ = so.write_all(self.stdout.as_bytes());
-            let _ = so.flush();
+            so.write_all(self.stdout.as_bytes())?;
+            so.flush()?;
             self.stdout.clear();
         }
+        Ok(())
     }
 
     fn out(&mut self, line: impl AsRef<str>) {
@@ -1295,7 +1296,14 @@ pub async fn admin_cli_with(
                 };
                 out.stdout.push_str(&resolution_block(&user, &identities));
                 // The evidence is on the terminal before anything is written.
-                out.emit();
+                if let Err(e) = out.emit() {
+                    // The operator decides on this evidence: without it, no write.
+                    out.stderr.push_str(&format!(
+                        "error: the resolution evidence could not be written ({e}); nothing was granted\n"
+                    ));
+                    out.code = EXIT_CONFIG;
+                    return Ok(());
+                }
                 // The binding records the address as the store holds it.
                 let email = match &target {
                     GrantTarget::Email(_) => user.primary_email.clone(),

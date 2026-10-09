@@ -141,6 +141,7 @@ query examines more than a bounded window of the directory per request.
 | S301-A4 | `s301_a4_listing_and_search_examine_bounded_window` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
 | S301-A4 | `s301_a4_budget_interrupts_and_rolls_back` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
 | S301-A4 | `s301_a4_refusals_bound_their_required_audit_writes_by_the_budget` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
+| S301-A4 | `s301_a4_the_verify_budget_cannot_extend_the_admin_budget` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
 | S301-A4 | `s301_a4_terminate_of_five_thousand_sessions_with_a_large_budget` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
 | S301-A5 | `s301_a5_no_self_disable_and_viewer_cannot_disable` | `tests/scenarios/s301_admin_users.rs` | integration | passing |
 | S301-A6 | `s301_a6_directory_enumeration_needs_grant_and_is_bounded` | `tests/scenarios/s301_admin_users.rs` | integration | passing |

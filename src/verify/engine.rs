@@ -588,6 +588,9 @@ async fn revoke_handle(
 
 /// `last_seen_at` write coalescing: at most one write per handle per
 /// `touch_coalesce`, never awaited by the decision.
+/// The deadline of a detached handle touch.
+const TOUCH_DEADLINE: Duration = Duration::from_secs(2);
+
 fn touch(cx: &Cx<'_>, app: &AppPolicy, view: &HandleView) {
     static SCHEDULED: OnceLock<Mutex<HashMap<Digest, i64>>> = OnceLock::new();
     // Never longer than half of either idle timer (a short policy must not idle out).
@@ -621,10 +624,16 @@ fn touch(cx: &Cx<'_>, app: &AppPolicy, view: &HandleView) {
         map.insert(digest, cx.now.0);
     }
     let (sessions, at) = (cx.ctx.sessions.clone(), cx.now);
-    tokio::spawn(async move {
-        // Best effort: a lost touch only makes the next verify retry it.
-        let _ = sessions.touch_handle(&digest, at).await;
-    });
+    // A spawned task inherits no task-local deadline: the touch is bounded by
+    // its own short one, so it can neither pile up nor commit long after the
+    // verify that scheduled it.
+    tokio::spawn(with_deadline(
+        tokio::time::Instant::now() + TOUCH_DEADLINE,
+        async move {
+            // Best effort: a lost touch only makes the next verify retry it.
+            let _ = sessions.touch_handle(&digest, at).await;
+        },
+    ));
 }
 
 fn cacheability(

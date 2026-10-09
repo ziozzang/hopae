@@ -223,6 +223,7 @@ and every refusal is recorded.
 | S300-1 | `s300_1_first_visit_logs_in_and_lands_with_console_handle` | `tests/scenarios/s300_admin_access.rs` | gateway | passing |
 | S300-2 | `s300_2_granted_user_served_from_handle_not_headers` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
 | S300-3 | `s300_3_user_without_grant_is_refused_and_named` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-3 | `s300_3_aal_insufficient_is_refused_and_counted` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
 | S300-4 | `s300_4_read_only_administrator_reads_but_cannot_change` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
 | S300-5 | `s300_5_revoked_grant_stops_next_request` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
 | S300-6 | `s300_6_max_age_provider_stale_session_gets_provider_verified_reauthentication` | `tests/scenarios/s300_admin_access.rs` | integration | passing |

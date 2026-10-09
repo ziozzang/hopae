@@ -359,6 +359,8 @@ impl Store {
                 && g.role == role
                 && g.managed_by == managed_by
                 && (note.is_none() || note == g.note)
+                // Establishing a binding the row lacked is a change.
+                && (source_email.is_none() || g.source_email.is_some())
             {
                 return Ok((previous, false));
             }
@@ -1006,6 +1008,18 @@ impl Import<'_> {
         }
         // The resolved user may already hold a row bound some other way.
         if let Some(g) = grant_row(self.tx, &u.id)? {
+            // An email-only entry that resolved (verified, authoritative,
+            // active) to a row with no binding records the binding now, in this
+            // transaction, so a later reassignment of the mailbox can never be
+            // resolved to someone else (no event: no grant changes).
+            if let SeedKey::ByEmail(em) = &e.key
+                && g.source_email.is_none()
+            {
+                self.tx.execute(
+                    "UPDATE admin_grants SET source_email = ?2 WHERE user_id = ?1 AND source_email IS NULL",
+                    params![g.user_id.as_str(), em.as_str()],
+                )?;
+            }
             return self.apply_matched(e, g, forced_user, false);
         }
         let user = UserId::new(u.id);

@@ -614,6 +614,30 @@ fn s300_3_user_without_grant_is_refused_and_named() {
 }
 
 #[test]
+fn s300_3_aal_insufficient_is_refused_and_counted() {
+    // `admin.require_aal = 2` while no second factor exists: a granted
+    // administrator's session (aal 1) is refused, once, with its metric.
+    let idp = MockIdp::start("auth_time_present");
+    let h = Hopae::spawn(
+        Fixture::with("m4-admin", json!({"admin": {"require_aal": 2}})),
+        &idp,
+        &[],
+    );
+    let a = console_login(&h, &idp, "sub-a", "a@example.test", "Ada Admin", UA_IP);
+    grant(&h, &a.user_id, "admin");
+    let series = "hopae_admin_denied_total{reason=\"aal_insufficient\"}";
+    let n0 = metric(&h, series);
+    let r = admin(&h).with_handle(&a.handle).get("/v1/me");
+    assert_eq!(r.status, 403, "{r:?}");
+    assert_eq!(r.json()["error"], "aal_insufficient", "{r:?}");
+    assert_eq!(metric(&h, series), n0 + 1);
+    assert_eq!(
+        events_with_reason(&h, "admin.denied", "aal_insufficient").len(),
+        1
+    );
+}
+
+#[test]
 fn s300_4_read_only_administrator_reads_but_cannot_change() {
     let (_idp, h, u) = setup();
     let role = "hopae_admin_denied_total{reason=\"role_insufficient\"}";
@@ -3165,6 +3189,18 @@ mod reauth {
             r.status, 200,
             "the fence does not refuse a retained unsupported provider: {r:?}"
         );
+        // Status reads the same capability.
+        let st = super::kit::admin(&h)
+            .client_ip(IP)
+            .with_handle(&b.handle)
+            .get("/v1/status");
+        assert_eq!(st.status, 200, "{st:?}");
+        let sj = st.json();
+        let mock = sj["providers"]
+            .as_array()
+            .and_then(|p| p.iter().find(|p| p["provider_id"] == "mock"))
+            .unwrap_or_else(|| panic!("mock in status: {sj}"));
+        assert_eq!(mock["reauth"], "unsupported", "{mock}");
     }
 }
 

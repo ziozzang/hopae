@@ -45,6 +45,11 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 - `hopae --check` warns when an application sets `logout_confirm = false`; the same-origin navigation-gadget residual and the transferable logout ticket are documented (ADR-0015, threat model, configuration reference, scenario 015-A8 and A9).
 - Migration `0002` was edited in place for the last time; later schema changes are new numbered migrations (operations guide).
 
+### Fixed (code review G7 pass 2 of the M4-min console, ADR-0016)
+
+- Nested store deadline scopes keep the earliest, so the engine's larger verify budget cannot extend the console's `admin.query_budget_ms`; the detached handle touch carries its own 2 s deadline; engine session termination checks its deadline before commit.
+- `hopae admin grant` by an address records a binding the row lacked (a change, audited), and `hopae admin import` records the missing binding of a row an email-only entry resolves to, so a reassigned mailbox is never granted later; the grant aborts (exit `2`) when the resolution evidence cannot be written.
+
 ### Fixed (code review G7 of the M4-min console, ADR-0016)
 
 - A database provider the file no longer lists keeps its stored reauthentication capability in verify, the callback, the write fence and the status page (one capability map); a present JSON `null` `auth_time` fails the login like any other invalid claim; a reauthentication's `handle.revoked` events list the handles revoked in its own transaction, not a truncated preview.

@@ -66,7 +66,16 @@ tokio::task_local! {
 /// that is not finished by then fails with [`StoreError::Unavailable`].
 /// (The plan names an `Option<Timestamp>`; a real-time `Instant` is used
 /// because a test clock does not advance while a stalled call sleeps.)
+///
+/// Scopes nest by taking the **earliest**: an inner scope can shorten the
+/// enclosing deadline but never extend it (the console's budget survives the
+/// engine's own, larger verify budget). Work detached with `tokio::spawn` does
+/// not inherit a task-local; it must carry its own deadline (see the touch).
 pub async fn with_deadline<F: Future>(deadline: tokio::time::Instant, fut: F) -> F::Output {
+    let deadline = match STORE_DEADLINE.try_with(|d| *d) {
+        Ok(outer) => outer.min(deadline),
+        Err(_) => deadline,
+    };
     STORE_DEADLINE.scope(deadline, fut).await
 }
 

@@ -3077,6 +3077,42 @@ async fn expiry_during_a_retention_read_rolls_the_write_back() {
 }
 
 #[tokio::test]
+async fn nested_deadline_scopes_keep_the_earliest() {
+    let f = fx();
+    f.user(1).await;
+    let outer = tokio::time::Instant::now() + Duration::from_secs(5);
+    let later = tokio::time::Instant::now() + Duration::from_secs(600);
+    let sooner = tokio::time::Instant::now() + Duration::from_secs(1);
+    let kept = super::super::with_deadline(
+        outer,
+        super::super::with_deadline(
+            later,
+            f.store
+                .read_checked("probe", None, |_, c| Ok(c.remaining())),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        kept <= Duration::from_secs(5),
+        "a later inner scope extended it: {kept:?}"
+    );
+    let shorter = super::super::with_deadline(
+        outer,
+        super::super::with_deadline(
+            sooner,
+            f.store
+                .read_checked("probe", None, |_, c| Ok(c.remaining())),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(shorter <= Duration::from_secs(1), "{shorter:?}");
+}
+
+#[tokio::test]
 async fn a_slow_scan_is_interrupted_inside_sqlite_and_the_connection_is_restored() {
     let f = fx();
     f.user(1).await;

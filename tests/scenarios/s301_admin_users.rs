@@ -1350,6 +1350,37 @@ fn s301_a4_refusals_bound_their_required_audit_writes_by_the_budget() {
 }
 
 #[test]
+fn s301_a4_the_verify_budget_cannot_extend_the_admin_budget() {
+    // The engine runs the handle reads of the console's authentication under
+    // its own (gateway) budget; the console's smaller budget must still win.
+    let k = Console::with(
+        json!({"admin": {"query_budget_ms": 100}, "gateway": {"verify_budget_ms": 10000}}),
+    );
+    let a = k.admin("sub-a", AdminRole::Admin);
+    assert_eq!(k.client(&a).get("/v1/me").status, 200);
+    let denied_before = k.events("admin.denied").len();
+    k.h.hooks.stall(1500);
+    let t = std::time::Instant::now();
+    let r = k.client(&a).get("/v1/me");
+    let took = t.elapsed();
+    k.h.hooks.stall_off();
+    assert_eq!(
+        (r.status, code(&r).as_str()),
+        (503, "store_unavailable"),
+        "{}",
+        r.body
+    );
+    assert!(
+        took < std::time::Duration::from_millis(900),
+        "answered after {took:?}, not within the admin budget"
+    );
+    // Nothing lands late: no refusal record, and the console works again.
+    std::thread::sleep(std::time::Duration::from_millis(2000));
+    assert_eq!(k.events("admin.denied").len(), denied_before);
+    assert_eq!(k.client(&a).get("/v1/me").status, 200);
+}
+
+#[test]
 fn s301_a4_terminate_of_five_thousand_sessions_with_a_large_budget() {
     let k = Console::with(json!({"admin": {"query_budget_ms": 30000}}));
     let a = k.admin("sub-a", AdminRole::Admin);
@@ -1366,6 +1397,8 @@ fn s301_a5_no_self_disable_and_viewer_cannot_disable() {
     let a = k.admin("sub-a", AdminRole::Admin);
     let v = k.admin("sub-v", AdminRole::Viewer);
     seed_ux(&k);
+    let self_series = "hopae_admin_denied_total{reason=\"self_target\"}";
+    let s0 = k.metric(self_series);
     let r = k
         .client(&a)
         .post_json(&format!("/v1/users/{}/disable", a.user_id), json!({}));
@@ -1383,6 +1416,11 @@ fn s301_a5_no_self_disable_and_viewer_cannot_disable() {
     // A form answers with the denial page, which names the code.
     assert_eq!(r.status, 403, "{}", r.body);
     assert!(r.body.contains("self_target"), "{}", r.body);
+    assert_eq!(
+        k.metric(self_series),
+        s0 + 2,
+        "self_target is counted once per refusal"
+    );
     // The viewer's page offers no form at all.
     let pv = k.client(&v).get("/users/u_x");
     assert!(!pv.body.contains("/disable"), "no action for a viewer");

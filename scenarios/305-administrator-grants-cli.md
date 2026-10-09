@@ -151,6 +151,7 @@ validated foundation, with no backup written before the validation.
 | S305-1 | `s305_1_bootstrap_first_grant_by_user_id_prints_resolution` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
 | S305-1 | `s305_1_the_resolution_block_is_printed_before_the_grant_is_written` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
 | S305-1 | `s305_1_the_resolution_block_lists_every_identity` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-1 | `s305_1_a_failed_evidence_write_aborts_before_the_grant` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
 | S305-2 | `s305_2_grant_by_email_resolves_once_and_needs_confirm_unless_authoritative` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
 | S305-2 | `s305_2_grant_never_guesses_across_local_part_case` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
 | S305-3 | `s305_3_revoke_takes_effect_and_leaves_tombstone` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
@@ -166,6 +167,8 @@ validated foundation, with no backup written before the validation.
 | S305-A4 | `s305_a4_email_grant_not_hijacked_by_claim_stale_account_reassigned_mailbox_or_revoked_binding` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
 | S305-A4 | `s305_a4_regrant_by_a_new_address_never_replaces_the_binding` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
 | S305-A4 | `s305_a4_force_by_user_id_works_inside_an_ambiguous_binding_set` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-A4 | `s305_a4_the_first_email_binding_is_recorded_and_pins_the_address` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
+| S305-A4 | `s305_a4_an_import_records_a_missing_binding_of_an_api_row` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
 | S305-A5 | `s305_a5_command_reveals_nothing_beyond_own_store` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
 | S305-A6 | `s305_a6_file_cannot_resurrect_revoke_present_or_grant_ambiguous` | `tests/scenarios/s305_admin_grants.rs` | integration | passing |
 

@@ -863,6 +863,32 @@ impl Hopae {
     /// Run the `hopae` binary as a command-line administrator against this
     /// instance's configuration and state (`--config` is appended). The
     /// process gets the instance's environment, without the test-hooks address.
+    /// As [`Hopae::cli`] with the process's stdout replaced by `stdout`
+    /// (for example `/dev/full`, where every write fails).
+    pub fn cli_with_stdout(&self, args: &[&str], stdout: Stdio) -> super::admin::CliOutput {
+        let out = Command::new(hopae_bin())
+            .args(args)
+            .arg("--config")
+            .arg(&self.config_path)
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .envs(
+                self.env
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != "HOPAE_TEST_HOOKS"),
+            )
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(Stdio::piped())
+            .output()
+            .expect("run hopae");
+        super::admin::CliOutput {
+            status: out.status.code().unwrap_or(-1),
+            stdout: String::new(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+    }
+
     /// As [`Hopae::cli`], but the process is started with both streams piped
     /// and returned running, so a test can observe what it prints before it
     /// finishes.
