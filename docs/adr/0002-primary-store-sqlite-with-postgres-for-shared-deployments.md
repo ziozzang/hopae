@@ -104,6 +104,7 @@ MySQL, embedded key-value stores.
 | 1 | 2026-10-09 | 1 | 3 | 0 | 0 | 4 × FIX_FIRST applied (shared findings R06, R08, R10, R11) |
 | 2 | 2026-10-09 | 1 | 0 | 0 | 0 | R06, R11 CLOSED; R08, R10 PARTIAL → N02, N04 FIX_FIRST applied (Redis no longer caches positive session state; per-sink delivery rows) |
 | 3 | 2026-10-09 | 0 | 0 | 0 | 0 | R08, R10, N02, N04 CLOSED. Accepted pending confirmation pass. |
+| 4 | 2026-10-09 | 0 | 0 | 0 | 0 | No finding in pass 4. Accepted pending confirmation pass. |
 
 Findings and dispositions:
 

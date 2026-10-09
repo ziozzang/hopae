@@ -78,6 +78,7 @@ provider account recovery.
 | 1 | 2026-10-09 | 1 | 0 | 0 | 0 | 1 × FIX_FIRST applied (R01) |
 | 2 | 2026-10-09 | 0 | 0 | 0 | 0 | R01 CLOSED; the reviewer notes that the authoritative opt-in is a mailbox-authority trust decision, not proof of human continuity, which the configuration reference will state. |
 | 3 | 2026-10-09 | 0 | 0 | 0 | 0 | No finding. Accepted pending confirmation pass. |
+| 4 | 2026-10-09 | 0 | 0 | 0 | 0 | No finding in pass 4. Accepted pending confirmation pass. |
 
 Findings and dispositions:
 

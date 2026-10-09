@@ -5,7 +5,7 @@
 - Area: core
 - Milestone: M1
 - ADRs: 0002, 0003, 0005, 0006, 0008, 0013
-- Threat model: TM-07, TM-12, TM-14, TM-18, TM-19, TM-24, TM-29, TM-35
+- Threat model: TM-07, TM-12, TM-14, TM-18, TM-19, TM-24, TM-29, TM-35, TM-38
 - Gateway contract: Verify endpoint, Identity headers, Cache semantics, Versioning
 
 ## Goal
@@ -85,6 +85,12 @@ contract answers a status the gateway treats as denial.
 - Given: `u_1` has `groups = ["admin"]` in the session snapshot; an administrator removes the group (`users.authz_version` becomes 4, a `user` invalidation is published in M2).
 - When: verify with `H1`.
 - Then: with the default `apps.app.on_authz_change = refresh`, `200` without `x-forwarded-groups` and the session snapshot now carries `authz_version = 4`; with `terminate`, `302` login with cookie clear and `session.terminated` with `reason=authz_change`. With `users.status = disabled` instead: `302`/`401` with `reason=user_disabled` and the session terminated. In every case the change is visible on the very next verify, not after a timer.
+
+### S004-11 No non-allow path answers 2xx on the gateway listener
+
+- Given: fixtures that drive every non-allow outcome: no cookie (document and non-document), unknown handle, terminated session, expired handle, binding mismatch, disabled user, unknown host, caller key missing, contract violation, stalled store, overload, non-document request with the reserved parameter, ambiguous parameter, every handoff failure reason, recovery exhaustion, `session_conflict`, a step-up rule unmet (schema-level), rate limit.
+- When: each is sent to `GET /_hopae/verify`.
+- Then: every response status is in `{302, 401, 403, 400, 503}`; none is `2xx`; none carries `x-hangang-auth-terminal`; the only `200` in the whole table is the authenticated allow of S004-1, which carries the identity headers. A unit test additionally walks every `Decision` variant through the adapter's `render` and asserts that only `Decision::Allow` yields a `2xx`.
 
 ## Abuse cases
 
@@ -167,6 +173,7 @@ contract answers a status the gateway treats as denial.
 | S004-8 | `s004_8_cacheability_declared_safely` | `tests/scenarios/s004_verify.rs` | integration | planned |
 | S004-9 | `s004_9_stalled_dependency_within_budget` | `tests/scenarios/s004_verify.rs` | integration | planned |
 | S004-10 | `s004_10_authz_change_seen_on_next_verify` | `tests/scenarios/s004_verify.rs` | integration | planned |
+| S004-11 | `s004_11_no_non_allow_path_is_2xx` | `tests/scenarios/s004_verify.rs` | integration | planned |
 | S004-A1 | `s004_a1_malformed_handle_rejected_early` | `tests/scenarios/s004_verify.rs` | integration | planned |
 | S004-A2 | `s004_a2_last_seen_coalesced` | `tests/scenarios/s004_verify.rs` | integration | planned |
 | S004-A3 | `s004_a3_concurrency_limit_fails_closed` | `tests/scenarios/s004_verify.rs` | integration | planned |

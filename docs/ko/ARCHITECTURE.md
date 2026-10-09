@@ -1,6 +1,6 @@
 # 아키텍처
 
-<!-- translation-status: source=../ARCHITECTURE.md source-rev=4 status=current -->
+<!-- translation-status: source=../ARCHITECTURE.md source-rev=5 status=current -->
 
 [문서 목차](README.md) · [English](../ARCHITECTURE.md)
 
@@ -196,7 +196,11 @@ host`)에서 `127.0.0.1:8701`에 바인딩하거나, 컨테이너 포트를 호�
 호스트에서 그 브라우저의 모든 트랜잭션이 공유하므로 동시에 열린 탭들이 서로를
 무효화하지 않으며, 어떤 응답도 이를 지우지 않습니다. 두 탭이 어느 쪽 쿠키도
 도착하기 전에 시작한 경우, 진 탭은 그냥 포털로 되돌려 보내지고 포털이 싱글
-사인온으로 다시 핸드오프하며, 이는 최대 `handoff.max_recoveries`번까지입니다.
+사인온으로 다시 핸드오프하며, 이는 최대 `handoff.max_recoveries`번까지이고 그
+뒤에는 브라우저가 중계되는 `403` 페이지를 받습니다. 게이트웨이 리스너에서는
+인증된 허용만이 `2xx`입니다. 브라우저가 그 리스너에서 보는 모든 페이지는
+중계되는 `403`인데, 수정하지 않은 게이트웨이는 어떤 `2xx`든 업스트림으로
+전달하기 때문입니다.
 
 ### 흐름 5 — 정상 상태 verify
 
@@ -297,8 +301,8 @@ host`)에서 `127.0.0.1:8701`에 바인딩하거나, 컨테이너 포트를 호�
 | `apps` | `app_id` | `display_name`, `hosts`(정확한 소문자 호스트 이름의 JSON 배열. 패턴 없음), `ports`(JSON 배열, 기본값 `[443]`), `enabled`, `session_policy`(idle, absolute), `binding_policy`(ip, ua, on_mismatch), `step_up`(JSON 규칙, *나중에*), `allowed_groups`(*나중에*), `on_authz_change`(refresh, terminate), `gateway_ref`(참고용 라우트 ID), `created_at`, `updated_at` | verify는 `x-forwarded-host`로 애플리케이션을 찾습니다. 모든 `hosts`와 `ports`의 합집합이 돌아갈 출처 허용 목록이며, 각 항목은 운영자가 보증하는 정확한 자격 증명 목적지입니다. 목록에 없는 호스트는 거부되며 "모든 호스트" 모드도 접미사 모드도 없습니다. 예약된 애플리케이션 `default`는 정책 기본값만 가집니다. |
 | `sessions` | `session_id` | `user_id`, `provider_id`, `auth_time`, `factors`(`{kind, provider?, at}`의 JSON 배열), `aal`(1 또는 2), `authz_version`(스냅샷 시점의 사용자 값), `cred_gen`, `bound_ip`, `bound_ua_sha256`, `bound_country`(*나중에*), `created_at`, `last_seen_at`, `absolute_expires_at`, `terminated_at`, `terminated_reason` | 브라우저 로그인 한 번당 한 행. 자체 완결적인 신원 스냅샷(`snapshot` JSON: email, name, username, groups)을 담으며 `users.authz_version`이 바뀌면 갱신합니다. `cred_gen`은 핸들 취소나 단계 상승과 같은 트랜잭션에서 증가하며, 그 트랜잭션은 세션의 미소비 핸드오프 코드도 함께 소비 처리합니다. 이 값은 `x-hopae-gen`과 무효화 메시지에 실립니다. |
 | `session_handles` | `handle_sha256` | `session_id`, `host`, `issued_aal`, `created_at`, `last_seen_at`, `absolute_expires_at`, `revoked_at`, `revoked_reason` | (세션, 호스트)마다 하나. 쿠키는 핸들을 담으며, 서로 다른 호스트는 절대 핸들을 공유하지 않습니다. `issued_aal`은 핸들이 부여하는 수준이며, 단계 상승은 핸들을 취소하고 다시 발급합니다. 유휴·절대 타이머는 핸들 단위입니다([ADR-0007](../adr/0007-context-binding-policy.md)). |
-| `login_txns` | `txn_sha256` | `created_at`, `expires_at`(10분), `app_id`, `return_target`(게이트웨이가 준 절대 URL, 돌아갈 출처 허용 목록의 정확한 항목), `bind_sha256`(애플리케이션 호스트에 있는 브라우저의 안정적인 바인딩 쿠키 다이제스트), `portal_bind_sha256`(첫 포털 방문 시 기록하는, 브라우저의 안정적인 포털 바인딩 쿠키 다이제스트), `client_ip`, `ua_sha256`, `provider_id`, `state_sha256`(콜백은 이 값으로 트랜잭션을 찾음), `nonce`, `pkce_verifier`, `portal_session_id`(SSO일 때), `purpose`(login, stepup, link, switch), `conflicting_handle_sha256`(`switch`용), `pending_identity`(JSON, `link_required`용), `recovery_depth`, `consumed_at` | 로그인 시도 한 번의 서버 측 상태입니다. 브라우저마다 여러 개가 열려 있을 수 있으며, `recovery_depth`가 바인딩 경합 복구 횟수를 제한합니다. |
-| `handoff_codes` | `code_sha256` | `session_id`, `host`, `return_target`, `client_ip`, `bind_sha256`, `issued_aal`, `cred_gen`, `created_at`, `expires_at`(60초), `consumed_at`, `consumed_reason` | 1회용. 소비는 바인딩 쿠키, 세션의 현재 `cred_gen`, 다른 사용자의 유효한 핸들 부재까지 함께 검사하는 원자적 조건부 갱신이며, 만들어지는 핸들은 `min(issued_aal, session.aal)`을 받습니다. |
+| `login_txns` | `txn_sha256` | `created_at`, `expires_at`(10분), `app_id`, `return_target`(게이트웨이가 준 절대 URL, 돌아갈 출처 허용 목록의 정확한 항목), `bind_sha256`(애플리케이션 호스트에 있는 브라우저의 안정적인 바인딩 쿠키 다이제스트), `portal_bind_sha256`(첫 포털 방문 시 기록하는, 브라우저의 안정적인 포털 바인딩 쿠키 다이제스트), `client_ip`, `ua_sha256`, `provider_id`, `state_sha256`(콜백은 이 값으로 트랜잭션을 찾음), `nonce`, `pkce_verifier`, `portal_session_id`(SSO일 때), `purpose`(login, stepup, link, switch), `conflicting_handle_sha256`(`switch`용), `pending_identity`(JSON, `link_required`용), `recovery_depth`, `retry_bind_sha256`(콜백이 `portal_bind_mismatch`로 실패할 때 기록), `consumed_at` | 로그인 시도 한 번의 서버 측 상태입니다. 브라우저마다 여러 개가 열려 있을 수 있으며, `recovery_depth`가 바인딩 경합 복구 횟수를 제한하고, `retry_bind_sha256`은 `POST /login/retry`가 일치시켜야 하는 값입니다. |
+| `handoff_codes` | `code_sha256` | `session_id`, `host`, `return_target`, `client_ip`, `bind_sha256`, `issued_aal`, `cred_gen`, `recovery_depth`(발급한 트랜잭션에서 복사), `created_at`, `expires_at`(60초), `consumed_at`, `consumed_reason` | 1회용. 소비는 바인딩 쿠키, 세션의 현재 `cred_gen`, 다른 사용자의 유효한 핸들 부재까지 함께 검사하는 원자적 조건부 갱신이며, 만들어지는 핸들은 `min(issued_aal, session.aal)`을 받습니다. 복구 트랜잭션은 실패한 코드의 행에서 `recovery_depth + 1`을 가져오며 클라이언트에서는 절대 읽지 않습니다. |
 | `events` | `event_id` | `at`, `kind`, `outcome`, `reason`, `user_id`, `session_id`, `app_id`, `provider_id`, `client_ip`, `ua_sha256`, `request_id`, `attrs`(JSON, 제한됨) | 추가 전용 로그인 기록이자 감사 원천([ADR-0009](../adr/0009-event-model.md)). 필수 종류와 그 전달 행은 상태 변경과 같은 트랜잭션에서 기록합니다(트랜잭션 아웃박스). 전달 상태와 무관하게 `events.prune_every`건 삽입마다 또는 60초마다 기간과 건수로 정리하므로 테이블은 `max_rows + prune_every`를 절대 넘지 않습니다. |
 | `event_deliveries` | (`sink`, `event_id`) | `state`(pending, delivered, failed), `attempts`, `next_attempt_at`, `last_error`, `updated_at` | 필수 이벤트마다 구독 싱크당 한 행. 이벤트의 트랜잭션에서 삽입되고 전달 워커가 가져갑니다. 최소 1회 전달이며, 싱크별 적체 상한과 데드레터 처리를 갖습니다. 부모 이벤트와 함께 삭제되며(연쇄 삭제), 종결 상태 행은 `events.delivery_terminal_retention_days`가 지나면 별도로 만료됩니다. |
 | `blocks`(*M2*) | `block_id` | `kind`(user, email, email_domain, ip_cidr), `value`, `reason`, `created_by`, `created_at`, `expires_at` | 로그인과 verify에서 검사합니다. |

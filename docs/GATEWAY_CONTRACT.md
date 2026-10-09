@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -28,7 +28,7 @@ changes are proposed. Decisions are recorded in
 | Hopae | `gateway.verify_budget_ms` | Total time Hopae allows itself per verify, default `400`; must be below the gateway's `auth.timeout_ms` |
 | Hopae | `apps[]` | Application hosts (exact lower-case names only; no patterns), `ports` (default `[443]`) and policies; the union is the return-origin allowlist and each entry is a credential destination the operator vouches for; an unlisted host is denied (`unknown_app`) |
 | Hopae | `portal.sso_confirm_new_host` | Default `false`; when `true` the portal asks for one click before the first single-sign-on handoff of a session to each host |
-| Hopae | `handoff.max_recoveries` | Default `3`; how many times a browser may be sent back to the portal to recover from a binding-cookie race before a terminal page is shown |
+| Hopae | `handoff.max_recoveries` | Default `3`; how many times a browser may be sent back to the portal to recover from a binding-cookie race before a relayed `403` page is shown |
 | Gateway | route `auth.url` | `http://127.0.0.1:8701/_hopae/verify` |
 | Gateway | route `auth.static_request_headers` | `{"x-hopae-contract": "1", "x-hopae-gateway-key": {"env": "HANGANG_HOPAE_KEY"}}` (HC-3) |
 | Gateway | route `auth.request_headers` | `cookie`, `user-agent`, `accept`, `sec-fetch-dest`, `sec-fetch-mode`, `sec-fetch-site` |
@@ -110,6 +110,17 @@ schema (`deny_unknown_fields`) in scenario 008.
 `GET /_hopae/verify` on the gateway listener. No body. The response decides
 one request.
 
+**Status invariant.** On this listener Hopae answers `2xx` **only** for an
+authenticated allow carrying the identity headers. Every other outcome —
+login, step-up or handoff redirect, handoff failure, recovery exhaustion,
+account switch, denial, rate limit, ambiguity, contract violation, overload —
+is `302`, `401`, `403`, `400` or `503`, and any page shown to a browser from
+this listener is a relayed `403` body. The reason is the gateway's own rule:
+an unmodified gateway treats any `2xx` as an allow and forwards the request
+upstream unless `terminal_response` is configured, which Hopae does not
+require. `x-hangang-auth-terminal` is never emitted. Scenario 004-11 asserts
+the invariant across every non-allow path.
+
 Request headers consumed, in the order Hopae evaluates them:
 
 | Header | Source | Required | Use |
@@ -140,7 +151,7 @@ Response codes:
 | `200` | Allowed | Identity headers; `cache-control: no-store` (or `private, max-age=N` when HC-1 applies); `x-hopae-reason: ok` | Injects listed headers into the upstream request. |
 | `302` | Login, step-up or handoff redirect for a document navigation | `location` (portal URL or handoff target); `set-cookie` (plant the binding cookie or the handle, or clear them); `cache-control: no-store`; `x-hopae-reason` | Relayed to the client with `referrer-policy: no-referrer`; upstream not contacted. |
 | `401` | Authentication required or step-up required, non-document request | `content-type: application/json`, body `{"error":"login_required","login":"https://app.example.test/admin/x"}` (or `"step_up_required"`): `login` is the **application URL as requested**, because only a document navigation on the application host can plant the binding cookie and start a transaction; the `401` creates no transaction and sets no cookie; `www-authenticate: Hopae realm="auth.example.test"`; `cache-control: no-store` | Relayed to the client. A page script that receives it navigates the window to `login`. |
-| `403` | Denied: caller key missing or wrong (`caller_unauthorized`), host outside the allowlist (`unknown_app`), blocked user or IP, application disabled, group rule, step-up impossible, a non-document request carrying the reserved handoff parameter (`handoff_parameter_not_allowed`), an ambiguous reserved parameter (`handoff_ambiguous`), **or rate limited** (`{"error":"rate_limited","retry_after":30}`) | JSON body with `error`; `x-hopae-reason` | Relayed to the client with its body and without contacting the upstream. Rate limiting uses `403` because an unmodified gateway maps `429` to `503` and drops `retry-after`; with gateway change HC-8 Hopae answers `429` with `retry-after` instead (`gateway.rate_limit_status`). |
+| `403` | Denied: caller key missing or wrong (`caller_unauthorized`), host outside the allowlist (`unknown_app`), blocked user or IP, application disabled, group rule, step-up impossible, a non-document request carrying the reserved handoff parameter (`handoff_parameter_not_allowed`), an ambiguous reserved parameter (`handoff_ambiguous`), binding-race recovery exhausted (`handoff_recovery_exhausted`, small HTML body for the browser), **or rate limited** (`{"error":"rate_limited","retry_after":30}`) | JSON body with `error` (HTML for `handoff_recovery_exhausted` on a document navigation); `x-hopae-reason` | Relayed to the client with its body and without contacting the upstream. Rate limiting uses `403` because an unmodified gateway maps `429` to `503` and drops `retry-after`; with gateway change HC-8 Hopae answers `429` with `retry-after` instead (`gateway.rate_limit_status`). |
 | `400` | Contract violation | `x-hopae-reason` | `503` to the client (fail closed). |
 | `503` | Hopae cannot decide (store unavailable, overload, verify budget exceeded) | `retry-after`; `x-hopae-reason` | `503` to the client (fail closed). |
 
@@ -191,7 +202,7 @@ generation>` (the generations observed by that read).
 | --- | --- | --- | --- |
 | `__Host-hopae` | Each application host and the portal host | `Path=/; Secure; HttpOnly; SameSite=Lax`; no `Domain`; `Max-Age` equals the handle's remaining absolute lifetime | `v1.` + base64url of 32 random bytes: a handle bound to one session, one host and one issued level |
 | `__Host-hopae_bind` | The application host, planted by the unauthenticated `302` that starts a login or a step-up **when the request carries no well-formed value**; otherwise the existing value is kept and its `Max-Age` refreshed | `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` | base64url of 16 random bytes: the stable per-browser secret every handoff code for this host is bound to; shared by concurrent transactions; never cleared or replaced by any response; expires by `Max-Age`. Two tabs that start before either response arrives receive different values and the last one wins; the loser recovers through the ordinary unauthenticated `302` (see the handoff section), at most `handoff.max_recoveries` times |
-| `__Host-hopae_portal` | Portal host, planted at the first portal visit and refreshed on each | `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` | base64url of 16 random bytes: the stable per-browser portal secret; each transaction records its digest at the moment its provider redirect is issued and never changes it afterwards; the callback and every portal `POST` require a match; there is no per-transaction cookie. A callback whose well-formed cookie differs (first-contact race) consumes the transaction and offers one CSRF-protected retry |
+| `__Host-hopae_portal` | Portal host, planted at the first portal visit and refreshed on each | `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` | base64url of 16 random bytes: the stable per-browser portal secret; each transaction records its digest at the moment its provider redirect is issued and never changes it afterwards; the callback and every portal `POST` require a match with the transaction they act on, except `POST /login/retry`, which matches the `retry_bind_sha256` the interrupted page recorded (the replacement cookie); there is no per-transaction cookie. A callback whose well-formed cookie differs (first-contact race) consumes the transaction, stores the presented cookie's digest as `retry_bind_sha256` and offers one CSRF-protected retry |
 
 Clearing uses the same name and attributes with `Max-Age=0`. `SameSite` is
 always `Lax`: the portal → application redirect is a cross-site top-level
@@ -244,10 +255,13 @@ the code and leaves every cookie as it is (`session_conflict`); a code whose
 bind digest does not match the presented bind while the browser holds **no**
 valid handle (the first-use race between tabs) is burned and answered with
 the ordinary unauthenticated `302` to a new transaction that keeps the
-presented bind and inherits `recovery_depth + 1`, so the portal re-hands-off
-by single sign-on; a transaction beyond `handoff.max_recoveries` is answered
-with a terminal `200` page (`handoff_recovery_exhausted`) instead of another
-redirect; every other failure burns the code, answers the unauthenticated
+presented bind and takes `recovery_depth = code.recovery_depth + 1` (the
+depth travels on the code's row, copied from the transaction that minted it,
+and is never read from the client), so the portal re-hands-off by single
+sign-on; when the burned code's depth already equals `handoff.max_recoveries`
+no transaction is created and the answer is a relayed **`403`** with a small
+HTML body (`handoff_recovery_exhausted`) — never a `2xx`, per the status
+invariant above; every other failure burns the code, answers the unauthenticated
 `302` to the portal (which keeps an existing binding cookie) and emits
 `handoff.rejected` with the reason (`code_consumed`, `code_expired`,
 `code_stale_generation`, `code_host_mismatch`, `code_path_mismatch`,
@@ -276,7 +290,7 @@ All on the portal host, served by the portal listener.
 | `GET /login?txn=<id>` | Provider chooser; immediate redirect when one provider is enabled | `txn` must exist, be unexpired and match the client IP policy; plants or refreshes `__Host-hopae_portal` and records its digest in the transaction at first visit |
 | `POST /login/<provider>` | Start the provider flow | CSRF token bound to the portal binding cookie; `Origin` must be the portal origin |
 | `GET /callback/<provider>` | Provider redirect URI | `state` locates the transaction; the portal binding cookie must match the digest recorded when the provider redirect was issued; provider must match; PKCE; nonce; issuer. A well-formed but different cookie consumes the transaction and renders the retry page |
-| `POST /login/retry` | Start a new transaction for the same return target after a portal binding race, at `recovery_depth + 1` | CSRF token; `Origin` check; the consumed transaction must have failed with `portal_bind_mismatch`; bounded by `handoff.max_recoveries` |
+| `POST /login/retry` | Start a new transaction for the same return target after a portal binding race, at `recovery_depth + 1` | CSRF token issued on the interrupted page; `Origin` check; the portal binding cookie must match the consumed transaction's `retry_bind_sha256` (not its original digest); the consumed transaction must have failed with `portal_bind_mismatch`; bounded by `handoff.max_recoveries` |
 | `GET /switch?txn=<id>` | Account-switch confirmation after `session_conflict`: names the host and both accounts | Shows the form only; no state change |
 | `POST /switch` | Confirm (revokes the handle the browser presented on that host, mints a fresh code, redirects) or decline (redirect to the clean URL as the existing user) | CSRF token; `Origin` check; portal binding cookie; the transaction must be of purpose `switch` |
 | `GET /logout` | Confirmation page | Shows the form only; no state change |

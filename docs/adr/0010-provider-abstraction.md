@@ -127,6 +127,7 @@ token refresh for application use.
 | 1 | 2026-10-09 | 2 | 1 | 0 | 0 | 3 × FIX_FIRST applied (R01 shared, R07, R12) |
 | 2 | 2026-10-09 | 0 | 1 | 0 | 0 | R01, R07, R12 CLOSED; new N09 FIX_FIRST applied (deletion tombstones) |
 | 3 | 2026-10-09 | 0 | 0 | 0 | 0 | N09 CLOSED. Accepted pending confirmation pass. |
+| 4 | 2026-10-09 | 0 | 0 | 0 | 0 | No finding in pass 4. Accepted pending confirmation pass. |
 
 Findings and dispositions:
 

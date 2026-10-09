@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=4 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=5 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -27,7 +27,7 @@ Hangang 게이트웨이가 최우선(first-class) 통합 대상이며, 페이지
 | Hopae | `gateway.verify_budget_ms` | verify 한 번에 Hopae가 스스로에게 허용하는 총 시간. 기본값 `400`. 게이트웨이의 `auth.timeout_ms`보다 작아야 합니다 |
 | Hopae | `apps[]` | 애플리케이션 호스트(정확한 소문자 이름만, 패턴 없음), `ports`(기본값 `[443]`), 정책. 이들의 합집합이 돌아갈 출처 허용 목록이며, 각 항목은 운영자가 보증하는 자격 증명 목적지입니다. 나열되지 않은 호스트는 거부합니다(`unknown_app`) |
 | Hopae | `portal.sso_confirm_new_host` | 기본값 `false`. `true`이면 세션이 각 호스트로 처음 싱글 사인온 핸드오프를 하기 전에 포털이 한 번의 클릭을 요구합니다 |
-| Hopae | `handoff.max_recoveries` | 기본값 `3`. 바인딩 쿠키 경쟁에서 복구하기 위해 브라우저를 포털로 되돌려 보낼 수 있는 횟수. 이를 넘으면 종료 페이지를 보여 줍니다 |
+| Hopae | `handoff.max_recoveries` | 기본값 `3`. 바인딩 쿠키 경쟁에서 복구하기 위해 브라우저를 포털로 되돌려 보낼 수 있는 횟수. 이를 넘으면 중계된 `403` 페이지를 보여 줍니다 |
 | 게이트웨이 | 라우트 `auth.url` | `http://127.0.0.1:8701/_hopae/verify` |
 | 게이트웨이 | 라우트 `auth.static_request_headers` | `{"x-hopae-contract": "1", "x-hopae-gateway-key": {"env": "HANGANG_HOPAE_KEY"}}`(HC-3) |
 | 게이트웨이 | 라우트 `auth.request_headers` | `cookie`, `user-agent`, `accept`, `sec-fetch-dest`, `sec-fetch-mode`, `sec-fetch-site` |
@@ -109,6 +109,16 @@ Hangang 게이트웨이가 최우선(first-class) 통합 대상이며, 페이지
 게이트웨이 리스너의 `GET /_hopae/verify`입니다. 본문은 없습니다. 응답 하나가
 요청 하나를 결정합니다.
 
+**상태 코드 불변식.** 이 리스너에서 Hopae는 신원 헤더를 실은 인증된 허용에
+**대해서만** `2xx`로 답합니다. 그 밖의 모든 결과 — 로그인·단계 상승·핸드오프
+리디렉션, 핸드오프 실패, 복구 소진, 계정 전환, 거부, 속도 제한, 모호성, 계약
+위반, 과부하 — 는 `302`, `401`, `403`, `400`, `503` 중 하나이며, 이 리스너에서
+브라우저에 보여 주는 모든 페이지는 중계된 `403` 본문입니다. 이유는 게이트웨이
+자체의 규칙입니다. 수정하지 않은 게이트웨이는 `terminal_response`를 설정하지
+않는 한 모든 `2xx`를 허용으로 취급해 요청을 업스트림으로 전달하는데, Hopae는 그
+설정을 요구하지 않습니다. `x-hangang-auth-terminal`은 절대 내보내지 않습니다.
+시나리오 004-11이 허용이 아닌 모든 경로에 걸쳐 이 불변식을 검증합니다.
+
 소비하는 요청 헤더를 Hopae가 평가하는 순서대로 나열합니다.
 
 | 헤더 | 출처 | 필수 | 용도 |
@@ -139,7 +149,7 @@ Hangang 게이트웨이가 최우선(first-class) 통합 대상이며, 페이지
 | `200` | 허용 | 신원 헤더, `cache-control: no-store`(HC-1이 적용되면 `private, max-age=N`), `x-hopae-reason: ok` | 나열된 헤더를 업스트림 요청에 주입합니다. |
 | `302` | 문서 탐색에 대한 로그인, 단계 상승, 핸드오프 리디렉션 | `location`(포털 URL 또는 핸드오프 대상), `set-cookie`(바인딩 쿠키나 핸들을 심거나 지움), `cache-control: no-store`, `x-hopae-reason` | `referrer-policy: no-referrer`와 함께 클라이언트로 중계합니다. 업스트림에는 접속하지 않습니다. |
 | `401` | 인증 필요 또는 단계 상승 필요, 문서가 아닌 요청 | `content-type: application/json`, 본문 `{"error":"login_required","login":"https://app.example.test/admin/x"}`(또는 `"step_up_required"`): `login`은 **요청된 애플리케이션 URL 그대로**입니다. 애플리케이션 호스트의 문서 탐색만이 바인딩 쿠키를 심고 트랜잭션을 시작할 수 있기 때문입니다. `401`은 트랜잭션을 만들지 않고 쿠키도 설정하지 않습니다. `www-authenticate: Hopae realm="auth.example.test"`, `cache-control: no-store` | 클라이언트로 중계합니다. 이를 받은 페이지 스크립트는 창을 `login`으로 이동시킵니다. |
-| `403` | 거부: 호출자 키 누락이나 불일치(`caller_unauthorized`), 허용 목록 밖의 호스트(`unknown_app`), 차단된 사용자나 IP, 비활성화된 애플리케이션, 그룹 규칙, 단계 상승 불가, 예약 핸드오프 매개변수를 실은 문서가 아닌 요청(`handoff_parameter_not_allowed`), 모호한 예약 매개변수(`handoff_ambiguous`), **또는 속도 제한**(`{"error":"rate_limited","retry_after":30}`) | `error`를 담은 JSON 본문, `x-hopae-reason` | 업스트림에 접속하지 않고 본문과 함께 클라이언트로 중계합니다. 수정하지 않은 게이트웨이는 `429`를 `503`으로 바꾸고 `retry-after`를 버리므로 속도 제한에 `403`을 사용합니다. 게이트웨이 변경 HC-8이 있으면 Hopae는 대신 `retry-after`를 실은 `429`로 답합니다(`gateway.rate_limit_status`). |
+| `403` | 거부: 호출자 키 누락이나 불일치(`caller_unauthorized`), 허용 목록 밖의 호스트(`unknown_app`), 차단된 사용자나 IP, 비활성화된 애플리케이션, 그룹 규칙, 단계 상승 불가, 예약 핸드오프 매개변수를 실은 문서가 아닌 요청(`handoff_parameter_not_allowed`), 모호한 예약 매개변수(`handoff_ambiguous`), 바인딩 경쟁 복구 소진(`handoff_recovery_exhausted`, 브라우저용 작은 HTML 본문), **또는 속도 제한**(`{"error":"rate_limited","retry_after":30}`) | `error`를 담은 JSON 본문(문서 탐색의 `handoff_recovery_exhausted`는 HTML), `x-hopae-reason` | 업스트림에 접속하지 않고 본문과 함께 클라이언트로 중계합니다. 수정하지 않은 게이트웨이는 `429`를 `503`으로 바꾸고 `retry-after`를 버리므로 속도 제한에 `403`을 사용합니다. 게이트웨이 변경 HC-8이 있으면 Hopae는 대신 `retry-after`를 실은 `429`로 답합니다(`gateway.rate_limit_status`). |
 | `400` | 계약 위반 | `x-hopae-reason` | 클라이언트에 `503`(거부 처리). |
 | `503` | Hopae가 결정할 수 없음(저장소 사용 불가, 과부하, verify 예산 초과) | `retry-after`, `x-hopae-reason` | 클라이언트에 `503`(거부 처리). |
 
@@ -188,7 +198,7 @@ Hopae 내부의 결정 순서는 다음과 같습니다. 호출자 키 → 계�
 | --- | --- | --- | --- |
 | `__Host-hopae` | 각 애플리케이션 호스트와 포털 호스트 | `Path=/; Secure; HttpOnly; SameSite=Lax`, `Domain` 없음, `Max-Age`는 핸들의 남은 절대 수명과 같음 | `v1.` + 무작위 32바이트의 base64url. 세션 하나, 호스트 하나, 발급 수준 하나에 묶인 핸들 |
 | `__Host-hopae_bind` | 애플리케이션 호스트. 로그인이나 단계 상승을 시작하는 미인증 `302`가 **요청에 올바른 형식의 값이 없을 때** 심음. 있으면 기존 값을 유지하고 `Max-Age`만 갱신 | `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` | 무작위 16바이트의 base64url. 이 호스트의 모든 핸드오프 코드가 묶이는 브라우저별 안정적 비밀. 동시 트랜잭션이 공유하며, 어떤 응답도 지우거나 교체하지 않고 `Max-Age`로 만료. 어느 응답도 도착하기 전에 시작한 두 탭은 서로 다른 값을 받고 마지막 응답이 이기며, 진 쪽은 통상의 미인증 `302`로 복구함(핸드오프 절 참조). 최대 `handoff.max_recoveries`회 |
-| `__Host-hopae_portal` | 포털 호스트. 첫 포털 방문 시 심고 방문마다 갱신 | `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` | 무작위 16바이트의 base64url. 브라우저별 안정적 포털 비밀. 각 트랜잭션은 제공자 리디렉션을 내보내는 순간 그 다이제스트를 기록하고 이후 절대 바꾸지 않으며, 콜백과 모든 포털 `POST`는 일치를 요구함. 트랜잭션별 쿠키는 없음. 올바른 형식이지만 다른 쿠키를 가진 콜백(첫 접촉 경쟁)은 트랜잭션을 소비하고 CSRF로 보호된 재시도를 한 번 제공함 |
+| `__Host-hopae_portal` | 포털 호스트. 첫 포털 방문 시 심고 방문마다 갱신 | `Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` | 무작위 16바이트의 base64url. 브라우저별 안정적 포털 비밀. 각 트랜잭션은 제공자 리디렉션을 내보내는 순간 그 다이제스트를 기록하고 이후 절대 바꾸지 않으며, 콜백과 모든 포털 `POST`는 자신이 다루는 트랜잭션과의 일치를 요구함. 예외는 `POST /login/retry` 하나로, 중단 페이지가 기록한 `retry_bind_sha256`(교체된 쿠키)과 일치해야 함. 트랜잭션별 쿠키는 없음. 올바른 형식이지만 다른 쿠키를 가진 콜백(첫 접촉 경쟁)은 트랜잭션을 소비하고, 제시된 쿠키의 다이제스트를 `retry_bind_sha256`으로 저장하며, CSRF로 보호된 재시도를 한 번 제공함 |
 
 지울 때는 같은 이름과 속성에 `Max-Age=0`을 사용합니다. `SameSite`는 항상
 `Lax`입니다. 포털 → 애플리케이션 리디렉션은 교차 사이트 최상위 탐색이므로
@@ -236,10 +246,13 @@ Hopae는 다음이 모두 성립할 때만 코드를 소비합니다. 1회용이
 코드를 태워 버리며, 모든 쿠키를 그대로 둡니다(`session_conflict`). 바인딩
 다이제스트가 제시된 바인딩과 다른데 브라우저에 유효한 핸들이 **없으면**(탭
 사이의 첫 사용 경쟁) 코드를 태워 버리고, 제시된 바인딩을 유지하며
-`recovery_depth + 1`을 물려받는 새 트랜잭션으로 가는 통상의 미인증 `302`로
-답하므로 포털이 싱글 사인온으로 다시 핸드오프합니다. `handoff.max_recoveries`를
-넘는 트랜잭션에는 또 다른 리디렉션 대신 종료 `200`
-페이지(`handoff_recovery_exhausted`)로 답합니다. 그 밖의 모든 실패는 코드를
+`recovery_depth = code.recovery_depth + 1`을 갖는 새 트랜잭션으로 가는 통상의
+미인증 `302`로 답하므로(깊이는 코드를 만든 트랜잭션에서 복사되어 코드의 행에
+실려 다니며 클라이언트에서는 절대 읽지 않음) 포털이 싱글 사인온으로 다시
+핸드오프합니다. 태워 버린 코드의 깊이가 이미 `handoff.max_recoveries`와 같으면
+트랜잭션을 만들지 않고 작은 HTML 본문을 실은 중계된
+**`403`**(`handoff_recovery_exhausted`)으로 답합니다. 위의 상태 코드 불변식에
+따라 절대 `2xx`가 아닙니다. 그 밖의 모든 실패는 코드를
 태워 버리고, 포털로 가는 인증되지 않은 `302`(기존 바인딩 쿠키는 유지)로
 답하며, 사유(`code_consumed`, `code_expired`, `code_stale_generation`,
 `code_host_mismatch`, `code_path_mismatch`, `bind_mismatch`,
@@ -268,7 +281,7 @@ Hopae의 소비와 게이트웨이의 캐시 우회(HC-1)가 공유하는 규칙
 | `GET /login?txn=<id>` | 제공자 선택. 제공자가 하나만 활성화되어 있으면 즉시 리디렉션 | `txn`이 존재하고, 만료되지 않았으며, 클라이언트 IP 정책에 맞아야 함. `__Host-hopae_portal`을 심거나 갱신하고 첫 방문 시 그 다이제스트를 트랜잭션에 기록 |
 | `POST /login/<provider>` | 제공자 흐름 시작 | 포털 바인딩 쿠키에 묶인 CSRF 토큰. `Origin`은 포털 출처여야 함 |
 | `GET /callback/<provider>` | 제공자 리디렉션 URI | `state`로 트랜잭션을 찾음. 포털 바인딩 쿠키가 제공자 리디렉션을 내보낼 때 기록한 다이제스트와 일치해야 함. 제공자 일치, PKCE, nonce, 발급자. 올바른 형식이지만 다른 쿠키는 트랜잭션을 소비하고 재시도 페이지를 표시함 |
-| `POST /login/retry` | 포털 바인딩 경쟁 뒤에 같은 돌아갈 대상으로 `recovery_depth + 1`의 새 트랜잭션을 시작 | CSRF 토큰, `Origin` 검사. 소비된 트랜잭션이 `portal_bind_mismatch`로 실패했어야 함. `handoff.max_recoveries`로 제한 |
+| `POST /login/retry` | 포털 바인딩 경쟁 뒤에 같은 돌아갈 대상으로 `recovery_depth + 1`의 새 트랜잭션을 시작 | 중단 페이지에서 발급한 CSRF 토큰, `Origin` 검사. 포털 바인딩 쿠키는 소비된 트랜잭션의 `retry_bind_sha256`(원래 다이제스트가 아님)과 일치해야 함. 소비된 트랜잭션이 `portal_bind_mismatch`로 실패했어야 함. `handoff.max_recoveries`로 제한 |
 | `GET /switch?txn=<id>` | `session_conflict` 뒤의 계정 전환 확인. 호스트와 두 계정을 표시 | 폼만 표시. 상태 변경 없음 |
 | `POST /switch` | 확인(브라우저가 그 호스트에서 제시한 핸들을 취소하고, 새 코드를 발급하고, 리디렉션) 또는 거절(기존 사용자로 깨끗한 URL로 리디렉션) | CSRF 토큰, `Origin` 검사, 포털 바인딩 쿠키. 트랜잭션의 목적이 `switch`여야 함 |
 | `GET /logout` | 확인 페이지 | 폼만 표시. 상태 변경 없음 |

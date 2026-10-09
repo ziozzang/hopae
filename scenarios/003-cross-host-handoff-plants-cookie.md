@@ -5,7 +5,7 @@
 - Area: sessions
 - Milestone: M1
 - ADRs: 0004, 0005, 0008
-- Threat model: TM-02, TM-04, TM-05, TM-22, TM-23, TM-31, TM-33, TM-36
+- Threat model: TM-02, TM-04, TM-05, TM-22, TM-23, TM-31, TM-33, TM-36, TM-38
 - Gateway contract: Cross-domain handoff, Reserved parameter recognition, Cookies, Verify endpoint (`302` with `set-cookie`)
 
 ## Goal
@@ -173,7 +173,7 @@ yields a session handle and never replaces another user's session.
 
 - Given: a harness client that discards every `set-cookie` for `__Host-hopae_bind` and always presents a bind that matches no code (a browser with a broken cookie jar, or an attacker trying to make Hopae redirect forever); the portal holds a valid `H0`.
 - When: the client follows the redirects: navigation with a code → unauthenticated `302` (depth 1) → portal SSO → code → `302` (depth 2) → … 
-- Then: at depth `handoff.max_recoveries + 1` (default: the fourth attempt) Hopae answers a terminal `200` page with `x-hopae-reason: handoff_recovery_exhausted` instead of another redirect; no code is minted for that transaction; the event records the depth; the client's existing cookies are untouched; a fresh navigation without a code starts over at depth 0. The redirect count per browser is therefore bounded by `3 × (portal round trip)` and the store writes per recovery are one transaction and one code.
+- Then: each recovery transaction's `recovery_depth` is the burned code's depth plus one (depths 1, 2, 3 are observed on the codes the portal mints); when the burned code's depth equals `handoff.max_recoveries` (default: the fourth mismatching navigation) Hopae creates no transaction and answers **`403`** with a small HTML body, `content-type: text/html`, `cache-control: no-store` and `x-hopae-reason: handoff_recovery_exhausted` — never a `2xx` — which the live gateway relays to the client; the echo upstream records **zero requests** during the whole chain; the event records the depth; the client's existing cookies are untouched; a fresh navigation without a code starts over at depth 0. A client that tampers with nothing but presents a crafted depth anywhere (query, cookie, header) has no effect, because depth is read only from the code's row. The redirect count per browser is therefore bounded by `3 × (portal round trip)` and the store writes per recovery are one transaction and one code.
 
 ## Observability expectations
 
@@ -206,7 +206,7 @@ yields a session handle and never replaces another user's session.
 | S003-A10 | `s003_a10_other_users_handle_requires_explicit_switch` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A11 | `s003_a11_pre_elevation_code_never_elevated` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A12 | `s003_a12_ambiguous_parameter_refused` | `tests/scenarios/s003_handoff.rs` | integration | planned |
-| S003-A13 | `s003_a13_recovery_bounded` | `tests/scenarios/s003_handoff.rs` | integration | planned |
+| S003-A13 | `s003_a13_recovery_bounded_no_upstream` | `tests/scenarios/s003_handoff.rs` | gateway | planned |
 
 ## Live verification
 

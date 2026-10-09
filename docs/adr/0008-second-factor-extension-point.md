@@ -116,6 +116,7 @@ details (origin is the portal origin), push factors.
 | 1 | 2026-10-09 | 2 | 0 | 0 | 0 | 2 × FIX_FIRST applied (R04 shared, R05) |
 | 2 | 2026-10-09 | 1 | 0 | 0 | 0 | R04 CLOSED; R05 PARTIAL → N01 FIX_FIRST applied |
 | 3 | 2026-10-09 | 0 | 0 | 0 | 0 | R05, N01 CLOSED (both commit orders defeated; PostgreSQL needs a consistent lock order in implementation). Accepted pending confirmation pass. |
+| 4 | 2026-10-09 | 0 | 0 | 0 | 0 | No finding in pass 4. Accepted pending confirmation pass. |
 
 Findings and dispositions:
 

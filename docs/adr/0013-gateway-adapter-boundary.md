@@ -94,6 +94,7 @@ Out of scope: writing any non-Hangang adapter in M1–M6; a plugin ABI.
 | 1 | 2026-10-09 | 1 | 0 | 0 | 0 | 1 × FIX_FIRST applied (R04, shared) |
 | 2 | 2026-10-09 | 0 | 0 | 1 | 0 | R04 CLOSED; N12 (shared) FIX_FIRST applied: the recognition rule lives in the adapter and `VerifyInput.handoff` carries the result |
 | 3 | 2026-10-09 | 0 | 0 | 0 | 0 | N12 CLOSED; lint description aligned with the M0 implementation (scans `src/` outside `src/gateway/`). Accepted pending confirmation pass. |
+| 4 | 2026-10-09 | 0 | 0 | 0 | 0 | No finding; the adapter's `render` carries the ADR-0005 invariant (only `Decision::Allow` renders to `2xx`), pinned by scenario 004-11. Accepted pending confirmation pass. |
 
 Findings and dispositions:
 

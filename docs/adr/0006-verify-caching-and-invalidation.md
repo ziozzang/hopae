@@ -62,6 +62,7 @@
 | 1 | 2026-10-09 | 1 | 1 | 0 | 0 | 2 × FIX_FIRST applied (R03, R08) |
 | 2 | 2026-10-09 | 1 | 0 | 1 | 0 | R03 CLOSED; R08 PARTIAL → N02 FIX_FIRST applied; N12 (shared) FIX_FIRST applied |
 | 3 | 2026-10-09 | 0 | 0 | 1 | 0 | R08, N02, N12 CLOSED; new N15 DEFERRED (epoch recorded in decision 8; tracking scenario in the 1xx range when the local cache ships; HC-1/HC-2 acceptance criteria extended). Accepted pending confirmation pass. |
+| 4 | 2026-10-09 | 0 | 0 | 0 | 0 | N15 deferral judged adequate; the tracking scenario must test epoch fencing against delayed old-epoch work before any cache ships. Accepted pending confirmation pass. |
 
 Findings and dispositions:
 

@@ -95,6 +95,7 @@ Out of scope: device fingerprinting, TLS fingerprinting, risk scoring.
 | 1 | 2026-10-09 | 0 | 1 | 0 | 0 | 1 × FIX_FIRST applied (R15, shared with ADR-0004) |
 | 2 | 2026-10-09 | 0 | 1 | 0 | 0 | R15 PARTIAL → N10 (scenario contradictions) FIX_FIRST applied in scenarios 009 and 010; the state machine itself stands |
 | 3 | 2026-10-09 | 0 | 0 | 0 | 0 | R15, N10 CLOSED. Accepted pending confirmation pass. |
+| 4 | 2026-10-09 | 0 | 0 | 0 | 0 | No finding in pass 4. Accepted pending confirmation pass. |
 
 Findings and dispositions:
 

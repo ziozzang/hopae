@@ -96,6 +96,7 @@ separately in M5), log shipping.
 | 1 | 2026-10-09 | 0 | 1 | 0 | 0 | 1 × FIX_FIRST applied (R10) |
 | 2 | 2026-10-09 | 1 | 1 | 0 | 0 | R10 PARTIAL → N04, N05 FIX_FIRST applied (per-sink delivery rows, at-least-once with dedup, bounded backlog with dead-letter) |
 | 3 | 2026-10-09 | 0 | 1 | 0 | 0 | R10, N04 CLOSED; N05 PARTIAL → N14 FIX applied (delivery rows die with their event, terminal-row retention, quantified prune cadence). Awaiting confirmation pass. |
+| 4 | 2026-10-09 | 0 | 0 | 0 | 0 | N05, N14 CLOSED. Accepted pending confirmation pass. |
 
 Findings and dispositions:
 
