@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("login.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t.get("login.title") }}</h1>
+<p>{{ t.get("login.lead") }}</p>
+{% for p in providers %}
+{% if p.available %}
+<form method="post" action="/login/{{ p.id }}">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="txn" value="{{ txn }}">
+<button type="submit">{{ t.fmt("login.button", "provider", p.display_name) }}</button>
+</form>
+{% else %}
+<p class="muted">{{ t.fmt("login.unavailable", "provider", p.display_name) }}</p>
+{% endif %}
+{% endfor %}
+{% endblock %}

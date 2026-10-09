@@ -1,8 +1,11 @@
 //! Routers, one per listener, with disjoint route sets (ADR-0003).
 //! Middleware (request id, security headers, limits) is added in M1.
 
+pub mod csrf;
 #[cfg(feature = "test-hooks")]
 pub mod hooks;
+pub mod portal;
+pub mod security;
 
 use axum::Router;
 use axum::http::StatusCode;

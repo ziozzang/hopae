@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get(title_key) }}{% endblock %}
+{% block content %}
+<h1>{{ t.get(title_key) }}</h1>
+<p>{{ t.get(body_key) }}</p>
+{% endblock %}
