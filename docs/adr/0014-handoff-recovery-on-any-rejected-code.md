@@ -1,6 +1,6 @@
 # ADR-0014: Handoff recovery depth applies to every rejection of a known code, and codes carry the transaction's client IP
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 003 (A13, 9), 002 (7)
@@ -16,7 +16,7 @@
 ## Decision
 
 1. `handoff_codes.client_ip` is copied from the **login transaction's** `client_ip` (recorded by the application-host verify call that started the login), never from the portal request that mints the code. Single sign-on and retry transactions are application-host transactions too, so the rule has no exception.
-2. The recovery rule of ADR-0004 applies to **every rejection of a known code** on a document navigation while the browser holds no valid handle for that host — `bind_mismatch`, `code_ip_mismatch`, `code_host_mismatch`, `code_path_mismatch`, `code_stale_generation`, `code_expired`, `code_consumed` — not only to `bind_mismatch`: the burned code's `recovery_depth` is the provenance, the new transaction takes `recovery_depth + 1`, and a burned code whose depth already equals `handoff.max_recoveries` answers the relayed `403 handoff_recovery_exhausted` with no transaction created. An **unknown** code (no row) starts a transaction at depth 0 and is bounded by `handoff.per_ip_failures_per_minute`; it cannot loop deterministically because Hopae never mints an unknown code.
+2. The recovery rule of ADR-0004 applies to **every rejection of a known code** on a document navigation while the browser holds no valid handle for that host — `bind_mismatch`, `code_ip_mismatch`, `code_host_mismatch`, `code_path_mismatch`, `code_stale_generation`, `code_expired` — not only to `bind_mismatch`: the burned code's `recovery_depth` is the provenance, the new transaction takes `recovery_depth + 1`, and a burned code whose depth already equals `handoff.max_recoveries` answers the relayed `403 handoff_recovery_exhausted` with no transaction created. An **unknown** code (no row) starts a transaction at depth 0 and is bounded by `handoff.per_ip_failures_per_minute`; it cannot loop deterministically because Hopae never mints an unknown code. An **already consumed** code (`code_consumed`) is treated like an unknown code for depth: it starts at depth 0 and is bounded by the same per-IP cap. Depth carries only on the first rejection of a code, because a burned code is attacker-replayable: if a consumed code kept its depth, an attacker could exhaust their own chain and hand the final burned code to any number of victims as a reusable exhaustion token (adversarial review, S3). A genuine recovery chain never presents a consumed code: every hop mints a fresh one.
 3. `code_ip_mismatch` is added to the contract's list of `handoff.rejected` reasons; the IP compared is the one the gateway reports for the redeeming request.
 
 ## Consequences
@@ -28,7 +28,7 @@
 
 ### Negative
 
-- A replayed consumed code from a browser without a handle (scenario 003-A1) now inherits the consumed code's depth; a browser that keeps replaying old codes reaches the exhaustion page sooner, which is the intended bound.
+- A replayed consumed code restarts at depth 0 and is bounded only by the per-IP failure cap; this is deliberate (see decision 2) and costs a replaying browser at most that many redirects.
 
 ### Neutral
 
@@ -45,7 +45,7 @@
 
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Pending: a short confirmation pass alongside G7 of the W1 integration. |
+| 1 | 2026-10-09 | 0 | 0 | 1 | 0 | S3: an attacker-exhausted burned code would act as a reusable exhaustion token for victims → FIX: `code_consumed` restarts at depth 0; depth carries only on a code's first rejection. IP-copy, retry single-use and per-page CSP not refuted. Accepted. |
 
 ## References
 
@@ -56,5 +56,6 @@
 핸드오프 코드의 클라이언트 IP는 포털 요청이 아니라 로그인을 시작한 애플리케이션
 호스트 verify의 트랜잭션에서 복사합니다. 복구 깊이 규칙은 `bind_mismatch`뿐
 아니라 알려진 코드가 거부되는 모든 사유에 적용되어, 어떤 사유로도 결정적인
-리디렉션 루프가 생기지 않습니다. 알 수 없는 코드는 깊이 0에서 시작하고 IP별 실패
-상한으로만 제한됩니다.
+리디렉션 루프가 생기지 않습니다. 알 수 없는 코드와 이미 소비된 코드는 깊이 0에서 시작하고 IP별 실패
+상한으로만 제한됩니다. 소비된 코드가 깊이를 유지하면 공격자가 소진된 코드를
+피해자에게 재사용 가능한 차단 토큰으로 넘길 수 있기 때문입니다.
