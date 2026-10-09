@@ -1350,6 +1350,96 @@ fn new_txn(f: &Fx, secret: &Secret, who: &str) -> NewTransaction {
 }
 
 #[tokio::test]
+async fn capped_insert_evicts_in_the_same_write_so_max_rows_is_a_hard_bound() {
+    let f = fx();
+    let since = f.now().sub(Duration::from_secs(60));
+    let mut evicted_total = 0;
+    for n in 0..25 {
+        let secret = random_token(&f.rng, 16);
+        let out = f
+            .store
+            .create_transaction_capped(new_txn(&f, &secret, "192.0.2.1"), vec![], since, 1000, 5)
+            .await
+            .unwrap();
+        let Admission::Admitted { evicted } = out else {
+            panic!("admitted: {out:?}");
+        };
+        evicted_total += evicted;
+        let rows = f.count("SELECT COUNT(*) FROM login_txns");
+        assert!(rows <= 5, "round {n}: {rows} rows");
+        // The row just written is never the one evicted.
+        assert!(
+            f.store
+                .transaction(&secret.digest())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        f.clock.advance(Duration::from_secs(1));
+    }
+    assert_eq!(f.count("SELECT COUNT(*) FROM login_txns"), 5);
+    assert_eq!(evicted_total, 20);
+    // The per-address cap still decides first and writes nothing.
+    let secret = random_token(&f.rng, 16);
+    let out = f
+        .store
+        .create_transaction_capped(
+            new_txn(&f, &secret, "192.0.2.1"),
+            vec![],
+            f.now().sub(Duration::from_secs(3600)),
+            3,
+            5,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out, Admission::OverCap);
+    assert_eq!(f.count("SELECT COUNT(*) FROM login_txns"), 5);
+}
+
+#[tokio::test]
+async fn logout_ticket_binding_is_recorded_once() {
+    let f = fx();
+    let secret = random_token(&f.rng, 16);
+    let mut t = new_txn(&f, &secret, "192.0.2.1");
+    t.purpose = TxnPurpose::Logout;
+    f.store.create_transaction(t, vec![]).await.unwrap();
+    let first = sha256(b"portal-one");
+    assert!(
+        f.store
+            .bind_logout_transaction(&secret.digest(), first)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !f.store
+            .bind_logout_transaction(&secret.digest(), sha256(b"portal-two"))
+            .await
+            .unwrap(),
+        "immutable once recorded"
+    );
+    let row = f
+        .store
+        .transaction(&secret.digest())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.purpose, TxnPurpose::Logout);
+    assert_eq!(row.portal_bind_sha256, Some(first));
+    // A login transaction is not a logout ticket.
+    let other = random_token(&f.rng, 16);
+    f.store
+        .create_transaction(new_txn(&f, &other, "192.0.2.1"), vec![])
+        .await
+        .unwrap();
+    assert!(
+        !f.store
+            .bind_logout_transaction(&other.digest(), sha256(b"x"))
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
 async fn transaction_lifecycle_bind_once_consume_once() {
     let f = fx();
     let secret = random_token(&f.rng, 16);

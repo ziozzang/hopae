@@ -60,6 +60,74 @@ impl CanonicalPath {
     }
 }
 
+/// The reserved namespace on application hosts (ADR-0015).
+const RESERVED_ROOT: &str = "/_hopae";
+
+/// The two application-host entry points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryPoint {
+    Login,
+    Logout,
+}
+
+/// What a canonical path is in the reserved namespace.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reserved {
+    /// Not in the namespace.
+    No,
+    /// One of the two entry points.
+    Entry(EntryPoint),
+    /// Anything else under `/_hopae` (denied).
+    Other,
+}
+
+impl CanonicalPath {
+    /// Classify the path against the reserved namespace, ASCII-case-insensitively:
+    /// `/_hopae` or `/_hopae/...` is reserved; exactly `/_hopae/login` and
+    /// `/_hopae/logout` are the entry points.
+    pub fn reserved(&self) -> Reserved {
+        let p = self.0.to_ascii_lowercase();
+        if p == RESERVED_ROOT {
+            return Reserved::Other;
+        }
+        match p.strip_prefix("/_hopae/") {
+            None => Reserved::No,
+            Some("login") => Reserved::Entry(EntryPoint::Login),
+            Some("logout") => Reserved::Entry(EntryPoint::Logout),
+            Some(_) => Reserved::Other,
+        }
+    }
+}
+
+/// The request's `sec-fetch-site`, as far as the core cares.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FetchSite {
+    SameOrigin,
+    SameSite,
+    CrossSite,
+    /// A user-initiated navigation (`none`).
+    UserInitiated,
+    /// Absent or not a value the specification defines.
+    Unknown,
+}
+
+/// The `return` query parameter of an entry point, resolved by the adapter
+/// (query parsing stays out of the core, ADR-0013).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EntryReturn {
+    /// No `return` parameter: the target is the request origin's `/`.
+    Absent,
+    /// Present but unusable: repeated, not a path-absolute reference or an
+    /// absolute URL, carries a handoff parameter, or its path is not canonical.
+    Invalid,
+    /// An absolute candidate (a path-absolute reference was resolved against
+    /// the request origin) with the canonical path of its URL.
+    Candidate {
+        url: String,
+        canonical_path: CanonicalPath,
+    },
+}
+
 pub struct VerifyInput {
     pub original_url: url::Url,
     pub canonical_path: CanonicalPath,
@@ -73,6 +141,8 @@ pub struct VerifyInput {
     pub bind_cookie: Option<Secret>,
     pub user_agent: Option<String>,
     pub navigation: Navigation,
+    pub fetch_site: FetchSite,
+    pub entry_return: EntryReturn,
     pub handoff: Handoff,
     pub contract: u8,
     pub caller: CallerAuth,
@@ -146,6 +216,23 @@ pub enum Decision {
         location: url::Url,
     },
     Switch {
+        transaction: Secret,
+    },
+    /// `GET /_hopae/login` with a live session: `302` to the target.
+    AlreadyAuthenticated {
+        location: url::Url,
+    },
+    /// `GET /_hopae/logout`: `302` to the portal's `/logout?txn=<ticket>`;
+    /// `clear_handle` only for a handle that was refused.
+    LogoutEntry {
+        transaction: Secret,
+        clear_handle: bool,
+    },
+    /// `GET /_hopae/logout` in the no-confirmation mode, after the session
+    /// ended: `302` to the portal's `/signed-out?txn=<consumed ticket>` with
+    /// the application handle cleared. The ticket is the opaque reference to
+    /// the return target; no URL travels in the redirect.
+    LoggedOut {
         transaction: Secret,
     },
     Deny {
@@ -250,5 +337,30 @@ impl VerifyContext {
         let mut c = self.clone();
         c.deadline = Some(tokio::time::Instant::now() + self.limits.budget);
         c
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn class(p: &str) -> Reserved {
+        CanonicalPath::new(p.to_string()).reserved()
+    }
+
+    #[test]
+    fn the_reserved_namespace_is_matched_ascii_case_insensitively() {
+        assert_eq!(class("/"), Reserved::No);
+        assert_eq!(class("/admin"), Reserved::No);
+        assert_eq!(class("/_hopae-x"), Reserved::No);
+        assert_eq!(class("/x/_hopae/login"), Reserved::No);
+        assert_eq!(class("/_hopae"), Reserved::Other);
+        assert_eq!(class("/_HOPAE"), Reserved::Other);
+        assert_eq!(class("/_hopae/"), Reserved::Other);
+        assert_eq!(class("/_hopae/verify"), Reserved::Other);
+        assert_eq!(class("/_hopae/logout/"), Reserved::Other);
+        assert_eq!(class("/_hopae/login/x"), Reserved::Other);
+        assert_eq!(class("/_hopae/login"), Reserved::Entry(EntryPoint::Login));
+        assert_eq!(class("/_HOPAE/Logout"), Reserved::Entry(EntryPoint::Logout));
     }
 }

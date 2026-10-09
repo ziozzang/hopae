@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 8 -->
+<!-- doc-rev: 9 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -357,7 +357,7 @@ consulted. The portal host has no such namespace (`404`).
 | `GET /_hopae/login` with a handle an ordinary verify would allow | `302 Location: <target>`; no cookie change; `already_authenticated`; `last_seen_at` touched as a `200` would |
 | `GET /_hopae/login` otherwise | The ordinary outcome of a document navigation to the target: the unauthenticated `302` to the portal with the binding cookie planted and a transaction whose `return_target` is the target (the handoff lands there, never on the entry point), a step-up `302`, or the denial |
 | `GET /_hopae/logout` (default `apps[].logout_confirm = true`) | The presented handle is evaluated as an ordinary verify would (a binding mismatch terminates as usual; an invalid handle is cleared as on every `302`); then a transaction of purpose `logout` — the **logout ticket** — stores the target, the application and the session of the valid handle presented, if any, and the answer is `302 Location: https://auth.example.test/logout?txn=<id>` (`logout_entry`). **No cookie is cleared and nothing is revoked**: the only state change is the portal's CSRF-protected `POST` ([portal entry points](#portal-entry-points)). The ticket is single use, expires with the transaction lifetime (600 s) and counts against `txn.per_ip_per_minute` and `txn.max_rows` like a login transaction |
-| `GET /_hopae/logout` with `apps[].logout_confirm = false`, `sec-fetch-site: same-origin` and a valid handle | The session is terminated at once (`reason=logout`, event `session.terminated`); `302 Location: <target>` with `set-cookie: __Host-hopae=; Max-Age=0; …`; the binding cookie is left as it is; `x-hopae-reason: logout`. Any other `sec-fetch-site` (absent, `none`, `same-site`, `cross-site`) or no valid handle takes the row above: `same-site` is excluded because a sibling subdomain is an actor in the threat model |
+| `GET /_hopae/logout` with `apps[].logout_confirm = false`, `sec-fetch-site: same-origin` and a valid handle | The session is terminated at once (`reason=logout`, event `session.terminated`); a logout ticket is created and consumed in the same call as the opaque reference to the target, and the answer is `302 Location: https://auth.example.test/signed-out?txn=<ticket>` (never the target itself, never a URL in the query) with `set-cookie: __Host-hopae=; Max-Age=0; …`; the binding cookie is left as it is; `x-hopae-reason: logout`. Any other `sec-fetch-site` (absent, `none`, `same-site`, `cross-site`) or no valid handle takes the row above: `same-site` is excluded because a sibling subdomain is an actor in the threat model |
 
 **Target.** The request origin's `/`, or the query parameter `return` (one
 pair whose decoded name is `return`, parsed like the reserved parameter; two
@@ -369,6 +369,17 @@ carry the reserved handoff parameter, and its canonical path must not be
 reserved. Anything else is `403 {"error":"return_not_allowed"}`
 (`return_not_allowed`) and creates nothing. The target reaches the portal only
 inside the transaction; no URL travels in the clear (TM-01).
+
+**After a logout.** Neither mode redirects to the protected return target: that
+would start a login, and a provider that still has a live session would sign
+the user straight back in. The portal renders its signed-out page instead
+(`200`, on the portal listener; after the confirming `POST` directly, in the
+no-confirmation mode after the `302` to `/signed-out?txn=<ticket>`). The page
+shows a "Sign in again to <application display name>" link to the ticket's
+return target, which passes the same return-target validation again when the
+page is rendered (no link is shown when it no longer validates). The reference
+in the redirect is the consumed logout ticket (single use, 600 s, readable
+only while it lives); the query never carries a URL (TM-01).
 
 **Why the logout `302` clears nothing.** A cleared handle would be re-planted
 by single sign-on on the next document navigation, so clearing is not a
@@ -398,7 +409,8 @@ All on the portal host, served by the portal listener.
 | `GET /switch?txn=<id>` | Account-switch confirmation after `session_conflict`: names the host and both accounts | Shows the form only; no state change |
 | `POST /switch` | Confirm (revokes the handle the browser presented on that host, mints a fresh code, redirects) or decline (redirect to the clean URL as the existing user) | CSRF token; `Origin` check; portal binding cookie; the transaction must be of purpose `switch` |
 | `GET /logout[?txn=<id>]` | Confirmation page; with a logout ticket from an [application-host entry point](#application-host-entry-points) it names the application, plants or refreshes `__Host-hopae_portal` and records its digest on the ticket at this first visit (immutable afterwards) | Shows the form only; no state change; a ticket that is unknown, consumed, expired, of another purpose (`txn_purpose_mismatch`) or recorded for another browser is treated as absent |
-| `POST /logout` | Terminate this session (`scope=this`, default) or every session of the user (`scope=all`, M2); with a valid ticket (`txn`), also the session the ticket names, and then `302` to the ticket's return target instead of the signed-out page | CSRF token bound to the portal handle, or to the portal binding cookie when no handle is presented; `Origin` check; a valid portal handle, or a ticket whose recorded digest matches the presented portal binding cookie; the ticket is consumed (single use) |
+| `POST /logout` | Terminate this session (`scope=this`, default) or every session of the user (`scope=all`, M2); with a valid ticket (`txn`), also the session the ticket names. Answers `200` with the signed-out page, which for a ticket just consumed carries a "Sign in again to <application>" link to the ticket's validated return target; never a redirect to that target | CSRF token bound to the portal handle, or to the portal binding cookie when no handle is presented; `Origin` check; a valid portal handle, or a ticket whose recorded digest matches the presented portal binding cookie; the ticket is consumed (single use) |
+| `GET /signed-out?txn=<id>` | The signed-out page of the no-confirmation mode, from the consumed logout ticket the verify `302` names; shows the same "Sign in again" link | Read only; the ticket must be of purpose `logout`, consumed by a logout and unexpired, else the expired-link page (`400`); the ticket is an opaque reference, the query carries no URL |
 | `GET /stepup?txn=<id>` (M5) | Second-factor challenge | As `/login` |
 | `GET /healthz` | Liveness (`200` when the process serves; store status in the body) | None; no secrets |
 | `GET /_hopae/verify` | Not served here | `404` |

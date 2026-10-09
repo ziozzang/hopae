@@ -28,8 +28,9 @@ pub(crate) mod fx {
     use hopae::store::types::*;
     use hopae::store::{Store, StoreHooks};
     use hopae::verify::{
-        BindAction, Cacheability, CallerAuth, CanonicalPath, Decision, DenyKind, Handoff, Identity,
-        KeySlot, Navigation, Scheme, VerifyContext, VerifyInput, decide,
+        BindAction, Cacheability, CallerAuth, CanonicalPath, Decision, DenyKind, EntryReturn,
+        FetchSite, Handoff, Identity, KeySlot, Navigation, Scheme, VerifyContext, VerifyInput,
+        decide,
     };
 
     /// Whole seconds so that the store's second-resolution columns round-trip.
@@ -273,6 +274,8 @@ pub(crate) mod fx {
                 document: true,
                 code: None,
                 ambiguous: false,
+                site: FetchSite::Unknown,
+                entry_return: EntryReturn::Absent,
                 contract: 1,
             }
         }
@@ -347,6 +350,8 @@ pub(crate) mod fx {
         code: Option<Secret>,
         ambiguous: bool,
         contract: u8,
+        site: FetchSite,
+        entry_return: EntryReturn,
     }
 
     impl Req {
@@ -400,6 +405,17 @@ pub(crate) mod fx {
             self
         }
 
+        pub fn site(mut self, v: FetchSite) -> Self {
+            self.site = v;
+            self
+        }
+
+        /// The adapter's resolution of an entry point's `return` parameter.
+        pub fn entry_return(mut self, v: EntryReturn) -> Self {
+            self.entry_return = v;
+            self
+        }
+
         pub fn contract(mut self, v: u8) -> Self {
             self.contract = v;
             self
@@ -432,6 +448,8 @@ pub(crate) mod fx {
                 } else {
                     Navigation::Other
                 },
+                fetch_site: self.site,
+                entry_return: self.entry_return,
                 handoff: match (self.code, self.ambiguous) {
                     (_, true) => Handoff::Ambiguous,
                     (Some(c), false) => Handoff::Code(c),
@@ -457,6 +475,11 @@ pub(crate) mod fx {
             Decision::Handoff { .. } => "handoff".into(),
             Decision::CleanRedirect { .. } => "clean_redirect".into(),
             Decision::Switch { .. } => "switch".into(),
+            Decision::AlreadyAuthenticated { .. } => "already_authenticated".into(),
+            Decision::LogoutEntry { clear_handle, .. } => {
+                format!("logout_entry(clear={clear_handle})")
+            }
+            Decision::LoggedOut { .. } => "logged_out".into(),
             Decision::Deny { reason, kind } => format!("deny({}, {kind:?})", reason.0),
         }
     }
@@ -776,6 +799,7 @@ async fn s004_10_authz_change_seen_on_next_verify() {
 
 #[tokio::test]
 async fn s004_11_no_non_allow_path_is_2xx() {
+    use hopae::verify::{EntryReturn, FetchSite};
     // Every engine outcome except Decision::Allow maps to a non-2xx status in
     // the adapter (its unit test walks `render`); here every non-allow fixture
     // must at least not be an Allow, and the one allow carries an identity.
@@ -813,6 +837,96 @@ async fn s004_11_no_non_allow_path_is_2xx() {
         "unknown code",
         f.decide(f.req(APP_URL).code(&unknown)).await,
     ));
+    // ADR-0015: the reserved namespace and the application-host entry points
+    // never produce an Allow either.
+    let root = "https://app.example.test";
+    let reserved = f
+        .decide(f.req(&format!("{root}/_hopae/verify")).cookie(&h1))
+        .await;
+    assert!(
+        matches!(&reserved, Decision::Deny { reason, .. } if *reason == hopae::event::types::reasons::RESERVED_PATH),
+        "{}",
+        show(&reserved)
+    );
+    outcomes.push(("reserved path", reserved));
+    outcomes.push((
+        "reserved path, mixed case",
+        f.decide(f.req(&format!("{root}/_HOPAE/x")).cookie(&h1))
+            .await,
+    ));
+    let not_document = f
+        .decide(f.req(&format!("{root}/_hopae/logout")).other().cookie(&h1))
+        .await;
+    assert!(
+        matches!(&not_document, Decision::Deny { reason, .. } if *reason == hopae::event::types::reasons::ENTRY_POINT_NOT_DOCUMENT),
+        "{}",
+        show(&not_document)
+    );
+    outcomes.push(("entry point, non-document", not_document));
+    let refused = f
+        .decide(
+            f.req(&format!("{root}/_hopae/login"))
+                .cookie(&h1)
+                .entry_return(EntryReturn::Invalid),
+        )
+        .await;
+    assert!(
+        matches!(&refused, Decision::Deny { reason, .. } if *reason == hopae::event::types::reasons::RETURN_NOT_ALLOWED),
+        "{}",
+        show(&refused)
+    );
+    outcomes.push(("entry point, return not allowed", refused));
+    let entry = f
+        .decide(
+            f.req(&format!("{root}/_hopae/logout"))
+                .cookie(&h1)
+                .site(FetchSite::SameOrigin),
+        )
+        .await;
+    assert!(
+        matches!(
+            &entry,
+            Decision::LogoutEntry {
+                clear_handle: false,
+                ..
+            }
+        ),
+        "{}",
+        show(&entry)
+    );
+    outcomes.push(("logout entry", entry));
+    let already = f
+        .decide(f.req(&format!("{root}/_hopae/login")).cookie(&h1))
+        .await;
+    assert!(
+        matches!(&already, Decision::AlreadyAuthenticated { location } if location.as_str() == "https://app.example.test/"),
+        "{}",
+        show(&already)
+    );
+    outcomes.push(("login entry, live session", already));
+    outcomes.push((
+        "login entry, no session",
+        f.decide(f.req(&format!("{root}/_hopae/login"))).await,
+    ));
+    // The no-confirmation mode, on its own configuration: the session ends and
+    // the answer is the redirect to the portal's signed-out page, never an Allow.
+    let direct = Fx::new("m1-logout-direct");
+    let (_u2, s2, g1) = precondition(&direct).await;
+    let ended = direct
+        .decide(
+            direct
+                .req(&format!("{root}/_hopae/logout"))
+                .cookie(&g1)
+                .site(FetchSite::SameOrigin),
+        )
+        .await;
+    assert!(
+        matches!(&ended, Decision::LoggedOut { .. }),
+        "{}",
+        show(&ended)
+    );
+    assert_eq!(direct.session_state(&s2).0.as_deref(), Some("logout"));
+    outcomes.push(("direct logout", ended));
     outcomes.push((
         "binding mismatch",
         f.decide(f.req(APP_URL).cookie(&h1).ip("198.51.100.7"))
@@ -887,7 +1001,10 @@ fn s004_a3_concurrency_limit_fails_closed() {
         &idp,
         &[],
     );
-    h.hooks.stall(200);
+    // A request now spends one stalled store call (the capped insert) where it
+    // used to spend two (the count, then the insert): double the stall keeps
+    // each permit held as long as before.
+    h.hooks.stall(400);
     let h = std::sync::Arc::new(h);
     let mut threads = vec![];
     for _ in 0..200 {
@@ -909,8 +1026,17 @@ fn s004_a3_concurrency_limit_fails_closed() {
             .all(|r| r.header("retry-after").is_some())
     );
     h.hooks.stall_off();
-    let r = h.verify(VerifyRequest::document("https://app.example.test/admin/x"));
+    // The per-address transaction cap is enforced in the one store write that
+    // inserts the row (ADR-0015), so the 64 admitted concurrent calls from one
+    // address cannot overshoot `txn.per_ip_per_minute` (30) any more; that
+    // address is now rate limited and a fresh one is served.
+    let r = h.verify(VerifyRequest::document("https://app.example.test/admin/x").ip("192.0.2.77"));
     assert_eq!(r.status, 302);
+    let stored: i64 = rusqlite::Connection::open(h.state_dir.path().join("state").join("hopae.db"))
+        .unwrap()
+        .query_row("SELECT count(*) FROM login_txns", [], |r| r.get(0))
+        .unwrap();
+    assert!(stored <= 31, "the cap holds under concurrency: {stored}");
 }
 
 #[tokio::test]

@@ -396,6 +396,8 @@ mod tests {
                 bind_cookie: bind.cloned(),
                 user_agent: None,
                 navigation: Navigation::Document,
+                fetch_site: FetchSite::Unknown,
+                entry_return: EntryReturn::Absent,
                 handoff: code.map_or(Handoff::None, |c| Handoff::Code(c.clone())),
                 contract: 1,
                 caller: CallerAuth::Keyed {

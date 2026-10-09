@@ -104,6 +104,16 @@ pub fn assert_only_allow_is_2xx() {
         },
         Decision::CleanRedirect { location: url() },
         Decision::Switch { transaction: tok() },
+        Decision::AlreadyAuthenticated { location: url() },
+        Decision::LogoutEntry {
+            transaction: tok(),
+            clear_handle: false,
+        },
+        Decision::LogoutEntry {
+            transaction: tok(),
+            clear_handle: true,
+        },
+        Decision::LoggedOut { transaction: tok() },
     ];
     let kinds = |retry: Duration| {
         [
@@ -188,6 +198,19 @@ fn clone_decision(d: &Decision) -> Decision {
             location: location.clone(),
         },
         Decision::Switch { transaction } => Decision::Switch {
+            transaction: transaction.clone(),
+        },
+        Decision::AlreadyAuthenticated { location } => Decision::AlreadyAuthenticated {
+            location: location.clone(),
+        },
+        Decision::LogoutEntry {
+            transaction,
+            clear_handle,
+        } => Decision::LogoutEntry {
+            transaction: transaction.clone(),
+            clear_handle: *clear_handle,
+        },
+        Decision::LoggedOut { transaction } => Decision::LoggedOut {
             transaction: transaction.clone(),
         },
         Decision::Deny { reason, kind } => Decision::Deny {

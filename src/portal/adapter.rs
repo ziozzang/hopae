@@ -96,6 +96,7 @@ fn failure(e: &SessionError) -> Failure {
         SessionError::Refused(r) => {
             if *r == reasons::TXN_EXPIRED
                 || *r == reasons::TXN_CONSUMED
+                || *r == reasons::TXN_PURPOSE_MISMATCH
                 || *r == reasons::TXN_BINDING
             {
                 FailKind::Expired
@@ -354,6 +355,59 @@ impl PortalServices for Adapter {
             Ok(LogoutOutcome::NoSession) => Ok(false),
             Err(e) => Err(failure(&e)),
         }
+    }
+
+    async fn logout_visit(
+        &self,
+        ctx: &RequestCtx,
+        txn: &Secret,
+        cookies: &Cookies,
+    ) -> Option<String> {
+        match self.svc.logout_visit(txn, cookies.bind.as_ref()).await {
+            Ok(name) => Some(name),
+            Err(e) => {
+                tracing::info!(
+                    request_id = %ctx.request_id,
+                    reason = e.reason().0,
+                    "logout ticket ignored"
+                );
+                None
+            }
+        }
+    }
+
+    async fn logout_with_ticket(
+        &self,
+        ctx: &RequestCtx,
+        txn: &Secret,
+        cookies: &Cookies,
+    ) -> Result<Option<SignedOutPage>, Failure> {
+        self.svc
+            .logout_confirmed(
+                &Self::sctx(ctx),
+                cookies.handle.as_ref(),
+                Some(txn),
+                cookies.bind.as_ref(),
+            )
+            .await
+            .map(|v| {
+                v.map(|v| SignedOutPage {
+                    app_name: v.app_name,
+                    sign_in: v.sign_in,
+                })
+            })
+            .map_err(|e| failure(&e))
+    }
+
+    async fn signed_out(&self, _ctx: &RequestCtx, txn: &Secret) -> Result<SignedOutPage, Failure> {
+        self.svc
+            .signed_out_view(txn)
+            .await
+            .map(|v| SignedOutPage {
+                app_name: v.app_name,
+                sign_in: v.sign_in,
+            })
+            .map_err(|e| failure(&e))
     }
 
     async fn csrf_rejected(&self, ctx: &RequestCtx, purpose: &'static str, cause: &'static str) {

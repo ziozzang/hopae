@@ -39,4 +39,6 @@ mod scenarios {
     mod s013_preflight;
     #[path = "s014_events.rs"]
     mod s014_events;
+    #[path = "s015_app_host_entry_points.rs"]
+    mod s015_app_host_entry_points;
 }

@@ -266,6 +266,11 @@ fn s013_1_valid_configuration_passes() {
         "{frag}"
     );
     assert_eq!(frag["forward_response"], true);
+    // HC-12 (ADR-0015): the configured handle and binding cookie names.
+    assert_eq!(
+        frag["strip_request_cookies"],
+        json!(["__Host-hopae", "__Host-hopae_bind"])
+    );
     assert_eq!(frag["static_request_headers"]["x-hopae-contract"], "1");
     assert_eq!(
         frag["static_request_headers"]["x-hopae-gateway-key"],

@@ -359,24 +359,27 @@ impl Sessions for Store {
         events: Vec<Event>,
         since: Timestamp,
         cap: u32,
-    ) -> StoreResult<bool> {
+        max_rows: u32,
+    ) -> StoreResult<Admission> {
         self.write("create_transaction_capped", move |env| {
             let shared = env.shared.clone();
             let tx = env.begin()?;
-            // Count and insert in one write transaction: parallel callers
-            // are serialized here, so the cap cannot be overshot.
+            // Count, evict and insert in one write transaction: parallel
+            // callers are serialized here, so neither the per-address cap nor
+            // `txn.max_rows` can be overshot.
             let n: i64 = tx.query_row(
                 "SELECT COUNT(*) FROM txn_admissions WHERE ip=?1 AND at >= ?2",
                 params![t.client_ip.to_string(), since.secs()],
                 |r| r.get(0),
             )?;
             if n >= i64::from(cap) {
-                return Ok(false);
+                return Ok(Admission::OverCap);
             }
+            let evicted = evict_to(&tx, max_rows.saturating_sub(1), t.created_at)?;
             insert_txn(&tx, &t)?;
             insert_events(&tx, &shared, &events)?;
             finish(tx, &shared, None)?;
-            Ok(true)
+            Ok(Admission::Admitted { evicted })
         })
         .await
     }
@@ -466,6 +469,22 @@ impl Sessions for Store {
         self.write("bind_switch_transaction", move |env| {
             let n = env.conn.execute(
                 "UPDATE login_txns SET portal_bind_sha256=?2 WHERE txn_sha256=?1 AND purpose='switch' AND portal_bind_sha256 IS NULL AND consumed_at IS NULL",
+                params![blob(&d), blob(&portal_bind_sha256)],
+            )?;
+            Ok(n == 1)
+        })
+        .await
+    }
+
+    async fn bind_logout_transaction(
+        &self,
+        txn_sha256: &Digest,
+        portal_bind_sha256: Digest,
+    ) -> StoreResult<bool> {
+        let d = *txn_sha256;
+        self.write("bind_logout_transaction", move |env| {
+            let n = env.conn.execute(
+                "UPDATE login_txns SET portal_bind_sha256=?2 WHERE txn_sha256=?1 AND purpose='logout' AND portal_bind_sha256 IS NULL AND consumed_at IS NULL",
                 params![blob(&d), blob(&portal_bind_sha256)],
             )?;
             Ok(n == 1)
@@ -607,18 +626,9 @@ impl Sessions for Store {
         self.write("evict_transactions", move |env| {
             let shared = env.shared.clone();
             let tx = env.begin()?;
-            let total: i64 = tx.query_row("SELECT COUNT(*) FROM login_txns", [], |r| r.get(0))?;
-            let excess = total - i64::from(max_rows);
-            if excess <= 0 {
-                return Ok(0);
-            }
-            // Dead rows (consumed or expired) go before live ones; oldest first within each group.
-            let n = tx.execute(
-                "DELETE FROM login_txns WHERE txn_sha256 IN (SELECT txn_sha256 FROM login_txns ORDER BY (consumed_at IS NULL AND expires_at > ?1), created_at, rowid LIMIT ?2)",
-                params![now.secs(), excess],
-            )?;
+            let n = evict_to(&tx, max_rows, now)?;
             finish(tx, &shared, None)?;
-            Ok(u32::try_from(n).unwrap_or(u32::MAX))
+            Ok(n)
         })
         .await
     }
@@ -684,6 +694,21 @@ impl Store {
         })
         .await
     }
+}
+
+/// Delete transactions until at most `keep` remain: dead rows (consumed or
+/// expired) go before live ones, oldest first within each group.
+fn evict_to(tx: &Transaction<'_>, keep: u32, now: Timestamp) -> StoreResult<u32> {
+    let total: i64 = tx.query_row("SELECT COUNT(*) FROM login_txns", [], |r| r.get(0))?;
+    let excess = total - i64::from(keep);
+    if excess <= 0 {
+        return Ok(0);
+    }
+    let n = tx.execute(
+        "DELETE FROM login_txns WHERE txn_sha256 IN (SELECT txn_sha256 FROM login_txns ORDER BY (consumed_at IS NULL AND expires_at > ?1), created_at, rowid LIMIT ?2)",
+        params![now.secs(), excess],
+    )?;
+    Ok(u32::try_from(n).unwrap_or(u32::MAX))
 }
 
 fn insert_txn(tx: &Transaction<'_>, t: &NewTransaction) -> StoreResult<()> {

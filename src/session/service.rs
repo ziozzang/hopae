@@ -719,7 +719,7 @@ impl Service {
         portal_cookie: &Secret,
     ) -> Result<Url, SessionError> {
         if row.purpose != TxnPurpose::Login {
-            return Err(SessionError::Refused(reasons::INVALID_STATE));
+            return Err(wrong_purpose(row.purpose));
         }
         if !self.txn_ip_ok(row, ctx) {
             return Err(self.refuse_consuming(ctx, row, reasons::TXN_BINDING).await);
@@ -783,7 +783,7 @@ impl Service {
     ) -> Result<LoginEntry, SessionError> {
         let row = self.load_live_txn(ctx, txn).await?;
         if row.purpose != TxnPurpose::Login {
-            return Err(SessionError::Refused(reasons::INVALID_STATE));
+            return Err(wrong_purpose(row.purpose));
         }
         if !self.txn_ip_ok(&row, ctx) {
             return Err(self.refuse_consuming(ctx, &row, reasons::TXN_BINDING).await);
@@ -946,7 +946,12 @@ impl Service {
         }
         if txn.purpose != TxnPurpose::Login {
             return Err(self
-                .refuse(ctx, Some(&txn), Some(provider_id), reasons::INVALID_STATE)
+                .refuse(
+                    ctx,
+                    Some(&txn),
+                    Some(provider_id),
+                    wrong_purpose(txn.purpose).reason(),
+                )
                 .await);
         }
         let (Some(expected_bind), Some(app_bind)) = (txn.portal_bind_sha256, txn.bind_sha256)
@@ -1414,6 +1419,16 @@ impl Service {
             session_id: view.session.session_id,
         })
     }
+}
+
+/// The refusal for a transaction of another purpose reaching a login step: a
+/// logout ticket is `txn_purpose_mismatch` (ADR-0015), the rest `invalid_state`.
+fn wrong_purpose(purpose: TxnPurpose) -> SessionError {
+    SessionError::Refused(if purpose == TxnPurpose::Logout {
+        reasons::TXN_PURPOSE_MISMATCH
+    } else {
+        reasons::INVALID_STATE
+    })
 }
 
 fn factor_kind(kind: ProviderKind) -> FactorKind {

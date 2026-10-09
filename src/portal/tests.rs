@@ -221,6 +221,30 @@ impl PortalServices for Fake {
         self.rec(format!("logout:{}", handle.expose()), Some(ctx), None);
         *self.logout.lock().unwrap()
     }
+    async fn logout_visit(&self, ctx: &RequestCtx, txn: &Secret, c: &Cookies) -> Option<String> {
+        self.rec(format!("logout_visit:{}", txn.expose()), Some(ctx), Some(c));
+        None
+    }
+    async fn logout_with_ticket(
+        &self,
+        ctx: &RequestCtx,
+        txn: &Secret,
+        c: &Cookies,
+    ) -> Result<Option<SignedOutPage>, Failure> {
+        self.rec(
+            format!("logout_ticket:{}", txn.expose()),
+            Some(ctx),
+            Some(c),
+        );
+        Ok(None)
+    }
+    async fn signed_out(&self, ctx: &RequestCtx, txn: &Secret) -> Result<SignedOutPage, Failure> {
+        self.rec(format!("signed_out:{}", txn.expose()), Some(ctx), None);
+        Err(Failure {
+            kind: FailKind::Expired,
+            reason: crate::event::types::reasons::TXN_EXPIRED,
+        })
+    }
     async fn csrf_rejected(&self, ctx: &RequestCtx, purpose: &'static str, cause: &'static str) {
         self.rec("csrf_rejected", Some(ctx), None);
         self.csrf_events.lock().unwrap().push((purpose, cause));

@@ -45,8 +45,8 @@ pub(crate) mod kit {
     use hopae::store::types::*;
     use hopae::store::{Store, StoreResult};
     use hopae::verify::types::{
-        BindAction, CallerAuth, CanonicalPath, Decision, DenyKind, Handoff, KeySlot, Navigation,
-        Scheme, VerifyContext, VerifyInput, VerifyLimits,
+        BindAction, CallerAuth, CanonicalPath, Decision, DenyKind, EntryReturn, FetchSite, Handoff,
+        KeySlot, Navigation, Scheme, VerifyContext, VerifyInput, VerifyLimits,
     };
     use url::Url;
 
@@ -533,6 +533,8 @@ pub(crate) mod kit {
                 bind_cookie: bind.cloned(),
                 user_agent: Some(UA.into()),
                 navigation: Navigation::Document,
+                fetch_site: FetchSite::Unknown,
+                entry_return: EntryReturn::Absent,
                 handoff: code.map_or(Handoff::None, |c| Handoff::Code(c.clone())),
                 contract: 1,
                 caller: CallerAuth::Keyed {

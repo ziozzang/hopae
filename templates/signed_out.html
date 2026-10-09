@@ -3,4 +3,9 @@
 {% block content %}
 <h1>{{ t.get("signedout.title") }}</h1>
 <p>{{ t.get("signedout.body") }}</p>
+{% if let Some(link) = sign_in %}
+{% if let Some(app) = app_name %}
+<p><a href="{{ link }}">{{ t.fmt("signedout.again", "app", app) }}</a></p>
+{% endif %}
+{% endif %}
 {% endblock %}

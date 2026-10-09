@@ -152,6 +152,9 @@ pub struct AppPolicy {
     pub on_authz_change: AuthzChange,
     /// 0..=30.
     pub verify_cache_seconds: u32,
+    /// `/_hopae/logout` asks for confirmation at the portal (`true`, the
+    /// default) or ends a same-origin navigation's session at once (`false`).
+    pub logout_confirm: bool,
     pub step_up: Vec<StepUpRule>,
 }
 
@@ -168,6 +171,7 @@ impl AppPolicy {
             binding: BindingPolicy::default(),
             on_authz_change: AuthzChange::Refresh,
             verify_cache_seconds: 0,
+            logout_confirm: true,
             step_up: Vec::new(),
         }
     }

@@ -30,8 +30,10 @@
 "logout.title" = "Sign out"
 "logout.body" = "Sign out of this browser? Applications will ask you to sign in again."
 "logout.button" = "Sign out"
+"logout.app_body" = "Sign out of {app}? You will be signed out of this browser, and applications will ask you to sign in again."
 "signedout.title" = "Signed out"
 "signedout.body" = "You are signed out of this browser."
+"signedout.again" = "Sign in again to {app}"
 
 "link.title" = "Account already exists"
 "link.body" = "This email address already belongs to an account. Sign in with {provider} to connect it."

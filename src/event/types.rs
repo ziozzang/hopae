@@ -224,6 +224,13 @@ pub mod reasons {
         BUDGET_EXCEEDED = "budget_exceeded",
         OVERLOADED = "overloaded",
         HEADER_TOO_LARGE = "header_too_large",
+        // Application-host entry points (ADR-0015)
+        RESERVED_PATH = "reserved_path",
+        ENTRY_POINT_NOT_DOCUMENT = "entry_point_not_document",
+        RETURN_NOT_ALLOWED = "return_not_allowed",
+        LOGOUT_ENTRY = "logout_entry",
+        ALREADY_AUTHENTICATED = "already_authenticated",
+        TXN_PURPOSE_MISMATCH = "txn_purpose_mismatch",
         // Only for defects no scenario reason covers; logged at `error` level,
         // never replaces store_unavailable, budget_exceeded or overloaded.
         INTERNAL_ERROR = "internal_error",

@@ -929,6 +929,153 @@ fn a_document_login_without_a_transaction_still_fails_closed() {
 }
 
 #[test]
+fn entry_point_redirects_render_302_with_the_contract_headers() {
+    // ADR-0015: the already-authenticated redirect names the target and sets no cookie.
+    let resp = r(
+        Decision::AlreadyAuthenticated {
+            location: url::Url::parse("https://app.example.test/admin/x").unwrap(),
+        },
+        Navigation::Document,
+    );
+    assert_eq!(resp.status(), StatusCode::FOUND);
+    assert_eq!(
+        h(&resp, "location"),
+        Some("https://app.example.test/admin/x")
+    );
+    assert!(resp.headers().get("set-cookie").is_none());
+    assert_eq!(h(&resp, "cache-control"), Some("no-store"));
+    assert_eq!(h(&resp, "x-hopae-reason"), Some("already_authenticated"));
+
+    // The logout ticket goes to the portal and clears nothing...
+    let resp = r(
+        Decision::LogoutEntry {
+            transaction: Secret::new("T1".into()),
+            clear_handle: false,
+        },
+        Navigation::Document,
+    );
+    assert_eq!(resp.status(), StatusCode::FOUND);
+    assert_eq!(
+        h(&resp, "location"),
+        Some("https://auth.example.test/logout?txn=T1")
+    );
+    assert!(resp.headers().get("set-cookie").is_none());
+    assert_eq!(h(&resp, "x-hopae-reason"), Some("logout_entry"));
+    // ...except a refused handle, which is cleared as on every 302.
+    let resp = r(
+        Decision::LogoutEntry {
+            transaction: Secret::new("T1".into()),
+            clear_handle: true,
+        },
+        Navigation::Document,
+    );
+    assert_eq!(
+        all(&resp, "set-cookie"),
+        vec!["__Host-hopae=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0"]
+    );
+
+    // The direct logout: the portal's signed-out page by reference, handle cleared,
+    // the binding cookie untouched, no URL in the redirect.
+    let resp = r(
+        Decision::LoggedOut {
+            transaction: Secret::new("T2".into()),
+        },
+        Navigation::Document,
+    );
+    assert_eq!(resp.status(), StatusCode::FOUND);
+    assert_eq!(
+        h(&resp, "location"),
+        Some("https://auth.example.test/signed-out?txn=T2")
+    );
+    assert_eq!(
+        all(&resp, "set-cookie"),
+        vec!["__Host-hopae=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0"]
+    );
+    assert_eq!(h(&resp, "x-hopae-reason"), Some("logout"));
+
+    // Both entry-point denials share one error name, with their own reason header.
+    for reason in [reasons::RESERVED_PATH, reasons::ENTRY_POINT_NOT_DOCUMENT] {
+        let resp = r(
+            Decision::Deny {
+                reason,
+                kind: DenyKind::Forbidden,
+            },
+            Navigation::Document,
+        );
+        assert_eq!(resp.status(), StatusCode::FOUND.max(StatusCode::FORBIDDEN));
+        assert_eq!(h(&resp, "x-hopae-reason"), Some(reason.0));
+        assert!(resp.headers().get("set-cookie").is_none());
+    }
+}
+
+#[test]
+fn entry_point_return_is_resolved_by_the_adapter() {
+    let url = |q: &str| format!("https://app.example.test/_hopae/logout?{q}");
+    let ret = |q: &str| ok(&base(&url(q))).input.entry_return;
+    assert_eq!(
+        ok(&base("https://app.example.test/_hopae/logout"))
+            .input
+            .entry_return,
+        EntryReturn::Absent
+    );
+    // A path-absolute reference is resolved against the request origin.
+    match ret("return=%2Fdocs%2Fbye%3Fq%3D1") {
+        EntryReturn::Candidate {
+            url,
+            canonical_path,
+        } => {
+            assert_eq!(url, "https://app.example.test/docs/bye?q=1");
+            assert_eq!(canonical_path.as_str(), "/docs/bye");
+        }
+        other => panic!("{other:?}"),
+    }
+    // An absolute URL is kept as written; the core validates it.
+    match ret("return=https%3A%2F%2Fother.example.org%2F") {
+        EntryReturn::Candidate { url, .. } => assert_eq!(url, "https://other.example.org/"),
+        other => panic!("{other:?}"),
+    }
+    for bad in [
+        "return=%2F%2Fevil.example.org%2F",
+        "return=%2F%5Cevil.example.org",
+        "return=%2Fa%0Ab",
+        "return=",
+        "return=%2Fa&return=%2Fb",
+        "return=%2Fx%3F_hopae_handoff%3DK",
+        "return=%2Fa%2F..%2Fb",
+        "return=%2Fa%252e%252e%2Fb%2F%2F",
+    ] {
+        assert_eq!(ret(bad), EntryReturn::Invalid, "{bad}");
+    }
+    // Other paths never carry a resolved return.
+    let v = base("https://app.example.test/x?return=%2Fa");
+    assert_eq!(ok(&v).input.entry_return, EntryReturn::Absent);
+}
+
+#[test]
+fn fetch_site_is_parsed_and_a_repeat_is_a_contract_violation() {
+    let fetch = |value: Option<&str>| {
+        let v = match value {
+            Some(x) => with(base("https://app.example.test/x"), "sec-fetch-site", x),
+            None => base("https://app.example.test/x"),
+        };
+        ok(&v).input.fetch_site
+    };
+    assert_eq!(fetch(Some("same-origin")), FetchSite::SameOrigin);
+    assert_eq!(fetch(Some("Same-Site")), FetchSite::SameSite);
+    assert_eq!(fetch(Some("cross-site")), FetchSite::CrossSite);
+    assert_eq!(fetch(Some("none")), FetchSite::UserInitiated);
+    assert_eq!(fetch(Some("bogus")), FetchSite::Unknown);
+    assert_eq!(fetch(None), FetchSite::Unknown);
+    let mut twice = base("https://app.example.test/x");
+    twice.push(("sec-fetch-site", "same-origin".into()));
+    twice.push(("sec-fetch-site", "same-origin".into()));
+    assert_eq!(
+        reason_of(&cfg(), &twice),
+        ("contract_violation", DenyKind::ContractViolation)
+    );
+}
+
+#[test]
 fn handoff_clean_and_switch_redirects() {
     let d = Decision::Handoff {
         location: url::Url::parse("https://app.example.test/admin/x?q=1").unwrap(),

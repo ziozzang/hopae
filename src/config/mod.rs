@@ -278,6 +278,10 @@ pub struct AppEntry {
     pub on_authz_change: Option<AuthzChangeCfg>,
     #[serde(default)]
     pub verify_cache_seconds: Option<u32>,
+    /// `/_hopae/logout` goes through the portal's confirmation page (default
+    /// `true`); `false` ends the session at once for a same-origin navigation.
+    #[serde(default)]
+    pub logout_confirm: Option<bool>,
     #[serde(default)]
     pub step_up: Vec<StepUpEntry>,
 }
@@ -1176,6 +1180,7 @@ fn resolve_app(entry: Option<&AppEntry>, base: &AppPolicy, cfg: &Config, id: &st
             Some(AuthzChangeCfg::Terminate) => AuthzChange::Terminate,
         },
         verify_cache_seconds: a.verify_cache_seconds.unwrap_or(base.verify_cache_seconds),
+        logout_confirm: a.logout_confirm.unwrap_or(base.logout_confirm),
         step_up: a
             .step_up
             .iter()
@@ -1338,6 +1343,52 @@ mod tests {
         assert_eq!(short.session.absolute, Duration::from_secs(86400));
         assert!(snap.return_origin_allowed(&Host::parse("short.example.test").unwrap(), 8443));
         assert!(c.warnings().iter().any(|w| w.contains("apps[1].hosts[0]")));
+    }
+
+    #[test]
+    fn logout_confirm_defaults_to_true_and_inherits_from_default() {
+        let host = |s: &str| Host::parse(s).unwrap();
+        let c = with(
+            r#"{"apps": [
+              {"app_id": "app", "hosts": ["a.example.test"]},
+              {"app_id": "direct", "hosts": ["d.example.test"], "logout_confirm": false}
+            ]}"#,
+        )
+        .unwrap();
+        let snap = c.snapshot(1);
+        assert!(snap.default_app.logout_confirm);
+        assert!(
+            snap.app_for_host(&host("a.example.test"))
+                .unwrap()
+                .logout_confirm
+        );
+        assert!(
+            !snap
+                .app_for_host(&host("d.example.test"))
+                .unwrap()
+                .logout_confirm
+        );
+        let c = with(
+            r#"{"apps": [
+              {"app_id": "default", "logout_confirm": false},
+              {"app_id": "app", "hosts": ["a.example.test"]},
+              {"app_id": "asks", "hosts": ["b.example.test"], "logout_confirm": true}
+            ]}"#,
+        )
+        .unwrap();
+        let snap = c.snapshot(1);
+        assert!(!snap.default_app.logout_confirm);
+        assert!(
+            !snap
+                .app_for_host(&host("a.example.test"))
+                .unwrap()
+                .logout_confirm
+        );
+        assert!(
+            snap.app_for_host(&host("b.example.test"))
+                .unwrap()
+                .logout_confirm
+        );
     }
 
     #[test]

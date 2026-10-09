@@ -272,6 +272,30 @@ async fn read_form(st: &PortalState, rq: &Rq, parts: &Parts, body: Body) -> Resu
     )))
 }
 
+/// `Origin` and CSRF checks for a state-changing POST, without recording
+/// anything: the cause of the first failed check, if any.
+fn guard_check(
+    st: &PortalState,
+    parts: &Parts,
+    form: &Form,
+    purpose: Purpose,
+    binding: Option<&str>,
+) -> Result<(), &'static str> {
+    // A repeated `Origin` header is ambiguous: refuse it like a mismatch.
+    let origin = if parts.headers.get_all(header::ORIGIN).iter().count() == 1 {
+        header_str(&parts.headers, header::ORIGIN)
+    } else {
+        None
+    };
+    if !security::origin_allowed(origin, &st.cfg.origin) {
+        return Err("origin");
+    }
+    let (Some(binding), Some(token)) = (binding, form.0.get("csrf")) else {
+        return Err("token");
+    };
+    csrf::verify(&st.csrf_key, binding, purpose, token, st.clock.now()).map_err(|e| e.label())
+}
+
 /// `Origin` and CSRF checks for a state-changing POST. `binding` is the value
 /// the token must be bound to (`None`: the browser presented nothing to bind to).
 async fn guard(
@@ -282,33 +306,20 @@ async fn guard(
     purpose: Purpose,
     binding: Option<&str>,
 ) -> Result<(), Response> {
-    let refuse = |cause: &'static str| async move {
-        st.services
-            .csrf_rejected(&rq.ctx, purpose.as_str(), cause)
-            .await;
-        tracing::info!(
-            request_id = rq.rid(),
-            purpose = purpose.as_str(),
-            cause,
-            "csrf check refused"
-        );
-        Err(error_response(rq.t(), rq.rid(), ErrorPage::Forbidden))
-    };
-    // A repeated `Origin` header is ambiguous: refuse it like a mismatch.
-    let origin = if parts.headers.get_all(header::ORIGIN).iter().count() == 1 {
-        header_str(&parts.headers, header::ORIGIN)
-    } else {
-        None
-    };
-    if !security::origin_allowed(origin, &st.cfg.origin) {
-        return refuse("origin").await;
-    }
-    let (Some(binding), Some(token)) = (binding, form.0.get("csrf")) else {
-        return refuse("token").await;
-    };
-    match csrf::verify(&st.csrf_key, binding, purpose, token, st.clock.now()) {
+    match guard_check(st, parts, form, purpose, binding) {
         Ok(()) => Ok(()),
-        Err(e) => refuse(e.label()).await,
+        Err(cause) => {
+            st.services
+                .csrf_rejected(&rq.ctx, purpose.as_str(), cause)
+                .await;
+            tracing::info!(
+                request_id = rq.rid(),
+                purpose = purpose.as_str(),
+                cause,
+                "csrf check refused"
+            );
+            Err(error_response(rq.t(), rq.rid(), ErrorPage::Forbidden))
+        }
     }
 }
 
@@ -688,12 +699,51 @@ pub(crate) async fn switch_post(State(st): State<PortalState>, req: Request) -> 
     }
 }
 
+/// The ticket named in a query or form, when it has the shape of an id.
+fn ticket_of(params: Option<&Params>) -> Option<Secret> {
+    params
+        .and_then(|p| p.get("txn"))
+        .filter(|t| simple_id(t, 128))
+        .map(|t| Secret::new(t.to_string()))
+}
+
 pub(crate) async fn logout_get(State(st): State<PortalState>, req: Request) -> Response {
     let (parts, _) = req.into_parts();
     let rq = match prepare(&st, &parts) {
         Ok(r) => r,
         Err(resp) => return resp,
     };
+    // A logout ticket (`/_hopae/logout`): live and bound to this browser, the
+    // page names the application and carries the ticket. Anything else is
+    // the plain confirmation.
+    if let Some(txn) = ticket_of(query(&parts).as_ref()) {
+        let bind = effective_bind(&st, &rq);
+        let cookies = Cookies {
+            bind: Some(bind.clone()),
+            handle: rq.presented.handle.clone(),
+        };
+        if let Some(app) = st.services.logout_visit(&rq.ctx, &txn, &cookies).await {
+            // Bound to the portal handle when there is one, otherwise to the
+            // portal binding cookie planted or refreshed here.
+            let binding = rq
+                .presented
+                .handle
+                .as_ref()
+                .map_or_else(|| bind.expose(), |h| h.expose());
+            let csrf = token_for(&st, binding, Purpose::Logout);
+            return render_page(
+                &rq,
+                pages::Logout {
+                    t: rq.t(),
+                    request_id: rq.rid(),
+                    csrf: &csrf,
+                    txn: Some(txn.expose()),
+                    app_name: Some(&app),
+                },
+                &[portal_cookie_header(&st, &bind)],
+            );
+        }
+    }
     // Bound to the portal handle when there is one; without a session the
     // token is bound to nothing and the POST is a no-op anyway.
     let binding = rq.presented.handle.as_ref().map_or("", |h| h.expose());
@@ -704,6 +754,8 @@ pub(crate) async fn logout_get(State(st): State<PortalState>, req: Request) -> R
             t: rq.t(),
             request_id: rq.rid(),
             csrf: &csrf,
+            txn: None,
+            app_name: None,
         },
         &[],
     )
@@ -716,20 +768,48 @@ pub(crate) async fn logout_post(State(st): State<PortalState>, req: Request) -> 
         Err(resp) => return resp,
     };
     let clear = cookies::clear_cookie(&st.cfg.cookie_names.handle, st.cfg.secure);
-    let signed_out = |rq: &Rq| {
+    let signed_out = |rq: &Rq, page: Option<&SignedOutPage>| {
+        let sign_in = page.and_then(|p| p.sign_in.as_ref().map(|u| u.as_str()));
         render_page(
             rq,
             pages::SignedOut {
                 t: rq.t(),
                 request_id: rq.rid(),
+                app_name: page.map(|p| p.app_name.as_str()),
+                sign_in,
             },
             std::slice::from_ref(&clear),
         )
     };
-    // Without a portal handle there is nothing to end and nothing to protect:
-    // a silent no-op, identical to the success page.
     let Some(handle) = rq.presented.handle.clone() else {
-        return signed_out(&rq);
+        // Without a portal handle the only thing that can act is a logout
+        // ticket held by this very browser: its form, `Origin` and CSRF token
+        // (bound to the portal binding cookie) must all check out. Anything
+        // else is the silent no-op, identical to the success page.
+        let Some(bind) = rq.presented.bind.clone() else {
+            return signed_out(&rq, None);
+        };
+        let Ok(form) = read_form(&st, &rq, &parts, body).await else {
+            return signed_out(&rq, None);
+        };
+        let Some(txn) = ticket_of(Some(&form.0)) else {
+            return signed_out(&rq, None);
+        };
+        if guard_check(&st, &parts, &form, Purpose::Logout, Some(bind.expose())).is_err() {
+            return signed_out(&rq, None);
+        }
+        let cookies = Cookies {
+            bind: Some(bind),
+            handle: None,
+        };
+        return match st
+            .services
+            .logout_with_ticket(&rq.ctx, &txn, &cookies)
+            .await
+        {
+            Ok(page) => signed_out(&rq, page.as_ref()),
+            Err(f) => fail_response(&rq, f),
+        };
     };
     let form = match read_form(&st, &rq, &parts, body).await {
         Ok(f) => f,
@@ -747,10 +827,50 @@ pub(crate) async fn logout_post(State(st): State<PortalState>, req: Request) -> 
     {
         return resp;
     }
-    // Only the handle in the cookie is ever acted on; form fields such as
-    // `session` or `scope` are not read.
+    // Only the handle in the cookie and a ticket this browser holds are ever
+    // acted on; form fields such as `session` or `scope` are not read.
+    if let Some(txn) = ticket_of(Some(&form.0)) {
+        let cookies = Cookies {
+            bind: rq.presented.bind.clone(),
+            handle: Some(handle),
+        };
+        return match st
+            .services
+            .logout_with_ticket(&rq.ctx, &txn, &cookies)
+            .await
+        {
+            Ok(page) => signed_out(&rq, page.as_ref()),
+            Err(f) => fail_response(&rq, f),
+        };
+    }
     match st.services.logout(&rq.ctx, &handle).await {
-        Ok(_) => signed_out(&rq),
+        Ok(_) => signed_out(&rq, None),
+        Err(f) => fail_response(&rq, f),
+    }
+}
+
+/// `GET /signed-out?txn=`: the page of a completed logout from the consumed
+/// ticket the no-confirmation mode redirects with.
+pub(crate) async fn signed_out_get(State(st): State<PortalState>, req: Request) -> Response {
+    let (parts, _) = req.into_parts();
+    let rq = match prepare(&st, &parts) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let Some(txn) = ticket_of(query(&parts).as_ref()) else {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    };
+    match st.services.signed_out(&rq.ctx, &txn).await {
+        Ok(page) => render_page(
+            &rq,
+            pages::SignedOut {
+                t: rq.t(),
+                request_id: rq.rid(),
+                app_name: Some(&page.app_name),
+                sign_in: page.sign_in.as_ref().map(|u| u.as_str()),
+            },
+            &[],
+        ),
         Err(f) => fail_response(&rq, f),
     }
 }

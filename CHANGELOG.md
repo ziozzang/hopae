@@ -20,11 +20,16 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 - Development process, documentation system, ADR and scenario templates, and roadmap.
 - Architecture design, gateway contract v1 (with proposed gateway changes HC-1 to HC-9), threat model v0, ADR-0002 to ADR-0013 (Proposed), and draft scenarios 001–014 for milestone M1.
 - `docs/CONFIG.md` configuration reference (M0 keys and the keys scheduled by the ADRs).
-- Design after the first live deployment (ADR-0015, Proposed; not implemented yet): application-host entry points `/_hopae/login` and `/_hopae/logout` answered by Hopae inside the verify call with a relayed `302` or `403` (never `2xx`), a server-side logout ticket so a browser without a valid portal handle can still end its session, the `apps[].logout_confirm` key (scheduled), gateway change HC-12 (`auth.strip_request_cookies`) with acceptance criteria, gateway contract v1.1 (rev 8), threat model entries TM-40 and TM-41, and draft scenario 015.
+- Application-host entry points (ADR-0015, Proposed; implemented): `/_hopae/login` and `/_hopae/logout` answered by Hopae inside the verify call with a relayed `302` or `403` (never `2xx`), the reserved `/_hopae/` namespace, a server-side logout ticket (transaction purpose `logout`) so a browser without a valid portal handle can still end its session, the `apps[].logout_confirm` key, the portal's `GET /signed-out`, and `strip_request_cookies` (gateway change HC-12) in the `hopae --check` route fragment; gateway contract v1.1 (rev 9), threat model entries TM-40 and TM-41, and draft scenario 015.
+- After a confirmed logout the portal shows a signed-out page with a "Sign in again to <application>" link to the validated return target instead of redirecting to the protected target, which a provider with a live session would answer by signing the user straight back in.
 
 ### Changed
 
 - Gateway contract v1.1 reserves the `/_hopae/` namespace on every protected application host: an application route under it is no longer supported and is answered `403 reserved_path` once ADR-0015 is implemented. The route fragments in the contract, `deploy/hangang-routes.example.json` and the `hopae --check` output gain `strip_request_cookies`; a gateway without HC-12 rejects the key.
+
+### Fixed
+
+- `txn.max_rows` is a hard bound: the eviction now happens inside the same store write as the capped transaction insert (login, retry and logout ticket) instead of in a detached task, and the per-address `txn.per_ip_per_minute` cap is enforced in that write for the verify engine too, so concurrent callers can no longer overshoot either limit.
 
 ### Security
 

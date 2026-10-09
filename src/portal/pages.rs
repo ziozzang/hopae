@@ -147,6 +147,9 @@ pub struct Logout<'a> {
     pub t: &'a Strings,
     pub request_id: &'a str,
     pub csrf: &'a str,
+    /// The logout ticket and the application it names (`/_hopae/logout`).
+    pub txn: Option<&'a str>,
+    pub app_name: Option<&'a str>,
 }
 
 #[derive(Template)]
@@ -154,6 +157,9 @@ pub struct Logout<'a> {
 pub struct SignedOut<'a> {
     pub t: &'a Strings,
     pub request_id: &'a str,
+    /// "Sign in again to <app>": the validated return target of a logout ticket.
+    pub app_name: Option<&'a str>,
+    pub sign_in: Option<&'a str>,
 }
 
 #[derive(Template)]

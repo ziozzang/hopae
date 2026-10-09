@@ -35,6 +35,7 @@ pub fn router(state: PortalState) -> Router {
             "/logout",
             get(handlers::logout_get).post(handlers::logout_post),
         )
+        .route("/signed-out", get(handlers::signed_out_get))
         .fallback(handlers::not_found)
         // Innermost first: the cap runs inside the request-id/header layer, so
         // even its 503 carries the security headers and an id.

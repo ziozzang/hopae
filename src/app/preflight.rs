@@ -90,7 +90,7 @@ pub fn report(cfg: &Config) -> String {
         let ports: Vec<String> = a.ports.iter().map(u16::to_string).collect();
         let _ = writeln!(
             out,
-            "  {} ({}): hosts {}; ports {}; {}; session idle {} absolute {}; on_authz_change {:?}; verify_cache_seconds {}{}",
+            "  {} ({}): hosts {}; ports {}; {}; session idle {} absolute {}; on_authz_change {:?}; verify_cache_seconds {}; logout_confirm {}{}",
             a.app_id,
             if a.enabled { "enabled" } else { "disabled" },
             hosts.join(", "),
@@ -100,6 +100,7 @@ pub fn report(cfg: &Config) -> String {
             dur(a.session.absolute),
             a.on_authz_change,
             a.verify_cache_seconds,
+            a.logout_confirm,
             if a.step_up.is_empty() {
                 String::new()
             } else {
@@ -199,7 +200,9 @@ pub fn report(cfg: &Config) -> String {
         out,
         "gateway route auth fragment (register it on every protected route; the key is the variable name, never a value):"
     );
-    let fragment = gateway_facts::route_auth_fragment(&verify_url, timeout);
+    let names = cfg.cookie_names();
+    let fragment =
+        gateway_facts::route_auth_fragment(&verify_url, timeout, &[&names.handle, &names.bind]);
     let _ = writeln!(
         out,
         "{}",

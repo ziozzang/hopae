@@ -238,6 +238,8 @@ pub enum TxnPurpose {
     Stepup,
     Link,
     Switch,
+    /// The logout ticket of `/_hopae/logout` (ADR-0015).
+    Logout,
 }
 
 impl TxnPurpose {
@@ -247,6 +249,7 @@ impl TxnPurpose {
             TxnPurpose::Stepup => "stepup",
             TxnPurpose::Link => "link",
             TxnPurpose::Switch => "switch",
+            TxnPurpose::Logout => "logout",
         }
     }
 
@@ -256,9 +259,20 @@ impl TxnPurpose {
             "stepup" => Some(TxnPurpose::Stepup),
             "link" => Some(TxnPurpose::Link),
             "switch" => Some(TxnPurpose::Switch),
+            "logout" => Some(TxnPurpose::Logout),
             _ => None,
         }
     }
+}
+
+/// Result of the capped transaction insert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Admission {
+    /// The transaction was written; `evicted` rows were removed in the same
+    /// write to keep the table within `txn.max_rows`.
+    Admitted { evicted: u32 },
+    /// The per-address cap was reached; nothing was written.
+    OverCap,
 }
 
 #[derive(Clone, Debug)]

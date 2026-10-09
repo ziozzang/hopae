@@ -161,15 +161,18 @@ pub trait Sessions: Send + Sync {
     ) -> StoreResult<()>;
     async fn create_transaction(&self, txn: NewTransaction, events: Vec<Event>) -> StoreResult<()>;
     /// As `create_transaction`, but only when fewer than `cap` transactions of
-    /// the same `client_ip` were created since `since`; the count and the
-    /// insert are one write transaction. `false` = over the cap, nothing written.
+    /// the same `client_ip` were created since `since`; the count, the
+    /// eviction down to `max_rows - 1` rows (dead rows first, then the
+    /// oldest) and the insert are one write transaction, so `max_rows` is a
+    /// hard bound on this path. `OverCap` = nothing written.
     async fn create_transaction_capped(
         &self,
         txn: NewTransaction,
         events: Vec<Event>,
         since: Timestamp,
         cap: u32,
-    ) -> StoreResult<bool>;
+        max_rows: u32,
+    ) -> StoreResult<Admission>;
     async fn transaction(&self, txn_sha256: &Digest) -> StoreResult<Option<TransactionRow>>;
     async fn transaction_by_state(
         &self,
@@ -185,6 +188,13 @@ pub trait Sessions: Send + Sync {
     /// this call set it, false when one was already recorded (or the
     /// transaction is consumed or not a switch).
     async fn bind_switch_transaction(
+        &self,
+        txn_sha256: &Digest,
+        portal_bind_sha256: Digest,
+    ) -> StoreResult<bool>;
+    /// Record the portal binding of a `logout` ticket, once (as
+    /// `bind_switch_transaction` does for a `switch` transaction).
+    async fn bind_logout_transaction(
         &self,
         txn_sha256: &Digest,
         portal_bind_sha256: Digest,

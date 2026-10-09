@@ -2,9 +2,16 @@
 {% block title %}{{ t.get("logout.title") }}{% endblock %}
 {% block content %}
 <h1>{{ t.get("logout.title") }}</h1>
+{% if let Some(app) = app_name %}
+<p>{{ t.fmt("logout.app_body", "app", app) }}</p>
+{% else %}
 <p>{{ t.get("logout.body") }}</p>
+{% endif %}
 <form method="post" action="/logout">
 <input type="hidden" name="csrf" value="{{ csrf }}">
+{% if let Some(txn) = txn %}
+<input type="hidden" name="txn" value="{{ txn }}">
+{% endif %}
 <button type="submit">{{ t.get("logout.button") }}</button>
 </form>
 {% endblock %}

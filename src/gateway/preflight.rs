@@ -35,11 +35,15 @@ pub const REQUEST_HEADERS: [&str; 6] = [
 pub const GATEWAY_KEY_ENV: &str = "HANGANG_HOPAE_KEY";
 
 /// The `auth` block of a protected route, as in docs/GATEWAY_CONTRACT.md.
-pub fn route_auth_fragment(verify_url: &str, timeout_ms: u64) -> Value {
+/// `strip_cookies` are the configured handle and binding cookie names, which
+/// the gateway removes from the request it forwards upstream (gateway change
+/// HC-12, ADR-0015).
+pub fn route_auth_fragment(verify_url: &str, timeout_ms: u64, strip_cookies: &[&str]) -> Value {
     json!({
         "url": verify_url,
         "request_headers": REQUEST_HEADERS,
         "response_headers": IDENTITY_HEADERS,
+        "strip_request_cookies": strip_cookies,
         "static_request_headers": {
             "x-hopae-contract": "1",
             "x-hopae-gateway-key": {"env": GATEWAY_KEY_ENV},

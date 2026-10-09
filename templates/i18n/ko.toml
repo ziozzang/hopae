@@ -29,8 +29,10 @@
 "logout.title" = "로그아웃"
 "logout.body" = "이 브라우저에서 로그아웃할까요? 애플리케이션은 다시 로그인을 요구합니다."
 "logout.button" = "로그아웃"
+"logout.app_body" = "{app}에서 로그아웃할까요? 이 브라우저에서 로그아웃되며, 애플리케이션은 다시 로그인을 요구합니다."
 "signedout.title" = "로그아웃되었습니다"
 "signedout.body" = "이 브라우저에서 로그아웃되었습니다."
+"signedout.again" = "{app}에 다시 로그인"
 
 "link.title" = "이미 있는 계정입니다"
 "link.body" = "이 이메일 주소는 이미 다른 계정에 속해 있습니다. 연결하려면 {provider}(으)로 로그인하세요."

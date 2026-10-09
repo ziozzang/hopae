@@ -6,10 +6,9 @@ use url::Url;
 
 use crate::crypto::{Digest, Secret, ct_eq, is_well_formed_bind, random_token};
 use crate::event::types::{EventKind, Outcome, reasons};
-use crate::policy::types::AppId;
 use crate::provider::types::ProviderId;
 use crate::session::service::{COUNTER_WINDOW, RequestCtx, Service, SessionError, TXN_LIFETIME};
-use crate::store::types::{NewTransaction, TransactionRow, TxnPurpose};
+use crate::store::types::{Admission, NewTransaction, TransactionRow, TxnPurpose};
 
 #[derive(Debug)]
 pub struct RetryOutcome {
@@ -20,28 +19,6 @@ pub struct RetryOutcome {
 pub use crate::gateway::recognition::HANDOFF_PARAM;
 
 impl Service {
-    /// `txn.max_rows`: evict so that one more row fits (dead rows first,
-    /// then the oldest), and report the eviction as a diagnostic.
-    pub(crate) async fn make_room(
-        &self,
-        ctx: &RequestCtx,
-        app: &AppId,
-    ) -> Result<(), SessionError> {
-        let evicted = self
-            .sessions
-            .evict_transactions(self.cfg.txn_max_rows.saturating_sub(1), self.clock.now())
-            .await?;
-        if evicted > 0 {
-            self.emitter
-                .diagnostic(EventKind::TxnEvicted, Outcome::Info, &ctx.request_id, |b| {
-                    b.app(app)
-                        .reason(reasons::TXN_EVICTED)
-                        .attr("count", evicted)
-                });
-        }
-        Ok(())
-    }
-
     /// `POST /login/retry` addressed by the callback's `state`, which is how
     /// the interrupted page names the consumed transaction.
     pub async fn retry_by_state(
@@ -121,8 +98,6 @@ impl Service {
             .clone()
             .ok_or(SessionError::Refused(reasons::INVALID_STATE))?;
 
-        self.make_room(ctx, &old.app_id).await?;
-
         let depth = old.recovery_depth + 1;
         let txn = random_token(&*self.rng, 16);
         let started = self
@@ -154,19 +129,35 @@ impl Service {
         // Admission: the per-IP count (against the transaction's application
         // IP, the address it is inserted with, ADR-0014) and the insert are
         // one store transaction.
-        if !self
+        match self
             .sessions
             .create_transaction_capped(
                 new_row,
                 vec![started],
                 now.sub(COUNTER_WINDOW),
                 self.cfg.txn_per_ip_per_minute,
+                self.cfg.txn_max_rows,
             )
             .await?
         {
-            return Err(SessionError::RateLimited {
-                retry_after: COUNTER_WINDOW,
-            });
+            Admission::OverCap => {
+                return Err(SessionError::RateLimited {
+                    retry_after: COUNTER_WINDOW,
+                });
+            }
+            Admission::Admitted { evicted } if evicted > 0 => {
+                self.emitter.diagnostic(
+                    EventKind::TxnEvicted,
+                    Outcome::Info,
+                    &ctx.request_id,
+                    |b| {
+                        b.app(&old.app_id)
+                            .reason(reasons::TXN_EVICTED)
+                            .attr("count", evicted)
+                    },
+                );
+            }
+            Admission::Admitted { .. } => {}
         }
         let fresh = self
             .sessions

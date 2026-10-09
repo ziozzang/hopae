@@ -13,7 +13,10 @@ use crate::gateway::{canonical, recognition};
 use crate::policy::types::Host;
 use crate::telemetry::counters;
 use crate::verify::types::Decision;
-use crate::verify::types::{CallerAuth, DenyKind, Handoff, Navigation, Scheme, VerifyInput};
+use crate::verify::types::{
+    CallerAuth, DenyKind, EntryReturn, FetchSite, Handoff, Navigation, Reserved, Scheme,
+    VerifyInput,
+};
 
 const H_KEY: &str = "x-hopae-gateway-key";
 const H_CONTRACT: &str = "x-hopae-contract";
@@ -172,6 +175,68 @@ fn navigation(h: &HeaderMap) -> Navigation {
     } else {
         Navigation::Other
     }
+}
+
+fn fetch_site(h: &HeaderMap) -> Result<FetchSite, ()> {
+    let Some(v) = single(h, "sec-fetch-site")? else {
+        return Ok(FetchSite::Unknown);
+    };
+    let b = v.as_bytes();
+    Ok(if b.eq_ignore_ascii_case(b"same-origin") {
+        FetchSite::SameOrigin
+    } else if b.eq_ignore_ascii_case(b"same-site") {
+        FetchSite::SameSite
+    } else if b.eq_ignore_ascii_case(b"cross-site") {
+        FetchSite::CrossSite
+    } else if b.eq_ignore_ascii_case(b"none") {
+        FetchSite::UserInitiated
+    } else {
+        FetchSite::Unknown
+    })
+}
+
+/// The target an entry point was asked for: the `return` parameter resolved
+/// against the request origin. A path-absolute reference (`/path?q`, a single
+/// leading slash) becomes an absolute URL on the request's origin; an absolute
+/// URL is kept as written. Anything the core should not even look at is
+/// `Invalid`.
+fn entry_return(original_url: &url::Url, raw_query: &str) -> EntryReturn {
+    let value = match recognition::find_return(raw_query) {
+        recognition::ReturnParam::Absent => return EntryReturn::Absent,
+        recognition::ReturnParam::Ambiguous => return EntryReturn::Invalid,
+        recognition::ReturnParam::Value(v) => v,
+    };
+    if value.is_empty() || value.chars().any(|c| c.is_control() || c == '\\') {
+        return EntryReturn::Invalid;
+    }
+    let candidate = if value.starts_with("//") {
+        return EntryReturn::Invalid;
+    } else if value.starts_with('/') {
+        format!("{}{value}", original_url.origin().ascii_serialization())
+    } else {
+        value
+    };
+    if url::Url::parse(&candidate).is_err()
+        || !matches!(
+            recognition::find_handoff(raw_query_of(&candidate)),
+            Handoff::None
+        )
+    {
+        return EntryReturn::Invalid;
+    }
+    match canonical::canonical_path(raw_path(&candidate)) {
+        Ok(canonical_path) => EntryReturn::Candidate {
+            url: candidate,
+            canonical_path,
+        },
+        Err(()) => EntryReturn::Invalid,
+    }
+}
+
+/// The query of a URL string, up to a fragment.
+fn raw_query_of(url: &str) -> &str {
+    let q = raw_query(url);
+    q.split('#').next().unwrap_or("")
 }
 
 struct Cookies {
@@ -394,6 +459,7 @@ pub fn parse(
             None,
         )
     })?;
+    let fetch_site = fetch_site(h).map_err(|()| violation("sec-fetch-site"))?;
     let user_agent = h
         .get("user-agent")
         .map(|v| crate::policy::binding::normalize_user_agent(v.as_bytes()));
@@ -401,6 +467,12 @@ pub fn parse(
     // 9. Reserved parameter, from the query exactly as written.
     let handoff = recognition::find_handoff(raw_query(raw_url));
     let handoff_seen = !matches!(handoff, Handoff::None);
+    // The entry points' `return`, resolved here: the core never reads a query.
+    let entry_return = if matches!(canonical_path.reserved(), Reserved::Entry(_)) {
+        entry_return(&original_url, raw_query(raw_url))
+    } else {
+        EntryReturn::Absent
+    };
 
     let env = RenderEnv {
         request_id: request_id.clone(),
@@ -424,6 +496,8 @@ pub fn parse(
         bind_cookie: cookies.bind.map(Secret::new),
         user_agent,
         navigation: navigation(h),
+        fetch_site,
+        entry_return,
         handoff,
         contract,
         caller,

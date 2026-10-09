@@ -35,6 +35,11 @@ fn hex(b: u8) -> Option<u8> {
 }
 
 fn classify(raw_name: &str) -> NameKind {
+    classify_name(raw_name, HANDOFF_PARAM)
+}
+
+/// As [`classify`] for any parameter name `target`.
+fn classify_name(raw_name: &str, target: &str) -> NameKind {
     let bytes = raw_name.as_bytes();
     // None = a malformed escape standing for one unknown character.
     let mut decoded: Vec<Option<u8>> = Vec::with_capacity(bytes.len());
@@ -68,7 +73,7 @@ fn classify(raw_name: &str) -> NameKind {
             }
         }
     }
-    let target = HANDOFF_PARAM.as_bytes();
+    let target = target.as_bytes();
     if decoded.len() != target.len()
         || !decoded
             .iter()
@@ -115,6 +120,35 @@ pub fn find_handoff(query: &str) -> Handoff {
         Some(code) => Handoff::Code(Secret::new(code)),
         None => Handoff::None,
     }
+}
+
+/// The entry points' `return` parameter, recognized like the reserved
+/// parameter (ADR-0015): pairs split on `&`, decoded name exactly `return`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReturnParam {
+    Absent,
+    /// Repeated, or a candidate name with a malformed percent escape.
+    Ambiguous,
+    Value(String),
+}
+
+/// Apply the recognition rule for `return` to a raw query string.
+pub fn find_return(query: &str) -> ReturnParam {
+    let mut found: Option<String> = None;
+    for pair in query.split('&').filter(|p| !p.is_empty()) {
+        let (name, value) = split_pair(pair);
+        match classify_name(name, "return") {
+            NameKind::Other => {}
+            NameKind::Malformed => return ReturnParam::Ambiguous,
+            NameKind::Exact => {
+                if found.is_some() {
+                    return ReturnParam::Ambiguous;
+                }
+                found = Some(decode_value(value));
+            }
+        }
+    }
+    found.map_or(ReturnParam::Absent, ReturnParam::Value)
 }
 
 /// The URL as a string without any pair the rule recognizes (exact or
@@ -187,6 +221,21 @@ mod tests {
         assert_eq!(code("_hopae_handoff=a+b").as_deref(), Some("a b"));
         assert_eq!(code("_hopae_handoff=").as_deref(), Some(""));
         assert_eq!(code("_hopae_handoff").as_deref(), Some(""));
+    }
+
+    #[test]
+    fn return_is_recognized_like_the_reserved_parameter() {
+        let v = |q: &str| find_return(q);
+        assert_eq!(v(""), ReturnParam::Absent);
+        assert_eq!(v("a=1"), ReturnParam::Absent);
+        assert_eq!(v("return=%2Fx"), ReturnParam::Value("/x".into()));
+        assert_eq!(v("a=1&%72eturn=%2Fx&b=2"), ReturnParam::Value("/x".into()));
+        assert_eq!(v("return"), ReturnParam::Value(String::new()));
+        assert_eq!(v("Return=%2Fx"), ReturnParam::Absent, "case matters");
+        assert_eq!(v("return=a&return=b"), ReturnParam::Ambiguous);
+        assert_eq!(v("return=a&%72eturn=b"), ReturnParam::Ambiguous);
+        assert_eq!(v("ret%zzrn=a"), ReturnParam::Ambiguous);
+        assert_eq!(v("return=a+b"), ReturnParam::Value("a b".into()));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! The gateway layer of the harness: the REAL hangang binary (the build that
-//! includes gateway change HC-3, `auth.static_request_headers`) started from a
+//! includes gateway changes HC-3 `auth.static_request_headers` and HC-12
+//! `auth.strip_request_cookies`) started from a
 //! generated file configuration, with the exact route fragments of
 //! `docs/GATEWAY_CONTRACT.md`.
 //!
@@ -108,6 +109,9 @@ enum Part {
     Portal(String),
     /// Protected route without `host`/`hosts` (S005-A7).
     HostNeutral(String),
+    /// The `site-hopae` route of the contract page (ADR-0015): `/_hopae` on a
+    /// path-scoped host goes to Hopae too.
+    HopaePrefix(String),
 }
 
 impl GatewayRoutes {
@@ -138,6 +142,13 @@ impl GatewayRoutes {
     /// A protected route with no `host` (host-neutral), for `path_prefix`.
     pub fn host_neutral(mut self, prefix: &str) -> Self {
         self.parts.push(Part::HostNeutral(prefix.into()));
+        self
+    }
+
+    /// The `site-hopae` route for a path-scoped `host`: `path_prefix: "/_hopae"`,
+    /// `segment_prefix`, higher priority, the same `auth` block.
+    pub fn hopae_prefix(mut self, host: &str) -> Self {
+        self.parts.push(Part::HopaePrefix(host.into()));
         self
     }
 
@@ -194,6 +205,16 @@ impl GatewayRoutes {
                     "path_prefix": "/",
                     "backends": [portal],
                 })),
+                Part::HopaePrefix(host) => out.push(json!({
+                    "id": format!("site-hopae-{host}"),
+                    "access_mode": "protected",
+                    "host": host,
+                    "path_prefix": "/_hopae",
+                    "path_match": "segment_prefix",
+                    "priority": 10,
+                    "backends": [echo],
+                    "auth": auth_fragment(verify_url),
+                })),
                 Part::HostNeutral(prefix) => out.push(json!({
                     "id": "neutral-protected",
                     "access_mode": "protected",
@@ -216,6 +237,7 @@ pub fn auth_fragment(verify_url: &str) -> Value {
         "url": verify_url,
         "request_headers": ["cookie", "user-agent", "accept", "sec-fetch-dest", "sec-fetch-mode", "sec-fetch-site"],
         "response_headers": IDENTITY_HEADERS,
+        "strip_request_cookies": ["__Host-hopae", "__Host-hopae_bind"],
         "static_request_headers": {
             "x-hopae-contract": "1",
             "x-hopae-gateway-key": {"env": GATEWAY_KEY_ENV}
@@ -770,6 +792,12 @@ impl Browser {
             req = req.header(k, v);
         }
         self.send(host, req)
+    }
+
+    /// A document navigation of a browser with an empty jar that sends exactly
+    /// `cookie` (a request whose `cookie` header the test controls).
+    pub fn fresh_jar_get(&self, host: &str, path: &str, cookie: &str) -> Response {
+        self.fresh().get_with(host, path, &[("cookie", cookie)])
     }
 
     /// A document navigation that arrives from another site (a redirect).

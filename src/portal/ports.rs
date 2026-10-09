@@ -143,6 +143,16 @@ pub enum SwitchChoice {
     Keep,
 }
 
+/// What the signed-out page shows after a logout that used a ticket.
+#[derive(Clone, Debug)]
+pub struct SignedOutPage {
+    /// The application's display name.
+    pub app_name: String,
+    /// The validated return target the "Sign in again" link points at;
+    /// `None` when it no longer validates.
+    pub sign_in: Option<Url>,
+}
+
 /// Provider and store state for `/healthz`.
 #[derive(Clone, Debug)]
 pub struct Health {
@@ -219,6 +229,32 @@ pub trait PortalServices: Send + Sync + 'static {
     /// terminate that handle's session (`reason=logout`). Unknown or already
     /// revoked handles are a silent no-op (`Ok(false)`).
     async fn logout(&self, ctx: &RequestCtx, handle: &Secret) -> Result<bool, Failure>;
+
+    /// `GET /logout?txn=`: the application's display name when the logout
+    /// ticket is live and belongs to this browser (`cookies.bind` is the
+    /// effective portal binding; the first visit records its digest). `None`
+    /// is "treated as absent": the page is the plain confirmation.
+    async fn logout_visit(
+        &self,
+        ctx: &RequestCtx,
+        txn: &Secret,
+        cookies: &Cookies,
+    ) -> Option<String>;
+
+    /// `POST /logout` with a ticket, after CSRF and `Origin`: ends the portal
+    /// handle's session (when presented) and, when the ticket is live and
+    /// bound to this browser, consumes it and ends the session it names.
+    /// `Some` only when the ticket was consumed by this call.
+    async fn logout_with_ticket(
+        &self,
+        ctx: &RequestCtx,
+        txn: &Secret,
+        cookies: &Cookies,
+    ) -> Result<Option<SignedOutPage>, Failure>;
+
+    /// `GET /signed-out?txn=`: the page of a completed logout, from the
+    /// consumed logout ticket the no-confirmation mode redirects with.
+    async fn signed_out(&self, ctx: &RequestCtx, txn: &Secret) -> Result<SignedOutPage, Failure>;
 
     /// Append a `csrf.rejected` event. `purpose` is the CSRF purpose name;
     /// `cause` is `origin`, `token` or `expired`. Best effort.

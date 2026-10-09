@@ -18,7 +18,10 @@ use crate::policy::binding::{self, BindingVerdict};
 use crate::policy::step_up;
 use crate::policy::types::{AppPolicy, AuthzChange, ConfigSnapshot, OnMismatch};
 use crate::session::types::Generations;
-use crate::store::types::{HandleView, IdentitySnapshot, NewTransaction, TxnPurpose, UserStatus};
+use crate::session::types::SessionId;
+use crate::store::types::{
+    Admission, HandleView, IdentitySnapshot, NewTransaction, TxnPurpose, UserStatus,
+};
 use crate::store::{StoreError, sqlite::with_deadline};
 
 const RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -224,6 +227,14 @@ async fn flow(cx: &Cx<'_>) -> Flow {
     let app =
         apps::resolve(&cx.snapshot, &input.host).map_err(|r| cx.deny(r, DenyKind::Forbidden))?;
 
+    // The reserved namespace (ADR-0015): after the application checks, before
+    // the reserved handoff parameter, which is neither redeemed nor consulted here.
+    match input.canonical_path.reserved() {
+        Reserved::No => {}
+        Reserved::Other => return Err(cx.deny(reasons::RESERVED_PATH, DenyKind::Forbidden)),
+        Reserved::Entry(entry) => return entry_point(cx, app, entry).await,
+    }
+
     // Reserved handoff parameter.
     match (&input.handoff, cx.document()) {
         (Handoff::None, _) => {}
@@ -249,6 +260,32 @@ async fn flow(cx: &Cx<'_>) -> Flow {
         }
     }
 
+    match authenticate(cx, app).await? {
+        Authn::Refused(cause) => login(cx, app, &target, cause, 0).await,
+        Authn::Allowed(authed) => Ok(allow(cx, app, *authed)),
+    }
+}
+
+/// What the presented handle amounts to.
+enum Authn {
+    /// A live handle of an enabled user: everything a `200` needs.
+    Allowed(Box<Authed>),
+    /// No usable handle; the reason a presented one was refused, if any.
+    /// The side effects of the refusal (termination, revocation) are done.
+    Refused(Option<Reason>),
+}
+
+struct Authed {
+    view: HandleView,
+    snapshot: IdentitySnapshot,
+    expires_at: Timestamp,
+}
+
+/// The handle checks of an ordinary verify: lookup, lifetimes, binding policy,
+/// user status and authorization version. The entry points reuse them: they
+/// "evaluate the presented handle as an ordinary verify would".
+async fn authenticate(cx: &Cx<'_>, app: &AppPolicy) -> Result<Authn, Decision> {
+    let (ctx, input) = (cx.ctx, cx.input);
     // Cookie handle: absent or malformed handles never reach the store.
     let Some(cookie) = input
         .cookie_handle
@@ -259,7 +296,7 @@ async fn flow(cx: &Cx<'_>) -> Flow {
             .cookie_handle
             .is_some()
             .then_some(reasons::MALFORMED_HANDLE);
-        return login(cx, app, &target, cause, 0).await;
+        return Ok(Authn::Refused(cause));
     };
     let digest = cookie.digest();
     let Some(view) = ctx
@@ -268,13 +305,13 @@ async fn flow(cx: &Cx<'_>) -> Flow {
         .await
         .map_err(|e| cx.store_err(e))?
     else {
-        return login(cx, app, &target, Some(reasons::UNKNOWN_HANDLE), 0).await;
+        return Ok(Authn::Refused(Some(reasons::UNKNOWN_HANDLE)));
     };
     if view.session.terminated_at.is_some() {
-        return login(cx, app, &target, Some(reasons::SESSION_TERMINATED), 0).await;
+        return Ok(Authn::Refused(Some(reasons::SESSION_TERMINATED)));
     }
     if view.handle.revoked_at.is_some() {
-        return login(cx, app, &target, Some(reasons::UNKNOWN_HANDLE), 0).await;
+        return Ok(Authn::Refused(Some(reasons::UNKNOWN_HANDLE)));
     }
 
     // Lifetimes: session timers first, then the handle's.
@@ -296,11 +333,11 @@ async fn flow(cx: &Cx<'_>) -> Flow {
         }
         LifetimeVerdict::HandleExpired(reason) => {
             revoke_handle(cx, app, &view, reason, vec![]).await?;
-            return login(cx, app, &target, Some(reason), 0).await;
+            return Ok(Authn::Refused(Some(reason)));
         }
         LifetimeVerdict::SessionExpired(reason) => {
             terminate(cx, app, &view, reason, vec![]).await?;
-            return login(cx, app, &target, Some(reason), 0).await;
+            return Ok(Authn::Refused(Some(reason)));
         }
     };
 
@@ -315,13 +352,13 @@ async fn flow(cx: &Cx<'_>) -> Flow {
                 revoke_handle(cx, app, &view, signal.reason(), attrs).await?;
             }
         }
-        return login(cx, app, &target, Some(signal.reason()), 0).await;
+        return Ok(Authn::Refused(Some(signal.reason())));
     }
 
     // User status and authorization version, read with the handle.
     if view.user.status == UserStatus::Disabled {
         terminate(cx, app, &view, reasons::USER_DISABLED, vec![]).await?;
-        return login(cx, app, &target, Some(reasons::USER_DISABLED), 0).await;
+        return Ok(Authn::Refused(Some(reasons::USER_DISABLED)));
     }
     let mut snapshot = view.session.snapshot.clone();
     match app.on_authz_change {
@@ -329,7 +366,7 @@ async fn flow(cx: &Cx<'_>) -> Flow {
         // application never advances (G7-C02).
         AuthzChange::Terminate if view.user.authz_version != view.session.authz_version_at_auth => {
             terminate(cx, app, &view, reasons::AUTHZ_CHANGE, vec![]).await?;
-            return login(cx, app, &target, Some(reasons::AUTHZ_CHANGE), 0).await;
+            return Ok(Authn::Refused(Some(reasons::AUTHZ_CHANGE)));
         }
         AuthzChange::Terminate => {}
         AuthzChange::Refresh if view.user.authz_version != view.session.authz_version => {
@@ -340,7 +377,7 @@ async fn flow(cx: &Cx<'_>) -> Flow {
                 .map_err(|e| cx.store_err(e))?
             else {
                 terminate(cx, app, &view, reasons::USER_DISABLED, vec![]).await?;
-                return login(cx, app, &target, Some(reasons::USER_DISABLED), 0).await;
+                return Ok(Authn::Refused(Some(reasons::USER_DISABLED)));
             };
             snapshot = IdentitySnapshot {
                 email: user.primary_email,
@@ -360,6 +397,20 @@ async fn flow(cx: &Cx<'_>) -> Flow {
         AuthzChange::Refresh => {}
     }
 
+    Ok(Authn::Allowed(Box::new(Authed {
+        view,
+        snapshot,
+        expires_at,
+    })))
+}
+
+/// The `200`: touch the handle, then identity and cacheability.
+fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed) -> Decision {
+    let Authed {
+        view,
+        snapshot,
+        expires_at,
+    } = authed;
     // Application policy is `enabled` (checked with the host); step-up rules
     // are parsed but not enforced in M1: they only make the answer path-dependent.
     let path_dependent = step_up::forces_no_store(&app.step_up);
@@ -367,7 +418,7 @@ async fn flow(cx: &Cx<'_>) -> Flow {
     touch(cx, app, &view);
 
     let cache = cacheability(cx, app, expires_at, path_dependent);
-    Ok(Decision::Allow {
+    Decision::Allow {
         identity: Identity {
             user_id: view.session.user_id.clone(),
             email: snapshot.email,
@@ -386,7 +437,7 @@ async fn flow(cx: &Cx<'_>) -> Flow {
             },
         },
         cache,
-    })
+    }
 }
 
 fn binding_attrs(
@@ -542,29 +593,58 @@ pub(super) async fn login(
             cause,
         });
     }
-    let (ctx, input) = (cx.ctx, cx.input);
-    let recent = ctx
-        .sessions
-        .count_transactions_since(input.client_ip, cx.now.sub(RATE_WINDOW))
-        .await
-        .map_err(|e| cx.store_err(e))?;
-    if recent >= ctx.limits.txn_per_ip_per_minute {
-        return Err(cx.deny(
-            reasons::TXN_RATE_LIMITED,
-            DenyKind::RateLimited {
-                retry_after: RATE_WINDOW,
-            },
-        ));
-    }
     let (bind_digest, bind) = cx.bind_for_transaction();
+    let started = cx
+        .event(EventKind::LoginStarted, Outcome::Info, app)
+        .attr("navigation", "document")
+        .attr("recovery_depth", i64::from(recovery_depth))
+        .build();
+    let txn = create_txn(
+        cx,
+        app,
+        NewTxn {
+            target,
+            purpose: TxnPurpose::Login,
+            bind: Some(bind_digest),
+            portal_session_id: None,
+            recovery_depth,
+            events: vec![started],
+        },
+    )
+    .await?;
+    Ok(Decision::Login {
+        transaction: Some(txn),
+        bind,
+        kind: LoginKind::Login,
+        clear_handle,
+        cause,
+    })
+}
+
+/// What a new transaction row is made of.
+struct NewTxn<'a> {
+    target: &'a url::Url,
+    purpose: TxnPurpose,
+    bind: Option<Digest>,
+    portal_session_id: Option<SessionId>,
+    recovery_depth: u32,
+    events: Vec<crate::event::types::Event>,
+}
+
+/// Admit and write one transaction (a login, or a logout ticket) under the
+/// per-address cap and `txn.max_rows`, both enforced inside the one store
+/// write (eviction included, so `max_rows` is a hard bound). Over the cap is
+/// `txn_rate_limited`. The returned secret is the transaction id.
+async fn create_txn(cx: &Cx<'_>, app: &AppPolicy, t: NewTxn<'_>) -> Result<Secret, Decision> {
+    let (ctx, input) = (cx.ctx, cx.input);
     let txn: Secret = random_token(&*ctx.rng, 16);
     let row = NewTransaction {
         txn_sha256: txn.digest(),
         created_at: cx.now,
         expires_at: cx.now.add(ctx.limits.txn_lifetime),
         app_id: app.app_id.clone(),
-        return_target: target.clone(),
-        bind_sha256: Some(bind_digest),
+        return_target: t.target.clone(),
+        bind_sha256: t.bind,
         portal_bind_sha256: None,
         retry_bind_sha256: None,
         client_ip: input.client_ip,
@@ -573,45 +653,157 @@ pub(super) async fn login(
         state_sha256: None,
         nonce: None,
         pkce_verifier: None,
-        portal_session_id: None,
-        purpose: TxnPurpose::Login,
+        portal_session_id: t.portal_session_id,
+        purpose: t.purpose,
         conflicting_handle_sha256: None,
         pending_identity: None,
-        recovery_depth,
+        recovery_depth: t.recovery_depth,
     };
-    let started = cx
-        .event(EventKind::LoginStarted, Outcome::Info, app)
-        .attr("navigation", "document")
-        .attr("recovery_depth", i64::from(recovery_depth))
-        .build();
-    ctx.sessions
-        .create_transaction(row, vec![started])
+    let admission = ctx
+        .sessions
+        .create_transaction_capped(
+            row,
+            t.events,
+            cx.now.sub(RATE_WINDOW),
+            ctx.limits.txn_per_ip_per_minute,
+            ctx.limits.txn_max_rows,
+        )
         .await
         .map_err(|e| cx.store_err(e))?;
-    // Keep the table bounded; best effort, never on the decision's path.
-    let (sessions, now, max_rows) = (ctx.sessions.clone(), cx.now, ctx.limits.txn_max_rows);
-    let (emitter, request_id, app_id) = (
-        ctx.emitter.clone(),
-        input.request_id.clone(),
-        app.app_id.clone(),
-    );
-    tokio::spawn(async move {
-        if let Ok(evicted) = sessions.evict_transactions(max_rows, now).await
-            && evicted > 0
-            && let Some(emitter) = emitter
-        {
-            emitter.diagnostic(EventKind::TxnEvicted, Outcome::Info, request_id, |b| {
-                b.app(&app_id)
-                    .reason(reasons::TXN_EVICTED)
-                    .attr("count", evicted)
-            });
+    match admission {
+        Admission::OverCap => Err(cx.deny(
+            reasons::TXN_RATE_LIMITED,
+            DenyKind::RateLimited {
+                retry_after: RATE_WINDOW,
+            },
+        )),
+        Admission::Admitted { evicted } => {
+            if evicted > 0
+                && let Some(emitter) = ctx.emitter.clone()
+            {
+                emitter.diagnostic(
+                    EventKind::TxnEvicted,
+                    Outcome::Info,
+                    input.request_id.clone(),
+                    |b| {
+                        b.app(&app.app_id)
+                            .reason(reasons::TXN_EVICTED)
+                            .attr("count", evicted)
+                    },
+                );
+            }
+            Ok(txn)
         }
-    });
-    Ok(Decision::Login {
-        transaction: Some(txn),
-        bind,
-        kind: LoginKind::Login,
+    }
+}
+
+// ---- application-host entry points (ADR-0015) ------------------------------
+
+/// `GET /_hopae/login` and `GET /_hopae/logout`: answered here, never relayed
+/// upstream, never a `2xx`.
+async fn entry_point(cx: &Cx<'_>, app: &AppPolicy, entry: EntryPoint) -> Flow {
+    // Only a document navigation by `GET` is an entry-point request; anything
+    // else (fetch, `<img>`, a form `POST`) changes nothing and gets one answer.
+    if !cx.document() || cx.input.method != http::Method::GET {
+        return Err(cx.deny(reasons::ENTRY_POINT_NOT_DOCUMENT, DenyKind::Forbidden));
+    }
+    let Some(target) = entry_target(cx) else {
+        return Err(cx.deny(reasons::RETURN_NOT_ALLOWED, DenyKind::Forbidden));
+    };
+    match entry {
+        EntryPoint::Login => match authenticate(cx, app).await? {
+            Authn::Allowed(authed) => {
+                // As a `200` would: the handle is in use.
+                touch(cx, app, &authed.view);
+                Ok(Decision::AlreadyAuthenticated { location: target })
+            }
+            Authn::Refused(cause) => login(cx, app, &target, cause, 0).await,
+        },
+        EntryPoint::Logout => logout_entry(cx, app, &target).await,
+    }
+}
+
+/// The entry point's target: the request origin's `/`, or the validated
+/// `return` on exactly the request's origin. `None` is `return_not_allowed`.
+fn entry_target(cx: &Cx<'_>) -> Option<url::Url> {
+    let request = &cx.input.original_url;
+    match &cx.input.entry_return {
+        EntryReturn::Absent => {
+            let mut root = request.clone();
+            root.set_path("/");
+            root.set_query(None);
+            root.set_fragment(None);
+            Some(root)
+        }
+        EntryReturn::Invalid => None,
+        EntryReturn::Candidate {
+            url,
+            canonical_path,
+        } => {
+            let target =
+                apps::validate_return_target(url, &cx.snapshot, cx.ctx.limits.secure).ok()?;
+            // The same registered origin, not merely a registered one; never a
+            // reserved path (the entry point itself), never the handoff parameter
+            // (the adapter checked the query).
+            (target.origin() == request.origin() && canonical_path.reserved() == Reserved::No)
+                .then_some(target)
+        }
+    }
+}
+
+/// The logout entry point: the presented handle is evaluated as an ordinary
+/// verify would; then either the session ends here (the no-confirmation mode
+/// for a same-origin navigation with a valid handle) or a logout ticket sends
+/// the browser to the portal's confirmation page. A `GET` that clears nothing
+/// and revokes nothing in the default mode (decision 6).
+async fn logout_entry(cx: &Cx<'_>, app: &AppPolicy, target: &url::Url) -> Flow {
+    let (ctx, input) = (cx.ctx, cx.input);
+    let authn = authenticate(cx, app).await?;
+    let (session, clear_handle) = match authn {
+        Authn::Allowed(authed) => (Some(authed.view), false),
+        Authn::Refused(cause) => (None, cause.is_some()),
+    };
+    let direct =
+        !app.logout_confirm && input.fetch_site == FetchSite::SameOrigin && session.is_some();
+    // The informational binding digest of the browser, never planted here.
+    let bind = input
+        .bind_cookie
+        .as_ref()
+        .filter(|b| is_well_formed_bind(b.expose()))
+        .map(Secret::digest);
+    let portal_session_id = session.as_ref().map(|v| v.session.session_id.clone());
+    if direct && let Some(view) = &session {
+        // Reducing access comes first: the session ends even when the
+        // reference page cannot be offered (rate limited).
+        terminate(cx, app, view, reasons::LOGOUT, vec![]).await?;
+    }
+    let ticket = create_txn(
+        cx,
+        app,
+        NewTxn {
+            target,
+            purpose: TxnPurpose::Logout,
+            bind,
+            portal_session_id,
+            recovery_depth: 0,
+            events: vec![],
+        },
+    )
+    .await?;
+    if direct {
+        // The ticket becomes the opaque reference to the return target for
+        // the portal's signed-out page: consumed at once, readable until it
+        // expires. No URL travels in the redirect (TM-01).
+        ctx.sessions
+            .consume_transaction(&ticket.digest(), reasons::LOGOUT, cx.now, vec![])
+            .await
+            .map_err(|e| cx.store_err(e))?;
+        return Ok(Decision::LoggedOut {
+            transaction: ticket,
+        });
+    }
+    Ok(Decision::LogoutEntry {
+        transaction: ticket,
         clear_handle,
-        cause,
     })
 }

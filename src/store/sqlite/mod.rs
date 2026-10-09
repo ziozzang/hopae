@@ -476,9 +476,10 @@ pub fn migrate(conn: &Connection) -> Result<u32, StoreError> {
     Ok(version)
 }
 
-/// Migration 0002 gained `sessions.authz_version_at_auth` and the
-/// `users_primary_email`, `event_deliveries_event_id` index and `txn_admissions`
-/// table while still unreleased (no new migration). A
+/// Migration 0002 gained `sessions.authz_version_at_auth`, the
+/// `users_primary_email`, `event_deliveries_event_id` index, the
+/// `txn_admissions` table and the `logout` transaction purpose while still
+/// unreleased (no new migration). A
 /// version-2 database written before that has neither, and no migration will
 /// add them: refuse it rather than fail later in a session query.
 fn refuse_pre_release_schema(conn: &Connection, version: u32) -> Result<(), StoreError> {
@@ -496,6 +497,8 @@ fn refuse_pre_release_schema(conn: &Connection, version: u32) -> Result<(), Stor
         "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='event_deliveries_event_id'",
     )? && present(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='txn_admissions'",
+    )? && present(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='login_txns' AND sql LIKE '%''logout''%'",
     )?;
     if !complete {
         return Err(StoreError::DevelopmentSchema);

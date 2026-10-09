@@ -125,7 +125,7 @@ CREATE TABLE login_txns (
     nonce                     TEXT,
     pkce_verifier             TEXT,
     portal_session_id         TEXT,
-    purpose                   TEXT NOT NULL CHECK (purpose IN ('login', 'stepup', 'link', 'switch')),
+    purpose                   TEXT NOT NULL CHECK (purpose IN ('login', 'stepup', 'link', 'switch', 'logout')),
     conflicting_handle_sha256 BLOB,
     pending_identity          TEXT,
     recovery_depth            INTEGER NOT NULL DEFAULT 0,

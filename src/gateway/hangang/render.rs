@@ -39,6 +39,9 @@ pub fn decision_label(decision: &Decision) -> (&'static str, &'static str) {
         Decision::Handoff { .. } => ("handoff", "handoff"),
         Decision::CleanRedirect { .. } => ("clean_redirect", "code_already_redeemed"),
         Decision::Switch { .. } => ("switch", "session_conflict"),
+        Decision::AlreadyAuthenticated { .. } => ("redirect", "already_authenticated"),
+        Decision::LogoutEntry { .. } => ("redirect", "logout_entry"),
+        Decision::LoggedOut { .. } => ("redirect", "logout"),
         Decision::Deny { reason, .. } => ("deny", reason.0),
     }
 }
@@ -149,6 +152,39 @@ pub fn render(
             }
             None => internal_error(env),
         },
+        Decision::AlreadyAuthenticated { location } => {
+            let mut o = Out::new(StatusCode::FOUND, reasons::ALREADY_AUTHENTICATED.0);
+            o.set("location", location.as_str());
+            o.finish()
+        }
+        Decision::LogoutEntry {
+            transaction,
+            clear_handle,
+        } => match portal_url(cfg, "logout", transaction.expose()) {
+            Some(u) => {
+                let mut o = Out::new(StatusCode::FOUND, reasons::LOGOUT_ENTRY.0);
+                o.set("location", &u);
+                if clear_handle && let Some(c) = cookie(cfg, &cfg.cookies.handle, "", 0) {
+                    o.add("set-cookie", &c);
+                }
+                o.finish()
+            }
+            None => internal_error(env),
+        },
+        Decision::LoggedOut { transaction } => {
+            match (
+                portal_url(cfg, "signed-out", transaction.expose()),
+                cookie(cfg, &cfg.cookies.handle, "", 0),
+            ) {
+                (Some(u), Some(c)) => {
+                    let mut o = Out::new(StatusCode::FOUND, reasons::LOGOUT.0);
+                    o.set("location", &u);
+                    o.add("set-cookie", &c);
+                    o.finish()
+                }
+                _ => internal_error(env),
+            }
+        }
         Decision::Deny { reason, kind } => deny(reason, kind, document, env),
     }
 }
@@ -391,8 +427,15 @@ fn html_escape(s: &str) -> String {
 }
 
 fn deny(reason: Reason, kind: DenyKind, document: bool, env: &RenderEnv) -> Response {
+    // A non-document request to an entry point is answered like any other
+    // reserved path: one error name for the whole namespace.
+    let error_name = if reason == reasons::ENTRY_POINT_NOT_DOCUMENT {
+        reasons::RESERVED_PATH.0
+    } else {
+        reason.0
+    };
     let json_error = |status: StatusCode| {
-        let mut body = serde_json::json!({"error": reason.0});
+        let mut body = serde_json::json!({"error": error_name});
         if let Some(d) = env.detail {
             body["detail"] = serde_json::json!(d);
         }

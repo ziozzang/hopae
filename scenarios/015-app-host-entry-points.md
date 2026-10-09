@@ -13,8 +13,9 @@
 A user signs in or out from a link on the application host itself:
 `/_hopae/login` and `/_hopae/logout` are answered by Hopae through the verify
 call with a relayed `302` or `403` and never a `2xx`, the only state change of
-a logout is the portal's CSRF-protected `POST`, the return target can only be
-the same registered origin, no case or encoding variant of the reserved
+a logout is the portal's CSRF-protected `POST` (after which the portal shows
+its signed-out page with a "Sign in again" link instead of redirecting to the
+protected target), the return target can only be the same registered origin, no case or encoding variant of the reserved
 namespace leaks to the upstream, and with gateway change HC-12 the upstream
 never sees `__Host-hopae` or `__Host-hopae_bind`.
 
@@ -40,23 +41,23 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 - When: `GET /logout?txn=T1`.
 - Then: `200` form naming application `app`, hidden field `txn=T1`, CSRF token bound to `H0`; `T1.portal_bind_sha256 = sha256(P1)`; no other state change; `cache-control: no-store`. Without `__Host-hopae_portal` the response plants one and records its digest instead.
 
-### S015-3 Confirmed logout terminates the session and returns to the target
+### S015-3 Confirmed logout terminates the session and offers a sign-in link
 
 - Given: S015-2.
 - When: `POST /logout` with the CSRF token, `txn=T1`, `origin: https://auth.example.test`, cookies `H0`, `P1`.
-- Then: `302`; `location: https://app.example.test/`; `set-cookie: __Host-hopae=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax` (portal host); `sessions.terminated_at = now`, `terminated_reason = logout`, `H0` and `H1` revoked; `T1.consumed_at = now`; event `session.terminated` with `reason=logout`. The next document navigation to `https://app.example.test/` with `H1` is `302` to the portal with the stale cookie cleared (006-3) and requires login again; the portal's `/login?txn=` offers the provider, not single sign-on.
+- Then: `200` (the portal's signed-out page; **no redirect to the protected target**, which would start a login that a provider with a live session answers silently); the page shows a "Sign in again to app" link whose `href` is `https://app.example.test/` (the ticket's `return_target`, validated again at render time); `set-cookie: __Host-hopae=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=Lax` (portal host); `sessions.terminated_at = now`, `terminated_reason = logout`, `H0` and `H1` revoked; `T1.consumed_at = now`; event `session.terminated` with `reason=logout`. The next document navigation to `https://app.example.test/` with `H1` is `302` to the portal with the stale cookie cleared (006-3) and requires login again; the portal's `/login?txn=` offers the provider, not single sign-on.
 
 ### S015-4 Ticket ends the session when the browser has no valid portal handle
 
 - Given: `H0` revoked by its idle timer (or absent); `H1` valid; S015-1 completed.
 - When: `GET /logout?txn=T1` with `P1` only, then `POST /logout` with the page's token, `txn=T1`, `Origin`, `P1`.
-- Then: the form's CSRF token is bound to `P1`; the `POST` terminates `s_1` (named by the ticket's `portal_session_id`) with `reason=logout`; `302` to `https://app.example.test/`; the next verify with `H1` is denied (`session_terminated`) and clears it.
+- Then: the form's CSRF token is bound to `P1`; the `POST` terminates `s_1` (named by the ticket's `portal_session_id`) with `reason=logout`; `200` signed-out page with the link to `https://app.example.test/`; the next verify with `H1` is denied (`session_terminated`) and clears it.
 
 ### S015-5 `return` on the same origin
 
 - Given: cookie `H1`.
 - When: verify with `x-original-url: https://app.example.test/_hopae/logout?return=%2Fdocs%2Fbye%3Fq%3D1`, and separately with `return=https%3A%2F%2Fapp.example.test%2Fdocs%2Fbye` and `return=https%3A%2F%2Fapp.example.test%3A443%2Fdocs%2Fbye`.
-- Then: each creates a ticket with `return_target = https://app.example.test/docs/bye?q=1` (respectively `…/docs/bye`); after S015-3 the `POST` answers `302` to that target byte for byte.
+- Then: each creates a ticket with `return_target = https://app.example.test/docs/bye?q=1` (respectively `…/docs/bye`); after S015-3 the signed-out page's "Sign in again" link is that target byte for byte.
 
 ### S015-6 Login entry without a session starts a login for the target
 
@@ -76,7 +77,7 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 
 - Given: fixture `m1-logout-direct.json`; cookie `H1; __Host-hopae_bind=B1`.
 - When: verify for `https://app.example.test/_hopae/logout` with `sec-fetch-site: same-origin`; then the same with `sec-fetch-site: same-site`, `cross-site`, `none`, and with the header absent; then `same-origin` without a valid handle.
-- Then: the first answers `302 Location: https://app.example.test/` with `set-cookie: __Host-hopae=; Max-Age=0; …`, no change to `__Host-hopae_bind`, `x-hopae-reason: logout`; `s_1` is terminated with `reason=logout` and event `session.terminated`; no ticket is created. Every other variant answers S015-1 (a ticket and `302` to the portal confirmation; nothing terminated).
+- Then: the first answers `302 Location: https://auth.example.test/signed-out?txn=<ticket>` (the ticket is a logout ticket created and consumed in the same call, the opaque reference to `https://app.example.test/`; the query carries no URL) with `set-cookie: __Host-hopae=; Max-Age=0; …`, no change to `__Host-hopae_bind`, `x-hopae-reason: logout`; `s_1` is terminated with `reason=logout` and event `session.terminated`; the portal's `GET /signed-out?txn=<ticket>` answers `200` with the "Sign in again to app" link to `https://app.example.test/`, while an unconsumed ticket or an unknown id gets the expired-link page (`400`). Every other variant answers S015-1 (a ticket and `302` to the portal confirmation; nothing terminated).
 
 ### S015-9 Case and encoding variants of the namespace stay with Hopae
 
@@ -125,7 +126,7 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 
 - Given: `T1` unconsumed; `s_1` reaches its idle limit between the page and the `POST`.
 - When: `POST /logout` with `txn=T1`.
-- Then: the ticket is consumed; termination is a no-op on the already terminated session; `302` to the return target; exactly one `session.terminated` event exists for `s_1`. With the no-confirmation mode, a direct logout racing an ordinary verify in another tab leaves the other tab denied on its next request.
+- Then: the ticket is consumed; termination is a no-op on the already terminated session; `200` signed-out page; exactly one `session.terminated` event exists for `s_1`. With the no-confirmation mode, a direct logout racing an ordinary verify in another tab leaves the other tab denied on its next request.
 
 ### S015-A4 Entry-point floods write nothing or are capped
 
@@ -149,12 +150,12 @@ never sees `__Host-hopae` or `__Host-hopae_bind`.
 
 - Given: the attacker's browser performs S015-1 and S015-2 (ticket `Ta`, digest of the attacker's portal cookie recorded) and lures the victim to `https://auth.example.test/logout?txn=Ta`.
 - When: the victim's browser (`P1`, `H0`) loads the page and the victim clicks confirm.
-- Then: `Ta`'s digest does not match `P1`, so the ticket is treated as absent: the page is the plain confirmation, and the `POST` ends only the victim's own portal session, which the victim consented to on the portal's page (006-A4 applies); the attacker's session is untouched; no `location` names any origin the victim did not come from (the signed-out page is rendered).
+- Then: `Ta`'s digest does not match `P1`, so the ticket is treated as absent: the page is the plain confirmation, and the `POST` ends only the victim's own portal session, which the victim consented to on the portal's page (006-A4 applies); the attacker's session is untouched; no `location` names any origin the victim did not come from (the signed-out page is rendered, without a link from the foreign ticket).
 
 ## Observability expectations
 
 - Log: `verify.denied` with `reason` ∈ {`reserved_path`, `entry_point_not_document`, `return_not_allowed`, `txn_rate_limited`}; `x-hopae-reason` ∈ {`logout_entry`, `already_authenticated`, `logout`} on the `302`s; `txn_purpose_mismatch` at the portal.
-- Audit: `session.terminated` with `reason=logout` (both modes); no event for ticket creation.
+- Audit: `session.terminated` with `reason=logout` (both modes); no event for ticket creation. `txn.evicted` counts rows removed by the synchronous `txn.max_rows` eviction.
 - Metrics: `hopae_verify_decisions_total{decision,reason}` for every outcome above; `hopae_session_terminated_total{reason="logout"}`.
 
 ## Test mapping
@@ -195,7 +196,7 @@ with `clear_handle`.
 ## Open questions
 
 - Should `sec-purpose` be added to the listed request headers so that prefetch and prerender never count as a document navigation at the entry points (and elsewhere)? Recorded in the roadmap backlog; it changes every route fragment.
-- Should the portal show a "signed out" page with a link instead of redirecting to a protected return target, when the provider re-authenticates silently? The brief asked for the redirect; ADR-0015 records the consequence.
+- A `return` too long for the verify URL limit (2048 bytes) never reaches Hopae's return check: the gateway-facing parser refuses the whole call (`400 contract_violation`) and nothing is created; S015-A2 asserts that for its 2100-character case.
 
 ## 한국어 요약
 
@@ -203,7 +204,8 @@ with `clear_handle`.
 Hopae가 처리하며, 응답은 중계되는 `302`나 `403`뿐이고 업스트림에는 어떤
 변형(`/_HOPAE/logout`, `/_hopae/%6Cogout`, `/_hopae/x`)도 도달하지 않습니다.
 로그아웃은 쿠키를 지우지 않고 서버 측 티켓과 함께 포털 확인 페이지로 보내며,
-CSRF로 보호된 `POST`만이 세션을 끝내고 같은 출처로 제한된 돌아갈 대상으로
-돌려보냅니다. 교차 사이트 `<img>`나 탐색, 형제 서브도메인, 공격자가 만든
+CSRF로 보호된 `POST`만이 세션을 끝내고, 이어서 포털이 보호된 대상으로 리디렉션하는
+대신(제공자가 조용히 다시 로그인시키므로) 같은 출처로 제한된 돌아갈 대상으로 가는
+"다시 로그인" 링크가 있는 로그아웃 완료 페이지를 보여 줍니다. 교차 사이트 `<img>`나 탐색, 형제 서브도메인, 공격자가 만든
 티켓은 아무것도 끝내지 못하고, `return`은 다른 출처를 가리킬 수 없습니다.
 HC-12가 있으면 업스트림은 `__Host-hopae`와 `__Host-hopae_bind`를 보지 못합니다.

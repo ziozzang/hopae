@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=8 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=9 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -347,7 +347,7 @@ https://app.example.test/_hopae/logout[?return=<같은 출처의 대상>]
 | 통상의 verify가 허용했을 핸들을 가진 `GET /_hopae/login` | `302 Location: <대상>`. 쿠키 변경 없음. `already_authenticated`. `200`과 마찬가지로 `last_seen_at` 갱신 |
 | 그 밖의 `GET /_hopae/login` | 대상으로의 문서 탐색이 받았을 통상의 결과: 바인딩 쿠키를 심고 `return_target`이 대상인 트랜잭션을 만드는 미인증 `302`(핸드오프는 진입점이 아니라 대상에 착지), 단계 상승 `302`, 또는 거부 |
 | `GET /_hopae/logout`(기본값 `apps[].logout_confirm = true`) | 제시된 핸들을 통상의 verify처럼 평가한 뒤(바인딩 불일치는 평소처럼 종료하고, 유효하지 않은 핸들은 모든 `302`에서처럼 지움), 목적이 `logout`인 트랜잭션 — **로그아웃 티켓** — 에 대상, 애플리케이션, 제시된 유효한 핸들의 세션(있으면)을 저장하고 `302 Location: https://auth.example.test/logout?txn=<id>`(`logout_entry`)로 답합니다. **쿠키를 지우지 않고 아무것도 취소하지 않습니다**: 유일한 상태 변경은 포털의 CSRF로 보호된 `POST`입니다([포털 진입점](#포털-진입점)). 티켓은 1회용이고 트랜잭션 수명(600초)으로 만료하며 로그인 트랜잭션처럼 `txn.per_ip_per_minute`과 `txn.max_rows`에 집계됩니다 |
-| `apps[].logout_confirm = false`, `sec-fetch-site: same-origin`, 유효한 핸들을 가진 `GET /_hopae/logout` | 세션을 즉시 종료합니다(`reason=logout`, 이벤트 `session.terminated`). `set-cookie: __Host-hopae=; Max-Age=0; …`와 함께 `302 Location: <대상>`. 바인딩 쿠키는 그대로 둡니다. `x-hopae-reason: logout`. 그 밖의 `sec-fetch-site`(없음, `none`, `same-site`, `cross-site`)나 유효한 핸들이 없으면 위 행을 따릅니다. 형제 서브도메인이 위협 모델의 행위자이므로 `same-site`는 제외합니다 |
+| `apps[].logout_confirm = false`, `sec-fetch-site: same-origin`, 유효한 핸들을 가진 `GET /_hopae/logout` | 세션을 즉시 종료합니다(`reason=logout`, 이벤트 `session.terminated`). 같은 호출에서 로그아웃 티켓을 만들어 곧바로 소비하며 이를 대상에 대한 불투명한 참조로 쓰고, `set-cookie: __Host-hopae=; Max-Age=0; …`와 함께 `302 Location: https://auth.example.test/signed-out?txn=<티켓>`으로 답합니다(대상 자체로 보내지 않으며 쿼리에 URL을 싣지 않음). 바인딩 쿠키는 그대로 둡니다. `x-hopae-reason: logout`. 그 밖의 `sec-fetch-site`(없음, `none`, `same-site`, `cross-site`)나 유효한 핸들이 없으면 위 행을 따릅니다. 형제 서브도메인이 위협 모델의 행위자이므로 `same-site`는 제외합니다 |
 
 **대상.** 요청 출처의 `/`, 또는 쿼리 매개변수 `return`(디코딩된 이름이
 `return`인 쌍 하나. 예약 매개변수와 같은 방식으로 파싱하며 둘이면 모호함)입니다.
@@ -358,6 +358,16 @@ https://app.example.test/_hopae/logout[?return=<같은 출처의 대상>]
 됩니다. 그 밖의 모든 것은 `403 {"error":"return_not_allowed"}`
 (`return_not_allowed`)이며 아무것도 만들지 않습니다. 대상은 트랜잭션 안에서만
 포털에 도달하며 URL이 그대로 오가는 일은 없습니다(TM-01).
+
+**로그아웃 뒤.** 어느 모드도 보호된 돌아갈 대상으로 리디렉션하지 않습니다.
+그러면 로그인이 시작되고, 살아 있는 세션을 가진 제공자는 사용자를 곧바로 다시
+로그인시키기 때문입니다. 대신 포털이 로그아웃 완료 페이지를 렌더링합니다(포털
+리스너의 `200`. 확인 `POST` 뒤에는 바로, 확인 없는 모드에서는
+`/signed-out?txn=<티켓>`으로의 `302` 뒤에). 페이지에는 티켓의 돌아갈 대상으로 가는
+"<애플리케이션 표시 이름>에 다시 로그인" 링크가 있으며, 이 대상은 페이지를 렌더링할 때
+같은 돌아갈 대상 검증을 다시 통과해야 합니다(더 이상 검증되지 않으면 링크를 표시하지
+않음). 리디렉션의 참조는 소비된 로그아웃 티켓(1회용, 600초, 살아 있는 동안만 읽을
+수 있음)이며 쿼리에는 URL이 실리지 않습니다(TM-01).
 
 **로그아웃 `302`가 아무것도 지우지 않는 이유.** 지운 핸들은 다음 문서 탐색에서
 싱글 사인온이 다시 심으므로 지우는 것은 로그아웃이 아닙니다. 또한 부작용이 있는
@@ -386,7 +396,8 @@ Hopae로 보내지 않습니다. [라우트 조각 페이지](#hangang-라우트
 | `GET /switch?txn=<id>` | `session_conflict` 뒤의 계정 전환 확인. 호스트와 두 계정을 표시 | 폼만 표시. 상태 변경 없음 |
 | `POST /switch` | 확인(브라우저가 그 호스트에서 제시한 핸들을 취소하고, 새 코드를 발급하고, 리디렉션) 또는 거절(기존 사용자로 깨끗한 URL로 리디렉션) | CSRF 토큰, `Origin` 검사, 포털 바인딩 쿠키. 트랜잭션의 목적이 `switch`여야 함 |
 | `GET /logout[?txn=<id>]` | 확인 페이지. [애플리케이션 호스트 진입점](#애플리케이션-호스트-진입점)의 로그아웃 티켓이 있으면 애플리케이션 이름을 표시하고, `__Host-hopae_portal`을 심거나 갱신하며, 이 첫 방문 때 그 다이제스트를 티켓에 기록(이후 불변) | 폼만 표시. 상태 변경 없음. 알 수 없거나, 소비되었거나, 만료되었거나, 목적이 다르거나(`txn_purpose_mismatch`), 다른 브라우저에 기록된 티켓은 없는 것으로 취급 |
-| `POST /logout` | 이 세션 종료(`scope=this`, 기본값) 또는 사용자의 모든 세션 종료(`scope=all`, M2). 유효한 티켓(`txn`)이 있으면 티켓이 가리키는 세션도 종료한 뒤 로그아웃 완료 페이지 대신 티켓의 돌아갈 대상으로 `302` | 포털 핸들에, 핸들이 없으면 포털 바인딩 쿠키에 묶인 CSRF 토큰. `Origin` 검사. 유효한 포털 핸들, 또는 기록된 다이제스트가 제시된 포털 바인딩 쿠키와 일치하는 티켓. 티켓은 소비됨(1회용) |
+| `POST /logout` | 이 세션 종료(`scope=this`, 기본값) 또는 사용자의 모든 세션 종료(`scope=all`, M2). 유효한 티켓(`txn`)이 있으면 티켓이 가리키는 세션도 종료. 로그아웃 완료 페이지와 함께 `200`으로 답하며, 방금 소비한 티켓이면 이 페이지에 티켓의 검증된 돌아갈 대상으로 가는 "<애플리케이션>에 다시 로그인" 링크가 있음. 그 대상으로의 리디렉션은 없음 | 포털 핸들에, 핸들이 없으면 포털 바인딩 쿠키에 묶인 CSRF 토큰. `Origin` 검사. 유효한 포털 핸들, 또는 기록된 다이제스트가 제시된 포털 바인딩 쿠키와 일치하는 티켓. 티켓은 소비됨(1회용) |
+| `GET /signed-out?txn=<id>` | 확인 없는 모드의 로그아웃 완료 페이지. verify `302`가 가리키는 소비된 로그아웃 티켓에서 만들며 같은 "다시 로그인" 링크를 표시 | 읽기 전용. 티켓은 목적이 `logout`이고, 로그아웃으로 소비되었으며, 만료되지 않아야 함. 아니면 만료된 링크 페이지(`400`). 티켓은 불투명한 참조이며 쿼리에 URL이 없음 |
 | `GET /stepup?txn=<id>`(M5) | 2차 인증 요소 챌린지 | `/login`과 동일 |
 | `GET /healthz` | 생존 확인(프로세스가 서비스 중이면 `200`, 본문에 저장소 상태) | 없음. 비밀 정보 없음 |
 | `GET /_hopae/verify` | 여기서는 제공하지 않음 | `404` |
