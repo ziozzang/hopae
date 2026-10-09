@@ -1,70 +1,180 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=2 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=3 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
 이 페이지는 Hopae가 읽는 모든 설정 키를 타입, 기본값, 제약, 도입된 마일스톤과
-함께 나열합니다. *나중*으로 표시된 키는 ADR에서 결정되었지만 아직 구현되지 않은
-키입니다. 운영자와 구현자가 같은 용어를 쓰도록 미리 나열하며, 각 키는 그것을
+함께 나열합니다. 아래 표들은 마일스톤 M1이 구현한 내용을 설명하고, 마지막 표는
+ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를 나열합니다. 그런 키는
 구현하는 변경에서 본문 표로 옮깁니다.
 
 ## 전제 조건과 설정
 
-- JSON 파일 하나를 `hopae run`과 `hopae --check`에 `--config <path>`로 전달합니다. YAML은 M0/M1에서 지원하지 않습니다(나중 작업이며, 하지 않을 수도 있습니다).
-- 파일 크기는 최대 1 MiB입니다. 알 수 없는 키는 모든 수준에서 거부됩니다(`deny_unknown_fields`).
+- JSON 파일 하나를 `hopae run`과 `hopae --check`에 `--config <path>`(또는 `HOPAE_CONFIG` 환경 변수)로 전달합니다. YAML은 M1에서 지원하지 않습니다(나중 작업이며, 하지 않을 수도 있습니다).
+- 파일 크기는 최대 1 MiB입니다. 알 수 없는 키는 모든 수준에서 거부됩니다(`deny_unknown_fields`). 메시지에는 키 경로가 들어가며, 가까운 키가 있으면 가장 비슷한 알려진 키도 알려 줍니다. 이름이 평문 비밀 값처럼 보이는 키(`_env` 접미사 없이 `secret`, `password`, `token`, `api_key`, `private_key`를 포함)는 값을 되풀이하지 않고 거부합니다.
 - 비밀 값은 파일에 절대 적지 않습니다. `_env`로 끝나는 키는 값을 담은 환경 변수의 이름을 지정합니다. `hopae --check`는 빠진 변수를 이름으로만 보고하고 값은 절대 출력하지 않습니다.
-- `hopae --check --config <path>`는 파일과 참조된 환경을 검증하고, 운영자가 다른 곳에 등록해야 하는 파생 사실(리스너, 게이트웨이 라우트 `auth` 조각, redirect URI)을 출력한 뒤 `0`으로 종료하거나, 오류마다 메시지 하나를 내고 `2`로 종료합니다. 경고는 stderr에 출력되며 `--strict`는 경고를 오류로 바꿉니다.
-- 설정은 시작할 때 한 번만 읽습니다. M6 이전에는 다시 로드를 지원하지 않으므로 파일을 바꾼 뒤 재시작합니다.
+- 설정은 시작할 때 한 번만 읽습니다. M6 이전에는 다시 로드를 지원하지 않으므로 파일을 바꾼 뒤 재시작합니다. `SIGHUP`은 기록만 하고 무시합니다.
+- 기간(`session.idle`, `apps[].session.idle` 등)은 양의 정수와 단위 하나로 씁니다. `30s`, `10m`, `12h`, `7d`.
 
-### 키(M0)
+### 명령줄
+
+| 호출 | 의미 |
+| --- | --- |
+| `hopae run --config <path>` | 두 리스너를 시작하고 서비스합니다. `run`이 기본 명령이므로(`hopae --config <path>`도 같습니다) `serve`는 별칭입니다. |
+| `hopae --check --config <path>` | 파일과 참조된 환경을 검증하고, 운영자가 다른 곳에 등록해야 하는 파생 사실(리스너, 반환 origin, 제공자 redirect URI, 게이트웨이 라우트 `auth` 조각)을 `config ok`로 끝나도록 출력한 뒤 `0`으로 종료합니다. 경고는 stderr로 나갑니다. 아래의 선택적 읽기 전용 drift 조회 외에는 아무것도 바인딩, 기록, 접속하지 않습니다. |
+| `hopae --check --strict --config <path>` | `--check`와 같지만 경고가 하나라도 있으면 오류입니다(종료 코드 `2`). `--strict`는 `--check`와 함께만 쓸 수 있습니다. |
+| `hopae providers import --config <path>` | 파일의 `providers[]`를 ADR-0010 규칙으로 저장소에 가져오고(파일 항목은 `managed_by = file` 행을 삽입하거나 갱신하며, 데이터베이스가 관리하거나 제거된 제공자는 건드리지 않습니다) 삽입, 갱신, 건너뛴 항목을 출력합니다. 인스턴스가 실행 중이어도 안전합니다. 변경을 반영하려면 그 인스턴스를 재시작합니다. |
+| `hopae providers import --force <provider_id> --config <path>` | 위와 같고, 지정한 파일 항목을 데이터베이스 위에 다시 덮어씁니다(비활성화, API 관리 또는 제거된 제공자). id는 파일에 있어야 합니다. `admin.providers_import` 이벤트를 기록합니다. |
+| `hopae --version` | 버전을 출력하고 `0`으로 종료합니다. 설정이 필요 없습니다. |
+
+종료 상태: `0` 성공. `2` 유효하지 않거나 안전하지 않은 설정(호출자 키 변수가 없거나
+빈 경우 포함), `--config` 누락, 다른 인스턴스가 상태 디렉터리 잠금을 쥐고 있어
+시작이 거부됨, `--strict` 실패, 실패한 `providers import`. `1` 그 밖의 모든 런타임
+실패(예: 열 수 없는 저장소, 바인딩할 수 없는 리스너).
+
+`gateway.admin_url`과 `gateway.readonly_token_env`가 모두 설정되고 변수가 비어 있지
+않으면 `hopae --check`가 게이트웨이의 관리 API에 어떤 호스트에 라우트가 있는지
+묻고, 라우트가 없는 애플리케이션 호스트를 경고합니다
+([ADR-0012](../adr/0012-service-registration-and-gateway-config-ownership.md)의
+0단계). 조회에 실패하면 경고일 뿐 오류가 아닙니다. `hopae run`은 두 키를 쓰지
+않습니다.
+
+### 키(M0과 M1)
+
+아래 키는 모두 구현되어 있습니다. "선택"은 키를 생략할 수 있고 기본값이 적용된다는
+뜻입니다.
+
+#### 프로세스와 저장소
 
 | 키 | 타입 | 기본값 | 제약과 의미 |
 | --- | --- | --- | --- |
-| `listen.portal` | 문자열, 소켓 주소 | `127.0.0.1:8700` | 포털 리스너(로그인, 콜백, 로그아웃, 상태 확인). 게이트웨이의 포털 라우트가 프록시합니다. |
-| `listen.gateway` | 문자열, 소켓 주소 | `127.0.0.1:8701` | 게이트웨이 리스너(`/_hopae/verify`). `listen.portal`과 달라야 합니다. 루프백이 아닌 주소는 경고를 냅니다. 이 리스너는 절대 공개적으로 접근할 수 없어야 합니다([게이트웨이 계약](GATEWAY_CONTRACT.md#전제-조건과-설정)). |
-| `state_dir` | 문자열, 경로 | 필수 | 런타임 상태를 위한 쓰기 가능한 디렉터리이며 모드 `0700`으로 만듭니다. 비어 있으면 안 됩니다. |
-| `store.kind` | `sqlite` | `sqlite` | 기본 저장소 백엔드([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)). `postgres`는 M2에서 추가됩니다. |
-| `store.path` | 문자열, 경로 | `<state_dir>/hopae.db` | SQLite 데이터베이스 파일. 지정할 때는 비어 있으면 안 됩니다. |
-| `portal.public_url` | 문자열, 출처(origin) | 필수 | 외부에서 보이는 포털 출처, `https://auth.example.test`. Hopae가 내보내는 모든 `Location`에 사용합니다. `https://` 또는 `http://`와 호스트로만 이루어져야 하며 경로, 쿼리, fragment가 없어야 합니다. |
+| `listen.portal` | 문자열, 소켓 주소 | `127.0.0.1:8700` | 포털 리스너(로그인, 콜백, 로그아웃, `/healthz`). 게이트웨이의 포털 라우트가 프록시합니다. |
+| `listen.gateway` | 문자열, 소켓 주소 | `127.0.0.1:8701` | 게이트웨이 리스너(`/_hopae/verify`). `listen.portal`과 달라야 합니다. 루프백이 아닌 주소는 경고를 냅니다. 이 리스너는 공개적으로 접근할 수 있어서는 안 됩니다([게이트웨이 계약](GATEWAY_CONTRACT.md#전제-조건과-설정)). |
+| `state_dir` | 문자열, 경로 | 필수 | 런타임 상태(데이터베이스, 인스턴스 잠금, 백업)를 위한 쓰기 가능한 디렉터리이며 모드 `0700`으로 생성됩니다. 비어 있으면 안 됩니다. |
+| `store.kind` | `sqlite` | `sqlite` | 기본 저장소 백엔드([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)). `postgres`는 M2에서 제공합니다. |
+| `store.path` | 문자열, 경로 | `<state_dir>/hopae.db` | SQLite 데이터베이스 파일. 지정했다면 비어 있으면 안 됩니다. |
+| `log.level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | stderr 프로세스 로그의 상세도. |
+| `log.verify_allow` | 불리언 | `false` | 허용된 verify를 하나하나 기록합니다(거부는 항상 집계되고 샘플링됩니다). |
+| `log.accept_client_request_id` | 불리언 | `false` | 클라이언트가 보낸 `x-request-id`를 잘라서 `attrs.client_request_id`에 기록합니다([ADR-0009](../adr/0009-event-model.md)). |
+| `trusted_proxies` | IP 주소 또는 CIDR 문자열 배열 | `["127.0.0.1/32"]` | 포털 리스너가 `x-forwarded-for`와 `x-forwarded-proto`를 신뢰하는 피어. 각 항목은 주소 또는 CIDR이어야 합니다. |
+| `limits.gateway_max_concurrent` | 정수, 1 이상 | `64` | 게이트웨이 리스너의 동시 처리 요청 상한. 초과 요청은 즉시 `reason=overloaded`와 함께 `503`으로 답합니다([ADR-0003](../adr/0003-http-stack-axum-on-hyper.md)). 호출자 키는 허가를 얻기 전에 검사합니다. |
+| `limits.portal_max_concurrent` | 정수, 1 이상 | `256` | 포털 리스너의 동시 처리 요청 상한. 초과 요청은 즉시 `503`으로 답합니다. |
+| `sessions.retention_days` | 정수, 1 이상 | `30` | 종료된 세션과 그 핸들을 세션 보존 정리 작업이 삭제하는 기간([ADR-0007](../adr/0007-context-binding-policy.md)). |
+
+#### 포털, 쿠키, 세션
+
+| 키 | 타입 | 기본값 | 제약과 의미 |
+| --- | --- | --- | --- |
+| `portal.public_url` | 문자열, origin | 필수 | 외부에서 보이는 포털 origin(`https://auth.example.test`). Hopae가 내보내는 모든 `Location`과 제공자 redirect URI(`<public_url>/callback/<provider_id>`)에 쓰입니다. 경로, 쿼리, 프래그먼트 없이 `https://` 또는 `http://`와 호스트여야 합니다. |
+| `portal.sso_confirm_new_host` | 불리언 | `false` | 세션이 어떤 호스트로 처음 핸드오프되기 전에 한 번 클릭해 확인하게 합니다([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)). |
+| `cookie.name` | 문자열 | `__Host-hopae`(`cookie.secure`가 `false`면 `hopae`) | 영문자, 숫자, `_`, `-` 1~64자. 바인딩 쿠키와 포털 쿠키는 `_bind`, `_portal`을 덧붙입니다. `cookie.secure`가 `true`이면 `__Host-`로 시작해야 하고 `false`이면 시작하면 안 됩니다. |
+| `cookie.secure` | 불리언 | `true` | `false`는 개발 전용입니다. `--check`와 시작 시 큰 경고를 내고, 상태 확인 본문에 `insecure_mode`가 나타나며, 기본 애플리케이션 포트가 `80`이 됩니다. |
+| `session.idle` | 기간 | `24h` | 세션 전체의 유휴 타임아웃. 핸들 중 어느 것으로도 이 기간 동안 쓰이지 않은 세션은 종료됩니다. |
+| `session.absolute` | 기간 | `30d` | 세션 전체의 절대 수명. 이 나이에 세션이 종료됩니다. |
+| `linking.on_conflict` | `link_required`, `separate`, `deny` | `link_required` | 로그인의 검증된 이메일이 다른 제공자를 통한 기존 사용자와 일치할 때의 동작([ADR-0011](../adr/0011-account-linking-policy.md)). |
+| `linking.mode` | `verified_email`, `off` | `verified_email` | 계정 연결 정책. |
+| `txn.max_rows` | 정수, 1 이상 | `1000` | 살아 있는 로그인 트랜잭션 수 상한([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)). 트랜잭션 수명은 상수 600초이며 키가 없습니다. |
+| `txn.per_ip_per_minute` | 정수, 1 이상 | `30` | 클라이언트 IP 하나가 분당 시작할 수 있는 로그인 트랜잭션 수. |
+| `handoff.per_ip_failures_per_minute` | 정수, 1 이상 | `10` | 클라이언트 IP 하나가 분당 일으킬 수 있는 핸드오프 코드 실패 수. 넘으면 속도 제한됩니다. |
+| `handoff.max_recoveries` | 정수 | `3` | 알려진 핸드오프 코드가 거부되었을 때(첫 사용 바인딩 쿠키 경쟁 등) 브라우저를 포털로 되돌려 보내 복구하는 횟수. 넘으면 중계된 `403` 페이지로 루프가 끝납니다([ADR-0014](../adr/0014-handoff-recovery-on-any-rejected-code.md)). 범위 검사는 하지 않습니다. |
+
+#### 게이트웨이
+
+| 키 | 타입 | 기본값 | 제약과 의미 |
+| --- | --- | --- | --- |
 | `gateway.kind` | `hangang` | 필수 | 게이트웨이 어댑터([ADR-0013](../adr/0013-gateway-adapter-boundary.md)). 다른 종류는 나중 작업입니다. |
-| `gateway.caller_key_env` | 문자열, 환경 변수 이름 | 없음 | 게이트웨이가 `x-hopae-gateway-key`로 보내는 호출자 키를 담은 변수(게이트웨이 변경 HC-3). `gateway.allow_unauthenticated_caller`가 `true`가 아니면 필수이며, 변수는 시작 시 설정되어 있고 비어 있지 않아야 합니다. 이름 패턴은 `[A-Za-z_][A-Za-z0-9_]*`입니다. |
-| `gateway.allow_unauthenticated_caller` | 불리언 | `false` | 개발 전용: 호출자 키 인증을 건너뜁니다. `--check`와 시작 시 경고를 내며 `--strict`는 거부합니다. |
-| `log.level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | 로그 상세 수준. |
+| `gateway.caller_key_env` | 문자열, 환경 변수 이름 | 없음 | 게이트웨이가 `x-hopae-gateway-key`로 보내는 호출자 키를 담은 변수(게이트웨이 변경 HC-3). `gateway.allow_unauthenticated_caller`가 `true`가 아니면 필수이며, 변수는 시작 시 설정되어 있고 비어 있지 않아야 합니다(아니면 종료 코드 `2`). 이름 패턴 `[A-Za-z_][A-Za-z0-9_]*`. |
+| `gateway.caller_key_next_env` | 문자열, 환경 변수 이름 | 없음 | 교체 중 두 번째로 허용하는 호출자 키([ADR-0005](../adr/0005-gateway-contract-and-versioning.md)). `caller_key_env`가 있어야 하고 그것과 달라야 하며, 변수는 시작 시 비어 있지 않아야 합니다. 7일 넘게 설정되어 있으면 `--check`가 경고합니다. |
+| `gateway.allow_unauthenticated_caller` | 불리언 | `false` | 개발 전용: 호출자 키 인증을 건너뜁니다. `--check`와 시작 시 경고를 내며(상태 확인 본문에는 `unauthenticated_caller`), `--strict`는 이를 거부합니다. |
+| `gateway.verify_budget_ms` | 정수 | `400` | verify 호출 하나가 쓸 수 있는 총 시간, 1~10000. 게이트웨이 라우트의 `auth.timeout_ms`보다 작게 유지하세요. `--check`는 `auth.timeout_ms`를 예산에 100을 더하고 5000으로 제한한 값으로 출력합니다. |
+| `gateway.admin_url` | 문자열, URL | 없음 | 게이트웨이 관리 API의 기본 URL(`http` 또는 `https`, 호스트 필요, 자격 증명 없음). `gateway.readonly_token_env`와 함께 `hopae --check`만 사용합니다. |
+| `gateway.readonly_token_env` | 문자열, 환경 변수 이름 | 없음 | 읽기 전용 게이트웨이 자격 증명을 담은 변수. 라우트가 없는 애플리케이션 호스트를 경고하기 위해 `hopae --check`만 사용합니다. 전체 drift 보고서는 M2입니다. |
+
+#### 애플리케이션
+
+`apps[]`는 애플리케이션 레지스트리입니다. 로그인 후 Hopae가 브라우저를 보낼 수
+있는 정확한 호스트들입니다. 활성화된 모든 호스트와 포트의 합집합이 반환 origin
+허용 목록이며, 각 항목은 운영자가 보증하는 자격 증명 목적지입니다. 목록에 없는
+호스트는 거부됩니다(`unknown_app`).
+
+| 키 | 타입 | 기본값 | 제약과 의미 |
+| --- | --- | --- | --- |
+| `apps[].app_id` | 문자열 | 필수 | `[a-z0-9][a-z0-9_-]{0,31}`, 유일. id `default`는 예약되어 있으며, 그 항목은 다른 모든 애플리케이션의 정책 기본값을 담고 호스트를 나열하면 안 됩니다. |
+| `apps[].display_name` | 문자열 | `app_id` | 포털에 표시됩니다. |
+| `apps[].hosts` | 문자열 배열 | 필수(`default` 제외) | 정확한 소문자 호스트 이름. 스킴, 와일드카드, 포트, 경로, 끝의 점은 안 됩니다. 호스트는 애플리케이션 하나에만 속할 수 있습니다. 대문자 입력은 경고와 함께 정규화됩니다. |
+| `apps[].ports` | 정수 배열 | `[443]`(`cookie.secure`가 `false`면 `[80]`) | 지정했다면 비어 있으면 안 되며 `0`은 안 됩니다. |
+| `apps[].enabled` | 불리언 | `true` | 비활성 애플리케이션은 거부됩니다(`app_disabled`). |
+| `apps[].session.idle`, `apps[].session.absolute` | 기간 | `12h`, `7d`(`default` 애플리케이션이 설정했다면 그 값을 상속) | 핸들별 타이머. `idle` 동안 쓰이지 않았거나 `absolute`보다 오래된 핸들은 취소되며, 세션과 다른 핸들은 계속됩니다([ADR-0007](../adr/0007-context-binding-policy.md)). |
+| `apps[].binding.ip` | `strict`, `prefix`, `off` | `strict` | 핸들의 클라이언트 IP 바인딩([ADR-0007](../adr/0007-context-binding-policy.md)). |
+| `apps[].binding.ip_prefix_v4`, `apps[].binding.ip_prefix_v6` | 정수 | `24`, `64` | `prefix` 모드의 접두사 길이. 각각 1~32, 1~128. |
+| `apps[].binding.ua` | `strict`, `off` | `off` | User-Agent 바인딩. |
+| `apps[].binding.on_mismatch` | `terminate_session`, `drop_handle` | `terminate_session` | 바인딩 불일치 시 동작. |
+| `apps[].on_authz_change` | `refresh`, `terminate` | `refresh` | 인가 데이터가 바뀔 때 살아 있는 세션에 일어나는 일. |
+| `apps[].verify_cache_seconds` | 정수 | `0` | 게이트웨이가 허용을 캐시할 수 있는 최대 시간. 최대 `30`. `--check`가 보고합니다. |
+| `apps[].step_up[]` | `{path_prefix, require: {aal, max_age}}` 배열 | 없음 | 스텝업 규칙. M1에서는 파싱과 검증만 하고(`aal`은 1 또는 2, `path_prefix`는 `/`로 시작, `max_age`는 양의 초) `no-store`를 강제합니다. 강제 적용은 M5에서 도착합니다. |
+
+#### 제공자
+
+`providers[]`는 로그인 제공자를 정의합니다. 항목은 시작할 때 ADR-0010 가져오기
+규칙으로 저장소에 반영됩니다. 그 뒤에는 실행 중에 바뀐 제공자에 대해 데이터베이스가
+권위를 가집니다. M1은 `kind = oidc`만 지원합니다(검증된 제공자는 Google).
+
+| 키 | 타입 | 기본값 | 제약과 의미 |
+| --- | --- | --- | --- |
+| `providers[].provider_id` | 문자열 | 필수 | `[a-z0-9][a-z0-9_-]{0,31}`, 유일. redirect URI `<portal.public_url>/callback/<provider_id>`에 나타납니다. 프리셋 이름(`google`)과 같은 id는 `issuer`가 없을 때 그 프리셋을 선택합니다. |
+| `providers[].kind` | `oidc` | 필수 | `oauth2`, `email_link`, `password`는 파싱되지만 M3 이전에는 거부됩니다. |
+| `providers[].display_name` | 문자열 | `provider_id` | 선택 화면의 라벨. |
+| `providers[].enabled` | 불리언 | `true` | 비활성 제공자는 제시되지 않습니다. |
+| `providers[].client_id` | 문자열 | 필수 | 비어 있으면 안 됩니다. 비밀 값이 아닙니다. |
+| `providers[].client_secret_env` | 문자열, 환경 변수 이름 | 없음 | 클라이언트 비밀 값을 담은 변수. 설정했는데 시작 시 변수가 없거나 비어 있으면 제공자가 비활성화됩니다(`--check`에는 경고로, `/healthz`에는 `disabled`로 나타남). Hopae는 그대로 시작합니다. |
+| `providers[].issuer` | 문자열, URL | 프리셋의 issuer | `https://`(`http://`는 루프백 호스트만), 쿼리·프래그먼트·자격 증명 없음. 프리셋이 적용되지 않으면 필수입니다. |
+| `providers[].scope` | 문자열 | `openid email profile` | 비어 있으면 안 됩니다. |
+| `providers[].allowed_email_domains` | 도메인 배열 | `[]` | 평범한 도메인 이름. 비어 있지 않으면 그 이메일 도메인으로만 로그인을 제한합니다. 신원 계층이 강제합니다. |
+| `providers[].authoritative_domains` | 도메인 배열 | `[]` | 이 제공자가 이메일에 대해 권위를 갖는 도메인([ADR-0011](../adr/0011-account-linking-policy.md)). |
+| `providers[].auto_link` | 불리언 | `false` | 정책이 허용하면 확인 없이 로그인을 기존 사용자에 연결합니다. |
+| `providers[].trust_email` | 불리언 | `false` | 제공자의 이메일 클레임을 검증된 것으로 취급합니다. |
+
+제공자 설정 `preset`, `userinfo`, `id_token_typ`은 OIDC 제공자가 설정 파일이 아니라
+제공자 행에 저장된 `config`에서 읽습니다. M1에서 파일 가져오기는 `client_id`,
+`issuer`, `scope`만 그 행에 쓰며, `hopae --check`는 이 세 이름을 알 수 없는 키로
+거부합니다. 이를 가진 행이 데이터베이스에 있을 때만 효과가 있습니다.
+
+| 저장된 설정 | 타입 | 기본값 | 의미 |
+| --- | --- | --- | --- |
+| `preset` | 문자열 | `provider_id`와 같은 이름의 프리셋, 없으면 issuer가 일치하는 프리셋 | 잘 알려진 제공자의 내장 기본값. M1에는 `google`만 있습니다(issuer `https://accounts.google.com`, scope `openid email profile`, user-info 호출 없음). |
+| `userinfo` | 불리언 | 프리셋의 값, 프리셋이 없으면 `true` | ID 토큰 검증 뒤 user-info 엔드포인트를 호출합니다. 주체(subject)는 ID 토큰과 일치해야 합니다. |
+| `id_token_typ` | 문자열 | 없음 | 제공자가 설정하는 경우 ID 토큰의 필수 `typ` 헤더. |
+
+#### 이벤트
+
+| 키 | 타입 | 기본값 | 제약과 의미 |
+| --- | --- | --- | --- |
+| `events.retention_days` | 정수, 1 이상 | `90` | 이벤트를 정리하는 기간([ADR-0009](../adr/0009-event-model.md)). |
+| `events.max_rows` | 정수, 1 이상 | `1000000` | 저장 이벤트 수의 하드 상한. 오래된 것부터 정리됩니다. |
+| `events.prune_every` | 정수, 1 이상 | `1000` | 정리 패스 사이에 삽입되는 행 수(패스는 최소 60초마다도 실행됩니다). |
+| `events.max_pending_per_sink` | 정수, 1 이상 | `10000` | 싱크마다 보관하는 미전달 행 수. 넘으면 가장 오래된 대기 행이 `backlog_overflow`로 `failed`가 됩니다. |
+| `events.delivery_terminal_retention_days` | 정수, 1 이상 | `7` | 전달 완료 또는 실패한 전달 행을 보관하는 기간. |
 
 ### 결정되어 예정된 키
 
-이 키들은 ADR과 게이트웨이 계약에 존재하며 표시된 마일스톤에서 구현됩니다. 그
-전까지 `hopae --check`는 알 수 없는 키로 거부합니다.
+이 키들은 ADR과 게이트웨이 계약에 있으며 표시한 마일스톤에서 구현됩니다. 그때까지
+`hopae --check`는 알 수 없는 키로 거부합니다.
 
-| 키 | 마일스톤 | 기본값 | 결정 문서 |
+| 키 | 마일스톤 | 기본값 | 결정된 곳 |
 | --- | --- | --- | --- |
-| `gateway.caller_key_next_env` | M1 | 없음 | 교체 중에 함께 받아들이는 두 번째 호출자 키([ADR-0005](../adr/0005-gateway-contract-and-versioning.md)) |
-| `gateway.verify_budget_ms` | M1 | `400` | verify 전체 예산. 게이트웨이의 `auth.timeout_ms`보다 작아야 합니다([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
-| `gateway.rate_limit_status` | HC-8 이후 | `403` | 게이트웨이가 중계하게 되면 `429`([ADR-0005](../adr/0005-gateway-contract-and-versioning.md)) |
-| `apps[]` (`app_id`, `display_name`, `hosts`, `ports`, `enabled`, `session.idle`, `session.absolute`, `binding.ip`, `binding.ua`, `binding.on_mismatch`, `on_authz_change`, `verify_cache_seconds`) | M1 | ADR 참조 | 애플리케이션 등록부. 정확한 호스트 이름만 허용합니다([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md), [ADR-0007](../adr/0007-context-binding-policy.md)) |
-| `session.idle`, `session.absolute` | M1 | `24h`, `30d` | 세션 전체 타이머([ADR-0007](../adr/0007-context-binding-policy.md)) |
-| `cookie.name`, `cookie.secure` | M1 | `__Host-hopae`, `true` | 쿠키 이름은 `cookie.name`에서 파생됩니다. `secure=false`는 개발 전용입니다([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)) |
-| `providers[]` (`provider_id`, `kind`, `display_name`, `enabled`, `client_id`, `client_secret_env`, `issuer`, `scope`, `allowed_email_domains`, `authoritative_domains`, `auto_link`, `trust_email`) | M1(Google), M3(그 외) | ADR 참조 | 저장소에 미러링되는 제공자 정의([ADR-0010](../adr/0010-provider-abstraction.md)) |
-| `linking.on_conflict`, `linking.mode` | M1 | `link_required`, `verified_email` | 계정 연결 정책([ADR-0011](../adr/0011-account-linking-policy.md)) |
-| `txn.max_rows`, `txn.per_ip_per_minute`, `handoff.per_ip_failures_per_minute`, `handoff.max_recoveries` | M1 | `1000`, `30`, `10`, `3` | 트랜잭션과 핸드오프 상한([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)) |
-| `portal.sso_confirm_new_host` | M1 | `false` | 세션을 어떤 호스트로 처음 핸드오프하기 전에 한 번 클릭하는 확인([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)) |
-| `events.retention_days`, `events.max_rows`, `events.prune_every`, `events.max_pending_per_sink`, `events.delivery_terminal_retention_days` | M1 | `90`, `1000000`, `1000`, `10000`, `7` | 이벤트 보존과 전달 상한([ADR-0009](../adr/0009-event-model.md)) |
-| `trusted_proxies` | M1 | `["127.0.0.1/32"]` | 포털 리스너가 `x-forwarded-for`/`x-forwarded-proto`를 신뢰하는 피어 |
-| `limits.gateway_max_concurrent`, `limits.portal_max_concurrent` | M1 | `64`, `256` | 리스너별 동시 처리 요청 상한. 초과분은 즉시 `503`(게이트웨이) 또는 `503`(포털)으로 답합니다([ADR-0003](../adr/0003-http-stack-axum-on-hyper.md)) |
-| `log.verify_allow`, `log.accept_client_request_id` | M1 | `false`, `false` | 허용된 verify를 개별적으로 로그에 남길지, 클라이언트가 보낸 `x-request-id`를(잘라서) `attrs.client_request_id`에 기록할지([ADR-0009](../adr/0009-event-model.md)) |
-| `sessions.retention_days` | M1 | `30` | 종료된 세션과 그 핸들을 세션 보존 스윕이 삭제하는 기준 경과 일수([ADR-0007](../adr/0007-context-binding-policy.md)) |
-| `gateway.admin_url` | M1(선택) | 없음 | 게이트웨이 관리 API의 기본 URL(`http(s)`, 자격 증명 없음). `gateway.readonly_token_env`와 함께 쓰면 `hopae --check`가 라우트 목록을 물어 라우트가 없는 애플리케이션 호스트를 경고합니다([ADR-0012](../adr/0012-service-registration-and-gateway-config-ownership.md)의 0단계). `run`은 사용하지 않습니다 |
-| `gateway.readonly_token_env` | M1(선택) | 없음 | `hopae --check`에서만 사용하는 읽기 전용 게이트웨이 자격 증명. 라우트가 없는 애플리케이션 호스트를 경고합니다([ADR-0012](../adr/0012-service-registration-and-gateway-config-ownership.md)의 0단계). 전체 불일치 보고는 M2입니다 |
+| `gateway.rate_limit_status` | HC-8 이후 | `403` | 게이트웨이가 중계하면 `429`([ADR-0005](../adr/0005-gateway-contract-and-versioning.md)) |
+| `oidc`가 아닌 `providers[].kind` | M3 | — | 카카오, 네이버, 이메일 링크, 비밀번호([ADR-0010](../adr/0010-provider-abstraction.md)) |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, 없음, 없음 | 로컬 캐시와 Redis 버스([ADR-0006](../adr/0006-verify-caching-and-invalidation.md)) |
 | `store.kind = postgres`, `store.url_env` | M2 | — | 공유 기본 저장소([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
 
 ## 동작
 
-- 검증은 `hopae --check`와 `hopae run` 시작 시 같은 규칙으로 실행됩니다. 파일이 유효하지 않으면 `run`은 어떤 리스너도 바인딩하지 않습니다.
+- 검증은 `hopae --check`와 `hopae run` 시작 시 같은 규칙으로 실행됩니다. 파일이 유효하지 않으면 `run`은 어떤 리스너도 바인딩하지 않고 종료 코드 `2`로 끝납니다.
 - 오류는 모아서 한꺼번에 보고하며, 각각 키 경로를 명시합니다.
 - 환경 변수 참조는 존재 여부만 검사합니다. 값은 절대 로그, 출력, 오류 메시지에 나타나지 않습니다.
-- 경고(치명적이지 않음): `gateway.allow_unauthenticated_caller`가 설정됨, `listen.gateway`가 루프백 주소가 아님.
+- 참조된 환경 변수: 호출자 키 변수가 없거나 비어 있으면 오류이고, 제공자 비밀 값이 없으면 해당 제공자를 비활성화하는 경고입니다.
+- 경고(치명적이지 않음): `gateway.allow_unauthenticated_caller`가 설정됨, `cookie.secure`가 false, `listen.gateway`가 루프백 주소가 아님, 비밀 값 변수가 없어 제공자가 비활성화됨, `gateway.caller_key_next_env`가 7일 넘게 설정됨, 게이트웨이 라우트가 없는 애플리케이션 호스트(`gateway.admin_url`을 설정한 경우만), 소문자로 정규화된 대문자 호스트 이름.
 - 데이터베이스 경로를 지정하지 않으면 `<state_dir>/hopae.db`로 파생됩니다.
 
 ## 제한과 호환성
@@ -72,6 +182,8 @@
 - JSON만 지원하며 주석은 허용하지 않습니다.
 - 1.0 이전에는 마이너 릴리스에서 키의 이름이 바뀌거나 삭제될 수 있습니다. 그런 변경은 각각 CHANGELOG의 `Changed` 아래에 이전 안내와 함께 기록합니다.
 - M6 이전에는 다시 로드가 없습니다.
+- `apps[].step_up`은 파싱만 하며 M5 이전에는 강제하지 않습니다.
+- 제공자 설정 `preset`, `userinfo`, `id_token_typ`은 M1에서 파일로 지정할 수 없습니다(제공자 절 참고).
 
 ## 예제, 검증, 관련 페이지
 
@@ -101,10 +213,13 @@
 }
 ```
 
+애플리케이션 하나와 Google 제공자를 포함한 더 완전한 템플릿은
+`deploy/hopae.example.json`입니다. [운영](OPERATIONS.md)을 참고하세요.
+
 다음 명령으로 검증합니다.
 
 ```sh
 HOPAE_GATEWAY_KEY=<redacted> hopae --check --config examples/hopae.example.json
 ```
 
-관련 페이지: [아키텍처](ARCHITECTURE.md), [게이트웨이 계약](GATEWAY_CONTRACT.md), 시나리오 013(사전 점검과 시작).
+관련 페이지: [운영](OPERATIONS.md), [아키텍처](ARCHITECTURE.md), [게이트웨이 계약](GATEWAY_CONTRACT.md), 시나리오 013(사전 점검과 시작).

@@ -1,6 +1,6 @@
 # 문서
 
-<!-- translation-status: source=../README.md source-rev=3 status=current -->
+<!-- translation-status: source=../README.md source-rev=4 status=current -->
 
 [English](../README.md)
 
@@ -22,7 +22,9 @@
 - [아키텍처](ARCHITECTURE.md) — 구성 요소, 신뢰 경계, 요청 흐름, 데이터 모델, 저장소, 크레이트 구조, 장애 시 동작
 - [게이트웨이 계약](GATEWAY_CONTRACT.md) — 버전이 붙은 verify 프로토콜, 신원 헤더, 쿠키, 핸드오프, 캐시와 무효화 의미론, 제안하는 게이트웨이 변경
 - [위협 모델](THREAT_MODEL.md) — 자산, 행위자, 진입점, 흐름별 STRIDE, 완화책
-- [설정 참조](CONFIG.md) — 모든 키, 기본값, 제약. 마일스톤별 예정 키
+- [설정 참조](CONFIG.md) — 모든 키, 기본값, 제약, 명령줄과 종료 코드
+- [운영](OPERATIONS.md) — 실행, 상태 디렉터리, 인스턴스 잠금, 백업, 키 교체, 로그, 상태 확인, 카운터, 장애 동작
+- [배포 템플릿](../../deploy/README.md) — 강화된 Docker Compose 서비스와 게이트웨이 라우트 예시
 
 그 밖의 참조 문서(제공자, 세션, 관리)는 마일스톤이 완료될 때마다
 추가됩니다. [로드맵](ROADMAP.md)이 의도한 형태를 설명합니다.

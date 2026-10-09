@@ -1,0 +1,34 @@
+{
+  "listen": {
+    "portal": "127.0.0.1:8700",
+    "gateway": "127.0.0.1:8701"
+  },
+  "state_dir": "/var/lib/hopae",
+  "portal": {
+    "public_url": "https://auth.example.test"
+  },
+  "gateway": {
+    "kind": "hangang",
+    "caller_key_env": "HOPAE_GATEWAY_KEY"
+  },
+  "log": {
+    "level": "info"
+  },
+  "apps": [
+    {
+      "app_id": "app",
+      "display_name": "Example application",
+      "hosts": ["app.example.test"]
+    }
+  ],
+  "providers": [
+    {
+      "provider_id": "google",
+      "kind": "oidc",
+      "display_name": "Google",
+      "client_id": "change-me.apps.googleusercontent.com",
+      "client_secret_env": "HOPAE_PROVIDER_GOOGLE_CLIENT_SECRET",
+      "allowed_email_domains": ["example.test"]
+    }
+  ]
+}
