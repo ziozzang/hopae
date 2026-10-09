@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 13 -->
+<!-- doc-rev: 14 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -178,7 +178,7 @@ the milestone shown. Until then `hopae --check` rejects them as unknown.
 | `listen.admin` | M4-min | `127.0.0.1:8702` | Admin listener, bound only when `admin.public_url` is set; must differ from the other listeners; non-loopback warns ([ADR-0016](adr/0016-management-console-minimum.md), [administration](ADMIN.md)) |
 | `admin.public_url` | M4-min | none | Externally visible origin of the console; registers the implicit application `admin` (reserved id) with the policy below ([ADR-0016](adr/0016-management-console-minimum.md)) |
 | `admin.session.idle`, `admin.session.absolute`, `admin.binding.ip`, `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6`, `admin.binding.ua`, `admin.binding.on_mismatch` | M4-min | `30m`, `12h`, `strict`, `24`, `64`, `off`, `terminate_session` | Lifetimes and binding of the console host, same types and constraints as `apps[].session.*` and `apps[].binding.*` |
-| `admin.max_auth_age` | M4-min | `12h` | Freshness bound of a console session, evaluated at every console verify with one predicate (`auth_time ≤ now + 60 s` and `now − auth_time < N`); with a provider whose `reauth` capability is `max_age` the session must carry a provider-verified `auth_time` and a stale one is sent to a reauthentication the provider performs; with an `unsupported` provider (Google) the bound is Hopae login age only ([ADR-0016](adr/0016-management-console-minimum.md) decision 15) |
+| `admin.max_auth_age` | M4-min | `12h` | Freshness bound of a console session, at least `30m` (a smaller value is a configuration error: the bound keeps a 600 s headroom between a reauthentication callback and the console verify that follows), evaluated at every console verify with one predicate (`auth_time ≤ now + 60 s` and `now − auth_time < N`); with a provider whose `reauth` capability is `max_age` the session must carry a provider-verified `auth_time` and a stale one is sent to a reauthentication the session's own provider performs; with an `unsupported` provider (Google) the bound is Hopae login age only ([ADR-0016](adr/0016-management-console-minimum.md) decision 15) |
 | `admin.require_aal` | M4-min | `1` | Minimum assurance level of the console handle (`1` or `2`); `2` also sets the implicit application's step-up rule and, before M5, makes `--check` warn that every request will be refused |
 | `admin.untrusted_peers` | M4-min | `refuse` | What the admin listener does with a TCP peer outside `trusted_proxies`: `refuse` answers `403 untrusted_peer` before reading a cookie (logged, counted); `as_client` treats the peer as the client, as the portal does |
 | `admin.query_budget_ms` | M4-min | `2000` | Deadline of one console store operation — listing, search or mutation (100 to 30000); the deadline is handed to the store job, which interrupts the statement inside SQLite, rolls back and answers `503` |

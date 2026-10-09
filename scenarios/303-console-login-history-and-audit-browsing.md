@@ -1,6 +1,6 @@
 # S303 — Console login history and audit browsing
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: management
 - Milestone: M4
@@ -116,7 +116,7 @@ exposes a credential.
 
 - Given: 1,000,000 events; `admin.query_budget_ms = 100`; the test hook `store/slow_scan` that makes each candidate row cost 1 ms (a progress-handler callback that sleeps).
 - When: `GET /v1/events?outcome=info`; then 16 of them concurrently; then the same with the budget at `2000` and the hook off.
-- Then: the first answers `503 store_unavailable` within 150 ms, the store counter `hopae_store_interrupts_total` increments and the SQLite statement reports `SQLITE_INTERRUPT` (the progress handler, installed for this job with the deadline captured **before** the job was dispatched to the blocking pool, returned non-zero), the handler is cleared and the read connection is returned to the pool usable (a following request on the same connection runs to completion); the 16 concurrent ones all end within 300 ms and the writer thread was never blocked (a concurrent `POST /v1/sessions/<id>/terminate` commits meanwhile); the control run answers `200` with 50 items; a request whose deadline has already passed when its job starts is refused before the first statement.
+- Then: the first answers `503 store_unavailable` within 150 ms, the store counter `hopae_store_interrupts_total` increments and the SQLite statement reports `SQLITE_INTERRUPT` (the progress handler, installed for this job with the deadline captured **before** the job was dispatched to the blocking pool, returned non-zero), the handler is cleared and the read connection is returned to the pool usable (a following request on the same connection runs to completion); the 16 concurrent ones all end within 300 ms and the writer thread was never blocked (a concurrent `POST /v1/sessions/<id>/terminate` commits meanwhile); the control run answers `200` with 50 items; a request whose deadline has already passed when its job starts is refused before the first statement. **Deadline sources (pass 3):** the job's deadline is the earliest **present** of the explicit console budget and the caller's task-local — with only the budget present it is the budget, with only a task-local present it is the task-local, with both the earlier, with neither unbounded — asserted for `/v1/events`, `/v1/status` and `/v1/sessions/<id>` (which take the budget explicitly) through the test hooks' `store/last_deadline`; a read blocked by a held write lock (`store/hold_write_lock`) while its own `BEGIN` needs the lock is bounded by the remaining budget, not by the 5 s default.
 
 ## Observability expectations
 

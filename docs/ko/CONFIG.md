@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=13 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=14 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -175,7 +175,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `listen.admin` | M4-min | `127.0.0.1:8702` | 관리 리스너. `admin.public_url`이 설정된 때만 바인딩하며 다른 리스너와 달라야 하고 루프백이 아니면 경고([ADR-0016](../adr/0016-management-console-minimum.md), [관리](ADMIN.md)) |
 | `admin.public_url` | M4-min | 없음 | 콘솔의 외부 노출 origin. 아래 정책을 가진 암묵적 애플리케이션 `admin`(예약 id)을 등록함([ADR-0016](../adr/0016-management-console-minimum.md)) |
 | `admin.session.idle`, `admin.session.absolute`, `admin.binding.ip`, `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6`, `admin.binding.ua`, `admin.binding.on_mismatch` | M4-min | `30m`, `12h`, `strict`, `24`, `64`, `off`, `terminate_session` | 콘솔 호스트의 수명과 바인딩. 타입과 제약은 `apps[].session.*`, `apps[].binding.*`와 같음 |
-| `admin.max_auth_age` | M4-min | `12h` | 콘솔 세션의 신선도 한도. 하나의 술어(`auth_time ≤ now + 60초` 그리고 `now − auth_time < N`)로 콘솔의 모든 verify에서 평가함. `reauth` 능력이 `max_age`인 제공자에서는 세션이 제공자가 검증한 `auth_time`을 가져야 하고 오래되면 제공자가 수행하는 재인증으로 보내며, `unsupported` 제공자(Google)에서는 한도가 Hopae 로그인 경과 시간뿐임([ADR-0016](../adr/0016-management-console-minimum.md) 결정 15) |
+| `admin.max_auth_age` | M4-min | `12h` | 콘솔 세션의 신선도 한도. `30m` 이상(더 작은 값은 설정 오류: 한도는 재인증 콜백과 뒤따르는 콘솔 verify 사이에 600초의 여유를 지킴). 하나의 술어(`auth_time ≤ now + 60초` 그리고 `now − auth_time < N`)로 콘솔의 모든 verify에서 평가함. `reauth` 능력이 `max_age`인 제공자에서는 세션이 제공자가 검증한 `auth_time`을 가져야 하고 오래되면 세션 자신의 제공자가 수행하는 재인증으로 보내며, `unsupported` 제공자(Google)에서는 한도가 Hopae 로그인 경과 시간뿐임([ADR-0016](../adr/0016-management-console-minimum.md) 결정 15) |
 | `admin.require_aal` | M4-min | `1` | 콘솔 핸들의 최소 보증 수준(`1` 또는 `2`). `2`는 암묵적 애플리케이션의 단계 상승 규칙도 설정하며 M5 전에는 모든 요청이 거부된다고 `--check`가 경고 |
 | `admin.untrusted_peers` | M4-min | `refuse` | `trusted_proxies` 밖의 TCP 피어를 관리 리스너가 어떻게 다루는지: `refuse`는 쿠키를 읽기 전에 `403 untrusted_peer`로 답함(기록, 집계). `as_client`는 포털처럼 피어를 클라이언트로 취급 |
 | `admin.query_budget_ms` | M4-min | `2000` | 콘솔 저장소 작업 하나(목록, 검색, 변경)의 마감(100부터 30000). 마감은 저장소 작업에 전달되어 SQLite 안에서 문장을 중단하고 롤백한 뒤 `503`으로 답함 |

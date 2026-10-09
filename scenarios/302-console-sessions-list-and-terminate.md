@@ -1,6 +1,6 @@
 # S302 — Console sessions: list live sessions, terminate one, terminate all of a user
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: management
 - Milestone: M4

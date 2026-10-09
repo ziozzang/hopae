@@ -1,6 +1,6 @@
 # 관리
 
-<!-- translation-status: source=../ADMIN.md source-rev=3 status=current -->
+<!-- translation-status: source=../ADMIN.md source-rev=4 status=current -->
 
 [문서 목차](README.md) · [English](../ADMIN.md)
 
@@ -35,7 +35,7 @@
 | `admin.public_url` | 문자열, origin | 없음 | 콘솔의 외부 노출 origin, `https://hopae-admin.example.test`. `https://` 또는 `http://`와 호스트, 선택적 포트, 경로 없음. 설정하면 암묵적 애플리케이션 `admin`이 등록됨 |
 | `admin.session.idle`, `admin.session.absolute` | 기간 | `30m`, `12h` | 콘솔 호스트의 핸들 단위 타이머(`idle`은 `60s` 이상) |
 | `admin.binding.ip`, `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6`, `admin.binding.ua`, `admin.binding.on_mismatch` | `apps[].binding.*`와 같음 | `strict`, `24`, `64`, `off`, `terminate_session` | 콘솔 핸들의 클라이언트 바인딩 |
-| `admin.max_auth_age` | 기간 | `12h` | 콘솔 세션의 신선도 한도. 어디서나 하나의 술어: `auth_time ≤ now + 60초` 그리고 `now − auth_time < N`. `auth_time`이 무엇을 증명하는지는 제공자의 `reauth` 능력에 따름([신선도](#신선도와-재인증)) |
+| `admin.max_auth_age` | 기간, `30m` 이상 | `12h` | 콘솔 세션의 신선도 한도. 어디서나 하나의 술어: `auth_time ≤ now + 60초` 그리고 `now − auth_time < N`. 최솟값은 600초의 콜백 여유를 지키며 더 작은 값은 설정 오류. `auth_time`이 무엇을 증명하는지는 제공자의 `reauth` 능력에 따름([신선도](#신선도와-재인증)) |
 | `admin.require_aal` | `1` 또는 `2` | `1` | 제시된 핸들의 최소 보증 수준. `2`는 호스트 전체에 대한 암묵적 애플리케이션의 단계 상승 규칙도 설정. Hopae에 2차 인증 요소가 생기기 전까지 `2`는 모든 요청을 거부하며 `hopae --check`가 경고 |
 | `admin.untrusted_peers` | `refuse`, `as_client` | `refuse` | `trusted_proxies` 밖의 TCP 피어를 리스너가 어떻게 다루는지: 요란하게 거부(`403 untrusted_peer`, 경고, 카운터)하거나 포털처럼 피어를 클라이언트로 취급 |
 | `admin.query_budget_ms` | 정수, 100부터 30000 | `2000` | 콘솔 저장소 작업 하나(목록, 검색, 변경)의 마감. 저장소 작업이 마감에 SQLite 안에서 문장을 중단하고 롤백하며 요청은 `503`으로 답함 |
@@ -109,7 +109,7 @@
 `admin.users[]`는 시작 시와 `hopae admin import`로 하나의 저장소 트랜잭션에서
 가져오며, 제공자 가져오기 규칙을 부여에 맞게 적용합니다.
 
-- 모든 항목은 원래의 키(`user_id`, `email`, 또는 둘 다)를 유지하고 먼저 그 키로 기존 행과 **대조**됩니다: `user_id`가 있는 항목은 그 행과, 이메일만 있는 항목은 `source_email`(행을 만들 때 쓴 주소)이 같은 `managed_by = file` 행과(그 행이 어떤 사용자에 묶여 있든) 대조됩니다. 존재하는 행의 주소는 **절대 다시 해결하지 않습니다**.
+- 모든 항목은 원래의 키(`user_id`, `email`, 또는 둘 다)를 유지하고 먼저 그 키로 기존 행과 **대조**됩니다: `user_id`가 있는 항목은 그 행과, 이메일만 있는 항목은 `source_email`(행을 만들 때 쓴 주소)이 같은 **모든** 행과 — 파일 관리든 명령줄 관리든, 살아 있든 취소되었든, 그 행이 어떤 사용자에 묶여 있든 — 대조됩니다. 그 주소로 묶인 행이 존재하는 동안 주소는 **절대 다시 해결하지 않으므로**, 실행 중 취소된 부여는 파일이 그 주소를 새 보유자에게 부여하는 것을 막습니다(`skipped (revoked at run time)`). 같은 주소로 묶인 행이 둘이면 모호한 바인딩입니다: 항목은 경고와 함께 건너뛰고 `--force`는 `user_id`를 지정해야 합니다.
 - 대조된 살아 있는 파일 행은 `role`과 `note`가 갱신됩니다. 항목이 유효하지 않은(`user_id`와 `email`이 다른 사용자를 가리키거나 그 밖에 쓸 수 없는) 대조된 행은 건드리지 않고 경고가 항목을 밝히며, 그 행은 존재하는 것으로 셉니다.
 - 대조되지 않은 항목은 같은 트랜잭션 안에서 한 번 해결됩니다: `user_id`로(사용자가 존재해야 함), `email`만으로는 그 검증된 주소를 정확히 한 사용자가 가지고 **그리고** 권위적일 때만, 둘 다로는 같은 사용자를 가리킬 때만. 그 밖의 경우는 항목과 사유(`unknown_user`, `email_unverified`, `email_not_authoritative`, `email_ambiguous`, `user_email_mismatch`)를 밝히는 사전 점검 경고와 함께 건너뜁니다.
 - 어떤 항목과도 대조되지 않은 살아 있는 파일 행은 취소됩니다(`revoked_by = file`). 파일에서 관리자를 지우면 다음 시작이나 가져오기에서 권한이 사라집니다. 항목이 여전히 가리키는 행은 — 건너뛴 항목이라도 — 부재를 이유로 취소되지 않습니다.
@@ -153,7 +153,8 @@
 
 - **하나의 술어.** 세션은 `auth_time ≤ now + 60초`이고 `now − auth_time < admin.max_auth_age`일 때 콘솔에 신선합니다(한도와 같은 나이는 신선하지 않음. 60초는 Hopae보다 앞선 제공자 시계를 허용). verify 엔진이 콘솔 호스트의 **모든** verify에서 적용하고, 관리 리스너가 경합 대비책으로 적용하며, 행위자 울타리가 SQL로 적용합니다. 실패하면 문서 탐색은 재인증 요구를 담은 트랜잭션(`reason=reauth_required`)과 함께 포털로 보내지고, 문서가 아닌 요청은 `401 {"error":"reauth_required"}`를 받습니다. 최근에 인증한 세션은 새 도전 없이 들어가고, 오래전 다른 호스트에서 로그인한 세션은 첫 콘솔 진입에서 도전을 받으며, 콘솔 안에서 한도를 넘긴 세션은 다음 탐색에서 도전을 받습니다.
 - **출처.** 모든 세션은 `auth_time_source`를 기록합니다: ID 토큰이 유효한 `auth_time`(`now + 60초`보다 늦지 않음)을 담았으면 `provider_claim`, 담지 않았으면 `hopae_completion`(이때 `auth_time`은 Hopae의 로그인이 완료된 순간). 있지만 잘못된 `auth_time` 클레임은 로그인을 실패시킵니다(`invalid_auth_time`). 절대 현재 시각으로 대체하지 않습니다. 마이그레이션 `0003` 이전에 만들어진 세션은 `hopae_completion`입니다. `x-hopae-auth-time`이 저장된 값을 보고합니다.
-- **`max_age` 제공자**(표준 매개변수를 존중하는 범용 OpenID 제공자)에서 콘솔은 `provider_claim` 출처를 요구합니다: 클레임 없이 인증된 세션, 이전 세션, 제공자가 검증된 시각 없이 자신의 단일 로그인으로 끝낸 세션은 신선하지 않으며 첫 콘솔 진입에서 도전을 받습니다. 재인증은 제공자가 검증한 도전입니다: 포털은 단일 로그인을 제공하지 않고(포털 핸들은 유지), authorize 요청은 `max_age=<초>`와 `prompt=login`(`reauth_prompt`가 `none`이 아니면)을 실으며, 돌아온 ID 토큰은 `auth_time`을 담아야 하고 그 시각은 600초의 여유(트랜잭션 수명이므로 핸드오프 뒤 첫 콘솔 verify도 신선함. 한도가 1200초 이하이면 한도의 절반)를 둔 술어를 만족해야 합니다. 아니면 로그인이 실패하고(`reauth_auth_time_missing`, `reauth_not_fresh`) 아무것도 만들어지지 않습니다.
+- **세션 자신의 제공자.** 재인증은 언제나 세션을 만든 제공자(`sessions.provider_id`)로 갑니다: 포털의 선택 화면은 그 제공자만 제공하고 재인증 트랜잭션에서 다른 제공자는 거부합니다. 그 제공자가 비활성화되거나 제거되었으면 포털은 관리자에게 로그아웃하고 다시 로그인하라고 알리며, 그러면 새 세션이(다른 제공자로도 가능) 만들어집니다. 세션의 증거 제공자는 절대 바뀌지 않습니다: 포털 세션이 있는 동안 같은 사용자가 다른 제공자로 하는 일반 로그인은 늘 그랬듯 그 세션을 바꾸지 않고 재사용하며, 다른 제공자의 증거는 오직 새 세션과 함께 옵니다.
+- **`max_age` 제공자**(표준 매개변수를 존중하는 범용 OpenID 제공자)에서 콘솔은 `provider_claim` 출처를 요구합니다: 클레임 없이 인증된 세션, 이전 세션, 제공자가 검증된 시각 없이 자신의 단일 로그인으로 끝낸 세션은 신선하지 않으며 첫 콘솔 진입에서 도전을 받습니다. 재인증은 제공자가 검증한 도전입니다: 포털은 단일 로그인을 제공하지 않고(포털 핸들은 유지), authorize 요청은 `max_age=<초>`와 `prompt=login`(`reauth_prompt`가 `none`이 아니면)을 실으며, 돌아온 ID 토큰은 `auth_time`을 담아야 하고 그 시각은 600초의 여유(트랜잭션 수명이므로 핸드오프 뒤 첫 콘솔 verify도 신선함. `admin.max_auth_age`가 `30m` 이상인 이유)를 둔 술어를 만족해야 합니다. 아니면 로그인이 실패하고(`reauth_auth_time_missing`, `reauth_not_fresh`) 아무것도 만들어지지 않습니다.
 - **`unsupported` 제공자**(`google` 프리셋: Google은 재인증 요청을 지원하지 않는다고 문서화함)에서 콘솔 신선도는 **Hopae 로그인 경과 시간**입니다: Hopae 자신의 로그인이 완료된 뒤 지난 시간. 재인증은 포털에서 단일 로그인 없이 하는 일반 제공자 로그인이며, 제공자는 자신의 세션으로 조용히 끝낼 수 있고 Hopae는 이를 알 수 없습니다. 이것이 문서화된 잔여 위험입니다: 관리자 계정에 제공자 측 2차 인증을 강제하고, 다음 마일스톤으로 제안된 Hopae 자체 TOTP를 기대하십시오. `hopae --check`는 활성 제공자마다 능력과 그에 따른 `admin.max_auth_age`의 의미를 출력합니다.
 - **성공하면** 같은 사용자의 기존 세션이 재인증됩니다: `auth_time`과 `auth_time_source`가 갱신되고, 인증 요소 항목이 추가되며, 자격 증명 세대가 올라가고, 모든 핸들이 취소되었다가 일반 핸드오프로 다시 발급됩니다(다른 애플리케이션은 단일 로그인으로 조용히 다시 핸드오프됨. 회전 중에 진행 중이던 탐색이 아닌 요청은 한 번 실패할 수 있음). 다른 사용자이거나 살아 있는 세션이 없으면 일반 새 세션이 됩니다.
 - `admin.require_aal = 2`는 수준 2로 발급된 핸들을 요구합니다([ADR-0008](../adr/0008-second-factor-extension-point.md)). Hopae에 2차 인증 요소가 생기기 전에는 모든 요청을 거부하므로 기본값은 `1`입니다.
@@ -254,7 +255,7 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'`을 가집니다. 어
 - HTML 폼: `application/x-www-form-urlencoded`의 `POST`, 페이지에서 발급된 `csrf` 필드(제시된 핸들에 바인딩, 목적 `admin`, 10분 유효), `admin.public_url`의 origin과 같은 `Origin` 헤더. 핸들 쿠키는 `SameSite=Lax`이므로 교차 사이트 폼 전송에는 애초에 실리지 않습니다.
 - JSON API: `content-type: application/json`의 `POST`, 헤더 `x-hopae-admin-request: 1`, 그리고 있을 때 콘솔 origin과 같은 `Origin`과 `same-origin` 또는 `none`인 `sec-fetch-site`. 교차 출처 브라우저는 아무도 답하지 않는 프리플라이트 없이는 이것들을 보낼 수 없습니다.
 - 모든 변경은 저장소 트랜잭션의 첫 문장으로 verify 엔진 자신의 수명 의미론에 따라 행위자를 다시 평가합니다: 세션이 살아 있고 실효 절대(`min(저장값, created_at + session.absolute)`)·유휴 마감 안에 있는지, 콘솔 호스트의 핸들이 취소되지 않고 실효 마감 안에 있으며 요구 수준인지, 둘 다 60초를 넘어 미래에 만들어지지 않았는지, 사용자가 `active`이고 인가 기준이 바뀌지 않았는지, 신선도 술어를 만족하는지, 부여가 살아 있는 `admin`인지. 먼저 커밋된 변화는 쓰기를 거부하고(`403 actor_revoked`) 아무것도 바꾸지 않습니다.
-- 변경도 `admin.query_budget_ms` 아래에서 실행됩니다. 마감까지 끝나지 못하는 비활성화나 전체 종료는 중단되고 롤백되며 `503`으로 답합니다. 부분적으로 커밋되는 것은 없습니다.
+- 변경도 `admin.query_budget_ms` 아래에서 실행됩니다. 자기 작업 때문이든 다른 연결이 쓰기 잠금을 쥐고 있기 때문이든 마감까지 끝나지 못하는 비활성화나 전체 종료는 중단되고 롤백되며 `503`으로 답합니다. 부분적으로 커밋되는 것은 없고 마감 뒤에 커밋되는 것도 없습니다.
 - 아무것도 바꾸지 않는 변경(비활성화된 사용자 비활성화, 끝난 세션 종료)은 `changed: false`와 함께 `200`으로 답하고 이벤트를 쓰지 않습니다.
 
 ### 감사 이벤트

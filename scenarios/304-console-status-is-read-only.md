@@ -1,6 +1,6 @@
 # S304 — Console status is read-only and shows no secret
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: management
 - Milestone: M4
