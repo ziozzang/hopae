@@ -4,9 +4,9 @@
 
 - Area: core
 - Milestone: M1
-- ADRs: 0005, 0012
-- Threat model: TM-06, TM-19
-- Gateway contract: Hangang route fragments (path-scoped), Proposed gateway changes (none required)
+- ADRs: 0005, 0008, 0012, 0013
+- Threat model: TM-06, TM-19, TM-27
+- Gateway contract: Hangang route fragments (path-scoped), Proposed gateway changes (HC-3 required, HC-6 optional)
 
 ## Goal
 
@@ -17,9 +17,9 @@ manual registration of phase 0 (ADR-0012) is checked by preflight.
 
 ## Preconditions and fixtures
 
-- Gateway layer with the two-route fragment from the contract page (`site-public` priority 0, `site-admin` priority 10, `path_match: segment_prefix`).
-- Hopae configuration `tests/fixtures/m1-basic.json`; application `app` with host `app.example.test`.
-- Echo upstream.
+- Gateway layer with the two-route fragment from the contract page (`site-public` priority 0, `site-admin` priority 10, `path_match: segment_prefix`, `static_request_headers` with the caller key) on a gateway build that includes HC-3.
+- Hopae configuration `tests/fixtures/m1-basic.json`; application `app` with host `app.example.test` and, for S008-A5, a `step_up` rule `{"path_prefix": "/admin", "require": {"aal": 2}}` evaluated in a unit test (enforcement ships in M5; the canonical-path matching is M1).
+- Echo upstream that percent-decodes the request path before serving (as most application servers do).
 
 ## Main flow
 
@@ -66,7 +66,7 @@ manual registration of phase 0 (ADR-0012) is checked by preflight.
 | Category | Case | Applies |
 | --- | --- | --- |
 | Replay | — | no: covered by 003 |
-| Tampering | S008-A1 | yes |
+| Tampering | S008-A1, S008-A5 | yes |
 | Race / timing | — | no |
 | Resource exhaustion | — | no: route matching is the gateway's concern |
 | Confused deputy | S008-A2 | yes |
@@ -98,6 +98,12 @@ manual registration of phase 0 (ADR-0012) is checked by preflight.
 - When: validated and exercised.
 - Then: behavior is identical for verify (the gateway still calls `auth`); the drift check flags `access_mode_not_protected` as a warning because `protected` is the documented invariant.
 
+### S008-A5 Percent-encoded prefix is canonicalized before any path rule
+
+- Given: no cookie, then a valid handle `H1` with `issued_aal = 1`.
+- When: `GET /%61dmin/x` through the gateway, without and then with the cookie; separately, the unit test feeds `x-original-url: https://app.example.test/%61dmin/x` to the decision function with the `step_up` rule above.
+- Then: the gateway selects `site-admin` (route selection uses its canonical path) and calls Hopae with the raw `x-original-url` containing `/%61dmin/x`; without a cookie the client receives the `302` to the portal and the echo upstream records no request; with `H1`, Hopae's `VerifyInput.canonical_path` is `/admin/x` (logged), the step-up rule for `/admin` **matches** in the unit test (`Decision::StepUp`), and only when the rule is absent does the upstream receive the request, where it decodes the path to `/admin/x`. When the gateway build includes HC-6, `x-hangang-canonical-path: /admin/x` is present and equals the computed value; a harness-injected mismatch (`/other`) is denied with `canonical_path_mismatch`. Non-canonical inputs (`/admin/%2e%2e/x`, `/admin//x`, `/%2561dmin/x`) are denied by Hopae with `path_not_canonical` even though the gateway may already have answered `400`.
+
 ## Observability expectations
 
 - Log: preflight warnings as structured lines with `check=gateway_route`.
@@ -118,6 +124,7 @@ manual registration of phase 0 (ADR-0012) is checked by preflight.
 | S008-A2 | `s008_a2_identity_headers_stripped_on_public_route` | `tests/scenarios/s008_path_scope.rs` | gateway | planned |
 | S008-A3 | `s008_a3_host_header_games` | `tests/scenarios/s008_path_scope.rs` | gateway | planned |
 | S008-A4 | `s008_a4_route_without_protected_mode_flagged` | `tests/scenarios/s008_path_scope.rs` | gateway | planned |
+| S008-A5 | `s008_a5_percent_encoded_prefix_canonicalized` | `tests/scenarios/s008_path_scope.rs` | gateway | planned |
 
 ## Live verification
 
@@ -134,4 +141,6 @@ manual registration of phase 0 (ADR-0012) is checked by preflight.
 호스트의 `/admin`만 우선순위가 높은 라우트로 보호하고 나머지는 공개로 두는
 구성을 실제 게이트웨이로 증명합니다. 핸드오프는 보호된 접두사 위에서 그대로
 동작하고, 공개 라우트에서도 신원 헤더 이름은 게이트웨이 전체에서 제거됩니다.
-사전 점검은 라우트가 없는 애플리케이션을 경고합니다.
+`/%61dmin/x`처럼 퍼센트 인코딩된 접두사는 게이트웨이와 같은 규칙으로 정규화한
+경로에 대해 정책을 평가하므로 우회되지 않습니다. 사전 점검은 라우트가 없는
+애플리케이션을 경고합니다.

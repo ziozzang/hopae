@@ -1,6 +1,6 @@
 # Architecture
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/ARCHITECTURE.md)
 
@@ -18,9 +18,10 @@ nothing is retrofitted.
 
 | Item | M1 requirement |
 | --- | --- |
-| Gateway | Hangang 0.2.6 or later with an external-authorization route (`auth`) whose `forward_response` is `true`; see the [gateway contract](GATEWAY_CONTRACT.md) for the exact route fragment |
+| Gateway | Hangang with an external-authorization route (`auth`) whose `forward_response` is `true` and whose static request headers carry the caller key (gateway change HC-3, implemented together with M1); see the [gateway contract](GATEWAY_CONTRACT.md) for the exact route fragment |
+| Caller key | A random secret shared by the gateway route and Hopae, referenced by `gateway.caller_key_env`; every verify call must present it in `x-hopae-gateway-key` |
 | Portal host | A dedicated host name for the login portal (`auth.example.test` in examples), served as a public route on the same gateway |
-| Transport | HTTPS between browser and gateway; the gateway terminates TLS; Hopae listens on loopback or a private network |
+| Transport | HTTPS between browser and gateway; the gateway terminates TLS; Hopae's gateway listener is reachable only from the gateway's network namespace (host loopback in the reference deployment) and still requires the caller key |
 | Primary store | SQLite file in a writable state directory (default); PostgreSQL for multi-instance deployments from M2 ([ADR-0002](adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
 | Shared cache | Optional Redis/Valkey for the session cache and the invalidation channel (from M2) |
 | Provider | One OIDC provider (Google in M1) with a client ID and a client secret read from the environment |
@@ -80,8 +81,8 @@ are rejected.
 | Boundary | What crosses it | What Hopae trusts | What Hopae never trusts |
 | --- | --- | --- | --- |
 | Browser ↔ gateway | HTTPS requests with cookies; redirects; provider round trips | Nothing. Every browser input is validated. | Any `x-forwarded-*`, `x-original-*`, identity header or handoff parameter supplied by a browser; the gateway strips or regenerates them ([contract](GATEWAY_CONTRACT.md#what-works-on-an-unmodified-hangang-026)). |
-| Gateway ↔ Hopae gateway listener | The verify request with gateway-generated context headers and the listed client headers | The gateway's generated context (`x-original-url`, `x-forwarded-for`, `x-forwarded-host`, `x-forwarded-proto`) because the listener is reachable only from the gateway network and, with the proposed gateway change HC-3, carries a caller key | The copied client headers (`cookie`, `user-agent`, `sec-fetch-*`): they are inputs to validate, never assertions. |
-| Gateway ↔ Hopae portal listener | Ordinary proxied requests on the portal host | `x-forwarded-for` and `x-forwarded-proto` only from configured `trusted_proxies` | Everything else is browser input. |
+| Gateway ↔ Hopae gateway listener | The verify request with gateway-generated context headers, the listed client headers and the caller key | The gateway's generated context (`x-original-url`, `x-forwarded-for`, `x-forwarded-host`, `x-forwarded-proto`) **only after** `x-hopae-gateway-key` has matched `gateway.caller_key_env` in constant time; a request without the key touches no state. Network isolation is defense in depth, not the boundary: with a host-network gateway any local process can reach loopback. | The copied client headers (`cookie`, `user-agent`, `sec-fetch-*`): they are inputs to validate, never assertions. The authority in `x-original-url` is client-selected on host-neutral routes, so it is checked against the return-origin allowlist. |
+| Gateway ↔ Hopae portal listener | Ordinary proxied requests on the portal host | `x-forwarded-for` and `x-forwarded-proto` only from configured `trusted_proxies` | Everything else is browser input, including every `x-original-*` header: the gateway regenerates `x-forwarded-*` but passes `x-original-*` through unchanged on routes without external authorization. |
 | Hopae ↔ identity provider | Discovery, JWKS, token exchange, user info (outbound HTTPS only) | The provider's signed ID token after full validation; user-info fields per provider rules ([ADR-0010](adr/0010-provider-abstraction.md)) | Unsigned claims, email addresses without a verified flag, anything in the callback query other than `code` and `state`. |
 | Hopae ↔ stores | SQL and Redis protocols on a private network | The primary store's content | The cache: a cache miss or a cache error always falls back to the primary store; a cache never widens access. |
 | Hopae ↔ Lua workers (M5) | Length-framed JSON over pipes | Nothing; outputs are validated as if they came from the network | Scripts; they have no network, no secrets and no filesystem. |
@@ -90,16 +91,23 @@ are rejected.
 The gateway listener and the portal listener are separate TCP listeners with
 disjoint routers: `GET /_hopae/verify` on the portal listener answers 404,
 and the portal pages do not exist on the gateway listener. The gateway
-listener must not be reachable from the public internet; the deployment
-template binds it to loopback.
+listener must not be reachable from the public internet. Because the
+reference gateway runs with host networking, the deployment template runs
+Hopae in the same network namespace (`network_mode: host`) bound to
+`127.0.0.1:8701`, or publishes the container port on the host loopback only
+(`127.0.0.1:8701:8701`); a container-internal loopback bind would be
+unreachable by the gateway. In every arrangement the caller key is required.
 
 ## Request flows
 
 Conventions: `GW` is the gateway, `HP` is Hopae, `IdP` is the identity
 provider. `txn` is a login transaction id, `code` a single-use handoff code,
-`handle` the opaque cookie value for one host. Identity headers are
-abbreviated as `[id-hdrs]`. Portal host `auth.example.test`; application hosts
-`app.example.test` and `other.example.org` (a different registrable domain).
+`handle` the opaque cookie value for one host, `bind` the browser binding
+cookie planted on an application host when a login starts. Every verify call
+also carries `x-hopae-gateway-key`, omitted from the diagrams. Identity
+headers are abbreviated as `[id-hdrs]`. Portal host `auth.example.test`;
+application hosts `app.example.test` and `other.example.org` (a different
+registrable domain).
 
 ### Flow 1 — First visit, unauthenticated
 
@@ -113,7 +121,8 @@ abbreviated as `[id-hdrs]`. Portal host `auth.example.test`; application hosts
    │                             │  sec-fetch-dest: document       │
    │                             ├────────────────────────────────▶│ no handle → create txn
    │                             │ 302 Location: https://auth.example.test/login?txn=T
-   │                             │ Cache-Control: no-store         │ (txn: target, host, ip, ua)
+   │                             │ Set-Cookie: __Host-hopae_bind=B (app host, 600 s)
+   │                             │ Cache-Control: no-store         │ (txn: target, host, ip, ua, H(B))
    │ 302 (relayed, forward_response)◀───────────────────────────────┤
    │◀────────────────────────────┤                                 │
 ```
@@ -152,7 +161,7 @@ URL instead of a `302`; the gateway relays the `401` because
    │                            │                      │ identity → user (create/link)  │
    │                            │                      │ session created (factors, bind)│
    │                            │                      │ portal handle H0; handoff code │
-   │                            │                      │ K for app.example.test        │
+   │                            │                      │ K for app.example.test, H(B)  │
    │ 302 Location: https://app.example.test/admin/x?_hopae_handoff=K                  │
    │ Set-Cookie: __Host-hopae=H0 (portal host)  Set-Cookie: __Host-hopae_txn=; Max-Age=0
    │◀───────────────────────────┴──────────────────────┤                              │
@@ -162,13 +171,13 @@ URL instead of a `302`; the gateway relays the `401` because
 
 ```text
  Browser                      GW                                 HP (verify)
-   │ GET https://app.example.test/admin/x?_hopae_handoff=K        │
-   ├────────────────────────────▶│ GET /_hopae/verify              │
-   │                             │  x-original-url: …/admin/x?_hopae_handoff=K
-   │                             ├────────────────────────────────▶│ K: single use, ≤60 s,
-   │                             │                                 │ bound to host+path+ip
+   │ GET https://app.example.test/admin/x?_hopae_handoff=K  (cookie: __Host-hopae_bind=B)
+   ├────────────────────────────▶│ GET /_hopae/verify (cookie, x-original-url with K)
+   │                             ├────────────────────────────────▶│ K: single use, ≤60 s, bound to
+   │                             │                                 │ host+path+ip+H(B); no other
+   │                             │                                 │ user's valid handle present
    │                             │ 302 Location: https://app.example.test/admin/x
-   │                             │ Set-Cookie: __Host-hopae=H1; Path=/; Secure; HttpOnly; SameSite=Lax
+   │                             │ Set-Cookie: __Host-hopae=H1 (issued_aal=1); Set-Cookie: __Host-hopae_bind=; Max-Age=0
    │                             │ Cache-Control: no-store          │ handle H1 → session
    │◀────────────────────────────┤ (relayed; upstream not contacted)│
    │ GET /admin/x  (cookie: __Host-hopae=H1)                        │
@@ -176,9 +185,13 @@ URL instead of a `302`; the gateway relays the `401` because
 ```
 
 The same flow serves a second application on `other.example.org`: its first
-request yields Flow 1, the portal finds a valid portal handle `H0`, skips the
-provider (single sign-on) and immediately answers Flow 3's redirect with a new
-code for `other.example.org`.
+request yields Flow 1 (which plants that host's own binding cookie), the
+portal finds a valid portal handle `H0`, skips the provider (single sign-on)
+and immediately answers Flow 3's redirect with a new code for
+`other.example.org` bound to that cookie. A code can therefore be redeemed
+only by the browser that started the login on that host; another browser
+behind the same IP, or a browser already holding a different user's valid
+handle, is refused.
 
 ### Flow 5 — Steady-state verify
 
@@ -187,9 +200,10 @@ code for `other.example.org`.
    │ GET /admin/x  (cookie: __Host-hopae=H1)                        │
    ├────────────────────────────▶│ GET /_hopae/verify (cookie, x-original-url, x-forwarded-for, user-agent)
    │                             ├────────────────────────────────▶│ H1 → session S
+   │                             │                                 │ handle+session timers ok
    │                             │                                 │ binding: ip/ua ok
-   │                             │                                 │ app policy: ok
-   │                             │                                 │ idle/absolute: ok
+   │                             │                                 │ user active, authz_version ok
+   │                             │                                 │ app policy, step-up: ok
    │                             │ 200 [id-hdrs] Cache-Control: no-store (or max-age, HC-1)
    │                             │◀────────────────────────────────┤ last_seen (coalesced)
    │                             ├── upstream request + [id-hdrs] ──▶ application
@@ -244,15 +258,21 @@ provider is consulted again ([ADR-0007](adr/0007-context-binding-policy.md)).
 
 ```text
  Browser                      GW                                 HP
-   │ GET https://app.example.test/admin/x  (cookie H1; session aal=1)
-   ├────────────────────────────▶│ verify ──────────────────────────▶│ app rule: path /admin requires aal 2
+   │ GET https://app.example.test/admin/x  (cookie H1, issued_aal=1)
+   ├────────────────────────────▶│ verify ──────────────────────────▶│ rule: canonical path /admin needs aal 2
    │                             │ 302 Location: https://auth.example.test/stepup?txn=T2
-   │◀────────────────────────────┤ Cache-Control: no-store (never cached)
+   │◀────────────────────────────┤ Set-Cookie: __Host-hopae_bind=B2 (app host); no-store
    │ GET /stepup?txn=T2 → TOTP challenge → POST /stepup/totp (csrf, code)
-   ├───────────────────────────▶├─────────────────────▶│ factor verified: session.factors += totp@now; aal=2
-   │ 302 back to app (no new handle needed: same session)
-   │ GET /admin/x → verify → 200 [id-hdrs incl. x-hopae-aal: 2, x-hopae-factors: oidc:google,totp]
+   ├───────────────────────────▶├─────────────────────▶│ factor ok: factors += totp@now; aal=2
+   │                            │                      │ ALL handles revoked (elevation); new portal handle
+   │ 302 https://app.example.test/admin/x?_hopae_handoff=K2  + Set-Cookie (portal)
+   │ GET …?_hopae_handoff=K2 (cookie bind=B2; stale H1 is revoked, same user → replaced)
+   ├────────────────────────────▶│ verify → 302 + Set-Cookie: __Host-hopae=H1' (issued_aal=2)
+   │ GET /admin/x (H1') → verify → 200 [id-hdrs incl. x-hopae-aal: 2, x-hopae-factors: oidc:google,totp]
 ```
+
+A copy of `H1` taken before the challenge stays at level 1 and is revoked by
+the elevation, so it never inherits the second factor.
 
 ## Data model
 
@@ -264,15 +284,16 @@ not columns.
 
 | Table | Key | Columns (summary) | Notes |
 | --- | --- | --- | --- |
-| `users` | `user_id` | `primary_email`, `email_verified`, `display_name`, `username`, `status` (active, disabled), `groups` (JSON array, *later*), `created_at`, `updated_at`, `last_login_at` | One row per person. `username` is unique when present. |
-| `identities` | (`provider_id`, `subject`) | `user_id`, `email`, `email_verified`, `name`, `picture`, `raw_claims` (JSON, bounded 8 KiB), `first_seen_at`, `last_seen_at` | Links a provider subject to a user ([ADR-0011](adr/0011-account-linking-policy.md)). |
-| `providers` | `provider_id` | `kind` (oidc, oauth2, email_link, password), `display_name`, `enabled`, `sort_order`, `config` (JSON: issuer, endpoints, scopes, quirks), `client_secret_env`, `allowed_email_domains`, `trust_email`, `created_at`, `updated_at` | Runtime-editable from M4; M1 reads them from the configuration file and mirrors them into this table at start. Secrets are referenced by environment variable name, never stored ([ADR-0010](adr/0010-provider-abstraction.md)). |
-| `apps` | `app_id` | `display_name`, `hosts` (JSON array of exact hosts), `enabled`, `session_policy` (idle, absolute), `binding_policy` (ip, ua, on_mismatch), `step_up` (JSON rules, *later*), `allowed_groups` (*later*), `gateway_ref` (informational route id), `created_at`, `updated_at` | Verify resolves the app from `x-forwarded-host`. The reserved app `default` applies to hosts not listed when `apps.unregistered = allow_default`. |
-| `sessions` | `session_id` | `user_id`, `provider_id`, `auth_time`, `factors` (JSON array of `{kind, provider?, at}`), `aal` (1 or 2), `bound_ip`, `bound_ua_sha256`, `bound_country` (*later*), `created_at`, `last_seen_at`, `absolute_expires_at`, `idle_expires_at`, `terminated_at`, `terminated_reason` | One row per browser login. Self-contained identity snapshot (`snapshot` JSON: email, name, username, groups) so verify needs no join. |
-| `session_handles` | `handle_sha256` | `session_id`, `host`, `created_at`, `last_seen_at`, `revoked_at` | One per (session, host). The cookie carries the handle; different hosts never share a handle. |
-| `login_txns` | `txn_sha256` | `created_at`, `expires_at` (10 min), `app_id`, `return_target` (absolute URL from the gateway), `client_ip`, `ua_sha256`, `provider_id`, `state_sha256`, `nonce`, `pkce_verifier`, `portal_session_id` (when SSO), `purpose` (login, stepup, link), `consumed_at` | Server-side state for one login attempt. |
-| `handoff_codes` | `code_sha256` | `session_id`, `host`, `return_target`, `client_ip`, `created_at`, `expires_at` (60 s), `consumed_at` | Single use; consumption is an atomic conditional update. |
-| `events` | `event_id` | `at`, `kind`, `outcome`, `reason`, `user_id`, `session_id`, `app_id`, `provider_id`, `client_ip`, `ua_sha256`, `request_id`, `attrs` (JSON, bounded) | Append-only login history and audit source ([ADR-0009](adr/0009-event-model.md)); retention pruned by age and count. |
+| `users` | `user_id` | `primary_email`, `email_verified`, `email_authoritative`, `display_name`, `username`, `status` (active, disabled), `authz_version`, `groups` (JSON array, *later*), `created_at`, `updated_at`, `last_login_at` | One row per person. `username` is unique when present. `authz_version` increments on every change to status, groups or roles; verify reads `status` and `authz_version` on every call. |
+| `identities` | (`provider_id`, `subject`) | `user_id`, `email`, `email_verified`, `email_authoritative`, `name`, `picture`, `raw_claims` (JSON, bounded 8 KiB), `first_seen_at`, `last_seen_at` | Links a provider subject to a user ([ADR-0011](adr/0011-account-linking-policy.md)). Created only after the subject consistency check of [ADR-0010](adr/0010-provider-abstraction.md). |
+| `providers` | `provider_id` | `kind` (oidc, oauth2, email_link, password), `display_name`, `enabled`, `managed_by` (file, api), `sort_order`, `config` (JSON: issuer, endpoints, scopes, quirks), `client_secret_env`, `allowed_email_domains`, `authoritative_domains`, `auto_link`, `trust_email`, `created_at`, `updated_at` | File entries are imported at start only for rows that are absent or `managed_by = file`; a row changed through the management API (M4) is never overwritten by the file, so a runtime disable survives restarts. Secrets are referenced by environment variable name, never stored. |
+| `apps` | `app_id` | `display_name`, `hosts` (JSON array of exact hosts or `*.suffix` patterns), `ports` (JSON array, default `[443]`), `enabled`, `session_policy` (idle, absolute), `binding_policy` (ip, ua, on_mismatch), `step_up` (JSON rules, *later*), `allowed_groups` (*later*), `on_authz_change` (refresh, terminate), `gateway_ref` (informational route id), `created_at`, `updated_at` | Verify resolves the app from `x-forwarded-host`; the union of all `hosts` and `ports` is the return-origin allowlist. A host that matches no pattern is denied; there is no "any host" mode. The reserved app `default` carries explicit patterns too. |
+| `sessions` | `session_id` | `user_id`, `provider_id`, `auth_time`, `factors` (JSON array of `{kind, provider?, at}`), `aal` (1 or 2), `authz_version` (of the user at snapshot time), `generation`, `bound_ip`, `bound_ua_sha256`, `bound_country` (*later*), `created_at`, `last_seen_at`, `absolute_expires_at`, `terminated_at`, `terminated_reason` | One row per browser login. Self-contained identity snapshot (`snapshot` JSON: email, name, username, groups) refreshed when `users.authz_version` moves. `generation` increments on every invalidation so a cache fill started earlier is discarded. |
+| `session_handles` | `handle_sha256` | `session_id`, `host`, `issued_aal`, `created_at`, `last_seen_at`, `absolute_expires_at`, `revoked_at`, `revoked_reason` | One per (session, host). The cookie carries the handle; different hosts never share a handle. `issued_aal` is the level the handle grants; elevation revokes and reissues handles. Idle and absolute timers are per handle ([ADR-0007](adr/0007-context-binding-policy.md)). |
+| `login_txns` | `txn_sha256` | `created_at`, `expires_at` (10 min), `app_id`, `return_target` (absolute URL from the gateway, within the return-origin allowlist), `bind_sha256` (digest of the binding cookie planted on the application host), `client_ip`, `ua_sha256`, `provider_id`, `state_sha256`, `nonce`, `pkce_verifier`, `portal_session_id` (when SSO), `purpose` (login, stepup, link), `pending_identity` (JSON, for `link_required`), `consumed_at` | Server-side state for one login attempt. |
+| `handoff_codes` | `code_sha256` | `session_id`, `host`, `return_target`, `client_ip`, `bind_sha256`, `created_at`, `expires_at` (60 s), `consumed_at` | Single use; consumption is an atomic conditional update that also checks the binding cookie and the absence of another user's valid handle. |
+| `events` | `event_id` | `at`, `kind`, `outcome`, `reason`, `user_id`, `session_id`, `app_id`, `provider_id`, `client_ip`, `ua_sha256`, `request_id`, `attrs` (JSON, bounded) | Append-only login history and audit source ([ADR-0009](adr/0009-event-model.md)). Required kinds are written in the same transaction as the state change (transactional outbox); retention pruned by age and count, never past a sink cursor. |
+| `event_sinks` | `sink` | `last_event_id`, `updated_at` | Durable cursor per sink (log, webhooks in M5) so sinks resume without loss. |
 | `blocks` (*M2*) | `block_id` | `kind` (user, email, email_domain, ip_cidr), `value`, `reason`, `created_by`, `created_at`, `expires_at` | Checked at login and at verify. |
 | `attempts` (*M2*) | (`scope`, `key`) | `failures`, `window_started_at`, `locked_until` | Per-account and per-IP throttling counters; in Redis when configured. |
 | `factors` (*M5*) | `factor_id` | `user_id`, `kind` (totp, webauthn, recovery), `label`, `secret_env_or_encrypted`, `public_key`, `counter`, `created_at`, `last_used_at`, `disabled_at` | Enrollments ([ADR-0008](adr/0008-second-factor-extension-point.md)). |
@@ -297,8 +318,8 @@ records the decision; the summary:
 | Concern | SQLite (rusqlite, bundled) | PostgreSQL (tokio-postgres) | Redis/Valkey |
 | --- | --- | --- | --- |
 | Role | Primary store, default, single instance | Primary store for active-active deployments (M2) | Cache of session lookups, pub/sub invalidation, throttling counters (M2); never a source of truth |
-| Durability | WAL, `synchronous=NORMAL`, one writer task; backup by file copy of a checkpointed database (M7) | Managed by the operator | Loss of Redis loses only cached data and in-flight counters |
-| Verify latency | Tens of microseconds per lookup on loopback | Sub-millisecond on a private network; local cache in front | Sub-millisecond; local cache in front |
+| Durability | WAL, `synchronous=NORMAL`, one writer task; required audit events committed in the same transaction as the state change; backup by file copy of a checkpointed database (M7) | Managed by the operator; same transactional rule | Loss of Redis loses only cached data and in-flight counters |
+| Verify latency and budget | Tens of microseconds per lookup on loopback; the verify budget is 400 ms in total (`gateway.verify_budget_ms`) | Sub-millisecond on a private network; optional local cache in front | Each cache operation is capped at 50 ms (`cache.op_timeout_ms`) inside the 400 ms budget; three consecutive timeouts open a 5 s breaker; a stalled connection therefore costs at most 50 ms per verify before the primary store answers |
 | Why | Matches the gateway's proven embedded choice; zero operational dependency for the common single-gateway deployment; schema migrations embedded | Multi-instance needs one shared directory: user ids, identities and blocks must agree between instances; SQLite cannot be shared safely over a network | The gateway's `security_redis` pattern (connection manager, 900 ms timeouts, fail closed on counters) is reused |
 
 All three sit behind the same traits (`Directory`, `Sessions`, `Events`),
@@ -352,7 +373,8 @@ commit that adds it.
 | --- | --- | --- | --- |
 | Hopae process down or unreachable | The gateway times out (`auth.timeout_ms`, 500 ms recommended) and answers `503` to the client: fail closed. With the proposed micro-cache (HC-1) cached positive decisions continue until their TTL; no new logins. | Unavailable | Gateway `503` counters; Hopae health check failing. Mitigation: two instances behind a gateway hairpin route (M7) and the micro-cache TTL as a bounded buffer. |
 | Primary store unavailable | `503` with `reason=store_unavailable`; never allow | `503` | Log at error, metric `hopae_store_errors_total`; the gateway relays `503`. |
-| Redis unavailable (M2) | Cache bypassed: lookups go to the primary store; local cache disabled; decisions unchanged | Unaffected | Warning log, metric `hopae_cache_degraded`; invalidation messages are not published, so the gateway micro-cache relies on its TTL (bounded staleness). |
+| Redis unavailable or stalled (M2) | Cache bypassed after at most one 50 ms timeout per operation, then the breaker bypasses it for 5 s: lookups go to the primary store inside the 400 ms verify budget; local cache disabled; decisions unchanged | Unaffected | Warning log, metric `hopae_cache_degraded`; invalidation messages are not published, so the gateway micro-cache relies on its absolute freshness deadline (bounded staleness). |
+| Gateway without the caller key (misconfigured route, unmodified gateway in production) | `403 caller_unauthorized` on every verify, which the gateway relays; no state is read or written | n/a | `hopae --check` shows the expected static header; metric `hopae_verify_unauthorized_total`. |
 | Identity provider unreachable or slow | Unaffected (verify never calls providers) | Login attempt fails with `reason=provider_unavailable`; retry page; transaction kept until expiry | Event `login.failed`; metric per provider. Discovery and JWKS caches have a hard deadline; expired keys reject tokens rather than skipping signature checks. |
 | Clock skew beyond leeway (60 s) | Sessions appear expired or future-dated: deny | ID token validation fails (`iat`/`exp`) | `reason=clock_skew`; preflight warns when the system clock is unsynchronized. |
 | Gateway sends an unexpected contract (missing `x-original-url`, unknown contract version) | `400` for the verify call, which the gateway maps to `503`: fail closed | n/a | `reason=contract_violation` with the missing field name; never a secret. |
@@ -363,7 +385,8 @@ a counter per reason, and no secret in any message.
 
 ## Limitations and compatibility
 
-- One gateway family is supported in M1 (Hangang through the versioned contract). Other forward-auth gateways share the core but need their adapter and their own verification run.
+- One gateway family is supported in M1 (Hangang through the versioned contract, including gateway change HC-3 for the caller key). Other forward-auth gateways share the core but need their adapter and their own verification run.
+- A login must be started and finished in the same browser on the same application host (binding cookie); browsers that block cookies on the application host cannot sign in.
 - Cookies are host-only. A cookie shared across sibling subdomains (`Domain=`) is deliberately not offered in M1 because of cookie tossing; the handoff covers that case ([ADR-0004](adr/0004-session-model-and-cross-domain-handoff.md)).
 - Verify is called on every request. Until the gateway micro-cache (HC-1) exists, Hopae's per-request budget is the whole budget: no provider calls, no unbounded queries, and a bounded local cache.
 - Multi-instance deployments require PostgreSQL (M2) and Redis for invalidation; SQLite deployments are single-instance with fast restart.

@@ -22,9 +22,12 @@ as **contract v1** with these fixed points:
 | Point | Decision |
 | --- | --- |
 | Verify endpoint | `GET /_hopae/verify` on a dedicated gateway listener (`listen.gateway`, default `127.0.0.1:8701`), never served by the portal listener |
+| Caller authentication | Required in M1: the gateway sends `x-hopae-gateway-key` (gateway change HC-3, implemented alongside M1); Hopae compares it in constant time with the value of `gateway.caller_key_env` before reading any other header; mismatch or absence → `403` `caller_unauthorized` with no state touched. Loopback binding is a defense in depth, not the authentication: on a host-network gateway any local process can reach loopback (review finding R09). `gateway.allow_unauthenticated_caller = true` exists for development only and makes preflight print a warning. |
 | Required request context | `x-original-url`, `x-forwarded-host`, `x-forwarded-proto`, `x-forwarded-for` (or `x-real-ip`); any missing → `400` `contract_violation` → gateway `503` |
+| Optional gateway context | `x-hangang-canonical-path` and `x-hangang-route-id` (gateway change HC-6): the decoded, normalized path the gateway used for route selection and the selected route id. Until present, Hopae computes the canonical path itself with the gateway's rules ([ADR-0013](0013-gateway-adapter-boundary.md)). |
 | Listed client headers | `cookie`, `user-agent`, `accept`, `sec-fetch-dest`, `sec-fetch-mode`, `sec-fetch-site` |
-| Status semantics | `200` allow with identity headers; `302` for document navigations needing login, step-up or handoff; `401` JSON for non-document requests; `403` denied; `400` contract violation; `503` cannot decide |
+| Status semantics | `200` allow with identity headers; `302` for document navigations needing login, step-up or handoff; `401` JSON for non-document requests; `403` denied, including rate limiting (`{"error":"rate_limited","retry_after":N}` in the body, because an unmodified gateway maps `429` to `503` and drops `retry-after`; `429` + `retry-after` becomes available with gateway change HC-8); `400` contract violation; `503` cannot decide |
+| Portal listener inputs | Every `x-original-*` and `x-forwarded-*` header on the portal listener is browser input unless the peer is a configured trusted proxy, and `x-original-*` is never used there at all: the gateway regenerates `x-forwarded-*` but passes `x-original-*` through unchanged on routes without external authorization (review finding R18). |
 | Identity headers | `x-forwarded-user`, `x-forwarded-email`, `x-forwarded-preferred-username`, `x-forwarded-groups`, `x-hopae-session`, `x-hopae-provider`, `x-hopae-auth-time`, `x-hopae-expires`, `x-hopae-aal`, `x-hopae-factors`; visible ASCII with percent-encoded UTF-8; per-header limits; total ≤ 8 KiB |
 | Diagnostics | `x-hopae-reason` on every response; never declared in `response_headers` |
 | Version signal | `x-hopae-contract: 1` on responses; the gateway sends the same header once HC-3 exists; unknown major on the request → `400` |
@@ -55,7 +58,7 @@ Applications that need more than these headers wait for `x-hopae-claims`
 
 | Alternative | Why not |
 | --- | --- |
-| Shared-secret header required in M1 | The gateway cannot add static headers today; HC-3 adds it. Network isolation is the M1 boundary. |
+| Network isolation only, no shared-secret header in M1 (the G1 draft) | Rejected after review finding R09: the reference gateway runs with host networking, so loopback admits any local process; HC-3 is small and is now part of M1. |
 | A single listener with path-based separation | A route misconfiguration could expose `/_hopae/verify` publicly; separate listeners make the boundary a bind address. |
 | JSON body on the verify response | The gateway copies headers, not bodies, into upstream requests; a body would need a second mechanism. |
 | Only `x-hopae-*` headers (no `x-forwarded-*`) | Loses drop-in compatibility with applications written for other forward-auth products. |
@@ -65,11 +68,18 @@ Applications that need more than these headers wait for `x-hopae-claims`
 
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Pending G2. |
+| 1 | 2026-10-09 | 1 | 1 | 2 | 0 | 4 × FIX_FIRST applied (R04 shared, R09, R17, R18) |
 
-Questions for the reviewer: is `401` for non-document requests detectable
-reliably from `sec-fetch-dest`/`accept`, and what happens with old clients
-that send neither? Should `x-hopae-session` be omitted from the upstream set?
+Findings and dispositions:
+
+- R04 (S1, shared with ADR-0008 and ADR-0013): the gateway selects routes on a canonical path but sends the raw path. FIX_FIRST: optional `x-hangang-canonical-path`/`x-hangang-route-id` (HC-6) and Hopae-side canonicalization with the gateway's rules until then; scenario 008-A5.
+- R09 (S2): loopback is not caller authentication and container loopback differs from host loopback. FIX_FIRST: `x-hopae-gateway-key` required in M1 (HC-3 implemented in the gateway); the deployment template runs Hopae in the gateway's network namespace or publishes the port on the host loopback only; scenario 013-A1 and 004-6.
+- R17 (S3): `429` cannot pass through an unmodified gateway. FIX_FIRST: rate limiting answers `403` with a `rate_limited` body in M1; HC-8 adds `429` relay; scenarios 001-A4 and 003-A4.
+- R18 (S3): `x-original-*` survives ordinary proxying on the portal route. FIX_FIRST: documented as browser input; scenario 007-A3 corrected; optional HC-9 strips it gateway-wide.
+
+Reviewer confirmation recorded: navigation metadata selects presentation only
+and confers no authorization; `Accept: */*` clients get `401`; `x-hopae-session`
+is a correlation identifier, not a usable handle.
 
 ## References
 

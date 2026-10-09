@@ -37,20 +37,22 @@ Kinds in M1: `login.started`, `login.succeeded`, `login.failed`,
 `factor.verified`, `factor.failed`, `block.created`, `lockout.started`,
 `admin.*`, `webhook.delivery`, `update.*`.
 
-Delivery: emitters publish on an in-process `tokio::sync::broadcast` bus;
-sinks subscribe. M1 sinks: the structured log (every event, one line, JSON)
-and the `events` table (every event except sampled-out `verify.denied`),
-written by a batching task with a bounded queue; when the queue is full,
-`login.*` and `session.*` events are written synchronously (never dropped)
-and the drop count of other kinds is itself an event. Retention: `events.
-retention_days` (default 90) and `events.max_rows` (default 1,000,000),
-pruned hourly oldest-first.
+Delivery is a **transactional outbox**, not a bus (review finding R10):
+
+- Required kinds — `login.*`, `session.*`, `handle.*`, `handoff.*`, `identity.*`, `factor.*`, `block.*`, `admin.*`, `config.loaded` — are written to the `events` table **in the same store transaction** as the state change they describe (`Events::append_in(tx, event)`). A session exists only if its `session.created` event exists. A crash after commit loses nothing; a crash before commit loses both consistently.
+- Diagnostic kinds — `verify.denied` (sampled), `provider.error`, `txn.evicted`, `events.dropped` — are written by a bounded best-effort batch writer; drops are counted and reported as `events.dropped`.
+- An in-process notification channel carries only event ids after commit; sinks (the structured log, webhooks in M5) read the durable rows by id and keep a durable cursor (`event_sinks(sink, last_event_id)`), so a slow or restarted sink resumes without loss. The log sink may fall behind; the table is the record.
+- Security counters are **not** derived from events: throttling and lockout (M2) update their counters synchronously and atomically (an SQL `UPDATE … RETURNING` or a Redis script, as the gateway's counters do) before an attempt is admitted; the `login.failed` event is written in the same transaction for history.
+
+Retention: `events.retention_days` (default 90) and `events.max_rows`
+(default 1,000,000), pruned hourly oldest-first; pruning never removes rows
+newer than any sink's cursor.
 
 Consumers defined now, implemented later: login history queries (M2) read
-the table; throttling (M2) counts `login.failed` per account and per IP in
-the store or Redis; webhooks (M5) subscribe to the bus with per-destination
-kind filters and deliver HMAC-signed JSON with `event_id` as the idempotency
-key; the administrator audit (M4) is `admin.*` events in the same table.
+the table; webhooks (M5) deliver HMAC-signed JSON per destination from the
+durable rows with `event_id` as the idempotency key and a per-destination
+cursor and retry state; the administrator audit (M4) is `admin.*` events in
+the same table.
 
 Out of scope: event schemas as a public API (webhook payloads are versioned
 separately in M5), log shipping.
@@ -60,11 +62,11 @@ separately in M5), log shipping.
 ### Positive
 
 - One vocabulary of reasons across logs, history, webhooks and the console; one place to enforce "no secrets".
-- Webhooks and throttling are subscribers, not new write paths.
+- Audit rows and state changes cannot disagree; webhooks replay from durable rows after a restart.
 
 ### Negative
 
-- A broadcast bus is lossy under slow subscribers by design; the store sink mitigates for the kinds that matter and counts the rest.
+- Every login or session write carries an extra row in its transaction; the batching writer only exists for diagnostics.
 - Sampling `verify.denied` hides repeated denials of one client; the counter metric keeps the volume visible.
 
 ### Neutral
@@ -77,17 +79,21 @@ separately in M5), log shipping.
 | --- | --- |
 | Log lines as the only record, parsed later | Not queryable for lockouts and history; schema drift. |
 | Separate tables per consumer (history, audit, webhook outbox) | Three write paths and three vocabularies for one fact. |
+| In-process broadcast bus with a store subscriber and a synchronous fallback (the G1 draft) | Rejected after review finding R10: a lagging receiver is overwritten before the fallback can see it; counters derived from events undercount. |
 | External message broker | A new runtime dependency for a single process; Redis pub/sub (M2) is for invalidation, not durable events. |
 
 ## Adversarial review
 
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Pending G2. |
+| 1 | 2026-10-09 | 0 | 1 | 0 | 0 | 1 × FIX_FIRST applied (R10) |
 
-Questions for the reviewer: is the synchronous fallback for `login.*` under
-queue pressure a denial-of-service lever against the portal? Does storing
-`client_ip` for 90 days need a privacy switch?
+Findings and dispositions:
+
+- R10 (S2): the broadcast bus could lose `login.failed` events and undercount throttling. FIX_FIRST: transactional outbox for required kinds, durable sink cursors, synchronous atomic counters; scenario 014-5 and 014-6 rewritten.
+
+Open for the reviewer: does storing `client_ip` for 90 days need a privacy
+switch?
 
 ## References
 

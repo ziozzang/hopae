@@ -31,9 +31,20 @@ present and `2` when at least one second factor is present. First factors
 are `oidc`, `oauth2`, `email_link`, `password`; second factors are the
 `Factor` kinds. Entries are append-only for the life of the session.
 
-**Headers.** Verify emits `x-hopae-aal` and `x-hopae-factors`
-(`kind[:provider]` comma list) on every `200` from M1, so applications can
-act on them before Hopae itself enforces step-up.
+**Handles carry their level.** Every handle records `issued_aal` at
+issuance and the effective level of a request is the handle's `issued_aal`,
+never the session's current `aal`. When a second factor is satisfied the
+session's `aal` rises, **every existing handle of the session is revoked**
+(reason `elevation`), the portal handle is reissued to the browser that
+completed the challenge, and that browser is handed off again to the
+application it came from through the normal browser-bound handoff
+(ADR-0004); other hosts obtain new handles lazily through single sign-on on
+their next request. A handle stolen before elevation therefore never gains
+the elevation (review finding R05).
+
+**Headers.** Verify emits `x-hopae-aal` (the handle's `issued_aal`) and
+`x-hopae-factors` (`kind[:provider]` comma list) on every `200` from M1, so
+applications can act on them before Hopae itself enforces step-up.
 
 **Step-up rule.** `apps[].step_up` is a list of rules evaluated in order at
 verify after binding and application policy:
@@ -43,12 +54,18 @@ verify after binding and application policy:
 ```
 
 `aal` is the minimum level; `max_age` (seconds) bounds how old the newest
-satisfying second factor may be. A rule with `path_prefix` makes the
-application's `200` responses `no-store` (ADR-0006). An unmet rule on a
-document navigation answers `302` to `/stepup?txn=…` with a transaction of
-purpose `stepup` bound to the session; a non-document request answers `401`
-with `{"error": "step_up_required", "aal": 2}`. Satisfying the challenge
-appends the factor to the same session; no new handles are issued.
+satisfying second factor may be. `path_prefix` is matched against the
+**canonical path** of `VerifyInput` (ADR-0013: percent-decoded once, UTF-8,
+encoded separators, dot segments and repeated slashes rejected), never
+against the raw `x-original-url`, because the gateway selects routes on the
+canonical form while sending the raw form (review finding R04). A rule with
+`path_prefix` makes the application's `200` responses `no-store`
+(ADR-0006). An unmet rule on a document navigation answers `302` to
+`/stepup?txn=…` with a transaction of purpose `stepup` bound to the session
+and to the browser (binding cookie on the application host, as for login); a
+non-document request answers `401` with `{"error": "step_up_required",
+"aal": 2}`. Satisfying the challenge appends the factor to the session,
+raises `aal`, and triggers the handle rotation described above.
 
 **Enrollment policy.** Per application or group (M5): `require_enrolled:
 true` denies `403 enrollment_required` with a link to the enrollment page
@@ -64,10 +81,11 @@ details (origin is the portal origin), push factors.
 
 - M5 implements factors without touching the session schema, the verify headers or the gateway contract.
 - Applications can enforce their own policy from `x-hopae-aal` on day one.
-- Step-up never issues new cookies, so the handoff is unaffected.
+- A handle's level is fixed at issuance, so elevation cannot leak to a copy of the cookie taken earlier.
 
 ### Negative
 
+- Elevation costs one redirect pair per host the user returns to, because handles are reissued.
 - Path-scoped step-up disables decision caching for that application; the operator sees that in `hopae --check`.
 - Encrypted-at-rest factor secrets add a key to manage (`HOPAE_FACTOR_KEY`) and a rotation procedure (M7).
 
@@ -88,11 +106,16 @@ details (origin is the portal origin), push factors.
 
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Pending G2. |
+| 1 | 2026-10-09 | 2 | 0 | 0 | 0 | 2 × FIX_FIRST applied (R04 shared, R05) |
 
-Questions for the reviewer: should the handle be rotated when `aal` rises,
-so that a cookie stolen at `aal=1` does not inherit the elevation? Does the
-`stepup` transaction need its own binding?
+Findings and dispositions:
+
+- R04 (S1, shared): `path_prefix` matched the raw path while the gateway routes on the canonical path (`/%61dmin/x`). FIX_FIRST: rules match the canonical path from ADR-0013; scenario 008-A5.
+- R05 (S1): a stolen pre-elevation handle inherited the session's new `aal`. FIX_FIRST: `issued_aal` per handle, revoke-and-reissue on elevation, browser-bound re-handoff.
+
+Open for the reviewer: the `stepup` transaction reuses the login binding
+cookie mechanism; confirm that a step-up started from a non-document request
+(`401 step_up_required`) has a sane path to a document navigation.
 
 ## References
 

@@ -73,11 +73,11 @@ of those headers, or gateway context headers, never gets them delivered.
 - When: request through the gateway.
 - Then: the client receives `503` (gateway 16 KiB cap); Hopae's own 4 KiB cap makes this unreachable in production (unit test on the emitter).
 
-### S007-A3 Spoofed gateway context on the portal route
+### S007-A3 Spoofed gateway context on the portal route is ignored
 
-- Given: the portal route; client sends `x-forwarded-for: 203.0.113.9`, `x-original-url: https://app.example.test/`.
+- Given: the portal route; client sends `x-forwarded-for: 203.0.113.9`, `x-original-url: https://evil.example.org/`, `x-original-uri: /evil`.
 - When: `GET https://auth.example.test/login?txn=T1` through the gateway.
-- Then: Hopae's portal saw `x-forwarded-for` equal to the harness client address as resolved by the gateway, not `203.0.113.9`; `x-original-url` absent or regenerated.
+- Then: Hopae's portal saw `x-forwarded-for` equal to the harness client address as resolved by the gateway, not `203.0.113.9` (the gateway regenerates `x-forwarded-*`); the `x-original-*` headers **arrive unchanged** (the gateway does not strip them on routes without external authorization) and the portal never reads them: the transaction's `return_target` is unchanged, no `Location` names `evil.example.org`, and a test hook confirms the portal's request model has no original-URL field. Gateway change HC-9 would strip them; this case must pass with and without it.
 
 ### S007-A4 Unauthenticated client with identity headers
 
@@ -107,7 +107,7 @@ of those headers, or gateway context headers, never gets them delivered.
 | S007-4 | `s007_4_values_survive_gateway` | `tests/scenarios/s007_header_contract.rs` | gateway | planned |
 | S007-A1 | `s007_a1_client_identity_header_replaced` | `tests/scenarios/s007_header_contract.rs` | gateway | planned |
 | S007-A2 | `s007_a2_oversized_identity_refused` | `tests/scenarios/s007_header_contract.rs` | gateway | planned |
-| S007-A3 | `s007_a3_spoofed_context_on_portal_route` | `tests/scenarios/s007_header_contract.rs` | gateway | planned |
+| S007-A3 | `s007_a3_client_x_original_on_portal_route_ignored` | `tests/scenarios/s007_header_contract.rs` | gateway | planned |
 | S007-A4 | `s007_a4_unauthenticated_identity_headers_stripped` | `tests/scenarios/s007_header_contract.rs` | gateway | planned |
 | S007-A5 | `s007_a5_duplicate_cookie_fields_joined` | `tests/scenarios/s007_header_contract.rs` | gateway | planned |
 

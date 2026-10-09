@@ -59,7 +59,7 @@ Rules that bound the choice:
 
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Pending G2. |
+| 1 | 2026-10-09 | 0 | 0 | 0 | 0 | No finding against this record in pass 1. |
 
 ## References
 

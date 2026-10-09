@@ -5,15 +5,17 @@
 - Area: core
 - Milestone: M1
 - ADRs: 0009
-- Threat model: TM-12, TM-17
+- Threat model: TM-12, TM-17, TM-28
 - Gateway contract: n/a
 
 ## Goal
 
-Every M1 flow emits typed events with the schema of ADR-0009 to the
-structured log and the `events` table; events carry identifiers and reason
-codes only; the store sink never loses `login.*` or `session.*` events and
-bounds everything else.
+Every M1 flow records typed events with the schema of ADR-0009 in the
+`events` table and the structured log; events carry identifiers and reason
+codes only; required events are committed in the same transaction as the
+state change they describe, so no login, session, handle or handoff outcome
+can exist without its record (or the reverse), while diagnostic events are
+bounded and their drops are counted.
 
 ## Preconditions and fixtures
 
@@ -49,17 +51,23 @@ bounds everything else.
 
 ## Alternative flows
 
-### S014-5 Queue pressure never drops login or session events
+### S014-5 Required events are committed with their state change
 
-- Given: the store sink slowed to 1 s per batch and a bounded queue of 100.
-- When: 1,000 `login.failed` and 1,000 `verify.denied` events are produced quickly.
-- Then: all 1,000 `login.failed` rows exist (synchronous fallback); `verify.denied` rows may be fewer and one `events.dropped` row records the count by kind.
+- Given: the diagnostic batch writer stalled by the harness (1 s per batch, queue of 100).
+- When: 1,000 logins (success and failure mixed) and 1,000 denied verifies are produced quickly.
+- Then: for every `sessions` row there is exactly one `session.created` row and one `login.succeeded` row with the same `request_id`, and for every `login.failed` attempt a row exists, independent of the stalled writer (they are written through `Events::append_in` in the login transaction); `verify.denied` rows may be fewer and one `events.dropped` row records the count by kind; the stalled writer never delays a login response by more than its store transaction.
 
-### S014-6 Events survive a crash after the write
+### S014-6 Crash atomicity between state and record
 
-- Given: the process is killed right after a `login.succeeded` write returns.
-- When: restarted.
-- Then: the row is present (WAL durability with `synchronous=NORMAL` is accepted to lose only the last transactions on OS crash; this case covers process crash only).
+- Given: harness crash points (a) after the login transaction commits and (b) inside it, before commit.
+- When: the process is killed at each point and restarted.
+- Then: (a) both the session and its `session.created`/`login.succeeded` rows are present; (b) neither the session nor the rows exist and the transaction is unconsumed. WAL durability with `synchronous=NORMAL` is accepted to lose only the last transactions on an OS crash; this case covers process crash only.
+
+### S014-7 Sinks resume from a durable cursor
+
+- Given: the log sink's `event_sinks.last_event_id` points at event `e_100`; events `e_101`–`e_150` were committed while the sink was stopped.
+- When: the process restarts.
+- Then: the log sink emits `e_101`–`e_150` exactly once, in order, then continues live; the cursor advances only after each line is written; pruning never removes rows newer than the cursor.
 
 ## Abuse cases
 
@@ -88,9 +96,9 @@ bounds everything else.
 
 ### S014-A3 Events cannot fill the disk
 
-- Given: `events.max_rows = 500` and a 10,000-event burst.
+- Given: `events.max_rows = 500` and a 10,000-event burst of diagnostic kinds.
 - When: run.
-- Then: the table never exceeds 500 + one batch; the SQLite file size stays bounded after a checkpoint; the burst cost is recorded as `events.dropped`/`events.pruned`.
+- Then: the table never exceeds 500 + one batch; the SQLite file size stays bounded after a checkpoint; the burst cost is recorded as `events.dropped`/`events.pruned`; required kinds are never dropped by the burst writer because they do not pass through it (a login burst is bounded by the transaction-rate limits of scenario 001 instead).
 
 ### S014-A4 Spoofed request id
 
@@ -112,8 +120,9 @@ bounds everything else.
 | S014-2 | `s014_2_denials_sampled` | `tests/scenarios/s014_events.rs` | integration | planned |
 | S014-3 | `s014_3_log_line_shape_no_secrets` | `tests/scenarios/s014_events.rs` | integration | planned |
 | S014-4 | `s014_4_retention` | `tests/scenarios/s014_events.rs` | integration | planned |
-| S014-5 | `s014_5_queue_pressure_keeps_login_events` | `tests/scenarios/s014_events.rs` | integration | planned |
-| S014-6 | `s014_6_events_survive_process_crash` | `tests/scenarios/s014_events.rs` | integration | planned |
+| S014-5 | `s014_5_required_events_committed_with_state` | `tests/scenarios/s014_events.rs` | integration | planned |
+| S014-6 | `s014_6_crash_atomicity_state_and_record` | `tests/scenarios/s014_events.rs` | integration | planned |
+| S014-7 | `s014_7_sinks_resume_from_cursor` | `tests/scenarios/s014_events.rs` | integration | planned |
 | S014-A1 | `s014_a1_user_strings_not_stored_raw` | `tests/scenarios/s014_events.rs` | unit | planned |
 | S014-A2 | `s014_a2_ordering_under_concurrency` | `tests/scenarios/s014_events.rs` | integration | planned |
 | S014-A3 | `s014_a3_events_cannot_fill_disk` | `tests/scenarios/s014_events.rs` | integration | planned |
@@ -131,7 +140,8 @@ bounds everything else.
 
 ## 한국어 요약
 
-M1의 모든 흐름은 ADR-0009의 스키마대로 이벤트를 구조화 로그와 `events`
-테이블에 남깁니다. 이벤트에는 식별자와 사유 코드만 있고 쿠키·코드·토큰은 절대
-없습니다. `login.*`과 `session.*`은 큐 압력에서도 유실되지 않고, 거부 사건은
-샘플링되며, 보존 기간과 최대 행 수로 디스크 사용을 제한합니다.
+M1의 모든 흐름은 ADR-0009의 스키마대로 이벤트를 `events` 테이블과 구조화
+로그에 남깁니다. 이벤트에는 식별자와 사유 코드만 있고 쿠키·코드·토큰은 절대
+없습니다. 필수 이벤트는 상태 변경과 같은 트랜잭션에서 커밋되어 세션과 기록이
+어긋날 수 없고, 싱크는 영속 커서에서 재개하며, 진단 이벤트만 샘플링·드롭되고
+그 수를 셉니다. 보존 기간과 최대 행 수로 디스크 사용을 제한합니다.

@@ -17,16 +17,16 @@ unsafe configuration.
 
 ## Preconditions and fixtures
 
-- Fixtures under `tests/fixtures/config/`: `valid.json`, `unknown_key.json`, `missing_secret.json`, `insecure_cookie.json`, `public_gateway_listener.json`, `cache_too_long.json`, `bad_app_host.json`, `duplicate_host.json`.
+- Fixtures under `tests/fixtures/config/`: `valid.json`, `unknown_key.json`, `missing_secret.json`, `insecure_cookie.json`, `missing_caller_key.json`, `unauthenticated_caller.json`, `public_gateway_listener.json`, `cache_too_long.json`, `bad_app_host.json`, `duplicate_host.json`.
 - Environment variables set by the harness per case; never real values.
 
 ## Main flow
 
 ### S013-1 Valid configuration passes
 
-- Given: `valid.json` and `HOPAE_TEST_MOCK_SECRET` set.
+- Given: `valid.json` and `HOPAE_TEST_MOCK_SECRET`, `HOPAE_TEST_GATEWAY_KEY` set.
 - When: `hopae --check --config valid.json`.
-- Then: exit 0; stdout lists listeners, store kind and path, applications with hosts and binding policy, providers with their `redirect_uri`, identity header set, and the gateway route `auth` fragment to register; no secret value appears (asserted by grepping for the env var's value).
+- Then: exit 0; stdout lists listeners, store kind and path, applications with host patterns, ports and binding policy, the return-origin allowlist, providers with their `redirect_uri` and `managed_by`, identity header set, the verify budget, the declared cache staleness bound (`0` here), and the gateway route `auth` fragment to register including `static_request_headers` with the **name** of the caller-key variable; no secret value appears (asserted by grepping for both env vars' values).
 
 ### S013-2 Unknown key is rejected
 
@@ -54,11 +54,11 @@ unsafe configuration.
 - When: `hopae run`.
 - Then: store opened and migrated → configuration mirrored into `providers`/`apps` → listeners bound (gateway listener last) → `healthz` answers `200` with `ready=true`; on `SIGTERM` listeners close, in-flight verify calls complete within 5 s, the store checkpoints, exit 0.
 
-### S013-6 Migration from an older schema
+### S013-6 Migration from an older schema and provider authority on restart
 
-- Given: a store at schema version 1 (fixture file).
+- Given: a store at schema version 1 (fixture file); separately, a store whose `providers` row `google` is `enabled = false, managed_by = api` while the configuration file lists `google` as enabled.
 - When: `run`.
-- Then: migrated to the current version inside a transaction; `meta.schema_version` updated; a backup copy `hopae.sqlite.bak-v1` is written first for SQLite.
+- Then: migrated to the current version inside a transaction; `meta.schema_version` updated; a backup copy `hopae.sqlite.bak-v1` is written first for SQLite. For the provider case: `google` stays disabled after start, the log says `provider google: database authoritative (managed_by=api); file entry ignored`, callbacks for it answer `provider_disabled`; `hopae providers import --force google` is the only way to reassert the file and it logs an `admin.*` event.
 
 ### S013-7 Reload is not supported in M1
 
@@ -81,9 +81,9 @@ unsafe configuration.
 
 ### S013-A1 Unsafe values are rejected, not warned
 
-- Given: `public_gateway_listener.json` (`listen.gateway = 0.0.0.0:8701` without `gateway.caller_key_env`), `cache_too_long.json` (`verify_cache_seconds = 60`), `bad_app_host.json` (host with scheme or path), `duplicate_host.json` (two applications claim one host).
+- Given: `missing_caller_key.json` (`gateway.kind = hangang` without `gateway.caller_key_env` and without `gateway.allow_unauthenticated_caller`), `public_gateway_listener.json` (`listen.gateway = 0.0.0.0:8701`), `cache_too_long.json` (`verify_cache_seconds = 60`), `bad_app_host.json` (host with scheme or path), `duplicate_host.json` (two applications claim one host), and a variant where `gateway.caller_key_env` names an unset variable.
 - When: `--check`.
-- Then: exit 2 for each with a specific message; the public-listener case passes only when a caller key is configured, with a warning that the key is defense in depth.
+- Then: exit 2 for each with a specific message; the public-listener case passes only with a configured caller key **and** a warning that a non-loopback bind relies on the key alone; the unset-variable case exits 2 (a missing caller key is never a warning).
 
 ### S013-A2 Two processes on one SQLite file
 
@@ -103,11 +103,11 @@ unsafe configuration.
 - When: `--check`.
 - Then: exit 2 `secrets must be referenced by environment variable name`; the literal is not echoed in the error.
 
-### S013-A5 Insecure cookie mode must be explicit and loud
+### S013-A5 Insecure modes must be explicit and loud
 
-- Given: `insecure_cookie.json` (`cookie.secure = false`).
+- Given: `insecure_cookie.json` (`cookie.secure = false`) and `unauthenticated_caller.json` (`gateway.allow_unauthenticated_caller = true`).
 - When: `--check` and `run`.
-- Then: both print `WARNING: insecure cookie mode (development only)` to stderr; the health body reports `insecure_mode=true`; `--strict` exits 2.
+- Then: both print `WARNING: insecure cookie mode (development only)` or `WARNING: verify caller authentication disabled (development only)` to stderr; the health body reports `insecure_mode=true` or `unauthenticated_caller=true`; `--strict` exits 2 for either.
 
 ## Observability expectations
 
@@ -124,13 +124,13 @@ unsafe configuration.
 | S013-3 | `s013_3_missing_secret_degrades` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 | S013-4 | `s013_4_run_refuses_invalid_config` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 | S013-5 | `s013_5_startup_order_and_readiness` | `tests/scenarios/s013_preflight.rs` | integration | planned |
-| S013-6 | `s013_6_schema_migration` | `tests/scenarios/s013_preflight.rs` | integration | planned |
+| S013-6 | `s013_6_schema_migration_and_provider_authority` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 | S013-7 | `s013_7_reload_unsupported_in_m1` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 | S013-A1 | `s013_a1_unsafe_values_rejected` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 | S013-A2 | `s013_a2_second_process_same_store_refused` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 | S013-A3 | `s013_a3_huge_config_bounded` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 | S013-A4 | `s013_a4_literal_secret_rejected` | `tests/scenarios/s013_preflight.rs` | integration | planned |
-| S013-A5 | `s013_a5_insecure_cookie_mode_loud` | `tests/scenarios/s013_preflight.rs` | integration | planned |
+| S013-A5 | `s013_a5_insecure_modes_loud` | `tests/scenarios/s013_preflight.rs` | integration | planned |
 
 ## Live verification
 
@@ -145,6 +145,8 @@ unsafe configuration.
 ## 한국어 요약
 
 `hopae --check`는 설정 전체를 검증하고 비밀 값은 출력하지 않으며, 운영자가
-게이트웨이에 등록해야 할 사실(redirect URI, 신원 헤더, 라우트 조각)을
-출력합니다. 알 수 없는 키, 공개 게이트웨이 리스너, 과도한 캐시 TTL, 파일에 적힌
-비밀 값은 거부하고, 안전하지 않은 쿠키 모드는 명시적 경고와 함께만 허용합니다.
+게이트웨이에 등록해야 할 사실(redirect URI, 신원 헤더, 호출자 키 변수 이름을
+포함한 라우트 조각)을 출력합니다. 호출자 키 누락, 알 수 없는 키, 과도한 캐시
+TTL, 파일에 적힌 비밀 값은 거부하고, 안전하지 않은 쿠키 모드와 호출자 인증
+해제는 명시적 경고와 함께만 허용합니다. API로 비활성화한 제공자는 재시작 후에도
+파일 설정에 의해 다시 켜지지 않습니다.

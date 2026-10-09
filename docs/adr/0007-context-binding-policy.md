@@ -27,17 +27,36 @@ reserved application `default` supplies defaults.
 | `binding.ua` | `strict`, `off` | `off` | `strict`: SHA-256 of the `user-agent` header equals the recorded digest. |
 | `binding.country` (later) | `strict`, `off` | `off` | Requires a country source (gateway header or local database); not evaluated in M1. |
 | `binding.on_mismatch` | `terminate_session`, `drop_handle` | `terminate_session` | `terminate_session`: the whole session ends (reason `binding_ip`/`binding_ua`), every host loses access, an invalidation is published. `drop_handle`: only the presenting host's handle is revoked; the portal session, if its own policy still passes, can hand off again. |
-| `session.idle` | duration | `12h` | Terminated with reason `idle` when `now − last_seen_at` exceeds it; `last_seen_at` has 30 s granularity. |
-| `session.absolute` | duration | `7d` | Terminated with reason `absolute` at `created_at + absolute`. Cookie `Max-Age` mirrors it. |
+| `apps[].session.idle` | duration | `12h` | Per-handle idle timer; see the state machine below. `last_seen_at` has 30 s granularity. |
+| `apps[].session.absolute` | duration | `7d` | Per-handle absolute timer; cookie `Max-Age` mirrors it. |
+| `session.idle`, `session.absolute` | duration | `24h`, `30d` | Session-wide timers; expiry terminates the session and every handle. |
 | `session.max_auth_age` (later) | duration | none | Requires a fresh first-factor authentication when `now − auth_time` exceeds it. |
 
-Evaluation order at verify: lifetimes → binding → application policy →
-step-up. The portal applies the `default` application's policy to its own
-handle. A mismatch is an event (`session.terminated` with the reason, the
-recorded and observed values' digests, never raw UA strings) and answers the
+Evaluation order at verify: lifetimes → binding → user status and
+`authz_version` → application policy → step-up. The portal applies the
+`default` application's policy to its own handle. A mismatch is an event
+(`session.terminated` or `handle.revoked` with the reason, the recorded and
+observed values' digests, never raw UA strings) and answers the
 unauthenticated path (`302`/`401`) with a cookie clear. The login transaction
 inherits the policy: a transaction started from IP A cannot be completed from
 IP B when `binding.ip = strict` (reason `txn_binding`).
+
+**Lifetime state machine.** Handles and sessions have separate timers; a
+handle timer revokes that handle only, a session timer terminates the session
+and therefore every handle (review finding R15):
+
+| Timer | Scope and clock | Effect on expiry |
+| --- | --- | --- |
+| `apps[].session.idle` (default 12 h) | Per handle, from `session_handles.last_seen_at` | Revoke that handle (`handle.revoked`, reason `idle`); the session and other handles continue |
+| `apps[].session.absolute` (default 7 d) | Per handle, from `session_handles.created_at`; the cookie `Max-Age` mirrors it | Revoke that handle (reason `absolute`); a new handoff may issue a new handle while the session lives |
+| `default` application's idle and absolute | The portal handle | Revoke the portal handle; the next login consults the provider again (no SSO) |
+| `session.idle` (default 24 h) | Per session, from the newest `last_seen_at` of any of its handles | Terminate the session (reason `idle`) |
+| `session.absolute` (default 30 d) | Per session, from `sessions.created_at`; `x-hopae-expires` reports the earliest of the handle's and the session's deadlines | Terminate the session (reason `absolute`) |
+| Binding mismatch | Per request | `terminate_session` or `drop_handle` as configured |
+| Elevation ([ADR-0008](0008-second-factor-extension-point.md)) | Per session | Revoke every handle (reason `elevation`) and reissue through browser-bound handoffs |
+
+Activity on one host never extends another host's handle timer; only the
+session-wide idle timer sees all hosts.
 
 Out of scope: device fingerprinting, TLS fingerprinting, risk scoring.
 
@@ -73,12 +92,16 @@ Out of scope: device fingerprinting, TLS fingerprinting, risk scoring.
 
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Pending G2. |
+| 1 | 2026-10-09 | 0 | 1 | 0 | 0 | 1 × FIX_FIRST applied (R15, shared with ADR-0004) |
 
-Questions for the reviewer: does `drop_handle` let an attacker who stole a
-cookie force the victim's handle revoked repeatedly (denial of service) and
-is that acceptable? Is `/24` a sensible IPv4 prefix default given mobile
-carriers?
+Findings and dispositions:
+
+- R15 (S2): per-host idle expiry and session-wide termination contradicted each other, and session-wide activity would let one host keep another's shorter policy alive. FIX_FIRST: the lifetime state machine above separates handle timers from session timers; scenario 010 rewritten.
+
+Reviewer confirmation recorded: the strict-IP default with its cookie-thief
+logout and mobile-churn costs is the maintainer's explicit choice; shared NAT
+does not make an IP a browser identity, which is why the handoff is bound to
+a browser cookie (ADR-0004) rather than to the IP alone.
 
 ## References
 

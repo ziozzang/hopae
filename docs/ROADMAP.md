@@ -1,6 +1,6 @@
 # Roadmap
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 3 -->
 
 [Documentation](README.md) · [한국어](ko/ROADMAP.md)
 
@@ -57,6 +57,8 @@ source (`src/proxy.rs`, `src/config.rs`):
 - Path scoping is per route (`path_prefix`, match mode, priority); finer rules live in Hopae using the original URL header.
 - Login throttling, blacklists and login history are not gateway features; the gateway's per-URL failure bans can be an outer layer.
 - The gateway's Lua policy API cannot set response headers, cookies or redirects; login and logout entry points on application hosts therefore live in Hopae (or in a native gateway change, HC-5).
+- The gateway cannot add static headers to the external check, so the verify endpoint has no caller authentication beyond network reach; on a host-network gateway loopback admits any local process. Gateway change HC-3 is therefore implemented together with M1.
+- Routes are selected on a canonical (decoded, normalized) path while the external check receives the raw path; a `429` from the external check becomes `503`; `x-original-*` headers pass through unchanged on routes without the external check.
 
 ## Milestones
 
@@ -87,13 +89,15 @@ is deliberately narrow and lands before any breadth.
 
 Scope (scenarios 001–099):
 
-- [ ] Generic OIDC authorization-code client with PKCE and nonce; Google as the first configured provider (ADR-0010).
-- [ ] Server-side sessions in the SQLite store; per-host opaque handles in `__Host-hopae`; login transactions; single-use cross-domain handoff; idle and absolute lifetimes (ADR-0002, ADR-0004).
-- [ ] Two listeners: gateway (`/_hopae/verify`) and portal (login, provider callback, logout, health) (ADR-0005).
-- [ ] `GET /_hopae/verify` per the contract: `200` with the identity header set; `302`/`401` with a validated return target otherwise; `400`/`503` fail closed; `cache-control: no-store` everywhere (ADR-0006 default).
-- [ ] Application registry (`apps[]`) with hosts, lifetimes and binding policy; client-IP binding with session termination on mismatch, configurable per application (ADR-0007).
-- [ ] Session schema records factors and `aal`; verify emits `x-hopae-aal` and `x-hopae-factors` (ADR-0008 schema only).
-- [ ] Event model: typed events to the structured log and the `events` table with retention (ADR-0009).
+- [ ] Generic OIDC authorization-code client with PKCE and nonce and the user-info subject consistency check; Google as the first configured provider (ADR-0010).
+- [ ] Server-side sessions in the SQLite store; per-host opaque handles in `__Host-hopae` with per-handle timers and issued level; login transactions; browser-bound single-use cross-domain handoff (`__Host-hopae_bind`); lifetime state machine (ADR-0002, ADR-0004, ADR-0007).
+- [ ] Two listeners: gateway (`/_hopae/verify`, caller key required) and portal (login, provider callback, logout, health) (ADR-0005).
+- [ ] Gateway change HC-3 (static request headers with the caller key) implemented in the gateway's repository and verified by scenarios 004-A8 and 013-A1 against the built gateway.
+- [ ] `GET /_hopae/verify` per the contract: `200` with the identity header set; `302`/`401` with a return target inside the explicit return-origin allowlist otherwise; `403` for denials and rate limits; `400`/`503` fail closed; `cache-control: no-store` everywhere (ADR-0006 default); 400 ms verify budget.
+- [ ] Application registry (`apps[]`) with host patterns, ports, lifetimes and binding policy; client-IP binding with session termination on mismatch, configurable per application (ADR-0007); canonical path in the decision input (ADR-0013).
+- [ ] Account creation rules with explicit linking by default: an email collision refuses with a notice (ADR-0011); the completion flow is M3.
+- [ ] Session schema records factors and `aal`; handles record `issued_aal`; verify emits `x-hopae-aal` and `x-hopae-factors`; users carry `authz_version` read at every verify (ADR-0008 schema only).
+- [ ] Event model as a transactional outbox: required events committed with their state change, durable sink cursors, structured log sink, retention (ADR-0009).
 - [ ] Header-injection contract: the identity header set, their declaration in the gateway route so client copies are stripped gateway-wide, and a gateway-layer test proving a spoofed header never reaches the upstream.
 - [ ] Path-scoped protection via gateway routes (public prefix, protected prefix, higher-priority `/admin`) documented with a working route example; phase-0 manual registration (ADR-0012); Hopae-side per-path rules deferred to M2.
 - [ ] Configuration file, `hopae --check` preflight, structured logs with reason codes.
@@ -120,9 +124,10 @@ Scenarios (draft at G1, approved at G3):
 
 Exit: a browser on a protected route of the live gateway completes login with
 the real provider, the upstream sees the identity headers, a client-supplied
-identity header is stripped, a second application on another registrable
-domain is reached without a second provider login, and logout ends access on
-the next request.
+identity header is stripped, a verify call without the caller key is refused,
+a second application on another registrable domain is reached without a
+second provider login, a second browser behind the same IP cannot redeem the
+first browser's handoff, and logout ends access on the next request.
 
 ### M2 — Sessions, abuse controls and shared state (0.2.0)
 
@@ -130,9 +135,9 @@ Scope (scenarios 100–199):
 
 - [ ] Login history API over the `events` table: filters by user, IP, provider, outcome, time; bounded retention.
 - [ ] Blacklists: subject, email, email domain and client IP (CIDR); checked at login and at verify; administrator-managed.
-- [ ] Login-attempt throttling and lockout per account and per client IP with constant-work responses; interaction with the gateway's failure bans documented.
+- [ ] Login-attempt throttling and lockout per account and per client IP with synchronous atomic counters and constant-work responses; interaction with the gateway's failure bans documented.
 - [ ] PostgreSQL backend for the primary store (ADR-0002) so two instances share one directory.
-- [ ] Redis/Valkey session cache (write-through, bounded local cache, fail to the primary store), throttling counters, and the invalidation channel (ADR-0006); `verify_cache_seconds` per application.
+- [ ] Redis/Valkey session cache (write-through, opt-in bounded local cache, 50 ms operations inside the verify budget, breaker, fail to the primary store), throttling counters, and the generation-stamped invalidation channel (ADR-0006); `verify_cache_seconds` and `x-hopae-fresh-until` per application; `authz_version` invalidation on group or status change.
 - [ ] Logout everywhere and administrator revocation; session listing per subject.
 - [ ] Hopae-side path and host policy rules evaluated from the original URL (allow, require login, require group); such rules mark the application's decisions `no-store`.
 - [ ] Phase 1 of gateway configuration ownership (ADR-0012): `hopae gateway render` and the read-only drift report.
@@ -191,7 +196,7 @@ Scope (scenarios 600–699):
 - [ ] Multi-instance operation documented end to end: what is shared, what is instance-local, required PostgreSQL and Redis/Valkey settings; high availability of verify through a gateway hairpin route over two instances.
 - [ ] Prometheus metrics, health and readiness endpoints, structured audit export.
 - [ ] Backup and restore of the SQLite store; key rotation for cookie and session keys, factor keys and webhook secrets.
-- [ ] Phase 2 of gateway configuration ownership (ADR-0012), only by a new ADR.
+- [ ] Phase 2 of gateway configuration ownership (ADR-0012), only by a new ADR and only after gateway change HC-7 (field-scoped route writes) exists.
 - [ ] API-client mode (stretch): issue RFC 9068 access tokens with JWKS and discovery so the gateway's native JWT verifier can protect APIs with the same identities.
 
 Exit: a rolling replacement of two instances keeps sessions; metrics and backups verified live.
@@ -207,10 +212,14 @@ major version.
 
 Proposed changes to the gateway are listed with acceptance criteria in the
 [gateway contract](GATEWAY_CONTRACT.md#proposed-gateway-changes). They are
-separate tasks in the gateway's repository, done in a worktree, and none is
-required by M1. Recommended order: HC-3 (static request headers and caller
-key), HC-4 (cookie filtering), HC-1 (decision micro-cache), HC-2
-(invalidation subscriber), HC-5 (native entry points, optional). Hopae adds a
+separate tasks in the gateway's repository, done in a worktree. HC-3 (static
+request headers carrying the caller key) is required by M1 and is built with
+it. Recommended order afterwards: HC-6 (canonical path and route id on the
+verify call), HC-8 (`429` relay with `retry-after`), HC-4 (cookie
+filtering), HC-1 (decision micro-cache with the full key), HC-2
+(generation-stamped invalidation subscriber), HC-9 (strip `x-original-*`
+gateway-wide), HC-5 (native entry points, optional), HC-7 (field-scoped
+route writes, prerequisite for configuration-ownership phase 2). Hopae adds a
 gateway-layer scenario for each change in the first release that relies on it
 and records the pairing in the contract's compatibility matrix.
 

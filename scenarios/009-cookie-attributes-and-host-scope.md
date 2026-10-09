@@ -58,7 +58,13 @@ client cannot be adopted as a session.
 
 - Given: `cookie.name = __Host-corp_sso`.
 - When: redemption.
-- Then: that name is used; preflight rejects names without the `__Host-` prefix when `cookie.secure = true`.
+- Then: that name is used for the handle and `__Host-corp_sso_bind` / `__Host-corp_sso_txn` for the others; preflight rejects names without the `__Host-` prefix when `cookie.secure = true`.
+
+### S009-7 Binding cookie attributes
+
+- Given: no cookie on `app.example.test`.
+- When: the unauthenticated document navigation of scenario 001, then the redemption of scenario 003.
+- Then: the `302` to the portal sets `__Host-hopae_bind` with `Path=/`, `Secure`, `HttpOnly`, `SameSite=Lax`, `Max-Age=600`, no `Domain`, value of 22 base64url characters; the redemption response clears it with matching attributes and `Max-Age=0`; a `401` for a non-document request sets no binding cookie.
 
 ## Abuse cases
 
@@ -97,11 +103,11 @@ client cannot be adopted as a session.
 - When: the `set-cookie` passes through the relayed `302`.
 - Then: the client receives the attributes byte for byte (the gateway appends `set-cookie` unchanged).
 
-### S009-A5 `SameSite=None` is not an option
+### S009-A5 `SameSite` cannot be weakened or tightened by configuration
 
-- Given: configuration `cookie.same_site = none`.
+- Given: configuration containing `cookie.same_site = none` and, separately, `cookie.same_site = strict`.
 - When: `hopae --check`.
-- Then: rejected with a message; allowed values are `lax` (default) and `strict`.
+- Then: both rejected as an unknown key (`cookie.same_site` does not exist); every cookie Hopae sets (`__Host-hopae`, `__Host-hopae_bind`, `__Host-hopae_txn`) carries `SameSite=Lax`, which the cross-site portal → application navigation and the provider callback require.
 
 ## Observability expectations
 
@@ -119,11 +125,12 @@ client cannot be adopted as a session.
 | S009-4 | `s009_4_jar_isolation_across_hosts` | `tests/scenarios/s009_cookies.rs` | integration | planned |
 | S009-5 | `s009_5_dev_mode_drops_prefix` | `tests/scenarios/s009_cookies.rs` | integration | planned |
 | S009-6 | `s009_6_custom_cookie_name` | `tests/scenarios/s009_cookies.rs` | integration | planned |
+| S009-7 | `s009_7_binding_cookie_attributes` | `tests/scenarios/s009_cookies.rs` | integration | planned |
 | S009-A1 | `s009_a1_client_value_never_adopted` | `tests/scenarios/s009_cookies.rs` | integration | planned |
 | S009-A2 | `s009_a2_many_cookies_bounded` | `tests/scenarios/s009_cookies.rs` | integration | planned |
 | S009-A3 | `s009_a3_sibling_cookie_tossing_ineffective` | `tests/scenarios/s009_cookies.rs` | integration | planned |
 | S009-A4 | `s009_a4_attributes_survive_gateway_relay` | `tests/scenarios/s009_cookies.rs` | gateway | planned |
-| S009-A5 | `s009_a5_samesite_none_rejected` | `tests/scenarios/s009_cookies.rs` | unit | planned |
+| S009-A5 | `s009_a5_samesite_not_configurable` | `tests/scenarios/s009_cookies.rs` | unit | planned |
 
 ## Live verification
 
@@ -133,7 +140,7 @@ client cannot be adopted as a session.
 
 ## Open questions
 
-- `SameSite=Strict` would break the handoff redirect from the portal (cross-site navigation); confirm and document, or remove `strict` as an option.
+- None open; `Strict` was removed after review finding R16.
 
 ## 한국어 요약
 

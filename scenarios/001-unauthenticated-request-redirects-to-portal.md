@@ -17,10 +17,11 @@ an unauthenticated flood cannot exhaust the store.
 
 ## Preconditions and fixtures
 
-- Configuration `tests/fixtures/m1-basic.json`: portal `https://auth.example.test`, application `app` with host `app.example.test`, provider `mock` (kind `oidc`), `apps.unregistered = deny`.
+- Configuration `tests/fixtures/m1-basic.json`: portal `https://auth.example.test`, application `app` with host `app.example.test`, provider `mock` (kind `oidc`), the `default` application with no host patterns, `gateway.caller_key_env = HOPAE_TEST_GATEWAY_KEY`.
+- Every verify request in this scenario carries `x-hopae-gateway-key` with the configured value unless a case says otherwise.
 - Mock provider profile `default`.
-- Gateway route fragment: the protected whole-host route from the contract page.
-- Injected clock at `2026-10-09T00:00:00Z`; injected randomness so the transaction id is `T1`.
+- Gateway route fragment: the protected whole-host route from the contract page (including `static_request_headers`).
+- Injected clock at `2026-10-09T00:00:00Z`; injected randomness so the transaction id is `T1` and the binding cookie value is `B1`.
 
 ## Main flow
 
@@ -28,7 +29,7 @@ an unauthenticated flood cannot exhaust the store.
 
 - Given: no `__Host-hopae` cookie; no transaction rows.
 - When: `GET /_hopae/verify` on the gateway listener with `x-original-url: https://app.example.test/admin/x?q=1`, `x-forwarded-host: app.example.test`, `x-forwarded-proto: https`, `x-forwarded-for: 203.0.113.9`, `sec-fetch-dest: document`, `user-agent: UA1`.
-- Then: `302`; `location: https://auth.example.test/login?txn=T1`; `cache-control: no-store`; `x-hopae-reason: login_required`; no `set-cookie`; one `login_txns` row with `return_target = https://app.example.test/admin/x?q=1`, `app_id = app`, `client_ip = 203.0.113.9`, `ua_sha256 = sha256(UA1)`, `expires_at = now + 600`; event `login.started`.
+- Then: `302`; `location: https://auth.example.test/login?txn=T1`; `set-cookie: __Host-hopae_bind=B1; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` (planted on `app.example.test` through the relayed response); `cache-control: no-store`; `x-hopae-reason: login_required`; one `login_txns` row with `return_target = https://app.example.test/admin/x?q=1`, `app_id = app`, `client_ip = 203.0.113.9`, `ua_sha256 = sha256(UA1)`, `bind_sha256 = sha256(B1)`, `expires_at = now + 600`; event `login.started` written in the same transaction.
 
 ### S001-2 Portal renders the chooser for the transaction
 
@@ -48,7 +49,7 @@ an unauthenticated flood cannot exhaust the store.
 
 - Given: no cookie.
 - When: verify with `sec-fetch-dest: empty`, `sec-fetch-mode: cors`, `accept: application/json`.
-- Then: `401`; `content-type: application/json`; body `{"error":"login_required","login":"https://auth.example.test/login?txn=T1"}`; `www-authenticate: Hopae realm="auth.example.test"`; `cache-control: no-store`; a transaction row is created as in S001-1.
+- Then: `401`; `content-type: application/json`; body `{"error":"login_required","login":"https://auth.example.test/login?txn=T1"}`; `www-authenticate: Hopae realm="auth.example.test"`; `cache-control: no-store`; **no** `set-cookie` (a non-document request never receives a binding cookie, so its transaction can never complete a handoff); a transaction row is created as in S001-1 with `bind_sha256` empty.
 
 ### S001-5 Missing fetch metadata falls back to `accept`
 
@@ -56,11 +57,11 @@ an unauthenticated flood cannot exhaust the store.
 - When: verify with `accept: text/html,application/xhtml+xml`.
 - Then: `302` as S001-1. With `accept: */*` only: `401` as S001-4.
 
-### S001-6 Unregistered host is denied
+### S001-6 Host outside every application pattern is denied
 
-- Given: `apps.unregistered = deny`.
+- Given: no application lists `unknown.example.test` or a pattern covering it.
 - When: verify with `x-forwarded-host: unknown.example.test` and matching `x-original-url`.
-- Then: `403`; `x-hopae-reason: unknown_app`; no transaction row; event `verify.denied` with `reason=unknown_app`.
+- Then: `403`; `x-hopae-reason: unknown_app`; no transaction row; no `set-cookie`; event `verify.denied` with `reason=unknown_app`.
 
 ## Abuse cases
 
@@ -97,7 +98,7 @@ an unauthenticated flood cannot exhaust the store.
 
 - Given: `txn.max_rows = 1000` and `txn.per_ip_per_minute = 30` in the fixture.
 - When: 31 verify calls without cookies from one IP within a minute, then 2,000 from distinct IPs.
-- Then: the 31st from the same IP answers `429` with `retry-after` and `x-hopae-reason: txn_rate_limited`; beyond `max_rows` the oldest unconsumed transactions are evicted and `txn.evicted` events carry the count; the process RSS stays under the harness limit; store row count ≤ 1000.
+- Then: the 31st from the same IP answers `403` with body `{"error":"rate_limited","retry_after":60}` and `x-hopae-reason: txn_rate_limited` (an unmodified gateway relays `403` with its body but maps `429` to `503` and drops `retry-after`; with gateway change HC-8 and `gateway.rate_limit_status = 429` the same case answers `429` with `retry-after: 60`); beyond `max_rows` the oldest unconsumed transactions are evicted and `txn.evicted` events carry the count; the process RSS stays under the harness limit; store row count ≤ 1000.
 
 ### S001-A5 Gateway listener path on the portal listener is not served
 

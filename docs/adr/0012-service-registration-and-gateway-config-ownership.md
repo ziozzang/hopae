@@ -30,11 +30,13 @@
 | --- | --- | --- | --- |
 | 0 — Manual | M1 | The operator creates the route with the `auth` fragment from the contract page and the application row in Hopae. `hopae --check` warns when an application host has no corresponding route it can see (if a gateway read-only credential is configured) | No writes by Hopae |
 | 1 — Proposal and drift | M2/M4 | `hopae gateway render --app <id>` prints the route `auth` fragment (and a full route skeleton on request). With a read-only gateway credential, Hopae compares its applications to the gateway's routes and reports drift (missing route, missing identity header in `response_headers`, `forward_response` false, timeout out of range) in the console and in `hopae --check`. Nothing is written | Read-only credential; diff only |
-| 2 — Apply with consent | M7 or later, by a new ADR | For routes whose id is listed in `gateway.managed_routes` by the operator, Hopae may apply the rendered `auth` block through `PUT /v1/routes/http/<id>` under the gateway's revision CAS, after showing the diff and receiving an explicit console confirmation per change. It never creates or deletes routes and never touches other fields. Conflicts (revision mismatch) abort and are shown | Scoped allowlist; CAS; human confirmation; audit on both sides |
+| 2 — Apply with consent | M7 or later, by a new ADR, **and only after gateway change HC-7 exists** | For routes whose id is listed in `gateway.managed_routes` by the operator, Hopae may apply the rendered `auth` block through a gateway endpoint that accepts **only** the `auth` sub-resource of a route (`PUT /v1/routes/http/<id>/auth`, HC-7) with a credential whose scope the gateway enforces as "auth block of these route ids", under the gateway's revision CAS, after showing the diff and receiving an explicit console confirmation per change. The whole-route `PUT` is never used by Hopae. Conflicts abort and are shown | Gateway-enforced field scope and id scope (HC-7); CAS; human confirmation; audit on both sides. Client-side diffing is a courtesy, not the boundary (review finding R13) |
 
 A phase advances only when the previous one has run in the reference
 deployment for one minor version without an incident report, and only by a
-new ADR that supersedes the relevant row here.
+new ADR that supersedes the relevant row here. Without HC-7, phase 2 does not
+exist: a route-id allowlist on the whole-route `PUT` would let a defective or
+compromised Hopae change backends, hosts, priority or `access_mode`.
 
 **Non-goals, permanently:** a shared configuration store between the two
 products; Hopae creating or deleting routes; Hopae holding a gateway
@@ -53,7 +55,7 @@ database.
 ### Negative
 
 - Phase 0 is two manual steps per service; the drift report in phase 1 is the remedy, not automation.
-- Phase 2 depends on a gateway credential scope that does not exist yet (route-scoped API tokens); it is a gateway task to define before phase 2 can start.
+- Phase 2 depends on a gateway capability that does not exist yet (HC-7: an `auth`-only route sub-resource with a credential scoped to it and to listed route ids); it is a gateway task to define before phase 2 can start.
 
 ### Neutral
 
@@ -72,11 +74,16 @@ database.
 
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Pending G2. |
+| 1 | 2026-10-09 | 0 | 1 | 0 | 0 | 1 × FIX_FIRST applied (R13) |
 
-Questions for the reviewer: is a read-only gateway credential in Hopae
-(phase 1) itself an unacceptable widening of Hopae's blast radius? Should
-phase 2 be deleted from the plan rather than deferred?
+Findings and dispositions:
+
+- R13 (S2): a route-id allowlist plus CAS on the whole-route `PUT` does not restrict which fields change. FIX_FIRST: phase 2 requires HC-7 (gateway-enforced `auth`-only sub-resource and credential scope); without it phase 2 does not exist.
+
+Reviewer confirmation recorded: phases 0 and 1 (render and read-only drift)
+avoid writes and stand. Open for the reviewer: is the read-only gateway
+credential of phase 1 itself an unacceptable widening of Hopae's blast
+radius?
 
 ## References
 

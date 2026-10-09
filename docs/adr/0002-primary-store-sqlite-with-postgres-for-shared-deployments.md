@@ -34,10 +34,25 @@ counters (`attempts`) when configured, following the gateway's atomic-script
 pattern. A cache miss, timeout or error falls back to the primary store; a
 Redis outage disables the local cache (TTL 0) and logs `cache_degraded`.
 
-Hot-path bounds: a verify does at most one `session_handles` lookup joined
-with `sessions` (indexed by digest), one `apps` lookup from an in-memory
-snapshot of the directory refreshed every 5 s or on change, and a coalesced
-`last_seen_at` write at most every 30 s per handle.
+Hot-path bounds: a verify does one `session_handles` lookup joined with
+`sessions` (indexed by digest), one `users` lookup for `status` and
+`authz_version` (identity and authorization state are never served from a
+timed snapshot), one `apps` lookup from an in-memory **configuration**
+snapshot that is replaced when configuration changes (and publishes an `all`
+invalidation), and a coalesced `last_seen_at` write at most every 30 s per
+handle.
+
+Deadline budget: a verify has a total budget `gateway.verify_budget_ms`
+(default 400, below the recommended gateway timeout of 500 ms). Each cache
+operation gets `cache.op_timeout_ms` (default 50); on timeout the lookup
+falls through to the primary store with the remaining budget. Three
+consecutive cache timeouts open a breaker that bypasses the cache for 5 s and
+logs `cache_degraded`. A stalled connection (accepted, never answering) is
+the test case, not only a refused connection.
+
+Durable events: the `Events` trait exposes `append_in(&mut tx, event)` so
+that required audit events are committed in the same transaction as the
+state change they describe ([ADR-0009](0009-event-model.md)).
 
 Out of scope: distributed SQLite (replication, shared filesystems),
 MySQL, embedded key-value stores.
@@ -75,11 +90,17 @@ MySQL, embedded key-value stores.
 
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Pending G2. |
+| 1 | 2026-10-09 | 1 | 3 | 0 | 0 | 4 × FIX_FIRST applied (shared findings R06, R08, R10, R11) |
 
-Questions for the reviewer: is the "directory snapshot refreshed every 5 s"
-an unacceptable window for block enforcement at verify (TM-18)? Should the
-coalesced `last_seen_at` write make idle timeout observably imprecise?
+Findings and dispositions:
+
+- R06 (S1, shared with ADR-0009): a 5 s directory snapshot would serve stale user status and groups. FIX_FIRST: verify reads `users.status` and `users.authz_version` on every call; the in-memory snapshot holds configuration only.
+- R08 (S2, shared with ADR-0006): directory staleness contributed to an unbounded freshness claim. FIX_FIRST: identity state is read per verify; configuration changes publish `all`.
+- R10 (S2, shared with ADR-0009): an in-process bus cannot guarantee audit delivery. FIX_FIRST: `append_in(tx, event)` commits required events with the state change.
+- R11 (S2): copying the gateway's 900 ms Redis timeout would exceed the gateway's verify timeout. FIX_FIRST: 400 ms verify budget, 50 ms cache operations, breaker, stalled-connection test (scenario 004-9).
+
+Open for the reviewer: is the coalesced `last_seen_at` write (30 s) acceptable
+given per-handle idle expiry (ADR-0007)?
 
 ## References
 

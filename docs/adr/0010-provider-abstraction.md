@@ -22,9 +22,28 @@
 `begin(txn, redirect_uri) → AuthorizationRequest { url, state, nonce?,
 pkce? }`, `complete(txn, callback_query) → ProviderIdentity` and
 `health()`. `ProviderIdentity` is `{ subject, email: Option<String>,
-email_verified: bool, name, username, picture, raw_claims (bounded) }`.
-Only `complete` may perform outbound calls, and only to endpoints derived
-from the provider's configuration or its discovery document.
+email_verified: bool, email_authoritative: bool, name, username, picture,
+raw_claims (bounded) }`. Only `complete` may perform outbound calls, and
+only to endpoints derived from the provider's configuration or its discovery
+document.
+
+**Subject consistency invariant.** `complete` returns an identity only when
+every source of claims agrees on the subject: for `oidc`, a user-info
+response is accepted only if its `sub` equals the validated ID token's `sub`
+(OpenID Connect Core §5.3.2); for the Kakao preset, `/v2/user/me`'s `id`
+(as a decimal string) must equal the ID token's `sub`; for `oauth2` kinds
+without an ID token (Naver) the profile's subject pointer is the only
+subject and is required to be present. A mismatch rejects the login with
+`userinfo_subject_mismatch`, creates nothing and is an event (review finding
+R07).
+
+**Email authority.** `email_authoritative` is `true` only when the provider
+itself is the mailbox authority for that address: Google with an `hd` claim
+that matches one of the provider's `authoritative_domains`, or an
+`email_link` factor completed through Hopae's own mail. A verified email that
+is not authoritative (a Google account on a third-party mailbox, Kakao,
+Naver) can establish a new account's email but never links to an existing
+one automatically ([ADR-0011](0011-account-linking-policy.md)).
 
 **Kinds.**
 
@@ -51,12 +70,18 @@ variable is absent is loaded as `disabled` with a preflight warning and an
 event. An optional encrypted-at-rest mode for console-entered secrets is
 deferred to M4 and recorded there if adopted.
 
-**Runtime management.** Providers live in the `providers` table from M1 and
-are mirrored from the configuration file at start (file wins on conflict,
-with a warning). M4 adds create, update, enable, disable and delete through
-the management API; a disabled provider rejects callbacks with
-`provider_disabled`. Per-provider `allowed_email_domains` and `sort_order`
-are columns from M1.
+**Runtime management.** Providers live in the `providers` table from M1
+with a `managed_by` column (`file` or `api`). At start, file entries are
+imported only for rows that do not exist or are `managed_by = file`; a row
+that was ever changed through the management API (M4) is `managed_by = api`
+and the file never touches it again, so a runtime disable survives restarts
+(review finding R12). `hopae providers import --force <id>` is the explicit
+way to reassert the file. A disabled provider rejects callbacks with
+`provider_disabled`. Because secrets are environment references, adding a
+provider or rotating its secret requires the process (or container) to be
+restarted with the new variable; the console says so when a referenced
+variable is absent. Per-provider `allowed_email_domains`,
+`authoritative_domains` and `sort_order` are columns from M1.
 
 **Redirect URIs.** `https://auth.example.test/callback/<provider_id>`; one
 per provider; printed by `hopae --check` for registration at the provider.
@@ -94,12 +119,18 @@ token refresh for application use.
 
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Pending G2. |
+| 1 | 2026-10-09 | 2 | 1 | 0 | 0 | 3 × FIX_FIRST applied (R01 shared, R07, R12) |
 
-Questions for the reviewer: are the Naver facts (no verified flag, `state`
-on the token request) correct as of the official documentation? Is reading
-`email_verified` from a user-info endpoint rather than the ID token a
-mix-up risk when the access token and ID token come from the same exchange?
+Findings and dispositions:
+
+- R01 (S1, shared with ADR-0011): `email_verified` does not prove ownership of an existing Hopae account. FIX_FIRST: `email_authoritative` distinguishes mailbox authority from verification; linking defaults to explicit.
+- R07 (S1): user-info claims were not bound to the validated token subject. FIX_FIRST: subject consistency invariant above; scenario 002-A9 with mock profile `userinfo_wrong_sub`.
+- R12 (S2): "file wins on conflict" would re-enable a provider disabled at run time. FIX_FIRST: `managed_by` column, database authoritative for API-managed rows, explicit `--force` import; scenario 013-6 extended.
+
+Reviewer confirmation recorded: the official Naver documentation confirms
+`state` on the token request and the `response.*` profile mapping with no
+verification flag (reviewer-verified 2026-10-09); the M3 G1 re-check stands
+as a formality.
 
 ## References
 

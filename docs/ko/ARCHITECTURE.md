@@ -1,6 +1,6 @@
 # 아키텍처
 
-<!-- translation-status: source=../ARCHITECTURE.md source-rev=1 status=current -->
+<!-- translation-status: source=../ARCHITECTURE.md source-rev=2 status=current -->
 
 [문서 목차](README.md) · [English](../ARCHITECTURE.md)
 
@@ -17,9 +17,10 @@ Hopae는 게이트웨이의 포워드 인증 확인에 답하는 단일 바이�
 
 | 항목 | M1 요구 사항 |
 | --- | --- |
-| 게이트웨이 | `forward_response`가 `true`인 외부 인가 라우트(`auth`)를 가진 Hangang 0.2.6 이상. 정확한 라우트 조각은 [게이트웨이 계약](GATEWAY_CONTRACT.md)을 참고하세요 |
+| 게이트웨이 | `forward_response`가 `true`이고 정적 요청 헤더로 호출자 키를 실어 보내는 외부 인가 라우트(`auth`)를 가진 Hangang(게이트웨이 변경 HC-3, M1과 함께 구현). 정확한 라우트 조각은 [게이트웨이 계약](GATEWAY_CONTRACT.md)을 참고하세요 |
+| 호출자 키 | 게이트웨이 라우트와 Hopae가 공유하는 무작위 비밀. `gateway.caller_key_env`로 참조하며, 모든 verify 호출은 이를 `x-hopae-gateway-key`에 실어야 합니다 |
 | 포털 호스트 | 로그인 포털 전용 호스트 이름(예제에서는 `auth.example.test`). 같은 게이트웨이의 공개 라우트로 제공됩니다 |
-| 전송 | 브라우저와 게이트웨이 사이는 HTTPS. 게이트웨이가 TLS를 종단하고 Hopae는 루프백 또는 사설 네트워크에서 수신합니다 |
+| 전송 | 브라우저와 게이트웨이 사이는 HTTPS. 게이트웨이가 TLS를 종단하며, Hopae의 게이트웨이 리스너는 게이트웨이의 네트워크 네임스페이스(기준 배포에서는 호스트 루프백)에서만 접근할 수 있고 그래도 호출자 키를 요구합니다 |
 | 기본 저장소 | 쓰기 가능한 상태 디렉터리의 SQLite 파일(기본값). M2부터 다중 인스턴스 배포에는 PostgreSQL([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
 | 공유 캐시 | 세션 캐시와 무효화 채널을 위한 선택적 Redis/Valkey(M2부터) |
 | 제공자 | 환경에서 읽는 클라이언트 ID와 클라이언트 비밀을 가진 OIDC 제공자 하나(M1에서는 Google) |
@@ -78,8 +79,8 @@ Hopae는 파일 하나(`hopae.json` 또는 `hopae.yaml`, M1부터 `docs/CONFIG.m
 | 경계 | 무엇이 넘어가는가 | Hopae가 신뢰하는 것 | Hopae가 절대 신뢰하지 않는 것 |
 | --- | --- | --- | --- |
 | 브라우저 ↔ 게이트웨이 | 쿠키가 담긴 HTTPS 요청, 리디렉션, 제공자 왕복 | 아무것도 없음. 모든 브라우저 입력을 검증합니다. | 브라우저가 보낸 `x-forwarded-*`, `x-original-*`, 신원 헤더, 핸드오프 매개변수. 게이트웨이가 제거하거나 다시 생성합니다([계약](GATEWAY_CONTRACT.md#수정하지-않은-hangang-026에서-동작하는-것)). |
-| 게이트웨이 ↔ Hopae 게이트웨이 리스너 | 게이트웨이가 생성한 맥락 헤더와 나열된 클라이언트 헤더를 가진 verify 요청 | 게이트웨이가 생성한 맥락(`x-original-url`, `x-forwarded-for`, `x-forwarded-host`, `x-forwarded-proto`). 이 리스너는 게이트웨이 네트워크에서만 접근할 수 있고, 제안된 게이트웨이 변경 HC-3가 적용되면 호출자 키도 함께 옵니다 | 복사된 클라이언트 헤더(`cookie`, `user-agent`, `sec-fetch-*`)는 검증할 입력이지 단언이 아닙니다. |
-| 게이트웨이 ↔ Hopae 포털 리스너 | 포털 호스트로 일반 프록시된 요청 | 설정된 `trusted_proxies`에서 온 `x-forwarded-for`와 `x-forwarded-proto`만 | 그 외 모든 것은 브라우저 입력입니다. |
+| 게이트웨이 ↔ Hopae 게이트웨이 리스너 | 게이트웨이가 생성한 맥락 헤더, 나열된 클라이언트 헤더, 호출자 키를 가진 verify 요청 | 게이트웨이가 생성한 맥락(`x-original-url`, `x-forwarded-for`, `x-forwarded-host`, `x-forwarded-proto`)은 `x-hopae-gateway-key`가 `gateway.caller_key_env`와 상수 시간 비교로 일치한 **뒤에만** 신뢰합니다. 키가 없는 요청은 어떤 상태도 건드리지 않습니다. 네트워크 격리는 심층 방어일 뿐 경계가 아닙니다: 호스트 네트워크 게이트웨이에서는 어떤 로컬 프로세스든 루프백에 접근할 수 있습니다. | 복사된 클라이언트 헤더(`cookie`, `user-agent`, `sec-fetch-*`)는 검증할 입력이지 단언이 아닙니다. 호스트 중립 라우트에서는 `x-original-url`의 authority를 클라이언트가 고르므로 돌아갈 출처 허용 목록과 대조합니다. |
+| 게이트웨이 ↔ Hopae 포털 리스너 | 포털 호스트로 일반 프록시된 요청 | 설정된 `trusted_proxies`에서 온 `x-forwarded-for`와 `x-forwarded-proto`만 | 그 외 모든 것은 브라우저 입력이며 모든 `x-original-*` 헤더도 포함됩니다. 게이트웨이는 `x-forwarded-*`는 다시 생성하지만 외부 인가가 없는 라우트에서는 `x-original-*`를 그대로 통과시킵니다. |
 | Hopae ↔ ID 제공자 | 디스커버리, JWKS, 토큰 교환, 사용자 정보(아웃바운드 HTTPS만) | 완전한 검증을 거친 제공자의 서명된 ID 토큰. 제공자별 규칙에 따른 사용자 정보 필드([ADR-0010](../adr/0010-provider-abstraction.md)) | 서명되지 않은 클레임, 검증 플래그 없는 이메일 주소, 콜백 쿼리의 `code`와 `state` 이외의 모든 것. |
 | Hopae ↔ 저장소 | 사설 네트워크의 SQL과 Redis 프로토콜 | 기본 저장소의 내용 | 캐시. 캐시 미스나 캐시 오류는 항상 기본 저장소로 폴백하며, 캐시가 접근을 넓히는 일은 없습니다. |
 | Hopae ↔ Lua 워커(M5) | 파이프를 통한 길이 프레임 JSON | 아무것도 없음. 출력은 네트워크에서 온 것처럼 검증합니다 | 스크립트. 네트워크, 비밀 정보, 파일 시스템이 없습니다. |
@@ -88,15 +89,21 @@ Hopae는 파일 하나(`hopae.json` 또는 `hopae.yaml`, M1부터 `docs/CONFIG.m
 게이트웨이 리스너와 포털 리스너는 라우터가 서로 겹치지 않는 별도의 TCP
 리스너입니다. 포털 리스너의 `GET /_hopae/verify`는 404로 답하고, 게이트웨이
 리스너에는 포털 페이지가 존재하지 않습니다. 게이트웨이 리스너는 공개
-인터넷에서 접근할 수 없어야 하며, 배포 템플릿은 이를 루프백에 바인딩합니다.
+인터넷에서 접근할 수 없어야 합니다. 기준 게이트웨이가 호스트 네트워크로
+동작하므로 배포 템플릿은 Hopae를 같은 네트워크 네임스페이스(`network_mode:
+host`)에서 `127.0.0.1:8701`에 바인딩하거나, 컨테이너 포트를 호스트 루프백에만
+공개합니다(`127.0.0.1:8701:8701`). 컨테이너 내부 루프백에 바인딩하면
+게이트웨이가 접근할 수 없습니다. 어떤 구성에서든 호출자 키는 필수입니다.
 
 ## 요청 흐름
 
 표기 규칙: `GW`는 게이트웨이, `HP`는 Hopae, `IdP`는 ID 제공자입니다. `txn`은
 로그인 트랜잭션 ID, `code`는 일회용 핸드오프 코드, `handle`은 한 호스트의
-불투명 쿠키 값입니다. 신원 헤더는 `[id-hdrs]`로 줄여 씁니다. 포털 호스트는
-`auth.example.test`, 애플리케이션 호스트는 `app.example.test`와
-`other.example.org`(다른 등록 도메인)입니다.
+불투명 쿠키 값, `bind`는 로그인이 시작될 때 애플리케이션 호스트에 심는
+브라우저 바인딩 쿠키입니다. 모든 verify 호출은 `x-hopae-gateway-key`도
+함께 실어 보내지만 다이어그램에서는 생략합니다. 신원 헤더는 `[id-hdrs]`로
+줄여 씁니다. 포털 호스트는 `auth.example.test`, 애플리케이션 호스트는
+`app.example.test`와 `other.example.org`(다른 등록 도메인)입니다.
 
 ### 흐름 1 — 첫 방문, 미인증
 
@@ -110,7 +117,8 @@ Hopae는 파일 하나(`hopae.json` 또는 `hopae.yaml`, M1부터 `docs/CONFIG.m
    │                             │  sec-fetch-dest: document       │
    │                             ├────────────────────────────────▶│ 핸들 없음 → txn 생성
    │                             │ 302 Location: https://auth.example.test/login?txn=T
-   │                             │ Cache-Control: no-store         │ (txn: 대상, 호스트, ip, ua)
+   │                             │ Set-Cookie: __Host-hopae_bind=B (앱 호스트, 600초)
+   │                             │ Cache-Control: no-store         │ (txn: 대상, 호스트, ip, ua, H(B))
    │ 302 (중계됨, forward_response)◀────────────────────────────────┤
    │◀────────────────────────────┤                                 │
 ```
@@ -149,7 +157,7 @@ Hopae는 파일 하나(`hopae.json` 또는 `hopae.yaml`, M1부터 `docs/CONFIG.m
    │                            │                      │ 신원 → 사용자(생성/연결)        │
    │                            │                      │ 세션 생성(요소, 바인딩)         │
    │                            │                      │ 포털 핸들 H0, app.example.test │
-   │                            │                      │ 용 핸드오프 코드 K             │
+   │                            │                      │ 용 핸드오프 코드 K, H(B)       │
    │ 302 Location: https://app.example.test/admin/x?_hopae_handoff=K                  │
    │ Set-Cookie: __Host-hopae=H0 (포털 호스트)  Set-Cookie: __Host-hopae_txn=; Max-Age=0
    │◀───────────────────────────┴──────────────────────┤                              │
@@ -159,13 +167,13 @@ Hopae는 파일 하나(`hopae.json` 또는 `hopae.yaml`, M1부터 `docs/CONFIG.m
 
 ```text
  브라우저                      GW                                 HP(verify)
-   │ GET https://app.example.test/admin/x?_hopae_handoff=K        │
-   ├────────────────────────────▶│ GET /_hopae/verify              │
-   │                             │  x-original-url: …/admin/x?_hopae_handoff=K
-   │                             ├────────────────────────────────▶│ K: 1회용, ≤60초,
-   │                             │                                 │ 호스트+경로+ip에 바인딩
+   │ GET https://app.example.test/admin/x?_hopae_handoff=K  (cookie: __Host-hopae_bind=B)
+   ├────────────────────────────▶│ GET /_hopae/verify (cookie, K가 담긴 x-original-url)
+   │                             ├────────────────────────────────▶│ K: 1회용, ≤60초, 호스트+경로
+   │                             │                                 │ +ip+H(B)에 바인딩. 다른 사용자의
+   │                             │                                 │ 유효한 핸들이 없어야 함
    │                             │ 302 Location: https://app.example.test/admin/x
-   │                             │ Set-Cookie: __Host-hopae=H1; Path=/; Secure; HttpOnly; SameSite=Lax
+   │                             │ Set-Cookie: __Host-hopae=H1 (issued_aal=1); Set-Cookie: __Host-hopae_bind=; Max-Age=0
    │                             │ Cache-Control: no-store          │ 핸들 H1 → 세션
    │◀────────────────────────────┤ (중계됨, 업스트림 미접촉)         │
    │ GET /admin/x  (cookie: __Host-hopae=H1)                        │
@@ -173,9 +181,12 @@ Hopae는 파일 하나(`hopae.json` 또는 `hopae.yaml`, M1부터 `docs/CONFIG.m
 ```
 
 같은 흐름이 `other.example.org`의 두 번째 애플리케이션에도 적용됩니다. 첫
-요청은 흐름 1을 거치고, 포털은 유효한 포털 핸들 `H0`을 찾아 제공자를
-건너뛰고(싱글 사인온) 곧바로 `other.example.org`용 새 코드와 함께 흐름 3의
-리디렉션으로 답합니다.
+요청은 흐름 1을 거치며(그 호스트 전용 바인딩 쿠키를 심음), 포털은 유효한
+포털 핸들 `H0`을 찾아 제공자를 건너뛰고(싱글 사인온) 곧바로 그 쿠키에
+바인딩된 `other.example.org`용 새 코드와 함께 흐름 3의 리디렉션으로
+답합니다. 따라서 코드는 그 호스트에서 로그인을 시작한 브라우저만 소비할 수
+있으며, 같은 IP 뒤의 다른 브라우저나 이미 다른 사용자의 유효한 핸들을 가진
+브라우저는 거부됩니다.
 
 ### 흐름 5 — 정상 상태 verify
 
@@ -184,9 +195,10 @@ Hopae는 파일 하나(`hopae.json` 또는 `hopae.yaml`, M1부터 `docs/CONFIG.m
    │ GET /admin/x  (cookie: __Host-hopae=H1)                        │
    ├────────────────────────────▶│ GET /_hopae/verify (cookie, x-original-url, x-forwarded-for, user-agent)
    │                             ├────────────────────────────────▶│ H1 → 세션 S
+   │                             │                                 │ 핸들+세션 타이머 정상
    │                             │                                 │ 바인딩: ip/ua 정상
-   │                             │                                 │ 앱 정책: 정상
-   │                             │                                 │ 유휴/절대: 정상
+   │                             │                                 │ 사용자 활성, authz_version 정상
+   │                             │                                 │ 앱 정책, 단계 상승: 정상
    │                             │ 200 [id-hdrs] Cache-Control: no-store (HC-1이면 max-age)
    │                             │◀────────────────────────────────┤ last_seen(병합 기록)
    │                             ├── 업스트림 요청 + [id-hdrs] ──▶ 애플리케이션
@@ -239,15 +251,21 @@ Hopae는 파일 하나(`hopae.json` 또는 `hopae.yaml`, M1부터 `docs/CONFIG.m
 
 ```text
  브라우저                      GW                                 HP
-   │ GET https://app.example.test/admin/x  (cookie H1; 세션 aal=1)
-   ├────────────────────────────▶│ verify ──────────────────────────▶│ 앱 규칙: 경로 /admin은 aal 2 필요
+   │ GET https://app.example.test/admin/x  (cookie H1, issued_aal=1)
+   ├────────────────────────────▶│ verify ──────────────────────────▶│ 규칙: 정규 경로 /admin은 aal 2 필요
    │                             │ 302 Location: https://auth.example.test/stepup?txn=T2
-   │◀────────────────────────────┤ Cache-Control: no-store (절대 캐시하지 않음)
+   │◀────────────────────────────┤ Set-Cookie: __Host-hopae_bind=B2 (앱 호스트); no-store
    │ GET /stepup?txn=T2 → TOTP 챌린지 → POST /stepup/totp (csrf, code)
-   ├───────────────────────────▶├─────────────────────▶│ 요소 검증: session.factors += totp@now; aal=2
-   │ 302 앱으로 복귀(같은 세션이므로 새 핸들 불필요)
-   │ GET /admin/x → verify → 200 [id-hdrs: x-hopae-aal: 2, x-hopae-factors: oidc:google,totp 포함]
+   ├───────────────────────────▶├─────────────────────▶│ 요소 확인: factors += totp@now; aal=2
+   │                            │                      │ 모든 핸들 취소(elevation). 새 포털 핸들
+   │ 302 https://app.example.test/admin/x?_hopae_handoff=K2  + Set-Cookie (포털)
+   │ GET …?_hopae_handoff=K2 (cookie bind=B2; 오래된 H1은 취소됨, 같은 사용자 → 교체)
+   ├────────────────────────────▶│ verify → 302 + Set-Cookie: __Host-hopae=H1' (issued_aal=2)
+   │ GET /admin/x (H1') → verify → 200 [id-hdrs: x-hopae-aal: 2, x-hopae-factors: oidc:google,totp 포함]
 ```
+
+챌린지 전에 복사된 `H1`은 수준 1에 머물고 단계 상승으로 취소되므로, 2차
+인증 요소를 절대 물려받지 않습니다.
 
 ## 데이터 모델
 
@@ -258,15 +276,16 @@ Hopae는 파일 하나(`hopae.json` 또는 `hopae.yaml`, M1부터 `docs/CONFIG.m
 
 | 테이블 | 키 | 열(요약) | 비고 |
 | --- | --- | --- | --- |
-| `users` | `user_id` | `primary_email`, `email_verified`, `display_name`, `username`, `status`(active, disabled), `groups`(JSON 배열, *나중에*), `created_at`, `updated_at`, `last_login_at` | 사람 한 명당 한 행. `username`은 있을 때 고유합니다. |
-| `identities` | (`provider_id`, `subject`) | `user_id`, `email`, `email_verified`, `name`, `picture`, `raw_claims`(JSON, 8 KiB 제한), `first_seen_at`, `last_seen_at` | 제공자 subject를 사용자에 연결합니다([ADR-0011](../adr/0011-account-linking-policy.md)). |
-| `providers` | `provider_id` | `kind`(oidc, oauth2, email_link, password), `display_name`, `enabled`, `sort_order`, `config`(JSON: issuer, 엔드포인트, 스코프, 특이 사항), `client_secret_env`, `allowed_email_domains`, `trust_email`, `created_at`, `updated_at` | M4부터 실행 중 편집 가능. M1은 설정 파일에서 읽어 시작 시 이 테이블에 반영합니다. 비밀은 환경 변수 이름으로만 참조하고 저장하지 않습니다([ADR-0010](../adr/0010-provider-abstraction.md)). |
-| `apps` | `app_id` | `display_name`, `hosts`(정확한 호스트의 JSON 배열), `enabled`, `session_policy`(idle, absolute), `binding_policy`(ip, ua, on_mismatch), `step_up`(JSON 규칙, *나중에*), `allowed_groups`(*나중에*), `gateway_ref`(참고용 라우트 ID), `created_at`, `updated_at` | verify는 `x-forwarded-host`로 애플리케이션을 찾습니다. 예약된 애플리케이션 `default`는 `apps.unregistered = allow_default`일 때 목록에 없는 호스트에 적용됩니다. |
-| `sessions` | `session_id` | `user_id`, `provider_id`, `auth_time`, `factors`(`{kind, provider?, at}`의 JSON 배열), `aal`(1 또는 2), `bound_ip`, `bound_ua_sha256`, `bound_country`(*나중에*), `created_at`, `last_seen_at`, `absolute_expires_at`, `idle_expires_at`, `terminated_at`, `terminated_reason` | 브라우저 로그인 한 번당 한 행. verify가 조인 없이 동작하도록 자체 완결적인 신원 스냅샷(`snapshot` JSON: email, name, username, groups)을 담습니다. |
-| `session_handles` | `handle_sha256` | `session_id`, `host`, `created_at`, `last_seen_at`, `revoked_at` | (세션, 호스트)마다 하나. 쿠키는 핸들을 담으며, 서로 다른 호스트는 절대 핸들을 공유하지 않습니다. |
-| `login_txns` | `txn_sha256` | `created_at`, `expires_at`(10분), `app_id`, `return_target`(게이트웨이가 준 절대 URL), `client_ip`, `ua_sha256`, `provider_id`, `state_sha256`, `nonce`, `pkce_verifier`, `portal_session_id`(SSO일 때), `purpose`(login, stepup, link), `consumed_at` | 로그인 시도 한 번의 서버 측 상태입니다. |
-| `handoff_codes` | `code_sha256` | `session_id`, `host`, `return_target`, `client_ip`, `created_at`, `expires_at`(60초), `consumed_at` | 1회용. 소비는 원자적 조건부 갱신입니다. |
-| `events` | `event_id` | `at`, `kind`, `outcome`, `reason`, `user_id`, `session_id`, `app_id`, `provider_id`, `client_ip`, `ua_sha256`, `request_id`, `attrs`(JSON, 제한됨) | 추가 전용 로그인 기록이자 감사 원천([ADR-0009](../adr/0009-event-model.md)). 보존은 기간과 건수로 정리합니다. |
+| `users` | `user_id` | `primary_email`, `email_verified`, `email_authoritative`, `display_name`, `username`, `status`(active, disabled), `authz_version`, `groups`(JSON 배열, *나중에*), `created_at`, `updated_at`, `last_login_at` | 사람 한 명당 한 행. `username`은 있을 때 고유합니다. `authz_version`은 상태, 그룹, 역할이 바뀔 때마다 증가하며, verify는 호출마다 `status`와 `authz_version`을 읽습니다. |
+| `identities` | (`provider_id`, `subject`) | `user_id`, `email`, `email_verified`, `email_authoritative`, `name`, `picture`, `raw_claims`(JSON, 8 KiB 제한), `first_seen_at`, `last_seen_at` | 제공자 subject를 사용자에 연결합니다([ADR-0011](../adr/0011-account-linking-policy.md)). [ADR-0010](../adr/0010-provider-abstraction.md)의 subject 일관성 검사를 통과한 뒤에만 생성됩니다. |
+| `providers` | `provider_id` | `kind`(oidc, oauth2, email_link, password), `display_name`, `enabled`, `managed_by`(file, api), `sort_order`, `config`(JSON: issuer, 엔드포인트, 스코프, 특이 사항), `client_secret_env`, `allowed_email_domains`, `authoritative_domains`, `auto_link`, `trust_email`, `created_at`, `updated_at` | 파일 항목은 시작 시 행이 없거나 `managed_by = file`인 경우에만 가져옵니다. 관리 API(M4)로 변경된 행은 파일이 절대 덮어쓰지 않으므로 실행 중 비활성화가 재시작 뒤에도 유지됩니다. 비밀은 환경 변수 이름으로만 참조하고 저장하지 않습니다. |
+| `apps` | `app_id` | `display_name`, `hosts`(정확한 호스트 또는 `*.suffix` 패턴의 JSON 배열), `ports`(JSON 배열, 기본값 `[443]`), `enabled`, `session_policy`(idle, absolute), `binding_policy`(ip, ua, on_mismatch), `step_up`(JSON 규칙, *나중에*), `allowed_groups`(*나중에*), `on_authz_change`(refresh, terminate), `gateway_ref`(참고용 라우트 ID), `created_at`, `updated_at` | verify는 `x-forwarded-host`로 애플리케이션을 찾습니다. 모든 `hosts`와 `ports`의 합집합이 돌아갈 출처 허용 목록입니다. 어떤 패턴과도 맞지 않는 호스트는 거부되며 "모든 호스트" 모드는 없습니다. 예약된 애플리케이션 `default`도 명시적 패턴을 가집니다. |
+| `sessions` | `session_id` | `user_id`, `provider_id`, `auth_time`, `factors`(`{kind, provider?, at}`의 JSON 배열), `aal`(1 또는 2), `authz_version`(스냅샷 시점의 사용자 값), `generation`, `bound_ip`, `bound_ua_sha256`, `bound_country`(*나중에*), `created_at`, `last_seen_at`, `absolute_expires_at`, `terminated_at`, `terminated_reason` | 브라우저 로그인 한 번당 한 행. 자체 완결적인 신원 스냅샷(`snapshot` JSON: email, name, username, groups)을 담으며 `users.authz_version`이 바뀌면 갱신합니다. `generation`은 무효화마다 증가하여 그 전에 시작된 캐시 채움을 버리게 합니다. |
+| `session_handles` | `handle_sha256` | `session_id`, `host`, `issued_aal`, `created_at`, `last_seen_at`, `absolute_expires_at`, `revoked_at`, `revoked_reason` | (세션, 호스트)마다 하나. 쿠키는 핸들을 담으며, 서로 다른 호스트는 절대 핸들을 공유하지 않습니다. `issued_aal`은 핸들이 부여하는 수준이며, 단계 상승은 핸들을 취소하고 다시 발급합니다. 유휴·절대 타이머는 핸들 단위입니다([ADR-0007](../adr/0007-context-binding-policy.md)). |
+| `login_txns` | `txn_sha256` | `created_at`, `expires_at`(10분), `app_id`, `return_target`(게이트웨이가 준 절대 URL, 돌아갈 출처 허용 목록 안), `bind_sha256`(애플리케이션 호스트에 심은 바인딩 쿠키의 다이제스트), `client_ip`, `ua_sha256`, `provider_id`, `state_sha256`, `nonce`, `pkce_verifier`, `portal_session_id`(SSO일 때), `purpose`(login, stepup, link), `pending_identity`(JSON, `link_required`용), `consumed_at` | 로그인 시도 한 번의 서버 측 상태입니다. |
+| `handoff_codes` | `code_sha256` | `session_id`, `host`, `return_target`, `client_ip`, `bind_sha256`, `created_at`, `expires_at`(60초), `consumed_at` | 1회용. 소비는 바인딩 쿠키와 다른 사용자의 유효한 핸들 부재까지 함께 검사하는 원자적 조건부 갱신입니다. |
+| `events` | `event_id` | `at`, `kind`, `outcome`, `reason`, `user_id`, `session_id`, `app_id`, `provider_id`, `client_ip`, `ua_sha256`, `request_id`, `attrs`(JSON, 제한됨) | 추가 전용 로그인 기록이자 감사 원천([ADR-0009](../adr/0009-event-model.md)). 필수 종류는 상태 변경과 같은 트랜잭션에서 기록합니다(트랜잭션 아웃박스). 보존은 기간과 건수로 정리하되 싱크 커서를 넘어서는 정리하지 않습니다. |
+| `event_sinks` | `sink` | `last_event_id`, `updated_at` | 싱크(로그, M5의 웹훅)별 영속 커서. 싱크가 유실 없이 재개할 수 있게 합니다. |
 | `blocks`(*M2*) | `block_id` | `kind`(user, email, email_domain, ip_cidr), `value`, `reason`, `created_by`, `created_at`, `expires_at` | 로그인과 verify에서 검사합니다. |
 | `attempts`(*M2*) | (`scope`, `key`) | `failures`, `window_started_at`, `locked_until` | 계정별·IP별 제한 카운터. 설정 시 Redis에 둡니다. |
 | `factors`(*M5*) | `factor_id` | `user_id`, `kind`(totp, webauthn, recovery), `label`, `secret_env_or_encrypted`, `public_key`, `counter`, `created_at`, `last_used_at`, `disabled_at` | 등록 정보([ADR-0008](../adr/0008-second-factor-extension-point.md)). |
@@ -291,8 +310,8 @@ Hopae는 파일 하나(`hopae.json` 또는 `hopae.yaml`, M1부터 `docs/CONFIG.m
 | 관심사 | SQLite(rusqlite, bundled) | PostgreSQL(tokio-postgres) | Redis/Valkey |
 | --- | --- | --- | --- |
 | 역할 | 기본 저장소, 기본값, 단일 인스턴스 | 활성-활성 배포의 기본 저장소(M2) | 세션 조회 캐시, pub/sub 무효화, 제한 카운터(M2). 절대 진실의 원천이 아닙니다 |
-| 내구성 | WAL, `synchronous=NORMAL`, 쓰기 작업 하나. 체크포인트된 데이터베이스의 파일 복사로 백업(M7) | 운영자가 관리 | Redis를 잃어도 캐시된 데이터와 진행 중인 카운터만 잃습니다 |
-| Verify 지연 | 루프백에서 조회당 수십 마이크로초 | 사설 네트워크에서 1밀리초 미만. 앞에 로컬 캐시 | 1밀리초 미만. 앞에 로컬 캐시 |
+| 내구성 | WAL, `synchronous=NORMAL`, 쓰기 작업 하나. 필수 감사 이벤트는 상태 변경과 같은 트랜잭션에서 커밋. 체크포인트된 데이터베이스의 파일 복사로 백업(M7) | 운영자가 관리. 같은 트랜잭션 규칙 적용 | Redis를 잃어도 캐시된 데이터와 진행 중인 카운터만 잃습니다 |
+| Verify 지연과 예산 | 루프백에서 조회당 수십 마이크로초. verify 예산은 총 400 ms(`gateway.verify_budget_ms`) | 사설 네트워크에서 1밀리초 미만. 앞에 선택적 로컬 캐시 | 캐시 작업 하나는 400 ms 예산 안에서 50 ms(`cache.op_timeout_ms`)로 제한. 연속 세 번 시간 초과하면 5초 동안 차단기가 열림. 따라서 멈춘 연결은 기본 저장소가 답하기 전 verify당 최대 50 ms만 소모합니다 |
 | 이유 | 게이트웨이가 검증한 내장 저장소 선택과 일치. 흔한 단일 게이트웨이 배포에 운영 의존성이 없음. 스키마 마이그레이션 내장 | 다중 인스턴스는 하나의 공유 디렉터리가 필요합니다. 사용자 ID, 신원, 차단은 인스턴스 간에 일치해야 하는데 SQLite는 네트워크로 안전하게 공유할 수 없습니다 | 게이트웨이의 `security_redis` 패턴(연결 관리자, 900 ms 시간 제한, 카운터의 거부 처리)을 재사용합니다 |
 
 세 저장소 모두 같은 트레이트(`Directory`, `Sessions`, `Events`) 뒤에
@@ -345,7 +364,8 @@ tests/
 | --- | --- | --- | --- |
 | Hopae 프로세스 다운 또는 접근 불가 | 게이트웨이가 시간 초과(`auth.timeout_ms`, 500 ms 권장)되어 클라이언트에 `503`으로 답합니다: 거부 처리. 제안된 마이크로 캐시(HC-1)가 있으면 캐시된 허용 결정은 TTL까지 유지되지만 새 로그인은 없습니다. | 사용 불가 | 게이트웨이 `503` 카운터. Hopae 상태 확인 실패. 완화: 게이트웨이 헤어핀 라우트 뒤의 인스턴스 두 개(M7)와 제한된 완충 역할의 마이크로 캐시 TTL. |
 | 기본 저장소 사용 불가 | `reason=store_unavailable`과 함께 `503`. 절대 허용하지 않음 | `503` | 오류 수준 로그, 지표 `hopae_store_errors_total`. 게이트웨이는 `503`을 중계합니다. |
-| Redis 사용 불가(M2) | 캐시 우회: 조회는 기본 저장소로. 로컬 캐시 비활성화. 결정은 변하지 않음 | 영향 없음 | 경고 로그, 지표 `hopae_cache_degraded`. 무효화 메시지가 발행되지 않으므로 게이트웨이 마이크로 캐시는 TTL에 의존합니다(제한된 지연). |
+| Redis 사용 불가 또는 멈춤(M2) | 작업당 최대 한 번의 50 ms 시간 초과 뒤 캐시를 우회하고, 이어서 차단기가 5초 동안 우회합니다: 조회는 400 ms verify 예산 안에서 기본 저장소로. 로컬 캐시 비활성화. 결정은 변하지 않음 | 영향 없음 | 경고 로그, 지표 `hopae_cache_degraded`. 무효화 메시지가 발행되지 않으므로 게이트웨이 마이크로 캐시는 절대 신선도 마감에 의존합니다(제한된 지연). |
+| 호출자 키 없는 게이트웨이(잘못 설정된 라우트, 운영 환경의 수정하지 않은 게이트웨이) | 모든 verify에 `403 caller_unauthorized`, 게이트웨이가 중계. 어떤 상태도 읽거나 쓰지 않음 | 해당 없음 | `hopae --check`가 기대하는 정적 헤더를 보여 줍니다. 지표 `hopae_verify_unauthorized_total`. |
 | ID 제공자 접근 불가 또는 느림 | 영향 없음(verify는 제공자를 호출하지 않음) | 로그인 시도가 `reason=provider_unavailable`로 실패. 재시도 페이지. 트랜잭션은 만료까지 유지 | 이벤트 `login.failed`. 제공자별 지표. 디스커버리와 JWKS 캐시에는 하드 데드라인이 있어, 만료된 키는 서명 검사를 건너뛰는 대신 토큰을 거부합니다. |
 | 허용 오차(60초)를 넘는 시계 오차 | 세션이 만료되었거나 미래 시각으로 보임: 거부 | ID 토큰 검증 실패(`iat`/`exp`) | `reason=clock_skew`. 시스템 시계가 동기화되지 않으면 사전 점검이 경고합니다. |
 | 게이트웨이가 예상 밖의 계약을 보냄(`x-original-url` 누락, 알 수 없는 계약 버전) | verify 호출에 `400`, 게이트웨이는 `503`으로 변환: 거부 처리 | 해당 없음 | 누락된 필드 이름을 담은 `reason=contract_violation`. 비밀 정보는 절대 없습니다. |
@@ -356,7 +376,8 @@ tests/
 
 ## 제한과 호환성
 
-- M1에서 지원하는 게이트웨이 계열은 하나입니다(버전이 붙은 계약을 통한 Hangang). 다른 포워드 인증 게이트웨이는 핵심을 공유하지만 자체 어댑터와 자체 검증 실행이 필요합니다.
+- M1에서 지원하는 게이트웨이 계열은 하나입니다(호출자 키를 위한 게이트웨이 변경 HC-3를 포함하여, 버전이 붙은 계약을 통한 Hangang). 다른 포워드 인증 게이트웨이는 핵심을 공유하지만 자체 어댑터와 자체 검증 실행이 필요합니다.
+- 로그인은 같은 브라우저에서 같은 애플리케이션 호스트로 시작하고 끝내야 합니다(바인딩 쿠키). 애플리케이션 호스트의 쿠키를 차단하는 브라우저는 로그인할 수 없습니다.
 - 쿠키는 호스트 전용입니다. 형제 서브도메인에 걸친 쿠키(`Domain=`)는 쿠키 토싱 때문에 M1에서 의도적으로 제공하지 않으며, 핸드오프가 그 경우를 다룹니다([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)).
 - Verify는 모든 요청마다 호출됩니다. 게이트웨이 마이크로 캐시(HC-1)가 생기기 전까지 Hopae의 요청당 예산이 전체 예산입니다: 제공자 호출 없음, 제한 없는 쿼리 없음, 제한된 로컬 캐시.
 - 다중 인스턴스 배포에는 PostgreSQL(M2)과 무효화를 위한 Redis가 필요합니다. SQLite 배포는 빠른 재시작을 가진 단일 인스턴스입니다.

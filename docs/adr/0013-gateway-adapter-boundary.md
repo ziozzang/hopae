@@ -18,9 +18,11 @@
 The core exposes two gateway-neutral types and one trait:
 
 ```text
-VerifyInput  { original_url: Url, client_ip: IpAddr, host: String, proto: Scheme,
-               method: Method, cookie_handle: Option<String>, user_agent: Option<String>,
-               navigation: Navigation (Document | Other), contract: ContractVersion }
+VerifyInput  { original_url: Url, canonical_path: CanonicalPath, client_ip: IpAddr,
+               host: String, proto: Scheme, method: Method, route_id: Option<String>,
+               cookie_handle: Option<String>, bind_cookie: Option<String>,
+               user_agent: Option<String>, navigation: Navigation (Document | Other),
+               contract: ContractVersion, caller: CallerAuth (Keyed | Unauthenticated) }
 Decision     { Allow { identity: Identity, cache: Cacheability }
              | Login { transaction_url: Url, clear_cookie: bool }
              | Handoff { location: Url, set_cookie: CookieSpec }
@@ -30,6 +32,19 @@ Decision     { Allow { identity: Identity, cache: Cacheability }
 trait GatewayAdapter { fn parse(&self, req: &http::Request) -> Result<VerifyInput, ContractViolation>;
                        fn render(&self, decision: Decision, nav: Navigation) -> http::Response; }
 ```
+
+`CanonicalPath` is the path every policy rule (step-up, M2 path rules)
+matches against; `original_url` is only ever a return target. The adapter
+supplies it from a gateway header when one exists (`x-hangang-canonical-path`,
+HC-6) and otherwise computes it with the gateway's own rules, which are part
+of this boundary (review finding R04): percent escapes are decoded exactly
+once and must form valid UTF-8; a decoded or raw backslash, percent, `?`,
+`#`, `;`, control byte or DEL, a `.`/`..` segment, or a repeated slash makes
+the path non-canonical. A non-canonical path is `Decision::Deny { reason:
+path_not_canonical }` — the gateway itself answers `400` for such paths on
+guarded routes, so the Hopae check is a second line for other adapters.
+When both a gateway header and a computed value exist and differ, the
+request is denied (`canonical_path_mismatch`) and counted.
 
 Rules:
 
@@ -71,11 +86,15 @@ Out of scope: writing any non-Hangang adapter in M1–M6; a plugin ABI.
 
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Pending G2. |
+| 1 | 2026-10-09 | 1 | 0 | 0 | 0 | 1 × FIX_FIRST applied (R04, shared) |
 
-Questions for the reviewer: does `Navigation` (document versus other)
-belong in `VerifyInput` or is it already a gateway-specific notion? Is the
-`grep` lint theater?
+Findings and dispositions:
+
+- R04 (S1): `VerifyInput` carried only the raw URL, so path rules diverged from the gateway's canonical route selection. FIX_FIRST: `canonical_path` with the gateway's decoding rules, `route_id`, and the mismatch rule above; HC-6 proposed.
+
+Reviewer confirmation recorded: neutral decision types are a viable
+boundary; the lint alone cannot prove isolation, so a reviewer still reads.
+Open: does `Navigation` belong in `VerifyInput`?
 
 ## References
 

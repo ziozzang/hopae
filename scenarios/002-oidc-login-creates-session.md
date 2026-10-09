@@ -4,8 +4,8 @@
 
 - Area: providers
 - Milestone: M1
-- ADRs: 0004, 0008, 0010, 0011
-- Threat model: TM-03, TM-04, TM-08, TM-09, TM-12
+- ADRs: 0004, 0008, 0009, 0010, 0011
+- Threat model: TM-03, TM-04, TM-08, TM-09, TM-12, TM-25
 - Gateway contract: Portal entry points (`/login/<p>`, `/callback/<p>`), Cookies
 
 ## Goal
@@ -19,8 +19,8 @@ mixed-up callback never creates a session.
 ## Preconditions and fixtures
 
 - Configuration `tests/fixtures/m1-basic.json`; provider `mock` (`oidc`, issuer from the mock's discovery document, `client_secret_env = HOPAE_TEST_MOCK_SECRET`).
-- Mock provider profile `default`; profiles `wrong_state`, `wrong_nonce`, `expired_token`, `wrong_aud`, `invalid_signature`, `unverified_email`, `oversized` for abuse and failure cases.
-- Transaction `T1` from scenario 001 with `return_target = https://app.example.test/admin/x`, cookie `__Host-hopae_txn=T1` held by the browser.
+- Mock provider profile `default`; profiles `wrong_state`, `wrong_nonce`, `expired_token`, `wrong_aud`, `invalid_signature`, `unverified_email`, `userinfo_wrong_sub`, `hd_example_test`, `oversized` for abuse and failure cases.
+- Transaction `T1` from scenario 001 with `return_target = https://app.example.test/admin/x` and `bind_sha256 = sha256(B1)`, cookie `__Host-hopae_txn=T1` held by the browser on the portal host and `__Host-hopae_bind=B1` on the application host.
 - Injected clock; injected randomness for `state=S1`, `nonce=N1`, PKCE verifier `V1`, session id `s_1`, handle `H0`, handoff code `K1`.
 
 ## Main flow
@@ -35,8 +35,8 @@ mixed-up callback never creates a session.
 
 - Given: the mock issued `code=AC1` for `S1` with `nonce=N1`.
 - When: `GET /callback/mock?code=AC1&state=S1` with cookie `__Host-hopae_txn=T1`.
-- Then: Hopae `POST`s the mock token endpoint with `grant_type=authorization_code`, `code=AC1`, `code_verifier=V1`, `redirect_uri`, client authentication; the ID token passes `iss`, `aud`, `exp`, `iat` (60 s leeway), `nonce=N1`, signature (`kid` from JWKS); no redirects followed on the token call; `users` row created with `primary_email` from the token (verified), `identities` row `(mock, sub)`; `sessions` row `s_1` with `provider_id=mock`, `factors=[{"kind":"oidc","provider":"mock","at":now}]`, `aal=1`, `bound_ip=203.0.113.9`, `bound_ua_sha256`, `idle_expires_at`, `absolute_expires_at`; `session_handles` row for `(s_1, auth.example.test)`; `handoff_codes` row for `(s_1, app.example.test, /admin/x, 203.0.113.9)` expiring in 60 s; transaction `consumed_at` set.
-- Then (response): `302 location: https://app.example.test/admin/x?_hopae_handoff=K1`; `set-cookie: __Host-hopae=H0; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=<absolute remaining>`; `set-cookie: __Host-hopae_txn=; Max-Age=0; …`; `cache-control: no-store`; events `login.succeeded`, `session.created`.
+- Then: Hopae `POST`s the mock token endpoint with `grant_type=authorization_code`, `code=AC1`, `code_verifier=V1`, `redirect_uri`, client authentication; the ID token passes `iss`, `aud`, `exp`, `iat` (60 s leeway), `nonce=N1`, signature (`kid` from JWKS); no redirects followed on the token call; the user-info response's `sub` equals the ID token's `sub` (subject consistency); `users` row created with `primary_email` from the token (verified), `authz_version=1`, `identities` row `(mock, sub)`; `sessions` row `s_1` with `provider_id=mock`, `factors=[{"kind":"oidc","provider":"mock","at":now}]`, `aal=1`, `authz_version=1`, `bound_ip=203.0.113.9`, `bound_ua_sha256`, `absolute_expires_at`; `session_handles` row for `(s_1, auth.example.test)` with `issued_aal=1`; `handoff_codes` row for `(s_1, app.example.test, /admin/x, 203.0.113.9, bind_sha256=sha256(B1))` expiring in 60 s; transaction `consumed_at` set; events `login.succeeded` and `session.created` committed in the same transaction as the session.
+- Then (response): `302 location: https://app.example.test/admin/x?_hopae_handoff=K1`; `set-cookie: __Host-hopae=H0; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=<handle absolute remaining>`; `set-cookie: __Host-hopae_txn=; Max-Age=0; …`; `cache-control: no-store`.
 
 ### S002-3 Returning user maps to the existing identity
 
@@ -46,17 +46,17 @@ mixed-up callback never creates a session.
 
 ## Alternative flows
 
-### S002-4 Verified email from a trusted provider links to an existing user
+### S002-4 Email collision refuses with a link notice by default
 
-- Given: user `u_1` has `primary_email = a@example.test` (verified) from provider `trusted1`; provider `mock` is in `linking.trusted_providers`; the token asserts `a@example.test` with `email_verified=true`.
+- Given: user `u_1` has `primary_email = a@example.test` (verified) from provider `trusted1`; the token from `mock` asserts `a@example.test` with `email_verified=true`; `linking.on_conflict` is the default `link_required`; `mock` has `auto_link=false` (default).
 - When: callback for a new `sub`.
-- Then: identity attached to `u_1`; event `identity.linked` with `reason=verified_email`; session belongs to `u_1`.
+- Then: no user, identity, session or handoff code is created; `200` notice page "this email already belongs to an account; sign in with trusted1 to connect it"; the transaction's `purpose` becomes `link` with `pending_identity` set and a fresh 10-minute expiry; event `identity.conflict` with `reason=link_required`; the same outcome with profile `unverified_email`.
 
-### S002-5 Unverified email never links
+### S002-5 Authoritative email auto-links only when opted in
 
-- Given: as S002-4 but profile `unverified_email` (`email_verified=false`) or `mock` not in `linking.trusted_providers`.
+- Given: as S002-4 but `mock` has `auto_link=true` and `authoritative_domains=["example.test"]`, profile `hd_example_test` (token carries `hd=example.test`, `email_verified=true`), and `u_1`'s email is authoritative from `example.test`.
 - When: callback.
-- Then: a new user with empty `primary_email`; portal shows the "already in use" notice on the chooser the next time; `x-forwarded-email` omitted for this session; event `identity.conflict` with `reason=unverified_email` or `untrusted_provider`.
+- Then: identity attached to `u_1`; event `identity.linked` with `reason=authoritative_email`; session belongs to `u_1`. Without `hd`, with a different `hd`, or with `auto_link=false`, the outcome is S002-4.
 
 ### S002-6 Single sign-on from a valid portal handle skips the provider
 
@@ -72,7 +72,7 @@ mixed-up callback never creates a session.
 | Tampering | S002-A2 | yes |
 | Race / timing | S002-A3 | yes |
 | Resource exhaustion | S002-A4 | yes |
-| Confused deputy | S002-A5 | yes |
+| Confused deputy | S002-A5, S002-A9 | yes |
 | Spoofed or duplicated headers | S002-A6 | yes |
 | Downgrade | S002-A7 | yes |
 | Enumeration | S002-A8 | yes |
@@ -121,9 +121,15 @@ mixed-up callback never creates a session.
 
 ### S002-A8 Failure pages do not reveal whether an account exists
 
-- Given: profiles `unverified_email` for an email that exists and one that does not.
+- Given: profiles `invalid_signature` for an email that exists and one that does not.
 - When: callback.
-- Then: identical status, page body (except a per-request id) and timing within the harness tolerance; the distinction exists only in the `events` row.
+- Then: identical status, page body (except a per-request id) and timing within the harness tolerance; the distinction exists only in the `events` row. (The `link_required` notice of S002-4 is shown only after a fully validated token, so it is not an enumeration oracle for unauthenticated callers.)
+
+### S002-A9 Valid ID token with a different user-info subject is rejected
+
+- Given: profile `userinfo_wrong_sub`: the ID token is valid for subject `A`; the user-info endpoint answers with `sub=B` and `B`'s verified email, which belongs to an existing user.
+- When: callback.
+- Then: `400` generic failure page; `reason=userinfo_subject_mismatch`; no user, identity, session or link is created; the existing user is untouched; the mock records one user-info request; event `login.failed`. The same check applies to the Kakao preset (`/v2/user/me` `id` versus `sub`) in M3.
 
 ## Observability expectations
 
@@ -138,8 +144,8 @@ mixed-up callback never creates a session.
 | S002-1 | `s002_1_start_stores_state_nonce_pkce` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 | S002-2 | `s002_2_callback_validates_and_creates_session` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 | S002-3 | `s002_3_returning_identity_reused` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
-| S002-4 | `s002_4_verified_trusted_email_links` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
-| S002-5 | `s002_5_unverified_email_never_links` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
+| S002-4 | `s002_4_email_collision_refuses_with_link_notice` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
+| S002-5 | `s002_5_authoritative_email_auto_links_when_opted_in` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 | S002-6 | `s002_6_sso_from_portal_handle` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 | S002-A1 | `s002_a1_replayed_callback_rejected` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 | S002-A2 | `s002_a2_tampered_token_artifacts_rejected` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
@@ -149,6 +155,7 @@ mixed-up callback never creates a session.
 | S002-A6 | `s002_a6_provider_mixup_rejected` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 | S002-A7 | `s002_a7_pkce_nonce_not_negotiable` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 | S002-A8 | `s002_a8_failure_pages_uniform` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
+| S002-A9 | `s002_a9_userinfo_subject_mismatch_rejected` | `tests/scenarios/s002_oidc_login.rs` | integration | planned |
 
 ## Live verification
 
@@ -164,7 +171,8 @@ mixed-up callback never creates a session.
 ## 한국어 요약
 
 포털에서 PKCE와 nonce를 사용하는 authorization-code 흐름으로 로그인하면 ID
-토큰을 검증하고 사용자·신원·세션(첫 요소, 바인딩 맥락 포함)을 만들며, 포털
-핸들을 심고 핸드오프 코드와 함께 애플리케이션으로 돌려보냅니다. 재사용된
-콜백, 변조된 state/nonce/aud/서명, 로그인 CSRF, 제공자 혼동은 모두 세션을
-만들지 못합니다.
+토큰을 검증하고, 사용자 정보의 subject가 ID 토큰과 일치할 때만 사용자·신원·
+세션을 만들며, 포털 핸들을 심고 바인딩 쿠키에 묶인 핸드오프 코드와 함께
+애플리케이션으로 돌려보냅니다. 이메일이 기존 계정과 겹치면 기본적으로 연결하지
+않고 안내 페이지를 보여 줍니다. 재사용된 콜백, 변조된 state/nonce/aud/서명,
+로그인 CSRF, 제공자 혼동, subject 불일치는 모두 세션을 만들지 못합니다.

@@ -5,31 +5,34 @@
 - Area: sessions
 - Milestone: M1
 - ADRs: 0004, 0005
-- Threat model: TM-02, TM-04, TM-05
+- Threat model: TM-02, TM-04, TM-05, TM-22
 - Gateway contract: Cross-domain handoff, Cookies, Verify endpoint (`302` with `set-cookie`)
 
 ## Goal
 
 After login, the single-use handoff code appended to the return target is
-consumed by the verify call on the application host, which plants
-`__Host-hopae` for that host and redirects to the clean URL; the same
-mechanism works for a second application on a different registrable domain,
-and a replayed, expired, moved or stolen code never yields a session handle.
+consumed by the verify call on the application host — but only by the
+browser that holds the binding cookie planted there when that login started
+— which plants `__Host-hopae` for that host and redirects to the clean URL;
+the same mechanism works for a second application on a different registrable
+domain, and a replayed, expired, moved, stolen or NAT-neighbour's code never
+yields a session handle and never replaces another user's session.
 
 ## Preconditions and fixtures
 
-- Configuration `tests/fixtures/m1-two-domains.json`: applications `app` (`app.example.test`) and `other` (`other.example.org`).
-- Session `s_1` with portal handle `H0`; handoff code `K1` for `(s_1, app.example.test, /admin/x, 203.0.113.9)` created at `t0`.
+- Configuration `tests/fixtures/m1-two-domains.json`: applications `app` (`app.example.test`) and `other` (`other.example.org`); `default` application with pattern `*.example.test`.
+- The browser holds `__Host-hopae_bind=B1` on `app.example.test` (planted in scenario 001); session `s_1` with portal handle `H0`; handoff code `K1` for `(s_1, app.example.test, /admin/x, 203.0.113.9, sha256(B1))` created at `t0`.
+- Every verify request carries the caller key.
 - Gateway route fragments for both hosts (gateway layer).
 - Injected clock and randomness (`H1` for the new handle).
 
 ## Main flow
 
-### S003-1 Valid code plants the cookie and redirects to the clean URL
+### S003-1 Valid code with the binding cookie plants the handle and redirects to the clean URL
 
 - Given: `K1` unconsumed, `now = t0 + 5 s`.
-- When: `GET /_hopae/verify` with `x-original-url: https://app.example.test/admin/x?_hopae_handoff=K1`, `x-forwarded-host: app.example.test`, `x-forwarded-proto: https`, `x-forwarded-for: 203.0.113.9`, no cookie.
-- Then: `302 location: https://app.example.test/admin/x`; `set-cookie: __Host-hopae=H1; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=<absolute remaining>`; `cache-control: no-store`; `x-hopae-reason: handoff`; `handoff_codes.consumed_at` set; `session_handles` row `(sha256(H1), s_1, app.example.test)`; event `session.handoff`.
+- When: `GET /_hopae/verify` with `x-original-url: https://app.example.test/admin/x?_hopae_handoff=K1`, `x-forwarded-host: app.example.test`, `x-forwarded-proto: https`, `x-forwarded-for: 203.0.113.9`, `cookie: __Host-hopae_bind=B1`.
+- Then: `302 location: https://app.example.test/admin/x`; `set-cookie: __Host-hopae=H1; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=<handle absolute remaining>`; `set-cookie: __Host-hopae_bind=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`; `cache-control: no-store`; `x-hopae-reason: handoff`; `handoff_codes.consumed_at` set; `session_handles` row `(sha256(H1), s_1, app.example.test, issued_aal=1)`; event `session.handoff` in the same transaction.
 
 ### S003-2 Other query parameters are preserved
 
@@ -46,8 +49,8 @@ and a replayed, expired, moved or stolen code never yields a session handle.
 ### S003-4 Second domain via single sign-on
 
 - Given: the browser holds `H0` on the portal host; no cookie on `other.example.org`.
-- When: verify for `https://other.example.org/` → `302` to `/login?txn=T2` → `GET /login?txn=T2` with `H0` → `302` with `?_hopae_handoff=K2` → verify for `other.example.org` with `K2`.
-- Then: a handle `H2` for `(s_1, other.example.org)`; `session_handles` now has three rows for `s_1`; no provider interaction.
+- When: verify for `https://other.example.org/` → `302` to `/login?txn=T2` planting `__Host-hopae_bind=B2` on `other.example.org` → `GET /login?txn=T2` with `H0` → `302` with `?_hopae_handoff=K2` (bound to `sha256(B2)`) → verify for `other.example.org` with `K2` and `cookie: __Host-hopae_bind=B2`.
+- Then: a handle `H2` for `(s_1, other.example.org)`; `session_handles` now has three rows for `s_1`; no provider interaction; `B2` cleared.
 
 ## Alternative flows
 
@@ -65,7 +68,7 @@ and a replayed, expired, moved or stolen code never yields a session handle.
 | Tampering | S003-A2 | yes |
 | Race / timing | S003-A3 | yes |
 | Resource exhaustion | S003-A4 | yes |
-| Confused deputy | S003-A5 | yes |
+| Confused deputy | S003-A5, S003-A9, S003-A10 | yes |
 | Spoofed or duplicated headers | S003-A6 | yes |
 | Downgrade | S003-A7 | yes |
 | Enumeration | S003-A8 | yes |
@@ -92,7 +95,7 @@ and a replayed, expired, moved or stolen code never yields a session handle.
 
 - Given: `handoff.per_ip_failures_per_minute = 10`.
 - When: 11 verify calls with random `_hopae_handoff` values from one IP.
-- Then: the 11th answers `429` with `retry-after`; `handoff.rejected` events are sampled after the 10th; constant-time digest comparison (unit test on the compare function).
+- Then: the 11th answers `403` with body `{"error":"rate_limited","retry_after":60}` (`429` with `retry-after` once gateway change HC-8 is configured); `handoff.rejected` events are sampled after the 10th; constant-time digest comparison (unit test on the compare function).
 
 ### S003-A5 A compromised application cannot mint a handoff for another host
 
@@ -115,8 +118,20 @@ and a replayed, expired, moved or stolen code never yields a session handle.
 ### S003-A8 Expired code answers the same as an unknown code
 
 - Given: `now = t0 + 61 s`.
-- When: verify with `K1`.
-- Then: identical response bytes (except transaction id) to an unknown code; `reason=code_expired` only in the event.
+- When: verify with `K1` and `B1`.
+- Then: identical response bytes (except transaction id and the new binding cookie value) to an unknown code; `reason=code_expired` only in the event.
+
+### S003-A9 Two browsers behind one IP cannot swap sessions
+
+- Given: attacker browser X and victim browser Y share `203.0.113.9`. X started a login on `app.example.test` (binding cookie `Bx`), completed it, and captured its unconsumed code `Kx` (bound to `sha256(Bx)`) from the portal's redirect. Y holds no cookie on `app.example.test`, or holds its own binding cookie `By` from a login it started, or holds a valid handle of user V.
+- When: Y navigates to `https://app.example.test/admin/x?_hopae_handoff=Kx` within 60 s (verify sees Y's cookies only).
+- Then: `302` to the portal with a new transaction and a fresh binding cookie; **no** `set-cookie` for `__Host-hopae`; Y's existing cookies are unchanged; `Kx` is burned; event `handoff.rejected` with `reason=bind_mismatch`; X's own later navigation with `Kx` is also refused (`code_consumed`) and X recovers through single sign-on with a new code.
+
+### S003-A10 A valid handle of another user is never replaced
+
+- Given: browser Y holds a valid `__Host-hopae=Hy` for user V on `app.example.test` and a binding cookie `By`; a code `Ka` for user A exists whose `bind_sha256 = sha256(By)` (constructed by the harness through the store to test the invariant directly).
+- When: verify with `x-original-url: https://app.example.test/admin/x?_hopae_handoff=Ka`, `cookie: __Host-hopae=Hy; __Host-hopae_bind=By`.
+- Then: `302 location: https://app.example.test/admin/x` with **no** `set-cookie` for `__Host-hopae` (the existing handle stays), `Ka` burned, event `handoff.rejected` with `reason=session_conflict`; the next verify with `Hy` is `200` as user V. With `Hy` belonging to user A instead, the code is redeemed and `Hy` is replaced by a new handle for A (re-handoff of the same user).
 
 ## Observability expectations
 
@@ -141,6 +156,8 @@ and a replayed, expired, moved or stolen code never yields a session handle.
 | S003-A6 | `s003_a6_portal_ignores_handoff_param` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A7 | `s003_a7_plain_http_target_refused` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 | S003-A8 | `s003_a8_expired_code_uniform_response` | `tests/scenarios/s003_handoff.rs` | integration | planned |
+| S003-A9 | `s003_a9_two_browsers_same_ip_cannot_swap_sessions` | `tests/scenarios/s003_handoff.rs` | gateway | planned |
+| S003-A10 | `s003_a10_other_users_valid_handle_never_replaced` | `tests/scenarios/s003_handoff.rs` | integration | planned |
 
 ## Live verification
 
@@ -150,13 +167,14 @@ and a replayed, expired, moved or stolen code never yields a session handle.
 
 ## Open questions
 
-- Should a browser prefetch that consumes `K1` before the user's navigation be mitigated by allowing one SSO retry automatically (it is: the next verify starts a transaction and the portal hands off again without the provider)? Confirm the user-visible effect is a single extra redirect.
-- Should the IP binding of the code follow the application's `binding.ip` mode (`prefix`) rather than always `strict`?
+- A browser prefetch carries the binding cookie, so it redeems the code and the user's navigation then presents the planted handle; confirm with real browsers at G8 that the user-visible effect is nil.
+- Should the IP binding of the code follow the application's `binding.ip` mode (`prefix`) rather than always `strict`, now that the binding cookie is the primary secret?
 
 ## 한국어 요약
 
-로그인 후 돌아갈 URL에 붙은 일회용 핸드오프 코드를 애플리케이션 호스트의
-verify 호출이 소비하여 그 호스트 전용 `__Host-hopae` 쿠키를 심고 깨끗한 URL로
-`302`합니다. 다른 등록 도메인의 두 번째 애플리케이션도 포털 핸들로 제공자 없이
-같은 방식으로 처리됩니다. 재사용·이동·만료·추측된 코드는 핸들을 만들지 못하며
+로그인 후 돌아갈 URL에 붙은 일회용 핸드오프 코드는 로그인을 시작할 때 그
+애플리케이션 호스트에 심어 둔 바인딩 쿠키를 가진 브라우저만 소비할 수 있으며,
+소비하면 그 호스트 전용 `__Host-hopae` 쿠키를 심고 깨끗한 URL로 `302`합니다.
+같은 IP의 다른 브라우저는 코드를 쓸 수 없고, 다른 사용자의 유효한 핸들은 절대
+바꿔치기되지 않습니다. 재사용·이동·만료·추측된 코드는 핸들을 만들지 못하며
 업스트림은 코드를 절대 보지 못합니다.

@@ -5,19 +5,20 @@
 - Area: security
 - Milestone: M1
 - ADRs: 0004, 0005
-- Threat model: TM-01
+- Threat model: TM-01, TM-26
 - Gateway contract: Verify endpoint (`x-original-url`), Cross-domain handoff
 
 ## Goal
 
 Every `Location` Hopae emits toward an application is derived from the
-gateway-generated original URL, validated against the registered application
-hosts and bounds, and an attacker cannot turn the portal or the handoff into
-an open redirector.
+gateway-generated original URL, validated against the explicit return-origin
+allowlist (registered application host patterns and ports) and bounds, and
+an attacker cannot turn the portal or the handoff into an open redirector,
+not even by choosing the `Host` header on a host-neutral route.
 
 ## Preconditions and fixtures
 
-- Configuration `tests/fixtures/m1-two-domains.json` (`app.example.test`, `other.example.org`; `apps.unregistered = deny`).
+- Configuration `tests/fixtures/m1-two-domains.json`: application `app` with host `app.example.test`, application `other` with host `other.example.org`, the `default` application with pattern `*.example.test`; no `ports` listed (443 only).
 - Unit fixtures: a table of URLs and expected validation outcomes in `tests/fixtures/return-targets.json`.
 
 ## Main flow
@@ -46,16 +47,18 @@ an open redirector.
 | `//app.example.test/` | reject `not_absolute` |
 | `https://app.example.test.evil.example.org/` | reject `unknown_app` |
 | `https://APP.example.test/` | accept (host compared case-insensitively; emitted lower-case) |
-| `https://app.example.test/..%2fadmin` | accept (path is opaque to Hopae; it is the application's URL) |
+| `https://app.example.test/..%2fadmin` | accept as a return target (the path is the application's URL); the canonical path for policy is computed separately and this one is non-canonical, so policy rules deny it |
+| `https://app.example.test:8443/` | reject `port_not_allowed` (no `apps[].ports` entry) |
+| `https://app.example.test:443/` | accept |
 | `javascript:alert(1)` | reject `scheme` |
 
 ## Alternative flows
 
-### S005-3 Unregistered host allowed under the default policy
+### S005-3 Pattern-matched host under the default application
 
-- Given: `apps.unregistered = allow_default`.
+- Given: the `default` application has `hosts = ["*.example.test"]`.
 - When: verify with `x-forwarded-host: new.example.test`.
-- Then: accept; the transaction carries `app_id = default`; preflight has warned that unregistered hosts are allowed.
+- Then: accept; the transaction carries `app_id = default`. With `x-forwarded-host: new.example.org` (no pattern): `403 unknown_app`, no transaction, even though a `default` application exists. There is no configuration that accepts every host.
 
 ## Abuse cases
 
@@ -66,7 +69,7 @@ an open redirector.
 | Race / timing | — | no: pure validation |
 | Resource exhaustion | S005-A2 | yes |
 | Confused deputy | S005-A3 | yes |
-| Spoofed or duplicated headers | S005-A4 | yes |
+| Spoofed or duplicated headers | S005-A4, S005-A7 | yes |
 | Downgrade | S005-A5 | yes |
 | Enumeration | S005-A6 | yes |
 
@@ -106,6 +109,12 @@ an open redirector.
 - When: verify for each.
 - Then: both answer `403` with the same body; reasons differ only in events (`unknown_app` versus `app_disabled`).
 
+### S005-A7 Attacker-chosen `Host` on a host-neutral route cannot become a return origin
+
+- Given: gateway layer; a protected route **without** `host`/`hosts` (host-neutral) whose `auth` points at Hopae; the gateway validates the syntax of a client `Host` and generates `x-original-url` from it.
+- When: a client sends `GET /admin/x` with `Host: evil.example.org` through that route, then with `Host: app.example.test`.
+- Then: for `evil.example.org`: `403` relayed to the client, `x-hopae-reason: unknown_app`, no transaction, no binding cookie; for `app.example.test`: the normal `302` to the portal with a transaction whose `return_target` host is `app.example.test`. No `Location` emitted by Hopae in this scenario ever names a host outside the allowlist.
+
 ## Observability expectations
 
 - Log: `verify.denied` with `reason` for rejected targets; `warn` for ignored client parameters (rate limited).
@@ -118,13 +127,14 @@ an open redirector.
 | --- | --- | --- | --- | --- |
 | S005-1 | `s005_1_valid_target_round_trips_unchanged` | `tests/scenarios/s005_return_target.rs` | integration | planned |
 | S005-2 | `s005_2_validation_table` | `tests/scenarios/s005_return_target.rs` | unit | planned |
-| S005-3 | `s005_3_unregistered_host_default_policy` | `tests/scenarios/s005_return_target.rs` | integration | planned |
+| S005-3 | `s005_3_pattern_matched_host_default_app` | `tests/scenarios/s005_return_target.rs` | integration | planned |
 | S005-A1 | `s005_a1_portal_parameters_cannot_alter_target` | `tests/scenarios/s005_return_target.rs` | integration | planned |
 | S005-A2 | `s005_a2_pathological_urls_bounded` | `tests/scenarios/s005_return_target.rs` | unit | planned |
 | S005-A3 | `s005_a3_provider_redirect_ignored` | `tests/scenarios/s005_return_target.rs` | integration | planned |
 | S005-A4 | `s005_a4_host_case_and_trailing_dot` | `tests/scenarios/s005_return_target.rs` | unit | planned |
 | S005-A5 | `s005_a5_scheme_downgrade_only_in_dev_mode` | `tests/scenarios/s005_return_target.rs` | integration | planned |
 | S005-A6 | `s005_a6_no_host_enumeration` | `tests/scenarios/s005_return_target.rs` | integration | planned |
+| S005-A7 | `s005_a7_host_neutral_route_attacker_host_denied` | `tests/scenarios/s005_return_target.rs` | gateway | planned |
 
 ## Live verification
 
@@ -139,6 +149,7 @@ an open redirector.
 ## 한국어 요약
 
 Hopae가 애플리케이션으로 보내는 모든 `Location`은 게이트웨이가 만든
-`x-original-url`에서만 나오며, 등록된 호스트·스킴·길이·userinfo·fragment
-검사를 통과해야 합니다. 포털 쿼리나 제공자 응답의 어떤 값도 돌아갈 대상을
-바꾸지 못하므로 오픈 리디렉션이 성립하지 않습니다.
+`x-original-url`에서만 나오며, 등록된 애플리케이션 호스트 패턴과 포트로 이루어진
+명시적 허용 목록과 스킴·길이·userinfo·fragment 검사를 통과해야 합니다. 모든
+호스트를 허용하는 설정은 없으므로, 호스트 중립 라우트에서 공격자가 `Host`를
+골라도 돌아갈 출처가 될 수 없고 오픈 리디렉션이 성립하지 않습니다.
