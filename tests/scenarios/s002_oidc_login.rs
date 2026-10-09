@@ -490,6 +490,7 @@ pub(crate) mod kit {
                 client_ip: ip(addr),
                 user_agent: Some(UA.into()),
                 request_id: "req-kit".into(),
+                client_request_id: None,
             }
         }
 

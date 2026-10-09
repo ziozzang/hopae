@@ -25,6 +25,8 @@ pub struct StoreHooks {
     gate_cv: Condvar,
     crash: Mutex<Option<String>>,
     calls: Mutex<BTreeMap<String, u64>>,
+    /// Diagnostic batches that fail before commit (G7-P03 tests).
+    fail_diag_batches: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -106,6 +108,17 @@ impl StoreHooks {
             eprintln!("test-hooks: crash at {label}");
             std::process::abort();
         }
+    }
+
+    /// The next `n` diagnostic batch transactions fail (storage trouble).
+    pub fn fail_diag_batches(&self, n: u64) {
+        self.fail_diag_batches.store(n, Ordering::SeqCst);
+    }
+
+    pub(crate) fn take_diag_failure(&self) -> bool {
+        self.fail_diag_batches
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
     }
 
     pub(crate) fn count_call(&self, method: &'static str) {

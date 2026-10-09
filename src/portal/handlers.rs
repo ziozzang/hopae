@@ -40,6 +40,10 @@ const MAX_PARAM_BYTES: usize = 2048;
 #[derive(Clone, Debug)]
 pub struct RequestId(pub String);
 
+/// The client-supplied `x-request-id` (bounded), kept apart from [`RequestId`].
+#[derive(Clone, Debug)]
+pub struct ClientRequestId(pub String);
+
 /// Request facts every handler needs.
 struct Rq {
     ctx: RequestCtx,
@@ -193,6 +197,10 @@ fn prepare(st: &PortalState, parts: &Parts) -> Result<Rq, Response> {
     Ok(Rq {
         ctx: RequestCtx {
             request_id: rid,
+            client_request_id: parts
+                .extensions
+                .get::<ClientRequestId>()
+                .map(|c| c.0.clone()),
             client_ip: client.ip,
             user_agent,
             https: client.https,

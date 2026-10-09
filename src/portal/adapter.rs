@@ -54,6 +54,7 @@ impl Adapter {
             client_ip: ctx.client_ip,
             user_agent: ctx.user_agent.clone(),
             request_id: ctx.request_id.clone(),
+            client_request_id: ctx.client_request_id.clone(),
         }
     }
 
@@ -361,7 +362,9 @@ impl PortalServices for Adapter {
             Outcome::Failure,
             ctx.request_id.clone(),
             |b| {
-                b.ip(ctx.client_ip)
+                self.emitter
+                    .with_client_request_id(b, ctx.client_request_id.as_deref())
+                    .ip(ctx.client_ip)
                     .ua(ctx.user_agent.as_deref())
                     .reason(reasons::CSRF_REJECTED)
                     .attr("purpose", purpose)

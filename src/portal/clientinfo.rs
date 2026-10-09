@@ -11,6 +11,9 @@ use ipnet::IpNet;
 
 use crate::gateway::forwarding::{X_FORWARDED_FOR, X_FORWARDED_PROTO};
 
+/// Most forwarded-chain hops (over all header lines) that are believed.
+const MAX_HOPS: usize = 64;
+
 /// The client as the portal sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Client {
@@ -30,9 +33,20 @@ pub fn resolve(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -> Client {
         };
     }
     let mut chain: Vec<IpAddr> = Vec::new();
+    let mut hops = 0usize;
     for v in headers.get_all(&X_FORWARDED_FOR) {
         let Ok(text) = v.to_str() else { continue };
-        for part in text.split(',').take(64) {
+        for part in text.split(',') {
+            // More hops than any real proxy chain: the header is not
+            // believed. Never cut the chain short, which would drop the
+            // right-hand (authoritative) entries and keep an attacker's prefix.
+            hops += 1;
+            if hops > MAX_HOPS {
+                return Client {
+                    ip: peer,
+                    https: false,
+                };
+            }
             match part.trim().parse::<IpAddr>() {
                 Ok(ip) => chain.push(ip),
                 // An unparseable hop breaks the chain: nothing to its left can be believed.
@@ -135,5 +149,42 @@ mod tests {
         let h = headers(&[(xff(), "2001:db8::1")]);
         let c = resolve("127.0.0.1".parse().unwrap(), &h, &nets());
         assert_eq!(c.ip, "2001:db8::1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn the_hop_bound_rejects_overflow_instead_of_truncating_the_right() {
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+        let hops = |n: usize, last: &str| {
+            let mut v = vec!["198.51.100.7".to_string(); n - 1];
+            v.push(last.to_string());
+            v.join(", ")
+        };
+        // 64 hops: honored, the right-most untrusted one wins.
+        let h = headers(&[(xff(), &hops(64, "203.0.113.9"))]);
+        assert_eq!(
+            resolve(peer, &h, &nets()).ip,
+            "203.0.113.9".parse::<IpAddr>().unwrap()
+        );
+        // 65 hops (an attacker prefix of 64 copies and the real client last):
+        // the header is not believed at all; the peer is the client. The
+        // client-controlled prefix never becomes the client address.
+        let h = headers(&[(xff(), &hops(65, "203.0.113.9"))]);
+        let c = resolve(peer, &h, &nets());
+        assert_eq!(c.ip, peer);
+        assert!(!c.https);
+        // The bound counts hops over every header line.
+        let h = headers(&[
+            (xff(), &hops(40, "198.51.100.7")),
+            (xff(), &hops(25, "203.0.113.9")),
+        ]);
+        assert_eq!(resolve(peer, &h, &nets()).ip, peer);
+        let h = headers(&[
+            (xff(), &hops(40, "198.51.100.7")),
+            (xff(), &hops(24, "203.0.113.9")),
+        ]);
+        assert_eq!(
+            resolve(peer, &h, &nets()).ip,
+            "203.0.113.9".parse::<IpAddr>().unwrap()
+        );
     }
 }

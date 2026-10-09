@@ -80,6 +80,8 @@ pub struct EventCtx {
     pub user_agent: Option<String>,
     pub app_id: Option<AppId>,
     pub session_id: Option<SessionId>,
+    /// The client's `x-request-id`, recorded only under `log.accept_client_request_id`.
+    pub client_request_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -279,6 +281,9 @@ impl Service {
             ),
         };
         let mut b = b.ip(ctx.client_ip).ua(ctx.user_agent.as_deref());
+        if let Some(e) = &self.emitter {
+            b = e.with_client_request_id(b, ctx.client_request_id.as_deref());
+        }
         if let Some(app) = &ctx.app_id {
             b = b.app(app);
         }

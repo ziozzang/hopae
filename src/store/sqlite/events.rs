@@ -74,8 +74,51 @@ pub(super) fn insert_events(
     let now = shared.clock.now();
     for ev in events {
         insert_event(conn, ev, &shared.sinks, now, false)?;
+        shared.pending_events.fetch_add(1, Ordering::Relaxed);
     }
     Ok(())
+}
+
+/// Called by the writer thread after every job (G7-P01): once enough event
+/// rows have been committed since the last prune, prune inline. Counting
+/// committed rows in the serialized write path is what makes
+/// `max_rows + prune_every` a hard bound; an asynchronous wakeup cannot.
+pub(super) fn enforce_retention(env: &mut WriterEnv) {
+    let Some(policy) = retention(&env.shared) else {
+        return;
+    };
+    if env.shared.committed_events.load(Ordering::Relaxed) < prune_threshold(&policy) {
+        return;
+    }
+    let now = env.shared.clock.now();
+    match prune_in(env, now, &policy) {
+        Ok(report) => {
+            if report.events_deleted > 0 {
+                crate::telemetry::counters::add(
+                    crate::telemetry::counters::EVENTS_PRUNED_TOTAL,
+                    &[],
+                    report.events_deleted,
+                );
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "inline event prune failed"),
+    }
+    env.shared.committed_events.store(0, Ordering::Relaxed);
+}
+
+fn retention(shared: &Shared) -> Option<EventRetention> {
+    shared
+        .retention
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+}
+
+/// Committed rows between inline prunes: half of `prune_every`, so that the
+/// rows one job adds on top of the threshold still fit inside
+/// `max_rows + prune_every`.
+fn prune_threshold(p: &EventRetention) -> u64 {
+    (p.prune_every / 2).max(1)
 }
 
 /// Drain the diagnostic queue in batches, one transaction per batch. Failures
@@ -85,7 +128,12 @@ pub(super) fn flush_diagnostics(env: &mut WriterEnv) {
     loop {
         let batch: Vec<Event> = {
             let mut q = env.shared.diag.lock().unwrap_or_else(|p| p.into_inner());
-            let n = q.len().min(DIAG_BATCH);
+            let cap = retention(&env.shared)
+                .map_or(DIAG_BATCH, |p| {
+                    usize::try_from(prune_threshold(&p)).unwrap_or(DIAG_BATCH)
+                })
+                .min(DIAG_BATCH);
+            let n = q.len().min(cap);
             q.drain(..n).collect()
         };
         if batch.is_empty() {
@@ -95,13 +143,29 @@ pub(super) fn flush_diagnostics(env: &mut WriterEnv) {
         let now = shared.clock.now();
         let result = (|| -> StoreResult<()> {
             let tx = env.begin()?;
+            if shared.hooks.as_ref().is_some_and(|h| h.take_diag_failure()) {
+                return Err(StoreError::Unavailable("injected batch failure".into()));
+            }
             for ev in &batch {
                 insert_event(&tx, ev, &shared.sinks, now, true)?;
+                shared.pending_events.fetch_add(1, Ordering::Relaxed);
             }
             commit(tx, &shared, None)
         })();
         if let Err(e) = result {
             tracing::warn!(error = %e, dropped = batch.len(), "diagnostic event batch failed");
+            // Counted by kind where the loss happens; reported by the
+            // diagnostic writer once storage answers again.
+            let drops = shared
+                .drops
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            if let Some(drops) = drops {
+                for ev in &batch {
+                    drops.record(ev.kind);
+                }
+            }
         }
     }
 }
@@ -122,6 +186,85 @@ fn travels_with_state(kind: EventKind) -> bool {
 
 fn secs_f(t: Timestamp) -> f64 {
     t.0 as f64 / 1000.0
+}
+
+/// One prune pass in the writer's own transaction (age, count, terminal
+/// deliveries, backlog cap); shared by `prune` and the inline enforcement.
+fn prune_in(env: &mut WriterEnv, now: Timestamp, p: &EventRetention) -> StoreResult<PruneReport> {
+    let shared = env.shared.clone();
+    let tx = env.begin()?;
+    let mut report = PruneReport::default();
+
+    // 1. Age.
+    let cutoff = secs_f(now.sub(p.retention));
+    report.deliveries_marked_pruned += tx.execute(
+        "UPDATE event_deliveries SET state='failed', last_error='pruned', updated_at=?2 WHERE state='pending' AND event_id IN (SELECT event_id FROM events WHERE at < ?1)",
+        params![cutoff, now.secs()],
+    )? as u64;
+    report.events_deleted +=
+        tx.execute("DELETE FROM events WHERE at < ?1", params![cutoff])? as u64;
+
+    // 2. Count, oldest first, whatever the delivery state.
+    let total: i64 = tx.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
+    let max = i64::try_from(p.max_rows).unwrap_or(i64::MAX);
+    if total > max {
+        let excess = total - max;
+        let victims = "SELECT event_id FROM events ORDER BY at, event_id LIMIT ?1";
+        report.deliveries_marked_pruned += tx.execute(
+            &format!("UPDATE event_deliveries SET state='failed', last_error='pruned', updated_at=?2 WHERE state='pending' AND event_id IN ({victims})"),
+            params![excess, now.secs()],
+        )? as u64;
+        report.events_deleted += tx.execute(
+            &format!("DELETE FROM events WHERE event_id IN ({victims})"),
+            params![excess],
+        )? as u64;
+    }
+
+    // 3. Terminal delivery rows expire on their own clock.
+    let terminal_cutoff = now.sub(p.terminal_retention).secs();
+    report.terminal_deliveries_deleted = tx.execute(
+        "DELETE FROM event_deliveries WHERE state IN ('delivered','failed') AND updated_at < ?1",
+        params![terminal_cutoff],
+    )? as u64;
+
+    // 4. Backlog cap per sink: the oldest pending deliveries are dead-lettered.
+    let sinks: Vec<String> = {
+        let mut stmt = tx.prepare("SELECT DISTINCT sink FROM event_deliveries")?;
+        stmt.query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?
+    };
+    let cap = i64::try_from(p.max_pending_per_sink).unwrap_or(i64::MAX);
+    for sink in sinks {
+        let pending: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM event_deliveries WHERE sink=?1 AND state='pending'",
+            [&sink],
+            |r| r.get(0),
+        )?;
+        if pending <= cap {
+            continue;
+        }
+        let excess = pending - cap;
+        let moved = tx.execute(
+            "UPDATE event_deliveries SET state='failed', last_error='backlog_overflow', updated_at=?3 WHERE sink=?1 AND event_id IN (SELECT d.event_id FROM event_deliveries d JOIN events e USING (event_id) WHERE d.sink=?1 AND d.state='pending' ORDER BY e.at, d.event_id LIMIT ?2)",
+            params![sink, excess, now.secs()],
+        )? as u64;
+        report.backlog_overflowed += moved;
+        let rng = shared.rng();
+        let ev = EventBuilder::new(
+            &*shared.clock,
+            &*rng,
+            EventKind::SinkBacklogOverflow,
+            Outcome::Failure,
+            "prune",
+        )
+        .reason(reasons::BACKLOG_OVERFLOW)
+        .attr("sink", sink.as_str())
+        .attr("count", moved)
+        .build();
+        insert_event(&tx, &ev, &shared.sinks, now, false)?;
+    }
+    commit(tx, &shared, None)?;
+    Ok(report)
 }
 
 #[async_trait]
@@ -268,72 +411,9 @@ impl Events for Store {
     async fn prune(&self, now: Timestamp, policy: &EventRetention) -> StoreResult<PruneReport> {
         let p = policy.clone();
         self.write("prune", move |env| {
-            let shared = env.shared.clone();
-            let tx = env.begin()?;
-            let mut report = PruneReport::default();
-
-            // 1. Age.
-            let cutoff = secs_f(now.sub(p.retention));
-            report.deliveries_marked_pruned += tx.execute(
-                "UPDATE event_deliveries SET state='failed', last_error='pruned', updated_at=?2 WHERE state='pending' AND event_id IN (SELECT event_id FROM events WHERE at < ?1)",
-                params![cutoff, now.secs()],
-            )? as u64;
-            report.events_deleted += tx.execute("DELETE FROM events WHERE at < ?1", params![cutoff])? as u64;
-
-            // 2. Count, oldest first, whatever the delivery state.
-            let total: i64 = tx.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
-            let max = i64::try_from(p.max_rows).unwrap_or(i64::MAX);
-            if total > max {
-                let excess = total - max;
-                let victims = "SELECT event_id FROM events ORDER BY at, event_id LIMIT ?1";
-                report.deliveries_marked_pruned += tx.execute(
-                    &format!("UPDATE event_deliveries SET state='failed', last_error='pruned', updated_at=?2 WHERE state='pending' AND event_id IN ({victims})"),
-                    params![excess, now.secs()],
-                )? as u64;
-                report.events_deleted += tx.execute(
-                    &format!("DELETE FROM events WHERE event_id IN ({victims})"),
-                    params![excess],
-                )? as u64;
-            }
-
-            // 3. Terminal delivery rows expire on their own clock.
-            let terminal_cutoff = now.sub(p.terminal_retention).secs();
-            report.terminal_deliveries_deleted = tx.execute(
-                "DELETE FROM event_deliveries WHERE state IN ('delivered','failed') AND updated_at < ?1",
-                params![terminal_cutoff],
-            )? as u64;
-
-            // 4. Backlog cap per sink: the oldest pending deliveries are dead-lettered.
-            let sinks: Vec<String> = {
-                let mut stmt = tx.prepare("SELECT DISTINCT sink FROM event_deliveries")?;
-                stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?
-            };
-            let cap = i64::try_from(p.max_pending_per_sink).unwrap_or(i64::MAX);
-            for sink in sinks {
-                let pending: i64 = tx.query_row(
-                    "SELECT COUNT(*) FROM event_deliveries WHERE sink=?1 AND state='pending'",
-                    [&sink],
-                    |r| r.get(0),
-                )?;
-                if pending <= cap {
-                    continue;
-                }
-                let excess = pending - cap;
-                let moved = tx.execute(
-                    "UPDATE event_deliveries SET state='failed', last_error='backlog_overflow', updated_at=?3 WHERE sink=?1 AND event_id IN (SELECT d.event_id FROM event_deliveries d JOIN events e USING (event_id) WHERE d.sink=?1 AND d.state='pending' ORDER BY e.at, d.event_id LIMIT ?2)",
-                    params![sink, excess, now.secs()],
-                )? as u64;
-                report.backlog_overflowed += moved;
-                let rng = shared.rng();
-                let ev = EventBuilder::new(&*shared.clock, &*rng, EventKind::SinkBacklogOverflow, Outcome::Failure, "prune")
-                    .reason(reasons::BACKLOG_OVERFLOW)
-                    .attr("sink", sink.as_str())
-                    .attr("count", moved)
-                    .build();
-                insert_event(&tx, &ev, &shared.sinks, now, false)?;
-            }
-            commit(tx, &shared, None)?;
-            Ok(report)
+            let out = prune_in(env, now, &p);
+            env.shared.committed_events.store(0, Ordering::Relaxed);
+            out
         })
         .await
     }

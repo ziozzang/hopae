@@ -322,16 +322,45 @@ fn s013_3_missing_secret_degrades() {
     assert_eq!(s.terminate(), Some(0));
 }
 
+/// S013-3: with the only provider disabled (its secret unset) a real login
+/// transaction, created through verify, meets the unavailable notice and no
+/// provider control. (The old version requested `/login` without a
+/// transaction and so only ever saw the bad-request page.)
 #[test]
 fn extra_s013_3_login_page_lists_no_providers() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = fixture_in(dir.path(), "missing_secret");
-    let s = Serve::start(&cfg, &[("HOPAE_TEST_GATEWAY_KEY", GW_KEY)], "m3b");
-    let r = get(s.portal, "/login");
+    let idp = MockIdp::start("default");
+    // An empty secret disables the provider exactly like an unset one.
+    let h = Hopae::spawn(
+        Fixture::new("m1-basic"),
+        &idp,
+        &[("HOPAE_TEST_MOCK_SECRET", "")],
+    );
+    let r = h.verify(VerifyRequest::document("https://app.example.test/admin/x"));
+    assert_eq!(r.status, 302, "{r:?}");
+    let login = url::Url::parse(r.location().unwrap()).unwrap();
+    assert!(login.query().is_some_and(|q| q.contains("txn=")));
+    // The transaction is real: the same visit with a missing txn is a bad request.
+    let bad = h.portal().get("/login");
+    assert_eq!(bad.status, 400, "{bad:?}");
+    let page = h
+        .portal()
+        .get(&format!("{}?{}", login.path(), login.query().unwrap()));
+    assert_eq!(page.status, 503, "the unavailable page: {}", page.body);
     assert!(
-        !r.body.contains("callback/mock") && !r.body.contains("/login/mock"),
+        !page.body.contains("/login/mock") && !page.body.contains("callback/mock"),
         "{}",
-        r.body
+        page.body
+    );
+    assert!(
+        !page.body.contains("<form"),
+        "no provider control: {}",
+        page.body
+    );
+    assert_ne!(page.body, bad.body, "not the bad-request page");
+    assert!(
+        page.body.to_lowercase().contains("unavailable"),
+        "the unavailable notice: {}",
+        page.body
     );
 }
 
@@ -675,32 +704,70 @@ fn s013_7_reload_unsupported_and_key_rotation_by_restart() {
     assert!(!stale.all().contains("other-key-value-b"));
 }
 
+/// S013-7, the whole sequence A -> A+B -> B with literal key values: each
+/// stage accepts exactly the keys it should (a valid key reaches the login
+/// redirect, anything else is `caller_unauthorized`), and after the final
+/// restart the retired key A is refused.
 #[test]
 fn extra_s013_7_rotation_accepts_both_keys_and_refuses_the_retired_one() {
+    const KEY_A: &str = "rotation-key-a-value-0001";
+    const KEY_B: &str = "rotation-key-b-value-0002";
+    let url = "https://app.example.test/";
+    let accepted = |h: &Hopae, key: &str| {
+        let r = h.verify(VerifyRequest::document(url).key(KeySlot::Literal(key.into())));
+        assert_eq!(
+            r.status, 302,
+            "key {key} must reach the login redirect: {r:?}"
+        );
+        assert_ne!(
+            r.header("x-hopae-reason"),
+            Some("caller_unauthorized"),
+            "{r:?}"
+        );
+    };
+    let refused = |h: &Hopae, key: &str| {
+        let r = h.verify(VerifyRequest::document(url).key(KeySlot::Literal(key.into())));
+        assert_eq!(
+            r.header("x-hopae-reason"),
+            Some("caller_unauthorized"),
+            "key {key} must be refused: {r:?}"
+        );
+        assert_ne!(r.status, 302, "{r:?}");
+    };
+    // Stage 1: A only.
     let idp = MockIdp::start("default");
+    let mut h = Hopae::spawn(
+        Fixture::new("m1-basic"),
+        &idp,
+        &[(KEY_ENV, KEY_A), ("HOPAE_GW_KEY_B", KEY_B)],
+    );
+    accepted(&h, KEY_A);
+    refused(&h, KEY_B);
+    h.kill();
+    // Stage 2: A+B (B is the next key).
     let mut h = Hopae::spawn(
         Fixture::with(
             "m1-basic",
             json!({"gateway": {"caller_key_next_env": "HOPAE_GW_KEY_B"}}),
         ),
         &idp,
-        &[("HOPAE_GW_KEY_B", "rotation-key-b-value")],
+        &[(KEY_ENV, KEY_A), ("HOPAE_GW_KEY_B", KEY_B)],
     );
-    let url = "https://app.example.test/";
-    for slot in [KeySlot::Current, KeySlot::Next] {
-        let r = h.verify(VerifyRequest::document(url).key(slot));
-        assert_ne!(
-            r.header("x-hopae-reason"),
-            Some("caller_unauthorized"),
-            "{r:?}"
-        );
-    }
-    let r = h.verify(VerifyRequest::document(url).key(KeySlot::Wrong));
-    assert_eq!(
-        r.header("x-hopae-reason"),
-        Some("caller_unauthorized"),
-        "{r:?}"
+    accepted(&h, KEY_A);
+    accepted(&h, KEY_B);
+    refused(&h, "some-other-key-value");
+    h.kill();
+    // Stage 3: B only (B is promoted, the overlap ends). A is retired.
+    let mut h = Hopae::spawn(
+        Fixture::with(
+            "m1-basic",
+            json!({"gateway": {"caller_key_env": "HOPAE_GW_KEY_B", "caller_key_next_env": null}}),
+        ),
+        &idp,
+        &[(KEY_ENV, KEY_A), ("HOPAE_GW_KEY_B", KEY_B)],
     );
+    accepted(&h, KEY_B);
+    refused(&h, KEY_A);
     h.kill();
 }
 

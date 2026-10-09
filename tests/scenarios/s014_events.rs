@@ -212,7 +212,6 @@ async fn run_bounded(w: &DeliveryWorker, ms: u64) {
 /// response (the `302` that plants the application handle), or the callback's
 /// own answer when the callback did not log in.
 fn login_once(h: &Hopae, idp: &MockIdp, sub: &str, ip: &str) -> Response {
-    idp.set_subject(sub);
     let r = h.verify(VerifyRequest::document("https://app.example.test/admin/x").ip(ip));
     assert_eq!(r.status, 302, "{r:?}");
     let loc = url::Url::parse(r.location().expect("location")).unwrap();
@@ -245,7 +244,15 @@ fn login_once(h: &Hopae, idp: &MockIdp, sub: &str, ip: &str) -> Response {
     assert_eq!(go.status, 302, "{go:?}");
     // The browser follows the provider; its redirect is the callback, whose
     // answer is the application URL carrying the handoff code.
-    let cb = c.get(&idp.follow_authorization(go.location().expect("provider redirect")));
+    // The mock signs in one global "next" subject: choose and consume it under
+    // a lock, so concurrent logins keep their own identities.
+    let callback = {
+        static SUBJECT: Mutex<()> = Mutex::new(());
+        let _g = SUBJECT.lock().unwrap_or_else(|p| p.into_inner());
+        idp.set_subject(sub);
+        idp.follow_authorization(go.location().expect("provider redirect"))
+    };
+    let cb = c.get(&callback);
     if cb.status != 302 {
         // Not a login (for example the link notice when another subject
         // already owns the mock's email): nothing to redeem.
@@ -256,6 +263,73 @@ fn login_once(h: &Hopae, idp: &MockIdp, sub: &str, ip: &str) -> Response {
             .ip(ip)
             .cookie("__Host-hopae_bind", &bind),
     )
+}
+
+/// A login that must succeed: the final answer plants the application handle.
+fn login_ok(h: &Hopae, idp: &MockIdp, sub: &str, ip: &str) {
+    let r = login_once(h, idp, sub, ip);
+    assert_eq!(r.status, 302, "login of {sub} from {ip}: {r:?}");
+    assert!(
+        r.set_cookies()
+            .iter()
+            .any(|c| c.starts_with("__Host-hopae=")),
+        "login of {sub} planted no application handle: {r:?}"
+    );
+}
+
+/// `session_id`s in the `sessions` table of the running instance.
+fn session_rows(h: &Hopae) -> Vec<String> {
+    let db = h.state_dir.path().join("state").join("hopae.db");
+    let conn =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let mut stmt = conn.prepare("SELECT session_id FROM sessions").unwrap();
+    stmt.query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// The bijection of S014-5/A2: every session row has exactly one
+/// `session.created` and one `login.succeeded` event with the same request
+/// id, and there are no events without a session.
+fn assert_session_audit_bijection(h: &Hopae, expected_sessions: usize) {
+    let evs = h.hooks.events(None, Some(100_000));
+    let by_kind = |k: &str| -> Vec<&Value> { evs.iter().filter(|e| e["kind"] == k).collect() };
+    let created = by_kind("session.created");
+    let succeeded = by_kind("login.succeeded");
+    let mut rows = session_rows(h);
+    rows.sort();
+    assert_eq!(rows.len(), expected_sessions, "sessions in the store");
+    for (name, list) in [
+        ("session.created", &created),
+        ("login.succeeded", &succeeded),
+    ] {
+        let mut ids: Vec<String> = list
+            .iter()
+            .map(|e| e["session_id"].as_str().expect("session_id").to_string())
+            .collect();
+        ids.sort();
+        assert_eq!(
+            ids, rows,
+            "{name} events must match the session rows one to one"
+        );
+    }
+    for c in &created {
+        let ok = succeeded
+            .iter()
+            .find(|e| e["session_id"] == c["session_id"])
+            .expect("login.succeeded for the session");
+        assert_eq!(ok["request_id"], c["request_id"], "same request");
+        let (a, b) = (
+            ok["at"].as_f64().expect("numeric at"),
+            c["at"].as_f64().expect("numeric at"),
+        );
+        assert!(
+            a <= b,
+            "login.succeeded ({a}) is not after session.created ({b})"
+        );
+    }
 }
 
 fn kinds(h: &Hopae) -> Vec<String> {
@@ -527,7 +601,7 @@ fn s014_5_required_events_committed_with_state() {
             s.spawn(move || {
                 for i in 0..125 {
                     let ip = format!("203.0.113.{}", 1 + (t * 125 + i) % 250);
-                    let _ = login_once(h, idp, &format!("sub-{t}-{i}"), &ip);
+                    login_ok(h, idp, &format!("sub-{t}-{i}"), &ip);
                     let _ = h.verify(
                         VerifyRequest::document("https://app.example.test/x")
                             .ip(&format!("198.51.{}.{}", t, i))
@@ -543,14 +617,30 @@ fn s014_5_required_events_committed_with_state() {
     std::thread::sleep(Duration::from_secs(1));
     h.hooks.stall_diagnostics_off();
     std::thread::sleep(Duration::from_secs(3));
-    let created = h.hooks.events(Some("session.created"), Some(10_000));
-    let succeeded = h.hooks.events(Some("login.succeeded"), Some(10_000));
-    assert_eq!(created.len(), succeeded.len());
+    // Failed attempts are recorded too, each with its delivery rows.
+    let portal = h.portal();
+    for i in 0..5 {
+        let r = portal.send(Req::get(&format!("/callback/mock?code=x&state=bad-{i}")));
+        assert_ne!(r.status, 302, "{r:?}");
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    assert_session_audit_bijection(&h, 1000);
     let deliveries = h.hooks.deliveries(Some("log"));
-    for e in created.iter().chain(succeeded.iter()) {
+    let evs = h.hooks.events(None, Some(100_000));
+    let failed: Vec<&Value> = evs.iter().filter(|e| e["kind"] == "login.failed").collect();
+    assert!(
+        failed.len() >= 5,
+        "failed attempts must be recorded: {}",
+        failed.len()
+    );
+    for e in evs.iter().filter(|e| {
+        ["session.created", "login.succeeded", "login.failed"]
+            .contains(&e["kind"].as_str().unwrap())
+    }) {
         assert!(
             deliveries.iter().any(|d| d["event_id"] == e["event_id"]),
-            "no delivery row for {}",
+            "no delivery row for {} {}",
+            e["kind"],
             e["event_id"]
         );
     }
@@ -841,7 +931,7 @@ fn s014_a2_ordering_under_concurrency() {
             let (h, idp) = (&h, &idp);
             s.spawn(move || {
                 for i in 0..10 {
-                    let _ = login_once(
+                    login_ok(
                         h,
                         idp,
                         &format!("sub-{t}-{i}"),
@@ -859,14 +949,7 @@ fn s014_a2_ordering_under_concurrency() {
     ids.sort();
     ids.dedup();
     assert_eq!(ids.len(), evs.len());
-    for created in evs.iter().filter(|e| e["kind"] == "session.created") {
-        let sid = &created["session_id"];
-        let ok = evs
-            .iter()
-            .find(|e| e["kind"] == "login.succeeded" && &e["session_id"] == sid)
-            .expect("login.succeeded for every session");
-        assert!(ok["at"].as_f64() <= created["at"].as_f64());
-    }
+    assert_session_audit_bijection(&h, 100);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -889,6 +972,7 @@ async fn s014_a3_events_cannot_fill_disk() {
         max_pending_per_sink: 100,
         terminal_retention: DAY,
     };
+    store.set_event_retention(policy.clone());
     let (bus, rx) = bus::channel(bus::BUS_CAPACITY);
     let sampler = Arc::new(Sampler::default());
     let trigger = Arc::new(PruneTrigger::new(policy.prune_every));
@@ -919,6 +1003,7 @@ async fn s014_a3_events_cannot_fill_disk() {
         trigger: trigger.clone(),
         pruner: Some(pruner.clone()),
         hooks: None,
+        log: None,
     };
     let wtask = tokio::spawn(writer.run(stop_rx.clone()));
     let ptask = tokio::spawn(pruner.run(stop_rx.clone()));
@@ -1031,4 +1116,284 @@ fn emitter_client_request_id_policy() {
         }
     }
     let _ = json!({});
+}
+
+/// G7-P01: the table bound holds whatever the pruner task does. No pruner
+/// runs here at all: only the store's own retention enforcement is left, fed
+/// by required events committed in small transactions and by a diagnostic
+/// burst. The table never exceeds `max_rows + prune_every`, checked after
+/// every commit.
+#[tokio::test]
+async fn g7_p01_event_bound_is_enforced_in_the_write_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = Arc::new(TestClock::new(Timestamp(T0)));
+    let rng = Arc::new(OsRng);
+    let store = Store::open(
+        &dir.path().join("hopae.db"),
+        clock.clone(),
+        vec!["log".into()],
+        None,
+    )
+    .unwrap();
+    store.set_rng(rng.clone());
+    store.set_event_retention(EventRetention {
+        retention: DAY,
+        max_rows: 500,
+        prune_every: 100,
+        max_pending_per_sink: 100,
+        terminal_retention: DAY,
+    });
+    let bound = 600;
+    let mk = |kind| EventBuilder::new(&*clock, &*rng, kind, Outcome::Success, "r").build();
+    for i in 0..400 {
+        let evs = vec![
+            mk(EventKind::LoginSucceeded),
+            mk(EventKind::LoginSucceeded),
+            mk(EventKind::LoginSucceeded),
+        ];
+        store
+            .directory()
+            .import_providers(vec![], None, evs)
+            .await
+            .unwrap();
+        let (rows, _) = store.events().count_rows().await.unwrap();
+        assert!(rows <= bound, "after commit {i}: {rows} rows");
+    }
+    for _ in 0..3000 {
+        let _ = store
+            .events()
+            .append_diagnostic(mk(EventKind::ProviderError))
+            .await;
+    }
+    store.barrier().await.unwrap();
+    let (rows, _) = store.events().count_rows().await.unwrap();
+    assert!(rows <= bound, "after the diagnostic burst: {rows} rows");
+}
+
+/// G7-P02: a persisted diagnostic event also reaches the structured log, as
+/// the same JSON as its row (no delivery row, ADR-0009).
+#[test]
+fn g7_p02_diagnostic_events_reach_the_structured_log() {
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
+    let handle = format!("v1.{}", "A".repeat(43));
+    for _ in 0..5 {
+        h.verify(
+            VerifyRequest::document("https://app.example.test/x")
+                .ip("198.51.100.7")
+                .cookie("__Host-hopae", &handle),
+        );
+    }
+    h.advance(Duration::from_secs(61));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let row = loop {
+        let rows = h.hooks.events(Some("verify.denied"), Some(100));
+        if let Some(r) = rows.into_iter().find(|e| e["reason"] == "unknown_handle") {
+            break r;
+        }
+        assert!(std::time::Instant::now() < deadline, "no verify.denied row");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let log = h.log();
+        let found = log
+            .lines()
+            .filter(|l| l.starts_with('{'))
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| v["event_id"] == row["event_id"]);
+        if let Some(line) = found {
+            assert_eq!(line, row, "log line and row differ");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the persisted verify.denied never reached the log:\n{log}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        h.hooks
+            .deliveries(Some("log"))
+            .iter()
+            .all(|d| d["event_id"] != row["event_id"]),
+        "diagnostic events keep having no delivery row"
+    );
+}
+
+/// G7-P04: with `log.accept_client_request_id` the portal's request events
+/// carry the client's `x-request-id` as `attrs.client_request_id` (the
+/// event's own `request_id` stays Hopae's); without it nothing is recorded.
+#[test]
+fn g7_p04_client_request_id_is_recorded_only_when_enabled() {
+    for accept in [false, true] {
+        let idp = MockIdp::start("default");
+        let h = Hopae::spawn(
+            Fixture::with(
+                "m1-basic",
+                json!({"log": {"accept_client_request_id": accept}}),
+            ),
+            &idp,
+            &[],
+        );
+        let portal = h.portal();
+        // A form POST that fails its CSRF check (csrf.rejected, built by the adapter) ...
+        let r1 = portal.send(
+            Req::post("/switch")
+                .form(&[("csrf", "bad"), ("choice", "keep"), ("txn", "t")])
+                .header("x-request-id", "evil-1"),
+        );
+        // ... and a callback that fails inside the session service (login.failed).
+        let r2 = portal
+            .send(Req::get("/callback/mock?code=x&state=nope").header("x-request-id", "evil-2"));
+        for (r, kind, client) in [
+            (&r1, "csrf.rejected", "evil-1"),
+            (&r2, "login.failed", "evil-2"),
+        ] {
+            let own = r.header("x-request-id").expect("response id").to_string();
+            assert_ne!(own, client);
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let ev = loop {
+                let rows = h.hooks.events(Some(kind), Some(100));
+                if let Some(e) = rows.into_iter().find(|e| e["request_id"] == own.as_str()) {
+                    break e;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "accept={accept}: no {kind} row for request {own}"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            if accept {
+                assert_eq!(ev["attrs"]["client_request_id"], client, "{kind}: {ev}");
+            } else {
+                assert!(
+                    ev["attrs"].get("client_request_id").is_none(),
+                    "{kind}: {ev}"
+                );
+            }
+        }
+    }
+}
+
+/// G7-T03 (S014-3): complete success and failure flows, capture every
+/// credential they generate, and require that none of them appears anywhere
+/// in the log (at debug level) or in any event row.
+#[test]
+fn extra_s014_3_generated_credentials_never_reach_the_log() {
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
+    let ip = "203.0.113.9";
+    let mut secrets: Vec<(&str, String)> = Vec::new();
+
+    // Success flow, by hand, collecting what the browser handles.
+    let r = h.verify(VerifyRequest::document("https://app.example.test/admin/x").ip(ip));
+    assert_eq!(r.status, 302, "{r:?}");
+    let login = url::Url::parse(r.location().unwrap()).unwrap();
+    let txn = login
+        .query_pairs()
+        .find(|(k, _)| k == "txn")
+        .unwrap()
+        .1
+        .to_string();
+    secrets.push(("transaction id", txn.clone()));
+    let bind = r
+        .set_cookies()
+        .iter()
+        .find_map(|c| c.strip_prefix("__Host-hopae_bind="))
+        .map(|rest| rest.split(';').next().unwrap().to_string())
+        .expect("application binding cookie");
+    secrets.push(("application binding cookie", bind.clone()));
+    let jar = Jar::new();
+    let portal = h.portal_with(jar.clone()).with_ip(ip);
+    let go = portal.get(&format!("/login?txn={txn}"));
+    assert_eq!(go.status, 302, "{go:?}");
+    let authorize = url::Url::parse(go.location().unwrap()).unwrap();
+    for (k, v) in authorize.query_pairs() {
+        if ["state", "nonce", "code_challenge"].contains(&k.as_ref()) {
+            secrets.push(("authorization request value", v.to_string()));
+        }
+    }
+    let callback = idp.follow_authorization(go.location().unwrap());
+    let cb_url = url::Url::parse(&format!("https://x.test{callback}")).unwrap();
+    let provider_code = cb_url
+        .query_pairs()
+        .find(|(k, _)| k == "code")
+        .unwrap()
+        .1
+        .to_string();
+    secrets.push(("provider authorization code", provider_code));
+    let back = portal.get(&callback);
+    assert_eq!(back.status, 302, "{back:?}");
+    let handoff = url::Url::parse(back.location().unwrap()).unwrap();
+    let code = handoff
+        .query_pairs()
+        .find(|(k, _)| k == "_hopae_handoff")
+        .expect("handoff code")
+        .1
+        .to_string();
+    secrets.push(("handoff code", code.clone()));
+    let portal_jar = jar.for_host(&h.portal_host());
+    for (what, name) in [
+        ("portal handle", "__Host-hopae"),
+        ("portal binding cookie", "__Host-hopae_portal"),
+    ] {
+        secrets.push((
+            what,
+            portal_jar
+                .value(name)
+                .unwrap_or_else(|| panic!("no {what}")),
+        ));
+    }
+    let redeem = h.verify(
+        VerifyRequest::document(back.location().unwrap())
+            .ip(ip)
+            .cookie("__Host-hopae_bind", &bind),
+    );
+    assert_eq!(redeem.status, 302, "{redeem:?}");
+    let handle = redeem
+        .set_cookies()
+        .iter()
+        .find_map(|c| c.strip_prefix("__Host-hopae="))
+        .map(|rest| rest.split(';').next().unwrap().to_string())
+        .expect("application handle");
+    secrets.push(("application handle", handle.clone()));
+
+    // Failure flows: a replayed code, a forged state, a stale handle.
+    let replay = h.verify(
+        VerifyRequest::document(back.location().unwrap())
+            .ip("198.51.100.5")
+            .cookie("__Host-hopae_bind", &bind),
+    );
+    assert_ne!(replay.status, 200, "{replay:?}");
+    let forged = h
+        .portal()
+        .get("/callback/mock?code=forged-provider-code-123&state=forged-state-value-456");
+    assert_ne!(forged.status, 302, "{forged:?}");
+    secrets.push(("forged state", "forged-state-value-456".into()));
+    let stale = format!("v1.{}", "Z".repeat(43));
+    h.verify(
+        VerifyRequest::document("https://app.example.test/x")
+            .ip(ip)
+            .cookie("__Host-hopae", &stale),
+    );
+    secrets.push(("presented handle", stale));
+
+    h.advance(Duration::from_secs(61));
+    std::thread::sleep(Duration::from_secs(2));
+    let log = h.log();
+    let rows = serde_json::to_string(&h.hooks.events(None, Some(10_000))).unwrap();
+    for (what, v) in &secrets {
+        assert!(v.len() >= 8, "{what} looks too short to scan for: {v:?}");
+        assert!(!log.contains(v.as_str()), "the {what} reached the log");
+        assert!(
+            !rows.contains(v.as_str()),
+            "the {what} reached an event row"
+        );
+    }
+    for s in h.secret_values() {
+        assert!(!log.contains(&s), "a configured secret reached the log");
+    }
+    // The scan means something: the log does hold this flow.
+    assert!(log.contains("login.succeeded") || log.contains("session.created"));
 }

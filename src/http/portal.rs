@@ -48,6 +48,17 @@ pub fn router(state: PortalState) -> Router {
 async fn outer(State(st): State<PortalState>, mut req: Request, next: Next) -> Response {
     let rid = random_id(st.rng.as_ref(), "r_");
     req.extensions_mut().insert(RequestId(rid.clone()));
+    // The client's own id is kept apart: only an event attribute, and only
+    // when the operator turned `log.accept_client_request_id` on.
+    if let Some(v) = req
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+    {
+        let v: String = v.chars().take(256).collect();
+        req.extensions_mut().insert(handlers::ClientRequestId(v));
+    }
     let mut resp = next.run(req).await;
     security::apply(resp.headers_mut());
     if let Some(origins) = resp

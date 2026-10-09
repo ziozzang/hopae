@@ -21,6 +21,8 @@ use crate::provider::types::{CallbackQuery, ProviderHealth, ProviderId};
 #[derive(Clone, Debug)]
 pub struct RequestCtx {
     pub request_id: String,
+    /// The client's own `x-request-id` (never trusted, never used as `request_id`).
+    pub client_request_id: Option<String>,
     /// Client address after the trusted-proxy rule (never a raw header value).
     pub client_ip: IpAddr,
     pub user_agent: Option<String>,

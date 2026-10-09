@@ -427,15 +427,31 @@ async fn s006_a2_csrf_mismatch_rejected() {
     let h = Hopae::spawn(Fixture::new("m1-two-domains"), &idp, &[]);
     let (jar, _) = http_login(&h, &idp);
     let c = h.portal_with(jar).with_ip("203.0.113.9");
+    // The correct portal Origin is sent, so only the token can be what is
+    // refused (without it the Origin check would answer 403 first).
+    let origin = h.config()["portal"]["public_url"]
+        .as_str()
+        .unwrap()
+        .trim_end_matches('/')
+        .to_string();
     for fields in [vec![], vec![("csrf", "not-a-token-of-this-session")]] {
-        let r = c.post_form("/logout", &fields);
+        let r = c.send(
+            crate::support::Req::post("/logout")
+                .form(&fields)
+                .header("origin", &origin),
+        );
         assert_eq!(r.status, 403);
     }
     assert!(
         h.hooks.events(Some("session.terminated"), None).is_empty(),
         "session unchanged"
     );
-    assert!(!h.hooks.events(Some("csrf.rejected"), None).is_empty());
+    let rejected = h.hooks.events(Some("csrf.rejected"), None);
+    assert_eq!(rejected.len(), 2, "{rejected:?}");
+    for e in &rejected {
+        assert_eq!(e["attrs"]["cause"], "token", "{e}");
+        assert_eq!(e["attrs"]["purpose"], "logout", "{e}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

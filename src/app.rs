@@ -679,6 +679,12 @@ impl Bound {
                 u64::from(cfg.events.delivery_terminal_retention_days) * 86_400,
             ),
         };
+        // The store's writer enforces the same policy inline (ADR-0009: the
+        // bound must not depend on when the prune task gets to run).
+        self.services.store.set_event_retention(retention.clone());
+        self.services
+            .store
+            .set_drop_counts(self.services.emitter.drops().clone());
         let pruner = Pruner::new(
             events.clone(),
             self.services.clock.clone(),
@@ -698,6 +704,7 @@ impl Bound {
                 trigger: self.wiring.trigger.clone(),
                 pruner: Some(pruner.clone()),
                 hooks: self.services.store_hooks.clone(),
+                log: Some(Arc::new(LogSink::stderr(None))),
             }
             .run(bg_rx.clone()),
         ));

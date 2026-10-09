@@ -13,16 +13,19 @@ pub fn forces_no_store(rules: &[StepUpRule]) -> bool {
     !rules.is_empty()
 }
 
-/// A prefix matches on whole path segments: `/admin` covers `/admin` and
+/// A prefix matches on whole path segments, ASCII-case-insensitively: `/admin` covers `/admin` and
 /// `/admin/x` but not `/administrator`. A rule without a prefix covers the host.
 pub fn rule_matches(rule: &StepUpRule, canonical_path: &str) -> bool {
     match &rule.path_prefix {
         None => true,
         Some(prefix) => {
-            let p = prefix.trim_end_matches('/');
-            canonical_path == p
-                || canonical_path
-                    .strip_prefix(p)
+            // ASCII-case-insensitive (TM-39): an upstream that folds case
+            // serves `/ADMIN/x` as `/admin/x`, so the rule must too.
+            let p = prefix.trim_end_matches('/').to_ascii_lowercase();
+            let path = canonical_path.to_ascii_lowercase();
+            path == p
+                || path
+                    .strip_prefix(p.as_str())
                     .is_some_and(|rest| rest.starts_with('/'))
                 || p.is_empty()
         }
@@ -76,6 +79,21 @@ mod tests {
         assert!(!rule_matches(&r, "/administrator"));
         assert!(!rule_matches(&r, "/"));
         assert!(rule_matches(&rule(None, Aal::Two, None), "/anything"));
+    }
+
+    #[test]
+    fn prefix_comparison_is_ascii_case_insensitive() {
+        // TM-39: a case-insensitive upstream serves `/ADMIN/x` as `/admin/x`.
+        let r = rule(Some("/admin"), Aal::Two, None);
+        for p in ["/ADMIN", "/Admin/x", "/aDmIn/x/y"] {
+            assert!(rule_matches(&r, p), "{p}");
+        }
+        assert!(!rule_matches(&r, "/ADMINISTRATOR"));
+        let upper = rule(Some("/ADMIN/"), Aal::Two, None);
+        assert!(rule_matches(&upper, "/admin/x"));
+        // Only ASCII folds: a non-ASCII letter is not case-mapped.
+        let k = rule(Some("/\u{c9}t\u{e9}"), Aal::Two, None);
+        assert!(rule_matches(&k, "/\u{c9}T\u{e9}/x") && !rule_matches(&k, "/\u{e9}t\u{e9}/x"));
     }
 
     #[test]

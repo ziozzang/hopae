@@ -63,6 +63,9 @@ pub struct RequestCtx {
     pub client_ip: IpAddr,
     pub user_agent: Option<String>,
     pub request_id: String,
+    /// The client's `x-request-id`; the emitter records it only when
+    /// `log.accept_client_request_id` is on.
+    pub client_request_id: Option<String>,
 }
 
 /// Numbers and switches the service needs, from the configuration.
@@ -287,10 +290,13 @@ impl Service {
     /// told to the prune trigger here (the same as `Emitter::required`), because
     /// it is built to be committed with a state change.
     pub(crate) fn ev(&self, ctx: &RequestCtx, kind: EventKind, outcome: Outcome) -> EventBuilder {
-        self.emitter
+        let b = self
+            .emitter
             .counted(kind, outcome, ctx.request_id.clone())
             .ip(ctx.client_ip)
-            .ua(ctx.user_agent.as_deref())
+            .ua(ctx.user_agent.as_deref());
+        self.emitter
+            .with_client_request_id(b, ctx.client_request_id.as_deref())
     }
 
     pub(crate) fn event_ctx(&self, ctx: &RequestCtx, app: Option<&TransactionRow>) -> EventCtx {
@@ -300,6 +306,7 @@ impl Service {
             user_agent: ctx.user_agent.clone(),
             app_id: app.map(|t| t.app_id.clone()),
             session_id: None,
+            client_request_id: ctx.client_request_id.clone(),
         }
     }
 

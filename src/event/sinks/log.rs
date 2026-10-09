@@ -32,6 +32,15 @@ impl LogSink {
         Self::new(Box::new(std::io::stderr()), hooks)
     }
 
+    /// Write `event`'s line, best effort: a diagnostic event that reached the
+    /// store also reaches the log, without a delivery row (ADR-0009).
+    pub fn emit(&self, event: &Event) {
+        let mut line = Self::line(event);
+        line.push('\n');
+        let mut out = self.out.lock().unwrap_or_else(|p| p.into_inner());
+        let _ = out.write_all(line.as_bytes()).and_then(|()| out.flush());
+    }
+
     /// The line written for `event`, without the newline. `serde_json`
     /// escapes control characters, so it is always exactly one line.
     pub fn line(event: &Event) -> String {

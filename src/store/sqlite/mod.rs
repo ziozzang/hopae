@@ -17,7 +17,7 @@ use std::fs::OpenOptions;
 use std::future::Future;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::Duration;
@@ -71,6 +71,14 @@ pub(crate) struct Shared {
     pub(crate) rng: RwLock<Arc<dyn Rng>>,
     pub(crate) diag: Mutex<VecDeque<Event>>,
     pub(crate) diag_flush_queued: AtomicBool,
+    /// Retention policy enforced inline by the writer (ADR-0009, G7-P01).
+    /// Where diagnostic events lost at the persistence boundary are counted.
+    pub(crate) drops: Mutex<Option<Arc<crate::event::bus::DropCounts>>>,
+    pub(crate) retention: Mutex<Option<crate::store::types::EventRetention>>,
+    /// Event rows inserted by the transaction in progress (writer thread).
+    pub(crate) pending_events: AtomicU64,
+    /// Event rows committed since the last prune.
+    pub(crate) committed_events: AtomicU64,
 }
 
 impl Shared {
@@ -87,6 +95,8 @@ pub(crate) struct WriterEnv {
 
 impl WriterEnv {
     pub(crate) fn begin(&mut self) -> StoreResult<Transaction<'_>> {
+        // A transaction that did not commit leaves its count behind.
+        self.shared.pending_events.store(0, Ordering::Relaxed);
         Ok(self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?)
@@ -103,6 +113,8 @@ pub(crate) fn commit(tx: Transaction<'_>, shared: &Shared, gate: Option<&str>) -
         h.pass_gate(label);
     }
     tx.commit()?;
+    let n = shared.pending_events.swap(0, Ordering::Relaxed);
+    shared.committed_events.fetch_add(n, Ordering::Relaxed);
     Ok(())
 }
 
@@ -166,6 +178,10 @@ impl Store {
             rng: RwLock::new(Arc::new(OsRng)),
             diag: Mutex::new(VecDeque::new()),
             diag_flush_queued: AtomicBool::new(false),
+            drops: Mutex::new(None),
+            retention: Mutex::new(None),
+            pending_events: AtomicU64::new(0),
+            committed_events: AtomicU64::new(0),
         });
         let (tx, rx) = mpsc::channel::<Job>();
         let mut env = WriterEnv {
@@ -177,6 +193,7 @@ impl Store {
             .spawn(move || {
                 while let Ok(job) = rx.recv() {
                     job(&mut env);
+                    events::enforce_retention(&mut env);
                 }
             })
             .map_err(io(path))?;
@@ -201,6 +218,29 @@ impl Store {
 
     pub fn events(&self) -> Arc<dyn Events> {
         Arc::new(self.clone())
+    }
+
+    /// Count diagnostic events whose batch could not be persisted in `drops`.
+    pub fn set_drop_counts(&self, drops: Arc<crate::event::bus::DropCounts>) {
+        *self
+            .inner
+            .shared
+            .drops
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(drops);
+    }
+
+    /// The retention policy the writer enforces itself: after a job, once
+    /// `prune_every / 2` event rows have been committed since the last prune,
+    /// the writer prunes inline, so the table never exceeds
+    /// `max_rows + prune_every` however the prune task is scheduled.
+    pub fn set_event_retention(&self, policy: crate::store::types::EventRetention) {
+        *self
+            .inner
+            .shared
+            .retention
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(policy);
     }
 
     /// Replace the random source used for ids the store mints (user ids).

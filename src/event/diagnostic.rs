@@ -13,6 +13,7 @@ use crate::crypto::{Clock, Rng};
 use crate::event::bus::DropCounts;
 use crate::event::prune::{PruneTrigger, Pruner};
 use crate::event::sampling::Sampler;
+use crate::event::sinks::LogSink;
 use crate::event::types::{Event, EventBuilder, EventKind, Outcome};
 use crate::store::{Events, Store};
 use crate::telemetry::counters;
@@ -37,6 +38,8 @@ pub struct DiagnosticWriter {
     pub pruner: Option<Pruner>,
     /// Test hooks: the harness can stall this writer alone (S014-5).
     pub hooks: Option<Arc<crate::store::StoreHooks>>,
+    /// Structured log output for the diagnostic events that were persisted.
+    pub log: Option<Arc<LogSink>>,
 }
 
 impl DiagnosticWriter {
@@ -48,8 +51,12 @@ impl DiagnosticWriter {
                 tokio::time::sleep(d).await;
             }
         }
+        let for_log = self.log.is_some().then(|| ev.clone());
         match self.events.append_diagnostic(ev).await {
             Ok(()) => {
+                if let (Some(log), Some(ev)) = (&self.log, &for_log) {
+                    log.emit(ev);
+                }
                 self.trigger.note_insert();
                 *since_sync += 1;
                 // The store batches queued diagnostics in one transaction; flush
@@ -101,9 +108,12 @@ impl DiagnosticWriter {
             counters::EVENTS_TOTAL,
             &[("kind", "events.dropped"), ("outcome", "info")],
         );
+        let for_log = self.log.is_some().then(|| ev.clone());
         if self.events.append_diagnostic(ev).await.is_err() {
             // Keep the counts for the next report; the metric already has them.
             self.drops.restore(counts);
+        } else if let (Some(log), Some(ev)) = (&self.log, &for_log) {
+            log.emit(ev);
         }
     }
 
@@ -182,6 +192,7 @@ mod tests {
             trigger: Arc::new(PruneTrigger::new(1000)),
             pruner: None,
             hooks: None,
+            log: None,
         };
         let task = tokio::spawn(writer.run(stop_rx));
         hooks.set_stall(300);
@@ -233,5 +244,177 @@ mod tests {
             1000,
             "every diagnostic is either kept or counted"
         );
+    }
+
+    /// G7-P03: a diagnostic batch that fails at the persistence boundary is
+    /// counted as dropped by kind and reported once storage recovers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_batch_commit_is_counted_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = Arc::new(TestClock::new(Timestamp(1_800_000_000_000)));
+        let hooks = Arc::new(StoreHooks::new());
+        let store = Store::open(
+            &dir.path().join("t.db"),
+            clock.clone(),
+            vec!["log".into()],
+            Some(hooks.clone()),
+        )
+        .unwrap();
+        let (bus, rx) = channel(100);
+        let sampler = Arc::new(Sampler::default());
+        let em = Emitter::new(
+            clock.clone(),
+            Arc::new(OsRng),
+            bus,
+            sampler.clone(),
+            Arc::new(PruneTrigger::new(1000)),
+            false,
+        );
+        store.set_drop_counts(em.drops().clone());
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let writer = DiagnosticWriter {
+            store: store.clone(),
+            events: store.events(),
+            rx,
+            drops: em.drops().clone(),
+            sampler,
+            clock: clock.clone(),
+            rng: Arc::new(OsRng),
+            trigger: Arc::new(PruneTrigger::new(1000)),
+            pruner: None,
+            hooks: None,
+            log: None,
+        };
+        let task = tokio::spawn(writer.run(stop_rx));
+        hooks.fail_diag_batches(1);
+        for _ in 0..5 {
+            em.diagnostic(EventKind::ProviderError, Outcome::Failure, "r", |b| {
+                b.reason(reasons::PROVIDER_TIMEOUT)
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        store.barrier().await.unwrap();
+        let kept = store
+            .events()
+            .query(EventQuery {
+                kind: Some(EventKind::ProviderError),
+                limit: Some(100),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .len() as u64;
+        let lost = em.drops().total();
+        assert!(lost >= 1, "the failed batch is accounted for, kept {kept}");
+        assert_eq!(kept + lost, 5, "kept or counted, never silent");
+        // Storage is back: the next report carries the discarded batch.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        stop_tx.send(true).unwrap();
+        task.await.unwrap();
+        store.barrier().await.unwrap();
+        let reported: u64 = store
+            .events()
+            .query(EventQuery {
+                kind: Some(EventKind::EventsDropped),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .iter()
+            .map(|e| {
+                e.attrs["dropped_by_kind"]["provider.error"]
+                    .as_u64()
+                    .unwrap_or(0)
+            })
+            .sum();
+        assert_eq!(reported, lost, "reported by kind after recovery");
+    }
+
+    struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// G7-P02: every persisted diagnostic kind reaches the structured log as
+    /// the JSON of its row; none gets a delivery row.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn persisted_diagnostics_reach_the_log_as_their_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = Arc::new(TestClock::new(Timestamp(1_800_000_000_000)));
+        let store = Store::open(
+            &dir.path().join("t.db"),
+            clock.clone(),
+            vec!["log".into()],
+            None,
+        )
+        .unwrap();
+        let (bus, rx) = channel(100);
+        let sampler = Arc::new(Sampler::default());
+        let em = Emitter::new(
+            clock.clone(),
+            Arc::new(OsRng),
+            bus,
+            sampler.clone(),
+            Arc::new(PruneTrigger::new(1000)),
+            false,
+        );
+        let out = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let writer = DiagnosticWriter {
+            store: store.clone(),
+            events: store.events(),
+            rx,
+            drops: em.drops().clone(),
+            sampler,
+            clock: clock.clone(),
+            rng: Arc::new(OsRng),
+            trigger: Arc::new(PruneTrigger::new(1000)),
+            pruner: None,
+            hooks: None,
+            log: Some(Arc::new(LogSink::new(Box::new(Buf(out.clone())), None))),
+        };
+        let task = tokio::spawn(writer.run(stop_rx));
+        let kinds = [EventKind::ProviderError, EventKind::TxnEvicted];
+        for k in kinds {
+            em.diagnostic(k, Outcome::Failure, "r", |b| b);
+        }
+        em.drops().record(EventKind::ProviderError);
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        stop_tx.send(true).unwrap();
+        task.await.unwrap();
+        store.barrier().await.unwrap();
+        let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        for k in [
+            EventKind::ProviderError,
+            EventKind::TxnEvicted,
+            EventKind::EventsDropped,
+        ] {
+            let rows = store
+                .events()
+                .query(EventQuery {
+                    kind: Some(k),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1, "{}", k.name());
+            let line = lines
+                .iter()
+                .find(|l| l["kind"] == k.name())
+                .unwrap_or_else(|| panic!("no log line for {}", k.name()));
+            assert_eq!(line, &rows[0].to_json(), "{}", k.name());
+        }
+        assert_eq!(store.events().count_rows().await.unwrap().1, 0);
     }
 }

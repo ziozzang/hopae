@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -57,8 +57,8 @@ default applies.
 | `store.path` | string, path | `<state_dir>/hopae.db` | SQLite database file. Must not be empty when set. |
 | `log.level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | Verbosity of the process log on stderr. |
 | `log.verify_allow` | boolean | `false` | Log every allowed verify individually (denials are always counted and sampled). |
-| `log.accept_client_request_id` | boolean | `false` | Record a client-supplied `x-request-id` (truncated) in `attrs.client_request_id` ([ADR-0009](adr/0009-event-model.md)). |
-| `trusted_proxies` | array of IP address or CIDR strings | `["127.0.0.1/32"]` | Peers whose `x-forwarded-for` and `x-forwarded-proto` the portal listener trusts. Each entry must parse as an address or a CIDR. |
+| `log.accept_client_request_id` | boolean | `false` | Record a client-supplied `x-request-id` (truncated) in `attrs.client_request_id` of the events of verify and portal requests ([ADR-0009](adr/0009-event-model.md)). |
+| `trusted_proxies` | array of IP address or CIDR strings | `["127.0.0.1/32"]` | Peers whose `x-forwarded-for` and `x-forwarded-proto` the portal listener trusts. Each entry must parse as an address or a CIDR. A forwarded chain of more than 64 hops (all header lines together) is not believed: the peer itself is then the client address. |
 | `limits.gateway_max_concurrent` | integer, at least 1 | `64` | In-flight request cap on the gateway listener; excess requests are answered `503` with `reason=overloaded` immediately ([ADR-0003](adr/0003-http-stack-axum-on-hyper.md)). The caller key is checked before a permit is taken. |
 | `limits.portal_max_concurrent` | integer, at least 1 | `256` | In-flight request cap on the portal listener; excess requests are answered `503` immediately. |
 | `sessions.retention_days` | integer, at least 1 | `30` | Age after which terminated sessions and their handles are deleted by the session-retention sweep ([ADR-0007](adr/0007-context-binding-policy.md)). |

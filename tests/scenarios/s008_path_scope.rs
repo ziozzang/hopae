@@ -272,6 +272,38 @@ mod gateway_layer {
         let b = s.gw.browser();
         // The outcome per form is the gateway's behavior, recorded here as the
         // scenario asks: (path, status, path the upstream saw or None).
+        // HC-10: a gateway that knows the route field `path_case` matches protected
+        // prefixes case-insensitively, so `/ADMIN/x` reaches the external check.
+        // Probe the binary with its own `--check`, so the same test stays right
+        // before and after the gateway gains the field.
+        let (base_ok, base_out) = s.gw.check_variant(|_| {});
+        assert!(
+            base_ok,
+            "the unmodified configuration must check: {base_out}"
+        );
+        let (hc10, _) = s.gw.check_variant(|doc| {
+            fn mark(v: &mut serde_json::Value) {
+                match v {
+                    serde_json::Value::Object(o) => {
+                        if o.get("id")
+                            .and_then(|i| i.as_str())
+                            .is_some_and(|i| i.starts_with("site-admin"))
+                        {
+                            o.insert("path_case".into(), serde_json::json!("insensitive"));
+                        }
+                        o.values_mut().for_each(mark);
+                    }
+                    serde_json::Value::Array(a) => a.iter_mut().for_each(mark),
+                    _ => {}
+                }
+            }
+            mark(doc);
+        });
+        let upper: (u16, Option<&str>) = if hc10 {
+            (302, None)
+        } else {
+            (200, Some("/ADMIN/x"))
+        };
         let recorded: [(&str, u16, Option<&str>); 4] = [
             // an encoded slash is refused by the gateway's path validation
             ("/admin%2Fx", 400, None),
@@ -279,7 +311,7 @@ mod gateway_layer {
             // request reaches the upstream as /ADMIN/x, a different resource for a
             // case-sensitive upstream (see the report: a case-insensitive upstream
             // would serve /admin content here)
-            ("/ADMIN/x", 200, Some("/ADMIN/x")),
+            ("/ADMIN/x", upper.0, upper.1),
             // dot segments are refused (the gateway's default; allow_dot_segments is off)
             ("/admin/../admin/x", 400, None),
             // an empty segment is refused

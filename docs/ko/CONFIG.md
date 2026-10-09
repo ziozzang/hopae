@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=4 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=5 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -56,8 +56,8 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `store.path` | 문자열, 경로 | `<state_dir>/hopae.db` | SQLite 데이터베이스 파일. 지정했다면 비어 있으면 안 됩니다. |
 | `log.level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | stderr 프로세스 로그의 상세도. |
 | `log.verify_allow` | 불리언 | `false` | 허용된 verify를 하나하나 기록합니다(거부는 항상 집계되고 샘플링됩니다). |
-| `log.accept_client_request_id` | 불리언 | `false` | 클라이언트가 보낸 `x-request-id`를 잘라서 `attrs.client_request_id`에 기록합니다([ADR-0009](../adr/0009-event-model.md)). |
-| `trusted_proxies` | IP 주소 또는 CIDR 문자열 배열 | `["127.0.0.1/32"]` | 포털 리스너가 `x-forwarded-for`와 `x-forwarded-proto`를 신뢰하는 피어. 각 항목은 주소 또는 CIDR이어야 합니다. |
+| `log.accept_client_request_id` | 불리언 | `false` | 클라이언트가 보낸 `x-request-id`를 잘라서 verify와 포털 요청 이벤트의 `attrs.client_request_id`에 기록합니다([ADR-0009](../adr/0009-event-model.md)). |
+| `trusted_proxies` | IP 주소 또는 CIDR 문자열 배열 | `["127.0.0.1/32"]` | 포털 리스너가 `x-forwarded-for`와 `x-forwarded-proto`를 신뢰하는 피어. 각 항목은 주소 또는 CIDR이어야 합니다. 전달된 체인이 (모든 헤더 줄을 합쳐) 64홉을 넘으면 신뢰하지 않으며, 이때 피어 자신이 클라이언트 주소가 됩니다. |
 | `limits.gateway_max_concurrent` | 정수, 1 이상 | `64` | 게이트웨이 리스너의 동시 처리 요청 상한. 초과 요청은 즉시 `reason=overloaded`와 함께 `503`으로 답합니다([ADR-0003](../adr/0003-http-stack-axum-on-hyper.md)). 호출자 키는 허가를 얻기 전에 검사합니다. |
 | `limits.portal_max_concurrent` | 정수, 1 이상 | `256` | 포털 리스너의 동시 처리 요청 상한. 초과 요청은 즉시 `503`으로 답합니다. |
 | `sessions.retention_days` | 정수, 1 이상 | `30` | 종료된 세션과 그 핸들을 세션 보존 정리 작업이 삭제하는 기간([ADR-0007](../adr/0007-context-binding-policy.md)). |
