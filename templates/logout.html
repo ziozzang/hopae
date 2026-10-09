@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("logout.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t.get("logout.title") }}</h1>
+<p>{{ t.get("logout.body") }}</p>
+<form method="post" action="/logout">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit">{{ t.get("logout.button") }}</button>
+</form>
+{% endblock %}

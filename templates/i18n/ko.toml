@@ -1,0 +1,52 @@
+# 포털 문자열(한국어). 형식은 en.toml과 같고, 키는 두 파일이 항상 같아야 합니다.
+
+"lang.code" = "ko"
+"common.request_id" = "요청 ID"
+"common.continue" = "계속"
+
+"login.title" = "로그인"
+"login.lead" = "로그인 방법을 선택하세요."
+"login.button" = "{provider}(으)로 계속"
+"login.unavailable" = "{provider}은(는) 일시적으로 사용할 수 없습니다."
+
+"retry.title" = "로그인이 중단되었습니다"
+"retry.body" = "브라우저에서 로그인 창이 동시에 두 개 열려 이번 시도를 끝내지 못했습니다. 다시 시작하면 로그인을 마칠 수 있습니다."
+"retry.button" = "다시 시도"
+"retry.exhausted_title" = "로그인을 완료하지 못했습니다"
+"retry.exhausted_body" = "로그인이 너무 여러 번 중단되었습니다. 다른 탭을 닫고 애플리케이션을 다시 여세요."
+
+"continue.title" = "다른 애플리케이션으로 계속"
+"continue.body" = "이미 로그인되어 있습니다. {host}(으)로 계속할까요?"
+"continue.button" = "계속"
+
+"switch.title" = "계정을 바꿀까요?"
+"switch.body" = "{host}에는 여기에서 로그인한 계정과 다른 계정이 열려 있습니다."
+"switch.current" = "{host}에 열려 있는 계정"
+"switch.incoming" = "여기에서 로그인한 계정"
+"switch.switch_button" = "여기에서 로그인한 계정으로 바꾸기"
+"switch.keep_button" = "{host}에 열려 있는 계정 유지"
+
+"logout.title" = "로그아웃"
+"logout.body" = "이 브라우저에서 로그아웃할까요? 애플리케이션은 다시 로그인을 요구합니다."
+"logout.button" = "로그아웃"
+"signedout.title" = "로그아웃되었습니다"
+"signedout.body" = "이 브라우저에서 로그아웃되었습니다."
+
+"link.title" = "이미 있는 계정입니다"
+"link.body" = "이 이메일 주소는 이미 다른 계정에 속해 있습니다. 연결하려면 {provider}(으)로 로그인하세요."
+"link.body_generic" = "이 이메일 주소는 이미 다른 계정에 속해 있습니다. 연결하려면 이전에 사용한 방법으로 로그인하세요."
+
+"error.expired.title" = "로그인 링크가 만료되었습니다"
+"error.expired.body" = "애플리케이션으로 돌아가 다시 시도하세요."
+"error.failed.title" = "로그인에 실패했습니다"
+"error.failed.body" = "로그인을 완료하지 못했습니다. 애플리케이션으로 돌아가 다시 시도하세요."
+"error.forbidden.title" = "요청이 거부되었습니다"
+"error.forbidden.body" = "요청을 확인하지 못했습니다. 페이지를 새로 고치고 다시 시도하세요."
+"error.notfound.title" = "페이지를 찾을 수 없습니다"
+"error.notfound.body" = "이 주소에는 아무것도 없습니다."
+"error.too_large.title" = "요청이 너무 큽니다"
+"error.too_large.body" = "이 페이지가 받을 수 있는 크기를 넘었습니다."
+"error.unavailable.title" = "일시적으로 사용할 수 없습니다"
+"error.unavailable.body" = "서비스가 바쁘거나 사용할 수 없습니다. 잠시 후 다시 시도하세요."
+"error.bad_request.title" = "잘못된 요청입니다"
+"error.bad_request.body" = "요청을 이해하지 못했습니다."

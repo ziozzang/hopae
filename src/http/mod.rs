@@ -4,8 +4,11 @@
 
 pub mod gateway;
 
+pub mod csrf;
 #[cfg(feature = "test-hooks")]
 pub mod hooks;
+pub mod portal;
+pub mod security;
 
 use axum::Router;
 use axum::http::StatusCode;

@@ -1,0 +1,76 @@
+//! Portal listener router: routes, request ids, security headers on every
+//! response, the concurrency cap and the `404` fallback.
+//!
+//! Serve it with connect info so the trusted-proxy rule can see the TCP peer:
+//! `axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())`.
+
+use axum::Router;
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::Response;
+use axum::routing::{get, post};
+
+use crate::crypto::random_id;
+use crate::http::security;
+use crate::portal::PortalState;
+use crate::portal::handlers::{self, RequestId};
+use crate::portal::pages::ErrorPage;
+
+/// Router for the portal listener (all routes, middleware and the 404 fallback).
+pub fn router(state: PortalState) -> Router {
+    Router::new()
+        .route("/healthz", get(handlers::healthz))
+        .route("/assets/portal.css", get(handlers::stylesheet))
+        .route("/login", get(handlers::login_get))
+        .route("/login/retry", post(handlers::retry_post))
+        .route("/login/continue", post(handlers::continue_post))
+        .route("/login/{provider}", post(handlers::login_post))
+        .route("/callback/{provider}", get(handlers::callback_get))
+        .route(
+            "/switch",
+            get(handlers::switch_get).post(handlers::switch_post),
+        )
+        .route(
+            "/logout",
+            get(handlers::logout_get).post(handlers::logout_post),
+        )
+        .fallback(handlers::not_found)
+        // Innermost first: the cap runs inside the request-id/header layer, so
+        // even its 503 carries the security headers and an id.
+        .layer(middleware::from_fn_with_state(state.clone(), limit))
+        .layer(middleware::from_fn_with_state(state.clone(), outer))
+        .with_state(state)
+}
+
+/// Assign the request id, run the request, and stamp the security headers
+/// (and the id) on whatever comes back, whatever produced it.
+async fn outer(State(st): State<PortalState>, mut req: Request, next: Next) -> Response {
+    let rid = random_id(st.rng.as_ref(), "r_");
+    req.extensions_mut().insert(RequestId(rid.clone()));
+    let mut resp = next.run(req).await;
+    security::apply(resp.headers_mut());
+    if let Ok(v) = HeaderValue::from_str(&rid) {
+        resp.headers_mut().insert(handlers::request_id_header(), v);
+    }
+    resp
+}
+
+/// `limits.portal_max_concurrent`: excess requests are refused at once, not queued.
+async fn limit(State(st): State<PortalState>, req: Request, next: Next) -> Response {
+    match st.in_flight.clone().try_acquire_owned() {
+        Ok(permit) => {
+            let resp = next.run(req).await;
+            drop(permit);
+            resp
+        }
+        Err(_) => {
+            let rid = handlers::request_id_of(&req);
+            let mut resp = handlers::plain_error(req.headers(), &rid, ErrorPage::Unavailable);
+            *resp.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+            resp.headers_mut()
+                .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+            resp
+        }
+    }
+}

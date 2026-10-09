@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("link.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t.get("link.title") }}</h1>
+{% match via_provider %}
+{% when Some with (name) %}
+<p>{{ t.fmt("link.body", "provider", name) }}</p>
+{% when None %}
+<p>{{ t.get("link.body_generic") }}</p>
+{% endmatch %}
+{% endblock %}

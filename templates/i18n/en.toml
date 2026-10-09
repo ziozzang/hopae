@@ -1,0 +1,53 @@
+# Portal strings, English (the default language). One `key = "value"` per line;
+# placeholders are written {name}. Keep this file and ko.toml on the same keys.
+
+"lang.code" = "en"
+"common.request_id" = "Request ID"
+"common.continue" = "Continue"
+
+"login.title" = "Sign in"
+"login.lead" = "Choose how you want to sign in."
+"login.button" = "Continue with {provider}"
+"login.unavailable" = "{provider} is temporarily unavailable."
+
+"retry.title" = "Sign-in was interrupted"
+"retry.body" = "Your browser opened two sign-in pages at once, so this attempt could not be completed. Start it again to finish signing in."
+"retry.button" = "Try again"
+"retry.exhausted_title" = "Sign-in could not be completed"
+"retry.exhausted_body" = "Sign-in was interrupted too many times. Close the other tabs and open the application again."
+
+"continue.title" = "Continue to another application"
+"continue.body" = "You are already signed in. Continue to {host}?"
+"continue.button" = "Continue"
+
+"switch.title" = "Switch account?"
+"switch.body" = "{host} is open with a different account than the one you are signed in with here."
+"switch.current" = "Open on {host}"
+"switch.incoming" = "Signed in here"
+"switch.switch_button" = "Switch to the account signed in here"
+"switch.keep_button" = "Keep the account open on {host}"
+
+"logout.title" = "Sign out"
+"logout.body" = "Sign out of this browser? Applications will ask you to sign in again."
+"logout.button" = "Sign out"
+"signedout.title" = "Signed out"
+"signedout.body" = "You are signed out of this browser."
+
+"link.title" = "Account already exists"
+"link.body" = "This email address already belongs to an account. Sign in with {provider} to connect it."
+"link.body_generic" = "This email address already belongs to an account. Sign in with the method you used before to connect it."
+
+"error.expired.title" = "This sign-in link has expired"
+"error.expired.body" = "Go back to the application and try again."
+"error.failed.title" = "Sign-in failed"
+"error.failed.body" = "Sign-in could not be completed. Go back to the application and try again."
+"error.forbidden.title" = "Request refused"
+"error.forbidden.body" = "This request could not be verified. Reload the page and try again."
+"error.notfound.title" = "Page not found"
+"error.notfound.body" = "There is nothing at this address."
+"error.too_large.title" = "Request too large"
+"error.too_large.body" = "The request was larger than this page accepts."
+"error.unavailable.title" = "Temporarily unavailable"
+"error.unavailable.body" = "The service is busy or unavailable. Try again in a moment."
+"error.bad_request.title" = "Bad request"
+"error.bad_request.body" = "The request could not be understood."

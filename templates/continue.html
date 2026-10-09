@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("continue.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t.get("continue.title") }}</h1>
+<p>{{ t.fmt("continue.body", "host", host) }}</p>
+<form method="post" action="/login/continue">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="txn" value="{{ txn }}">
+<button type="submit">{{ t.get("continue.button") }}</button>
+</form>
+{% endblock %}

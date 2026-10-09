@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("switch.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t.get("switch.title") }}</h1>
+<p>{{ t.fmt("switch.body", "host", host) }}</p>
+<dl>
+<dt>{{ t.fmt("switch.current", "host", host) }}</dt>
+<dd>{{ current_account }}</dd>
+<dt>{{ t.get("switch.incoming") }}</dt>
+<dd>{{ incoming_account }}</dd>
+</dl>
+<form method="post" action="/switch">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="txn" value="{{ txn }}">
+<button type="submit" name="choice" value="switch">{{ t.get("switch.switch_button") }}</button>
+<button type="submit" name="choice" value="keep">{{ t.fmt("switch.keep_button", "host", host) }}</button>
+</form>
+{% endblock %}

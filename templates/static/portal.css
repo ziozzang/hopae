@@ -1,0 +1,13 @@
+:root { color-scheme: light dark; }
+body { font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans KR", sans-serif; margin: 0; background: Canvas; color: CanvasText; }
+main { max-width: 26rem; margin: 12vh auto 0; padding: 0 1.25rem; }
+h1 { font-size: 1.35rem; margin: 0 0 0.75rem; }
+p { line-height: 1.5; }
+form { margin: 0.75rem 0; }
+button { display: block; width: 100%; padding: 0.7rem 1rem; font: inherit; border-radius: 0.5rem; border: 1px solid currentColor; background: transparent; color: inherit; cursor: pointer; margin: 0.4rem 0; }
+button:hover, button:focus { background: color-mix(in srgb, currentColor 10%, transparent); }
+dl { margin: 1rem 0; }
+dt { font-size: 0.85rem; opacity: 0.7; }
+dd { margin: 0 0 0.6rem; font-weight: 600; }
+.muted { opacity: 0.65; }
+.rid { margin-top: 2rem; font-size: 0.75rem; opacity: 0.55; }
