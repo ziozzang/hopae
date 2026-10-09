@@ -1,6 +1,6 @@
 # ADR-0016: The management console is a Hopae application on its own listener, authenticated from the session handle, with administrators as granted users
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator, maintainer
 - Scenarios: 300, 301, 302, 303, 304, 305
