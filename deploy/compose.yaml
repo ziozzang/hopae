@@ -6,9 +6,10 @@
 #   docker compose up -d
 #
 # Network model: the container shares the host network namespace and Hopae
-# binds 127.0.0.1 only (portal :8700, gateway listener :8701). A gateway on
-# the same host reaches both on loopback; nothing else can. Nothing is
-# published with `ports:`. If your gateway runs in another network namespace,
+# binds 127.0.0.1 only (portal :8700, gateway listener :8701, and the admin
+# listener :8702 when `admin.public_url` is set). A gateway on the same host
+# reaches them on loopback; nothing else can. Nothing is published with
+# `ports:`; in particular the admin listener is never published. If your gateway runs in another network namespace,
 # put both in one namespace instead; never bind the gateway listener to a
 # routable address.
 
@@ -44,3 +45,6 @@ services:
     # The image has no shell or curl, so there is no container healthcheck.
     # Probe from the host: curl -fsS http://127.0.0.1:8700/healthz  (read the
     # "ready" field; the status code is 200 whenever the process serves).
+    # Administrator grants (after the first sign-in at the console host):
+    #   docker compose run --rm hopae admin grant <user_id> --config /etc/hopae/hopae.json
+    # The command runs against the same state volume and needs no restart.

@@ -1,6 +1,6 @@
 # Administration
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/ADMIN.md)
 
@@ -8,10 +8,10 @@ The administration console and its JSON API let an operator list and search
 users, inspect a user's identities, sessions and recent events, disable and
 enable a user, end one session or every session of a user, browse the login
 history and the audit trail, and read the status of applications, providers,
-the store and the build. This page is the G1 specification of milestone
-**M4-min** ([roadmap](ROADMAP.md#m4-min--management-console-minimum-020)),
-revised after design review passes 1 and 2; the decisions are recorded in
-[ADR-0016](adr/0016-management-console-minimum.md) (Proposed). The console is
+the store and the build. This page is the operator guide and reference of milestone
+**M4-min** ([roadmap](ROADMAP.md#m4-min--management-console-minimum-020)); the
+decisions are recorded in
+[ADR-0016](adr/0016-management-console-minimum.md). The console is
 a Hopae application served by Hopae itself: administrators sign in with the
 ordinary login flow, and Hopae authenticates every console request from its
 own session handle.
@@ -28,12 +28,12 @@ own session handle.
 | Provider second factor | A console session is single-factor until Hopae's own TOTP (proposed as the next milestone); require a second factor at the provider for administrator accounts |
 
 Keys (all under the top-level `admin` object unless stated; details in the
-[configuration reference](CONFIG.md#keys-decided-and-scheduled)):
+[configuration reference](CONFIG.md#management-console)):
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `listen.admin` | string, socket address | `127.0.0.1:8702` | Admin listener; bound only when `admin.public_url` is set; must differ from the other listeners; a non-loopback address produces a warning |
-| `admin.public_url` | string, origin | none | Externally visible origin of the console, `https://hopae-admin.example.test`; `https://` or `http://` plus a host and optional port, no path. Setting it registers the implicit application `admin` |
+| `admin.public_url` | string, origin | none | Externally visible origin of the console, `https://hopae-admin.example.test`; `https://` (`http://` only when `cookie.secure` is `false`) plus a lower-case host name, never an IP address, and an optional port; no path, query, fragment or credentials. Setting it registers the implicit application `admin` |
 | `admin.session.idle`, `admin.session.absolute` | duration | `30m`, `12h` | Per-handle timers of the console host (`idle` at least `60s`) |
 | `admin.binding.ip`, `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6`, `admin.binding.ua`, `admin.binding.on_mismatch` | as `apps[].binding.*` | `strict`, `24`, `64`, `off`, `terminate_session` | Client binding of the console handle |
 | `admin.max_auth_age` | duration, at least `30m` | `12h` | Freshness bound of a console session, one predicate everywhere: `auth_time ≤ now + 60 s` and `now − auth_time < N`. The minimum keeps the 600 s callback headroom; a smaller value is a configuration error. What `auth_time` proves depends on the provider's `reauth` capability ([freshness](#freshness-and-reauthentication)) |
@@ -59,7 +59,9 @@ is a configuration error, and the console host must not appear in any
 Gateway route fragment for the console host (Hangang; the `auth` block is the
 contract's standard one; the one difference from an application route is that
 `strip_request_cookies` is absent, because the upstream is Hopae and needs the
-handle):
+handle; `hopae --check` prints the same fragment with the real host and admin
+listener address; the Hangang route files in `deploy/` carry it as the
+`hopae-admin` route):
 
 ```json
 {
@@ -90,23 +92,95 @@ The gateway's own route-level controls (client address policy, country policy)
 may be added in front of the console host as a second layer; Hopae does not
 depend on them.
 
-Command line (runs against the store directly, safe while an instance runs; a
-running instance reads grants on every request, so no restart is needed; every
-command validates the database's recorded version before it touches anything,
-exactly as the instance does at start):
+### Command line reference
+
+The `hopae admin` commands run against the store directly and are safe while
+an instance runs: they take no instance lock, and a running instance reads
+grants on every request, so no restart is needed. Every command runs the same
+read-only precheck as the instance at start before it touches anything. It
+never creates, migrates or backs up the database: a missing file, or one older
+than the binary, is refused (`error: database schema version N is older than
+this binary (M): start the instance once to migrate`), as is one the precheck
+rejects. A busy database is waited for at most 5 seconds. Arguments are
+validated before the store is opened. Exit status: `0` success; `2` a refused
+command or an unusable database; `1` a store failure (busy, timed out,
+unreadable). Run from a container with `docker compose run --rm hopae admin
+list --config /etc/hopae/hopae.json` (the image entry point is `hopae`).
 
 | Invocation | Meaning |
 | --- | --- |
-| `hopae admin grant <user_id or email> [--role admin\|viewer] [--note <text>] [--confirm <user_id>] --config <path>` | Grant the role (default `admin`) to an existing user and print the user it resolved: `user_id`, `display_name`, `created_at`, `last_login_at`, `primary_email` with its `verified` and `authoritative` flags, and every linked identity as `provider:subject`. An email must be the user's verified `primary_email`; a user who never signed in does not exist (exit `2`, "sign in once first"). An email that is **not authoritative** is granted only with `--confirm <user_id>` naming the resolved id (exit `2` otherwise, after printing the resolution). The grant binds to the resolved `user_id` and is never re-resolved. A second grant updates the role and clears a revocation; a file-managed row becomes `managed_by = api`. Records `admin.grant` with `attrs.actor = cli`. |
+| `hopae admin grant <user_id or email> [--role admin\|viewer] [--note <text>] [--confirm <user_id>] --config <path>` | Grant the role (default `admin`) to an existing user and print the user it resolved (the resolution block below). An email must be the user's verified `primary_email`; a user who never signed in does not exist (exit `2`, "sign in once first"). An email that is **not authoritative** is granted only with `--confirm <user_id>` naming the resolved id (exit `2` otherwise, after printing the resolution); a user id needs no confirmation. A disabled user is refused. `--note` is at most 256 characters. The grant binds to the resolved `user_id` and is never re-resolved. A second grant updates the role and clears a revocation; a file-managed row becomes `managed_by = api`. Records `admin.grant` with `attrs.actor = cli`. |
 | `hopae admin revoke <user_id or email> --config <path>` | Revoke the grant; the user's next console request is `403 not_admin`. The row becomes a tombstone (`managed_by = api`) that the file import never resurrects. Records `admin.revoke`. |
-| `hopae admin list [--all] --config <path>` | Print every live grant: user id, email, role, `managed_by`, granted at, granted by, note; `--all` adds revoked rows with their revocation. |
-| `hopae admin import [--force <user_id or email>] --config <path>` | Apply `admin.users[]` of the file to the store by the [seeding rule](#grants-in-the-configuration-file) (the same import runs at start) and print what was inserted, updated, revoked and skipped with the reason; `--force` selects the existing row by the same key rule (an email selects the row bound through `source_email` before any resolution) and reasserts the file entry over an `api`-managed or revoked row. Records `admin.grant` / `admin.revoke` with `attrs.actor = file`. |
+| `hopae admin list [--all] --config <path>` | Print every live grant: user id, email, role, `managed_by`, granted at, granted by, note; `--all` adds revoked rows with their revocation. Prints nothing when there is no grant. |
+| `hopae admin import [--force <user_id or email>] --config <path>` | Apply `admin.users[]` of the file to the store by the [seeding rule](#grants-in-the-configuration-file) (the same import runs at start) and print what was inserted, updated, revoked, unchanged, forced and skipped with the reason; `--force` selects the existing row by the same key rule (an email selects the row bound through `source_email` before any resolution) and reasserts the file entry over an `api`-managed or revoked row. Records `admin.grant` / `admin.revoke` with `attrs.actor = file`. |
+
+Output, on stdout unless stated (timestamps are UTC, `-` stands for an absent
+value, control characters of provider-supplied text print as `?`).
+`hopae admin grant` prints the resolution block first, then the outcome:
+
+```text
+user_id u_01hzexampleexampleexample0
+display_name Example Person
+created_at 2026-01-15T09:30:00Z
+last_login_at 2026-03-02T11:04:10Z
+primary_email person@example.test (verified, authoritative)
+identities google:104000000000000000000
+granted admin to u_01hzexampleexampleexample0
+```
+
+`primary_email` ends in `(verified, authoritative)`, `(verified, not
+authoritative)` or `(unverified)`, and reads `(none)` without an address. A
+repeated identical grant prints `unchanged` instead of the last line. A refusal
+goes to stderr with exit `2`; the resolution block is still printed when the
+user was found:
+
+```text
+error: refusing: person@example.test is verified but not authoritative; re-run with --confirm u_01hzexampleexampleexample0 if this is the intended person
+error: no such user: sign in once first
+error: email not verified
+error: user is disabled: enable first
+error: --confirm names u_other but the address resolves to u_01hzexampleexampleexample0
+```
+
+`hopae admin revoke` prints `revoked admin from <user_id>` (or `viewer`),
+`no grant for <user_id>` or `already revoked`; an address bound to two rows is
+refused (`error: ambiguous binding; use the user id`). `hopae admin list`
+prints a header and one line per grant, fields separated by two spaces; a
+revoked row (with `--all`) ends with `  revoked <time> by <who>`; `granted_by`
+is a user id, `cli` or `file`:
+
+```text
+USER_ID  EMAIL  ROLE  MANAGED_BY  GRANTED_AT  GRANTED_BY  NOTE
+u_01hzexampleexampleexample0  person@example.test  admin  api  2026-03-02T11:06:00Z  cli  on-call
+```
+
+`hopae admin import` prints one line per outcome (the lists are user ids; empty
+lists print nothing after the colon) and, per skip reason, the entries
+affected, an address-only entry followed by the users it is bound to; warnings
+go to stderr as `warning: admin.users[<index>]: <reason>`:
+
+```text
+admin grants imported
+  inserted: u_01hzexampleexampleexample0
+  updated:
+  revoked:
+  unchanged:
+  forced:
+  skipped (revoked at run time): former@example.test → u_01hzformerformerformer00
+```
+
+Skip reasons are `changed_at_run_time` and `revoked_at_run_time` (printed as
+`changed at run time` and `revoked at run time`; recorded decisions, not
+defects), `email_binding_ambiguous`, `user_email_mismatch`,
+`email_not_authoritative`, `email_unverified`, `no_such_user` and
+`user_disabled`. `--force` that matches no file entry warns `--force matched no
+file entry`.
 
 ### Bootstrap and recovery
 
-1. Register the console route on the gateway and set `admin.public_url`; restart Hopae.
-2. Open `https://hopae-admin.example.test/` in a browser and sign in with the provider. The console answers `403 not_admin` and shows the user id and email of the signed-in user.
-3. Run `hopae admin grant <that user id>` (or list the user in `admin.users[]` and restart or run `hopae admin import`). The command prints the resolved user; check that the identities are the expected person's. Reload: the console opens.
+1. Register the console route on the gateway (the `hopae-admin` fragment above), set `admin.public_url` (and `listen.admin` if the default `127.0.0.1:8702` does not suit), run `hopae --check` and restart Hopae. The start prints `admin listening on <address>` besides the portal and gateway lines.
+2. Open `https://hopae-admin.example.test/` in a browser and sign in with the provider. The console answers `403 not_admin` and shows the user id and email of the signed-in user. A user who has never signed in does not exist yet, so this step creates the user the grant needs.
+3. Run `hopae admin grant <that user id>`. Granting by email is also possible, `hopae admin grant person@example.test --confirm <that user id>`: a provider such as Google is not authoritative for an address unless `providers[].authoritative_domains` names its domain, so the first run prints the resolution block and refuses with exit `2`, and the second run, naming the resolved id after you checked the identities, grants. Alternatively list the user in `admin.users[]` and restart or run `hopae admin import`. Check that the printed identities are the expected person's. Reload: the console opens.
 4. Recovery is the same command: a lost or compromised administrator is revoked with `hopae admin revoke`, and another user is granted. There is no password, bootstrap token or break-glass credential.
 
 ### Grants in the configuration file
@@ -116,7 +190,7 @@ transaction, with the provider import rule adapted to grants:
 
 - Every entry keeps its original key — `user_id`, `email`, or both — and is first **matched** against existing rows by that key: an entry with a `user_id` matches that row; an entry with an email alone matches **any** row whose `source_email` (the address the row was created from) equals it — file-managed or CLI-managed, live or revoked — whichever user that row is bound to. An address is **never re-resolved** while a row bound through it exists, so a grant revoked at run time blocks the address from being granted to its new holder by the file (`skipped (revoked at run time)`); two rows bound through the same address are an ambiguous binding: the entry is skipped with a warning and `--force` must name the `user_id`.
 - A matched live file row has its `role` and `note` updated. A matched row whose entry is invalid (its `user_id` and `email` name different users, or the entry is otherwise unusable) is left untouched and the warning names the entry; the row counts as present.
-- An unmatched entry is resolved once, inside the same transaction: by `user_id` (the user must exist); by `email` alone only when exactly one user holds that verified address **and** it is authoritative; by both only when they name the same user. Anything else is skipped with a preflight warning naming the entry and the reason (`unknown_user`, `email_unverified`, `email_not_authoritative`, `email_ambiguous`, `user_email_mismatch`).
+- An unmatched entry is resolved once, inside the same transaction: by `user_id` (the user must exist); by `email` alone only when exactly one user holds that verified address **and** it is authoritative; by both only when they name the same user. Anything else is skipped with a preflight warning naming the entry and the reason (`no_such_user`, `user_disabled`, `email_unverified`, `email_not_authoritative`, `email_binding_ambiguous`, `user_email_mismatch`).
 - A live file row that no entry matched is revoked (`revoked_by = file`): removing an administrator from the file removes the authority at the next start or import. A row an entry still names — even a skipped one — is never revoked by absence.
 - Rows created or last changed by the CLI (`managed_by = api`) and tombstones (revoked rows) are never touched by the import, so a runtime revocation survives restarts. `hopae admin import --force <user_id or email>` reasserts one file entry over such a row and records it.
 - Preflight warns when a file entry's email now belongs to a different user than the row it is bound to; the grant stays bound.
@@ -185,6 +259,8 @@ Every page links to `https://hopae-admin.example.test/_hopae/logout`, the applic
 | `invalid_cursor`, `invalid_filter`, `invalid_id` | `400` | Malformed pagination cursor, filter value or identifier | none |
 | `not_found` | `404` | Unknown user or session id; unknown path; a forwarded host other than the console host | none |
 | `payload_too_large` | `413` | Body over 64 KiB or query string over 4 KiB | none |
+| `header_too_large` | `431` | The `cookie` header lines total more than 8 KiB | none |
+| `method_not_allowed` | `405` | A known path with another method (the `allow` header names the right one); a preflight `OPTIONS` is `404` without CORS headers | none |
 | `overloaded` | `503` | `limits.admin_max_concurrent` reached | none |
 | `store_unavailable` | `503` | The primary store cannot answer, or a store operation reached `admin.query_budget_ms` and was interrupted and rolled back: fail closed | none |
 
@@ -193,8 +269,8 @@ Every page links to `https://hopae-admin.example.test/_hopae/logout`, the applic
 | Condition | Console | What the operator sees |
 | --- | --- | --- |
 | Primary store unavailable | Every request `503 store_unavailable`; nothing is cached | Log at error, `hopae_store_errors_total` |
-| Console route missing or without `auth` | Browsers reach the listener without a handle: `403 login_required` with the console link; no login starts | `hopae --check` prints the fragment; the phase-1 drift report flags the host |
-| Console route strips Hopae cookies | The listener never sees the handle: `403 login_required` on every request after a successful login | Drift report: `strip_request_cookies_on_console_route` |
+| Console route missing or without `auth` | Browsers reach the listener without a handle: `403 login_required` with the console link; no login starts | `hopae --check` prints the fragment; with `gateway.admin_url` and the read-only token it warns `console_route_without_auth` |
+| Console route strips Hopae cookies | The listener never sees the handle: `403 login_required` on every request after a successful login | `hopae --check` with `gateway.admin_url` and the read-only token warns `console_route_strips_cookies` |
 | A peer other than the gateway connects | `403 untrusted_peer` by default; nothing read, nothing created | A rate-limited warning naming the peer address, `hopae_admin_denied_total{reason="untrusted_peer"}` |
 | Admin listener reached directly through a trusted address | Nothing is trusted from the request but a valid handle; without one, `403 login_required` and no state | Counter `hopae_admin_denied_total{reason}` |
 | A provider declared `max_age` does not honor it (no `auth_time`, or a stale one) | Reauthentication fails (`reauth_auth_time_missing`, `reauth_not_fresh`); the console cannot be entered with that provider until its `reauth` setting is corrected to `unsupported` | `login.failed` naming the provider |
@@ -300,10 +376,17 @@ operator sees that the configuration file no longer owns the row.
 
 ### Counters
 
-`hopae_admin_requests_total{role,outcome}`, `hopae_admin_denied_total{reason}`,
-`hopae_admin_mutations_total{kind}`, `hopae_admin_rows_examined_total{list}`,
-`hopae_store_interrupts_total`; exposition is M7, the test hooks expose them
-meanwhile.
+| Counter | Labels | Counts |
+| --- | --- | --- |
+| `hopae_admin_requests_total` | `role` (`admin`, `viewer`, `none` before authentication), `outcome` (`ok`, `denied`, `client_error`, `server_error`, or the refusal code of a request refused before authentication); `insecure_mode="true"` is added when `cookie.secure` is `false` | Requests answered by the admin listener |
+| `hopae_admin_denied_total` | `reason` | Refusals of the listener and its handlers, by reason (`untrusted_peer`, `login_required`, `not_admin`, `role_insufficient`, `auth_too_old`, `aal_insufficient`, `self_target`, `actor_revoked`, `overloaded`) |
+| `hopae_admin_mutations_total` | `kind` (`user_disable`, `user_enable`, `sessions_terminate`, `session_terminate`) | Mutations that changed something |
+| `hopae_admin_rows_examined_total` | `list` (`users`, `sessions`, `events`) | Candidate rows examined by listings |
+| `hopae_admin_grants_imported_total` | `outcome` (`inserted`, `updated`, `revoked`, `unchanged`, `skipped`) | Grants applied by the import at start |
+| `hopae_store_interrupts_total` | none | Store jobs interrupted inside SQLite at their deadline |
+
+Exposition is M7; a `test-hooks` build exposes them meanwhile (see
+[operations](OPERATIONS.md#counters)).
 
 ## Limitations and compatibility
 

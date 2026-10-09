@@ -1,14 +1,14 @@
 # Configuration reference
 
-<!-- doc-rev: 14 -->
+<!-- doc-rev: 15 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
 This page lists every configuration key Hopae reads, with its type, default,
 constraints and the milestone that introduced it. The tables below describe
-what milestone M1 implements; the last table lists keys that are decided in an
-ADR but rejected as unknown today. Each of those moves to the main tables in
-the change that implements it.
+what milestones M1 and M4-min implement; the last table lists keys that are
+decided in an ADR but rejected as unknown today. Each of those moves to the
+main tables in the change that implements it.
 
 ## Prerequisites and configuration
 
@@ -27,13 +27,23 @@ the change that implements it.
 | `hopae --check --strict --config <path>` | As `--check`, but any warning is an error (exit `2`). `--strict` is valid only with `--check`. |
 | `hopae providers import --config <path>` | Import the `providers[]` of the file into the store by the ADR-0010 rule (a file entry inserts or updates a `managed_by = file` row; a database-managed or removed provider is left alone) and print what was inserted, updated and skipped. Safe while an instance runs; restart that instance to pick up the change. |
 | `hopae providers import --force <provider_id> --config <path>` | As above, and additionally reassert the named file entry over the database (a disabled, API-managed or removed provider). The id must be listed in the file. Records an `admin.providers_import` event. |
+| `hopae admin grant <user_id or email> [--role admin\|viewer] [--note <text>] [--confirm <user_id>] --config <path>` | Grant a console role (default `admin`) to an existing user and print the user it resolved. An email must be the user's verified primary email; one that is not authoritative needs `--confirm` naming the resolved user id. At most 256 characters of `--note`. The grant binds to that user id and is never re-resolved. Records `admin.grant` ([administration](ADMIN.md#command-line-reference)). |
+| `hopae admin revoke <user_id or email> --config <path>` | Revoke the grant; the row stays as a tombstone. Records `admin.revoke`. |
+| `hopae admin list [--all] --config <path>` | Print the live grants; `--all` adds revoked rows. |
+| `hopae admin import [--force <user_id or email>] --config <path>` | Apply `admin.users[]` of the file to the store (the same import runs at start) and print what was inserted, updated, revoked, unchanged, forced and skipped. |
 | `hopae --version` | Print the version and exit `0`; needs no configuration. |
 
 Exit status: `0` success; `2` an invalid or unsafe configuration (including a
 missing or empty caller-key variable), a missing `--config`, a refused start
 because another instance holds the state directory lock, a `--strict`
-failure, or a failed `providers import`; `1` any other runtime failure (for
-example a store that cannot be opened or a listener that cannot bind).
+failure, a failed `providers import`, or a refused `hopae admin` command (an
+unknown or unsuitable user, a bad argument, a database the precheck refuses:
+newer than the binary, pre-release, damaged, or older than the binary, in
+which case the message says to start the instance once to migrate); `1` any
+other runtime failure (for example a store that cannot be opened or a listener
+that cannot bind). The `hopae admin` commands never create, migrate or back up
+the database and do not take the instance lock; they wait at most 5 seconds for
+a busy database.
 
 With `gateway.admin_url` and `gateway.readonly_token_env` both set and the
 variable non-empty, `hopae --check` asks the gateway's admin API which hosts
@@ -41,10 +51,11 @@ have routes and warns about application hosts that have none (phase 0 of
 [ADR-0012](adr/0012-service-registration-and-gateway-config-ownership.md)). A
 failure to ask is a warning, never an error. `hopae run` never uses either key.
 
-### Keys (M0 and M1)
+### Keys (M0, M1 and M4-min)
 
 All keys below are implemented. "Optional" means the key may be omitted and the
-default applies.
+default applies. The management console keys (milestone M4-min) have their own
+table, [Management console](#management-console).
 
 #### Process and store
 
@@ -59,8 +70,10 @@ default applies.
 | `log.verify_allow` | boolean | `false` | Log every allowed verify individually (denials are always counted and sampled). |
 | `log.accept_client_request_id` | boolean | `false` | Record a client-supplied `x-request-id` (truncated) in `attrs.client_request_id` of the events of verify and portal requests ([ADR-0009](adr/0009-event-model.md)). |
 | `trusted_proxies` | array of IP address or CIDR strings | `["127.0.0.1/32"]` | Peers whose `x-forwarded-for` and `x-forwarded-proto` the portal listener trusts. Each entry must parse as an address or a CIDR. A forwarded chain of more than 64 hops (all header lines together) is not believed: the peer itself is then the client address. |
+| `listen.admin` | string, socket address | `127.0.0.1:8702` | Admin listener of the management console. Bound only when `admin.public_url` is set (with `listen.admin` set and no `admin.public_url`, a warning says the listener is not bound). Must differ from `listen.portal` and `listen.gateway` (checked whenever the key is set). A non-loopback address produces a warning: the listener must never be publicly reachable. |
 | `limits.gateway_max_concurrent` | integer, at least 1 | `64` | In-flight request cap on the gateway listener; excess requests are answered `503` with `reason=overloaded` immediately ([ADR-0003](adr/0003-http-stack-axum-on-hyper.md)). The caller key is checked before a permit is taken. |
 | `limits.portal_max_concurrent` | integer, at least 1 | `256` | In-flight request cap on the portal listener; excess requests are answered `503` immediately. |
+| `limits.admin_max_concurrent` | integer, at least 1 | `16` | In-flight request cap on the admin listener; excess requests are answered `503` (`overloaded`) at once, before the peer check and authentication. |
 | `sessions.retention_days` | integer, at least 1 | `30` | Age after which terminated sessions and their handles are deleted by the session-retention sweep ([ADR-0007](adr/0007-context-binding-policy.md)). |
 
 #### Portal, cookies and sessions
@@ -140,19 +153,43 @@ is the tested provider).
 | `providers[].auto_link` | boolean | `false` | Link a sign-in to an existing user without confirmation when the policy allows it. |
 | `providers[].trust_email` | boolean | `false` | Treat the provider's email claim as verified. |
 
-Provider settings `preset`, `userinfo` and `id_token_typ` are read by the OIDC
-provider from the provider row's stored `config`, not from the configuration
-file: in M1 the file importer writes only `client_id`, `issuer` and `scope` into
-that row, and `hopae --check` rejects the three names as unknown keys. They
-take effect when a row carrying them exists in the database.
+Provider settings `preset`, `userinfo`, `id_token_typ`, `reauth` and
+`reauth_prompt` are read by the OIDC provider from the provider row's stored
+`config`, not from the configuration file: the file importer writes only
+`client_id`, `issuer` and `scope` into that row, and `hopae --check` rejects the
+five names as unknown keys. They take effect when a row carrying them exists in
+the database. For `reauth` and `reauth_prompt` the stored value wins over the
+default the file resolves, at start and in the `hopae --check` report; a stored
+value that is not one of the listed ones is ignored.
 
 | Stored setting | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `preset` | string | the preset named like the `provider_id`, else the preset whose issuer matches | Built-in defaults for a well-known provider. Only `google` exists in M1 (issuer `https://accounts.google.com`, scope `openid email profile`, no user-info call). |
 | `userinfo` | boolean | the preset's value, `true` without a preset | Call the user-info endpoint after the ID token is validated; the subject must match the ID token. |
 | `id_token_typ` | string | none | Required `typ` header of the ID token, for providers that set one. |
-| `reauth` (M4-min) | `max_age`, `unsupported` | the preset's value; `max_age` without a preset | Whether the provider honors the OpenID Connect `max_age` parameter and returns `auth_time`, so that a console reauthentication is a provider-verified challenge; the `google` preset is `unsupported` (Google documents that it does not support reauthentication requests), and console freshness with such a provider is Hopae login age ([ADR-0016](adr/0016-management-console-minimum.md) decision 15, [administration](ADMIN.md#freshness-and-reauthentication)). |
-| `reauth_prompt` (M4-min) | `login`, `none` | `login` | Whether a reauthentication authorize request to a `max_age` provider also carries `prompt=login`. |
+| `reauth` | `max_age`, `unsupported` | the preset's value; `max_age` without a preset | Whether the provider honors the OpenID Connect `max_age` parameter and returns `auth_time`, so that a console reauthentication is a provider-verified challenge; the `google` preset is `unsupported` (Google documents that it does not support reauthentication requests), and console freshness with such a provider is Hopae login age ([ADR-0016](adr/0016-management-console-minimum.md) decision 15, [administration](ADMIN.md#freshness-and-reauthentication)). |
+| `reauth_prompt` | `login`, `none` | `login` | Whether a reauthentication authorize request to a `max_age` provider also carries `prompt=login`. A provider with `reauth` set to `unsupported` receives an ordinary authorize request with neither `max_age` nor `prompt`. |
+
+#### Management console
+
+The console is enabled by `admin.public_url`; without it no admin listener is
+bound and every other `admin.*` key is validated but has no effect. The
+background is in [administration](ADMIN.md).
+
+| Key | Type | Default | Constraints and meaning |
+| --- | --- | --- | --- |
+| `admin.public_url` | string, origin | none | Externally visible origin of the console, `https://hopae-admin.example.test`. `https://`, or `http://` only when `cookie.secure` is `false`; a lower-case host **name** (not an IP address) with an optional port; no path, query, fragment or credentials. Setting it registers the implicit application `admin` (hosts `[host]`, ports `[its port, else 443 (80 for http)]`, `on_authz_change = terminate`, `verify_cache_seconds = 0`, `logout_confirm = true`) and binds `listen.admin`. The id `admin` is reserved: an `apps[]` entry with it, or listing the console host, is an error. |
+| `admin.session.idle` | duration | `30m` | Per-handle idle timer of the console host; at least `60s`. |
+| `admin.session.absolute` | duration | `12h` | Per-handle absolute lifetime of the console host. |
+| `admin.binding.ip` | `strict`, `prefix`, `off` | `strict` | Client IP binding of the console handle, as `apps[].binding.ip`. |
+| `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6` | integer | `24`, `64` | Prefix length for `prefix` mode: 1 to 32 and 1 to 128. |
+| `admin.binding.ua` | `strict`, `off` | `off` | User-agent binding. |
+| `admin.binding.on_mismatch` | `terminate_session`, `drop_handle` | `terminate_session` | What a binding mismatch does. |
+| `admin.max_auth_age` | duration | `12h` | Freshness bound of a console session, at least `30m`: a smaller value is a configuration error (`admin.max_auth_age must be at least 30m`), because the bound keeps a 600 s headroom between a reauthentication callback and the console verify that follows. One predicate at every console verify: `auth_time ≤ now + 60 s` and `now − auth_time < N`. With a provider whose `reauth` capability is `max_age` the session must carry a provider-verified `auth_time` and a stale one is sent to a reauthentication that the session's own provider performs; with an `unsupported` provider (the `google` preset) the bound is Hopae login age only ([ADR-0016](adr/0016-management-console-minimum.md) decision 15, [administration](ADMIN.md#freshness-and-reauthentication)). |
+| `admin.require_aal` | `1`, `2` | `1` | Minimum assurance level of the console handle. `2` also sets the implicit application's step-up rule for the whole host and, because no second factor exists yet, makes `--check` warn that every console request will be refused. |
+| `admin.untrusted_peers` | `refuse`, `as_client` | `refuse` | What the admin listener does with a TCP peer outside `trusted_proxies`: `refuse` answers `403 untrusted_peer` before reading a cookie (counted, a rate-limited warning); `as_client` treats the peer as the client, as the portal does. |
+| `admin.query_budget_ms` | integer, 100 to 30000 | `2000` | Deadline of one console store operation (listing, search or mutation). The deadline is handed to the store job, which interrupts the statement inside SQLite, rolls back and answers `503`. |
+| `admin.users[]` | array of `{user_id?, email?, role?, note?}` | `[]` | Administrator grants seeded from the file at start and by `hopae admin import`. Each entry needs at least one of `user_id` (`u_` followed by letters, digits, `_` or `-`, at most 64 characters) and `email` (a valid address); `role` is `admin` (default) or `viewer`; `note` at most 256 characters; unknown keys are rejected. An entry given by email alone applies only when exactly one user holds that verified address and it is authoritative. A defective entry is a warning at start (skipped, never a start failure) and an error under `--check --strict`. Imported under the provider rule with `managed_by` and tombstones ([administration](ADMIN.md#grants-in-the-configuration-file)). |
 
 #### Events
 
@@ -175,16 +212,6 @@ the milestone shown. Until then `hopae --check` rejects them as unknown.
 | `providers[].kind` other than `oidc` | M3 | — | Kakao, Naver, email link, password ([ADR-0010](adr/0010-provider-abstraction.md)) |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, none, none | Local cache and Redis bus ([ADR-0006](adr/0006-verify-caching-and-invalidation.md)) |
 | `store.kind = postgres`, `store.url_env` | M2 | — | Shared primary store ([ADR-0002](adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
-| `listen.admin` | M4-min | `127.0.0.1:8702` | Admin listener, bound only when `admin.public_url` is set; must differ from the other listeners; non-loopback warns ([ADR-0016](adr/0016-management-console-minimum.md), [administration](ADMIN.md)) |
-| `admin.public_url` | M4-min | none | Externally visible origin of the console; registers the implicit application `admin` (reserved id) with the policy below ([ADR-0016](adr/0016-management-console-minimum.md)) |
-| `admin.session.idle`, `admin.session.absolute`, `admin.binding.ip`, `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6`, `admin.binding.ua`, `admin.binding.on_mismatch` | M4-min | `30m`, `12h`, `strict`, `24`, `64`, `off`, `terminate_session` | Lifetimes and binding of the console host, same types and constraints as `apps[].session.*` and `apps[].binding.*` |
-| `admin.max_auth_age` | M4-min | `12h` | Freshness bound of a console session, at least `30m` (a smaller value is a configuration error: the bound keeps a 600 s headroom between a reauthentication callback and the console verify that follows), evaluated at every console verify with one predicate (`auth_time ≤ now + 60 s` and `now − auth_time < N`); with a provider whose `reauth` capability is `max_age` the session must carry a provider-verified `auth_time` and a stale one is sent to a reauthentication the session's own provider performs; with an `unsupported` provider (Google) the bound is Hopae login age only ([ADR-0016](adr/0016-management-console-minimum.md) decision 15) |
-| `admin.require_aal` | M4-min | `1` | Minimum assurance level of the console handle (`1` or `2`); `2` also sets the implicit application's step-up rule and, before M5, makes `--check` warn that every request will be refused |
-| `admin.untrusted_peers` | M4-min | `refuse` | What the admin listener does with a TCP peer outside `trusted_proxies`: `refuse` answers `403 untrusted_peer` before reading a cookie (logged, counted); `as_client` treats the peer as the client, as the portal does |
-| `admin.query_budget_ms` | M4-min | `2000` | Deadline of one console store operation — listing, search or mutation (100 to 30000); the deadline is handed to the store job, which interrupts the statement inside SQLite, rolls back and answers `503` |
-| `admin.users[]` | M4-min | `[]` | Grants seeded from the file at start and by `hopae admin import`: entries `{user_id?, email?, role?, note?}` with at least one of `user_id` and `email`, `role` `admin` (default) or `viewer`; an entry given by email alone applies only when exactly one user holds the verified address and it is authoritative; imported under the provider rule with `managed_by` and tombstones ([administration](ADMIN.md)) |
-| `limits.admin_max_concurrent` | M4-min | `16` | In-flight cap of the admin listener |
-| `hopae admin grant <user_id or email> [--role admin\|viewer] [--note <text>] [--confirm <user_id>]`, `hopae admin revoke <user_id or email>`, `hopae admin list [--all]`, `hopae admin import [--force <user_id or email>]` (commands) | M4-min | — | Administrator grants from the command line and the file against the store; `grant` prints the resolved user and, for a non-authoritative email, requires `--confirm` naming the resolved id; a grant binds to that user id and is never re-resolved; records `admin.grant` / `admin.revoke` ([administration](ADMIN.md)) |
 
 ## Behavior
 
@@ -192,7 +219,7 @@ the milestone shown. Until then `hopae --check` rejects them as unknown.
 - Errors are collected and reported together, each naming the key path.
 - Environment references are checked for presence only; values are never logged, printed or echoed in error messages.
 - Referenced environment variables: a missing or empty caller-key variable is an error; a missing provider secret is a warning that disables that provider.
-- Warnings (non-fatal): `gateway.allow_unauthenticated_caller` set; `cookie.secure` false; `listen.gateway` not on a loopback address; a provider disabled because its secret variable is unset; `gateway.caller_key_next_env` configured for more than 7 days; an application host without a gateway route (only with `gateway.admin_url`); an upper-case host name that was normalized.
+- Warnings (non-fatal): `gateway.allow_unauthenticated_caller` set; `cookie.secure` false; `listen.gateway` not on a loopback address; a provider disabled because its secret variable is unset; `gateway.caller_key_next_env` configured for more than 7 days; an application host without a gateway route (only with `gateway.admin_url`); an upper-case host name that was normalized; `listen.admin` not on a loopback address; `listen.admin` set without `admin.public_url`; `admin.require_aal` set to `2`; an `admin.users[]` entry that cannot be applied (reported against the store when it exists); a missing console route or one that strips cookies (only with `gateway.admin_url`: `console_route_without_auth`, `console_route_strips_cookies`).
 - The database path, when unset, is derived as `<state_dir>/hopae.db`.
 
 ## Limitations and compatibility
@@ -200,8 +227,9 @@ the milestone shown. Until then `hopae --check` rejects them as unknown.
 - JSON only; comments are not allowed.
 - Before 1.0 a minor release may rename or remove a key; each such change is listed in the CHANGELOG under `Changed` with a migration note.
 - No reload before M6.
-- `apps[].step_up` is parsed but not enforced before M5.
-- Provider settings `preset`, `userinfo` and `id_token_typ` cannot be set from the file in M1 (see Providers).
+- `apps[].step_up` is parsed but not enforced before M5. `admin.require_aal = 2` therefore refuses every console request.
+- Provider settings `preset`, `userinfo`, `id_token_typ`, `reauth` and `reauth_prompt` cannot be set from the file (see Providers).
+- `apps[].max_auth_age` is not a key: only the implicit console application has a freshness bound, `admin.max_auth_age`.
 
 ## Examples, verification and related pages
 

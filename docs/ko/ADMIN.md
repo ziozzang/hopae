@@ -1,6 +1,6 @@
 # 관리
 
-<!-- translation-status: source=../ADMIN.md source-rev=4 status=current -->
+<!-- translation-status: source=../ADMIN.md source-rev=5 status=current -->
 
 [문서 목차](README.md) · [English](../ADMIN.md)
 
@@ -8,9 +8,8 @@
 이벤트를 살펴보고, 사용자를 비활성화·활성화하고, 세션 하나 또는 사용자의 모든
 세션을 끝내고, 로그인 기록과 감사 기록을 조회하고, 애플리케이션·제공자·저장소·
 빌드의 상태를 읽습니다. 이 페이지는 마일스톤
-**M4-min**([로드맵](ROADMAP.md#m4-min--관리-콘솔-최소020))의 G1 명세로서
-설계 검토 1차와 2차 뒤에 개정되었으며, 결정은
-[ADR-0016](../adr/0016-management-console-minimum.md)(Proposed)에 기록되어
+**M4-min**([로드맵](ROADMAP.md#m4-min--관리-콘솔-최소020))의 운영자 안내서이자
+참조이며, 결정은 [ADR-0016](../adr/0016-management-console-minimum.md)에 기록되어
 있습니다. 콘솔은 Hopae 자신이 제공하는 Hopae 애플리케이션입니다. 관리자는 일반
 로그인 흐름으로 로그인하고, Hopae는 모든 콘솔 요청을 자신의 세션 핸들로
 인증합니다.
@@ -27,12 +26,12 @@
 | 제공자 2차 인증 | Hopae 자체 TOTP(다음 마일스톤으로 제안)가 생기기 전까지 콘솔 세션은 단일 요소이므로 관리자 계정에는 제공자 측 2차 인증을 요구 |
 
 키(따로 적지 않으면 최상위 `admin` 객체 아래. 자세한 내용은
-[설정 참조](CONFIG.md#결정되어-예정된-키)):
+[설정 참조](CONFIG.md#관리-콘솔)):
 
 | 키 | 타입 | 기본값 | 의미 |
 | --- | --- | --- | --- |
 | `listen.admin` | 문자열, 소켓 주소 | `127.0.0.1:8702` | 관리 리스너. `admin.public_url`이 설정된 때만 바인딩. 다른 리스너와 달라야 하며 루프백이 아닌 주소는 경고 |
-| `admin.public_url` | 문자열, origin | 없음 | 콘솔의 외부 노출 origin, `https://hopae-admin.example.test`. `https://` 또는 `http://`와 호스트, 선택적 포트, 경로 없음. 설정하면 암묵적 애플리케이션 `admin`이 등록됨 |
+| `admin.public_url` | 문자열, origin | 없음 | 콘솔의 외부 노출 origin, `https://hopae-admin.example.test`. `https://`(`http://`는 `cookie.secure`가 `false`일 때만)와 소문자 호스트 이름(IP 주소는 안 됨), 선택적 포트이며 경로, 쿼리, 프래그먼트, 자격 증명은 없음. 설정하면 암묵적 애플리케이션 `admin`이 등록됨 |
 | `admin.session.idle`, `admin.session.absolute` | 기간 | `30m`, `12h` | 콘솔 호스트의 핸들 단위 타이머(`idle`은 `60s` 이상) |
 | `admin.binding.ip`, `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6`, `admin.binding.ua`, `admin.binding.on_mismatch` | `apps[].binding.*`와 같음 | `strict`, `24`, `64`, `off`, `terminate_session` | 콘솔 핸들의 클라이언트 바인딩 |
 | `admin.max_auth_age` | 기간, `30m` 이상 | `12h` | 콘솔 세션의 신선도 한도. 어디서나 하나의 술어: `auth_time ≤ now + 60초` 그리고 `now − auth_time < N`. 최솟값은 600초의 콜백 여유를 지키며 더 작은 값은 설정 오류. `auth_time`이 무엇을 증명하는지는 제공자의 `reauth` 능력에 따름([신선도](#신선도와-재인증)) |
@@ -56,7 +55,9 @@
 
 콘솔 호스트의 게이트웨이 라우트 조각(Hangang. `auth` 블록은 계약의 표준 블록이며,
 애플리케이션 라우트와의 유일한 차이는 업스트림이 Hopae라서 핸들이 필요하므로
-`strip_request_cookies`가 없다는 점입니다):
+`strip_request_cookies`가 없다는 점입니다. `hopae --check`는 실제 호스트와 관리 리스너 주소를
+넣은 같은 조각을 출력하며, `deploy/`의 Hangang 라우트 파일은 이를 `hopae-admin` 라우트로
+싣고 있습니다):
 
 ```json
 {
@@ -86,22 +87,90 @@
 게이트웨이 자체의 라우트 수준 제어(클라이언트 주소 정책, 국가 정책)를 콘솔
 호스트 앞에 두 번째 계층으로 둘 수 있습니다. Hopae는 그것에 의존하지 않습니다.
 
-명령줄(저장소에 직접 실행하며 인스턴스가 실행 중이어도 안전합니다. 실행 중인
-인스턴스는 요청마다 부여를 읽으므로 재시작이 필요 없습니다. 모든 명령은 인스턴스가
-시작할 때와 똑같이 무엇이든 건드리기 전에 데이터베이스의 기록된 버전을 검증합니다):
+### 명령줄 참조
+
+`hopae admin` 명령은 저장소에 직접 실행하며 인스턴스가 실행 중이어도 안전합니다.
+인스턴스 잠금을 잡지 않고, 실행 중인 인스턴스는 요청마다 부여를 읽으므로 재시작이
+필요 없습니다. 모든 명령은 무엇이든 건드리기 전에 인스턴스가 시작할 때와 같은 읽기 전용
+사전 점검을 실행합니다. 데이터베이스를 만들거나 마이그레이션하거나 백업하지 않습니다.
+파일이 없거나 바이너리보다 오래된 데이터베이스는 거부되며(`error: database schema
+version N is older than this binary (M): start the instance once to migrate`), 사전
+점검이 거부하는 데이터베이스도 마찬가지입니다. 바쁜 데이터베이스는 최대 5초까지
+기다립니다. 인자는 저장소를 열기 전에 검증합니다. 종료 상태: `0` 성공, `2` 거부된
+명령 또는 쓸 수 없는 데이터베이스, `1` 저장소 실패(바쁨, 시간 초과, 읽을 수 없음).
+컨테이너에서는 `docker compose run --rm hopae admin list --config
+/etc/hopae/hopae.json`으로 실행합니다(이미지의 엔트리포인트가 `hopae`입니다).
 
 | 호출 | 의미 |
 | --- | --- |
-| `hopae admin grant <user_id 또는 email> [--role admin\|viewer] [--note <text>] [--confirm <user_id>] --config <path>` | 기존 사용자에게 역할(기본 `admin`)을 부여하고 해결된 사용자를 출력합니다: `user_id`, `display_name`, `created_at`, `last_login_at`, `verified`·`authoritative` 플래그가 붙은 `primary_email`, 그리고 연결된 모든 신원을 `provider:subject`로. 이메일은 사용자의 검증된 `primary_email`이어야 합니다. 한 번도 로그인하지 않은 사용자는 존재하지 않습니다(종료 코드 `2`, "먼저 한 번 로그인하십시오"). **권위적이지 않은** 이메일은 해결된 id를 가리키는 `--confirm <user_id>`가 있을 때만 부여합니다(없으면 해결 결과를 출력한 뒤 종료 코드 `2`). 부여는 해결된 `user_id`에 묶이며 다시 해결되지 않습니다. 두 번째 부여는 역할을 갱신하고 취소를 해제하며, 파일 관리 행은 `managed_by = api`가 됩니다. `attrs.actor = cli`인 `admin.grant`를 기록합니다. |
+| `hopae admin grant <user_id 또는 email> [--role admin\|viewer] [--note <text>] [--confirm <user_id>] --config <path>` | 기존 사용자에게 역할(기본 `admin`)을 부여하고 해결된 사용자를 출력합니다(아래의 해결 블록). 이메일은 사용자의 검증된 `primary_email`이어야 합니다. 한 번도 로그인하지 않은 사용자는 존재하지 않습니다(종료 코드 `2`, "먼저 한 번 로그인하십시오"). **권위적이지 않은** 이메일은 해결된 id를 가리키는 `--confirm <user_id>`가 있을 때만 부여합니다(없으면 해결 결과를 출력한 뒤 종료 코드 `2`). 사용자 id에는 확인이 필요 없습니다. 비활성화된 사용자는 거부합니다. `--note`는 최대 256자입니다. 부여는 해결된 `user_id`에 묶이며 다시 해결되지 않습니다. 두 번째 부여는 역할을 갱신하고 취소를 해제하며, 파일 관리 행은 `managed_by = api`가 됩니다. `attrs.actor = cli`인 `admin.grant`를 기록합니다. |
 | `hopae admin revoke <user_id 또는 email> --config <path>` | 부여를 취소합니다. 사용자의 다음 콘솔 요청은 `403 not_admin`입니다. 행은 파일 가져오기가 절대 되살리지 않는 묘비(`managed_by = api`)가 됩니다. `admin.revoke`를 기록합니다. |
-| `hopae admin list [--all] --config <path>` | 살아 있는 모든 부여를 출력합니다: 사용자 id, 이메일, 역할, `managed_by`, 부여 시각, 부여자, 메모. `--all`은 취소된 행을 취소 정보와 함께 더합니다. |
-| `hopae admin import [--force <user_id 또는 email>] --config <path>` | 파일의 `admin.users[]`를 [심기 규칙](#설정-파일의-부여)으로 저장소에 적용하고(같은 가져오기가 시작 시에도 실행됨) 삽입·갱신·취소·건너뜀을 사유와 함께 출력합니다. `--force`는 같은 키 규칙으로 기존 행을 고르고(이메일은 어떤 해결보다 먼저 `source_email`로 묶인 행을 고름) 파일 항목을 `api` 관리 행이나 취소된 행 위에 다시 적용합니다. `attrs.actor = file`인 `admin.grant` / `admin.revoke`를 기록합니다. |
+| `hopae admin list [--all] --config <path>` | 살아 있는 모든 부여를 출력합니다: 사용자 id, 이메일, 역할, `managed_by`, 부여 시각, 부여자, 메모. `--all`은 취소된 행을 취소 정보와 함께 더합니다. 부여가 없으면 아무것도 출력하지 않습니다. |
+| `hopae admin import [--force <user_id 또는 email>] --config <path>` | 파일의 `admin.users[]`를 [심기 규칙](#설정-파일의-부여)으로 저장소에 적용하고(같은 가져오기가 시작 시에도 실행됨) 삽입·갱신·취소·변경 없음·강제·건너뜀을 사유와 함께 출력합니다. `--force`는 같은 키 규칙으로 기존 행을 고르고(이메일은 어떤 해결보다 먼저 `source_email`로 묶인 행을 고름) 파일 항목을 `api` 관리 행이나 취소된 행 위에 다시 적용합니다. `attrs.actor = file`인 `admin.grant` / `admin.revoke`를 기록합니다. |
+
+출력은 따로 밝히지 않으면 stdout입니다(시각은 UTC, `-`는 없는 값, 제공자가 준 텍스트의
+제어 문자는 `?`로 출력됨). `hopae admin grant`는 해결 블록을 먼저 출력하고 결과를 냅니다.
+
+```text
+user_id u_01hzexampleexampleexample0
+display_name Example Person
+created_at 2026-01-15T09:30:00Z
+last_login_at 2026-03-02T11:04:10Z
+primary_email person@example.test (verified, authoritative)
+identities google:104000000000000000000
+granted admin to u_01hzexampleexampleexample0
+```
+
+`primary_email`은 `(verified, authoritative)`, `(verified, not authoritative)`,
+`(unverified)` 중 하나로 끝나며 주소가 없으면 `(none)`입니다. 같은 부여를 반복하면
+마지막 줄 대신 `unchanged`를 출력합니다. 거부는 종료 코드 `2`와 함께 stderr로
+나가며, 사용자를 찾았다면 해결 블록은 그래도 출력됩니다.
+
+```text
+error: refusing: person@example.test is verified but not authoritative; re-run with --confirm u_01hzexampleexampleexample0 if this is the intended person
+error: no such user: sign in once first
+error: email not verified
+error: user is disabled: enable first
+error: --confirm names u_other but the address resolves to u_01hzexampleexampleexample0
+```
+
+`hopae admin revoke`는 `revoked admin from <user_id>`(또는 `viewer`),
+`no grant for <user_id>`, `already revoked` 중 하나를 출력하며, 두 행에 묶인 주소는
+거부합니다(`error: ambiguous binding; use the user id`). `hopae admin list`는 머리글과
+부여마다 한 줄을 출력하고 필드는 공백 두 칸으로 구분합니다. 취소된 행(`--all`)은
+`  revoked <time> by <who>`로 끝나며 `granted_by`는 사용자 id, `cli`, `file` 중 하나입니다.
+
+```text
+USER_ID  EMAIL  ROLE  MANAGED_BY  GRANTED_AT  GRANTED_BY  NOTE
+u_01hzexampleexampleexample0  person@example.test  admin  api  2026-03-02T11:06:00Z  cli  on-call
+```
+
+`hopae admin import`는 결과마다 한 줄(목록은 사용자 id이며 빈 목록은 콜론 뒤에 아무것도
+출력하지 않음)과, 건너뜀 사유마다 영향받은 항목을 출력합니다. 이메일만 있는 항목 뒤에는
+그 주소로 묶인 사용자가 붙습니다. 경고는 stderr로 `warning: admin.users[<index>]: <reason>`
+형태로 나갑니다.
+
+```text
+admin grants imported
+  inserted: u_01hzexampleexampleexample0
+  updated:
+  revoked:
+  unchanged:
+  forced:
+  skipped (revoked at run time): former@example.test → u_01hzformerformerformer00
+```
+
+건너뜀 사유는 `changed_at_run_time`과 `revoked_at_run_time`(각각 `changed at run time`,
+`revoked at run time`으로 출력됨. 결함이 아니라 기록된 결정), `email_binding_ambiguous`,
+`user_email_mismatch`, `email_not_authoritative`, `email_unverified`, `no_such_user`,
+`user_disabled`입니다. 어떤 파일 항목과도 맞지 않는 `--force`는 `--force matched no file entry`
+경고를 냅니다.
 
 ### 부트스트랩과 복구
 
-1. 게이트웨이에 콘솔 라우트를 등록하고 `admin.public_url`을 설정한 뒤 Hopae를 재시작합니다.
-2. 브라우저에서 `https://hopae-admin.example.test/`를 열고 제공자로 로그인합니다. 콘솔은 `403 not_admin`으로 답하며 로그인한 사용자의 사용자 id와 이메일을 보여 줍니다.
-3. `hopae admin grant <그 사용자 id>`를 실행합니다(또는 `admin.users[]`에 사용자를 나열하고 재시작하거나 `hopae admin import`를 실행합니다). 명령은 해결된 사용자를 출력하며, 신원이 의도한 사람의 것인지 확인합니다. 새로 고치면 콘솔이 열립니다.
+1. 게이트웨이에 콘솔 라우트(위의 `hopae-admin` 조각)를 등록하고 `admin.public_url`을 설정하고(기본값 `127.0.0.1:8702`가 맞지 않으면 `listen.admin`도), `hopae --check`를 실행한 뒤 Hopae를 재시작합니다. 시작하면 포털과 게이트웨이 줄 외에 `admin listening on <address>`가 출력됩니다.
+2. 브라우저에서 `https://hopae-admin.example.test/`를 열고 제공자로 로그인합니다. 콘솔은 `403 not_admin`으로 답하며 로그인한 사용자의 사용자 id와 이메일을 보여 줍니다. 한 번도 로그인하지 않은 사용자는 아직 존재하지 않으므로, 이 단계가 부여에 필요한 사용자를 만듭니다.
+3. `hopae admin grant <그 사용자 id>`를 실행합니다. 이메일로 부여할 수도 있습니다. `hopae admin grant person@example.test --confirm <그 사용자 id>`: Google 같은 제공자는 `providers[].authoritative_domains`에 그 도메인을 적지 않는 한 주소에 대해 권위적이지 않으므로, 첫 실행은 해결 블록을 출력하고 종료 코드 `2`로 거부하며, 신원을 확인한 뒤 해결된 id를 지정한 두 번째 실행이 부여합니다. 또는 `admin.users[]`에 사용자를 나열하고 재시작하거나 `hopae admin import`를 실행합니다. 출력된 신원이 의도한 사람의 것인지 확인합니다. 새로 고치면 콘솔이 열립니다.
 4. 복구도 같은 명령입니다. 잃어버렸거나 침해된 관리자는 `hopae admin revoke`로 취소하고 다른 사용자에게 부여합니다. 비밀번호, 부트스트랩 토큰, 비상용 자격 증명은 없습니다.
 
 ### 설정 파일의 부여
@@ -111,7 +180,7 @@
 
 - 모든 항목은 원래의 키(`user_id`, `email`, 또는 둘 다)를 유지하고 먼저 그 키로 기존 행과 **대조**됩니다: `user_id`가 있는 항목은 그 행과, 이메일만 있는 항목은 `source_email`(행을 만들 때 쓴 주소)이 같은 **모든** 행과 — 파일 관리든 명령줄 관리든, 살아 있든 취소되었든, 그 행이 어떤 사용자에 묶여 있든 — 대조됩니다. 그 주소로 묶인 행이 존재하는 동안 주소는 **절대 다시 해결하지 않으므로**, 실행 중 취소된 부여는 파일이 그 주소를 새 보유자에게 부여하는 것을 막습니다(`skipped (revoked at run time)`). 같은 주소로 묶인 행이 둘이면 모호한 바인딩입니다: 항목은 경고와 함께 건너뛰고 `--force`는 `user_id`를 지정해야 합니다.
 - 대조된 살아 있는 파일 행은 `role`과 `note`가 갱신됩니다. 항목이 유효하지 않은(`user_id`와 `email`이 다른 사용자를 가리키거나 그 밖에 쓸 수 없는) 대조된 행은 건드리지 않고 경고가 항목을 밝히며, 그 행은 존재하는 것으로 셉니다.
-- 대조되지 않은 항목은 같은 트랜잭션 안에서 한 번 해결됩니다: `user_id`로(사용자가 존재해야 함), `email`만으로는 그 검증된 주소를 정확히 한 사용자가 가지고 **그리고** 권위적일 때만, 둘 다로는 같은 사용자를 가리킬 때만. 그 밖의 경우는 항목과 사유(`unknown_user`, `email_unverified`, `email_not_authoritative`, `email_ambiguous`, `user_email_mismatch`)를 밝히는 사전 점검 경고와 함께 건너뜁니다.
+- 대조되지 않은 항목은 같은 트랜잭션 안에서 한 번 해결됩니다: `user_id`로(사용자가 존재해야 함), `email`만으로는 그 검증된 주소를 정확히 한 사용자가 가지고 **그리고** 권위적일 때만, 둘 다로는 같은 사용자를 가리킬 때만. 그 밖의 경우는 항목과 사유(`no_such_user`, `user_disabled`, `email_unverified`, `email_not_authoritative`, `email_binding_ambiguous`, `user_email_mismatch`)를 밝히는 사전 점검 경고와 함께 건너뜁니다.
 - 어떤 항목과도 대조되지 않은 살아 있는 파일 행은 취소됩니다(`revoked_by = file`). 파일에서 관리자를 지우면 다음 시작이나 가져오기에서 권한이 사라집니다. 항목이 여전히 가리키는 행은 — 건너뛴 항목이라도 — 부재를 이유로 취소되지 않습니다.
 - 명령줄이 만들었거나 마지막으로 바꾼 행(`managed_by = api`)과 묘비(취소된 행)는 가져오기가 절대 건드리지 않으므로 실행 중 취소가 재시작 뒤에도 유지됩니다. `hopae admin import --force <user_id 또는 email>`은 파일 항목 하나를 그런 행 위에 다시 적용하고 기록합니다.
 - 파일 항목의 이메일이 이제 행에 묶인 사용자와 다른 사용자의 것이면 사전 점검이 경고합니다. 부여는 묶인 채로 남습니다.
@@ -183,6 +252,8 @@
 | `invalid_cursor`, `invalid_filter`, `invalid_id` | `400` | 형식이 잘못된 페이지 커서, 필터 값, 식별자 | 없음 |
 | `not_found` | `404` | 알 수 없는 사용자나 세션 id. 알 수 없는 경로. 콘솔 호스트가 아닌 전달 호스트 | 없음 |
 | `payload_too_large` | `413` | 본문 64 KiB 초과 또는 쿼리 문자열 4 KiB 초과 | 없음 |
+| `header_too_large` | `431` | `cookie` 헤더 줄의 합이 8 KiB 초과 | 없음 |
+| `method_not_allowed` | `405` | 알려진 경로에 다른 메서드(`allow` 헤더가 올바른 메서드를 알려 줌). 사전 요청 `OPTIONS`는 CORS 헤더 없는 `404` | 없음 |
 | `overloaded` | `503` | `limits.admin_max_concurrent` 도달 | 없음 |
 | `store_unavailable` | `503` | 기본 저장소가 답하지 못하거나 저장소 작업이 `admin.query_budget_ms`에 닿아 중단되고 롤백됨: 거부 처리 | 없음 |
 
@@ -191,8 +262,8 @@
 | 조건 | 콘솔 | 운영자가 보는 것 |
 | --- | --- | --- |
 | 기본 저장소 사용 불가 | 모든 요청 `503 store_unavailable`. 아무것도 캐시하지 않음 | error 로그, `hopae_store_errors_total` |
-| 콘솔 라우트가 없거나 `auth`가 없음 | 브라우저가 핸들 없이 리스너에 도달: 콘솔 링크가 있는 `403 login_required`. 로그인은 시작되지 않음 | `hopae --check`가 조각을 출력. 1단계 불일치 보고가 호스트를 표시 |
-| 콘솔 라우트가 Hopae 쿠키를 제거함 | 리스너가 핸들을 보지 못함: 로그인 성공 뒤 모든 요청이 `403 login_required` | 불일치 보고: `strip_request_cookies_on_console_route` |
+| 콘솔 라우트가 없거나 `auth`가 없음 | 브라우저가 핸들 없이 리스너에 도달: 콘솔 링크가 있는 `403 login_required`. 로그인은 시작되지 않음 | `hopae --check`가 조각을 출력. `gateway.admin_url`과 읽기 전용 토큰이 있으면 `console_route_without_auth` 경고 |
+| 콘솔 라우트가 Hopae 쿠키를 제거함 | 리스너가 핸들을 보지 못함: 로그인 성공 뒤 모든 요청이 `403 login_required` | `gateway.admin_url`과 읽기 전용 토큰이 있으면 `hopae --check`가 `console_route_strips_cookies` 경고 |
 | 게이트웨이가 아닌 피어가 연결함 | 기본값으로 `403 untrusted_peer`. 아무것도 읽지 않고 만들지 않음 | 피어 주소를 밝히는 속도 제한된 경고, `hopae_admin_denied_total{reason="untrusted_peer"}` |
 | 신뢰된 주소로 관리 리스너에 직접 도달 | 유효한 핸들 외에는 요청의 어떤 것도 신뢰하지 않음. 핸들이 없으면 `403 login_required`이고 상태 변화 없음 | 카운터 `hopae_admin_denied_total{reason}` |
 | `max_age`로 선언된 제공자가 그것을 존중하지 않음(`auth_time` 없음 또는 오래됨) | 재인증 실패(`reauth_auth_time_missing`, `reauth_not_fresh`). `reauth` 설정을 `unsupported`로 바로잡기 전까지 그 제공자로는 콘솔에 들어갈 수 없음 | 제공자를 밝히는 `login.failed` |
@@ -298,9 +369,16 @@ API로 바뀐 제공자는 `managed_by = api`가
 
 ### 카운터
 
-`hopae_admin_requests_total{role,outcome}`, `hopae_admin_denied_total{reason}`,
-`hopae_admin_mutations_total{kind}`, `hopae_admin_rows_examined_total{list}`,
-`hopae_store_interrupts_total`. 노출은 M7이며 그동안은 테스트 훅이 보여 줍니다.
+| 카운터 | 레이블 | 세는 것 |
+| --- | --- | --- |
+| `hopae_admin_requests_total` | `role`(`admin`, `viewer`, 인증 전에는 `none`), `outcome`(`ok`, `denied`, `client_error`, `server_error`, 또는 인증 전에 거부된 요청의 거부 코드). `cookie.secure`가 `false`이면 `insecure_mode="true"`가 더해짐 | 관리 리스너가 답한 요청 |
+| `hopae_admin_denied_total` | `reason` | 리스너와 핸들러의 거부를 사유별로(`untrusted_peer`, `login_required`, `not_admin`, `role_insufficient`, `auth_too_old`, `aal_insufficient`, `self_target`, `actor_revoked`, `overloaded`) |
+| `hopae_admin_mutations_total` | `kind`(`user_disable`, `user_enable`, `sessions_terminate`, `session_terminate`) | 무언가를 바꾼 변경 |
+| `hopae_admin_rows_examined_total` | `list`(`users`, `sessions`, `events`) | 목록이 살펴본 후보 행 |
+| `hopae_admin_grants_imported_total` | `outcome`(`inserted`, `updated`, `revoked`, `unchanged`, `skipped`) | 시작할 때의 가져오기가 적용한 부여 |
+| `hopae_store_interrupts_total` | 없음 | 마감에서 SQLite 안에서 중단된 저장소 작업 |
+
+노출은 M7이며 그동안은 `test-hooks` 빌드가 보여 줍니다([운영](OPERATIONS.md#카운터)).
 
 ## 제한과 호환성
 

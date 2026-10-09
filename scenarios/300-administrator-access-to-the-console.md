@@ -200,9 +200,9 @@ and every refusal is recorded.
 
 ### S300-A9 A silent, absent, stale or forged authentication time cannot satisfy a `max_age` console
 
-- Given: `max_age` provider. Runs: (1) the mock profile `auth_time_stale` for the reauthentication of 300-6; (2) `auth_time_missing` for the same; (3) **ordinary login without the claim**: `u_a` clears every Hopae cookie, signs in on `app.example.test` with the mock in `auth_time_missing` (no `max_age` requested, the provider "completes silently"), then navigates to the console; (4) ordinary login with the mock returning `auth_time` 120 s in the future; (5) ordinary login with `auth_time` as a string, then as a negative number; (6) a **legacy** session created before migration `0003` (the test hooks insert a session row with `auth_time_source = hopae_completion` and `auth_time = now − 1 min`), then the console.
+- Given: `max_age` provider. Runs: (1) the mock profile `auth_time_stale` for the reauthentication of 300-6; (2) `auth_time_missing` for the same; (3) **ordinary login without the claim**: `u_a` clears every Hopae cookie, signs in on `app.example.test` with the mock in `auth_time_missing` (no `max_age` requested, the provider "completes silently"), then navigates to the console; (4) ordinary login with the mock returning `auth_time` 120 s in the future; (5) ordinary login with `auth_time` as a string, then as a negative number, then as a JSON `null`, and the reauthentication of 300-6 with `null` — for both capabilities (a present `null` is a present, invalid claim); (6) a **legacy** session created before migration `0003` (the test hooks insert a session row with `auth_time_source = hopae_completion` and `auth_time = now − 1 min`), then the console.
 - When: the callback of each run, then the console navigation.
-- Then: (1) `login.failed` with `reauth_not_fresh`, nothing created or changed, the session keeps its old `auth_time`, the console still answers `302 reauth_required`; (2) `login.failed` with `reauth_auth_time_missing`, same consequences, the event names the provider; (3) the ordinary login **succeeds** with `auth_time = now` and `auth_time_source = hopae_completion` (ordinary logins never require the claim), but the console answers `302 reauth_required` at once — provenance, not age, fails `FRESH` for a `max_age` provider — and the reauthentication that follows requests `max_age` and obtains a `provider_claim`; (4) and (5) the login **fails** with `invalid_auth_time` (`login.failed`), nothing is created, and no session ever carries `auth_time = now` in place of the invalid claim; (6) the legacy session is challenged on its first console entry exactly like (3), while its verifies on `app.example.test` are unaffected. With an `unsupported` provider (300-16) runs (3) and (6) enter the console (login age only) and runs (4) and (5) still fail the login: an invalid claim is invalid for every provider.
+- Then: (1) `login.failed` with `reauth_not_fresh`, nothing created or changed, the session keeps its old `auth_time`, the console still answers `302 reauth_required`; (2) `login.failed` with `reauth_auth_time_missing`, same consequences, the event names the provider; (3) the ordinary login **succeeds** with `auth_time = now` and `auth_time_source = hopae_completion` (ordinary logins never require the claim), but the console answers `302 reauth_required` at once — provenance, not age, fails `FRESH` for a `max_age` provider — and the reauthentication that follows requests `max_age` and obtains a `provider_claim`; (4) and (5) (`null` included) the login **fails** with `invalid_auth_time` (`login.failed`), nothing is created, and no session ever carries `auth_time = now` in place of the invalid claim; (6) the legacy session is challenged on its first console entry exactly like (3), while its verifies on `app.example.test` are unaffected. With an `unsupported` provider (300-16) runs (3) and (6) enter the console (login age only) and runs (4) and (5) still fail the login: an invalid claim is invalid for every provider.
 
 ### S300-A10 The callback's headroom makes a successful reauthentication reach the console, and the boundaries are exact
 
@@ -220,33 +220,38 @@ and every refusal is recorded.
 
 | Case | Test | File | Kind | Status |
 | --- | --- | --- | --- | --- |
-| S300-1 | `s300_1_first_visit_logs_in_and_lands_with_console_handle` | `tests/scenarios/s300_admin_access.rs` | gateway | planned |
-| S300-2 | `s300_2_granted_user_served_from_handle_not_headers` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-3 | `s300_3_user_without_grant_is_refused_and_named` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-4 | `s300_4_read_only_administrator_reads_but_cannot_change` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-5 | `s300_5_revoked_grant_stops_next_request` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-6 | `s300_6_max_age_provider_stale_session_gets_provider_verified_reauthentication` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-7 | `s300_7_console_app_policy_applies_to_console_handle` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-8 | `s300_8_preflight_prints_console_route_capabilities_and_refuses_reserved_id` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-9 | `s300_9_mutations_carry_form_token_or_api_header` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-10 | `s300_10_sign_out_from_console_ends_session_everywhere` | `tests/scenarios/s300_admin_access.rs` | gateway | planned |
-| S300-11 | `s300_11_korean_pages_and_pinned_headers` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-12 | `s300_12_console_route_without_auth_is_403_not_a_loop` | `tests/scenarios/s300_admin_access.rs` | gateway | planned |
-| S300-13 | `s300_13_peer_that_is_not_the_gateway_is_refused_by_default` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-14 | `s300_14_listener_denials_recorded_like_gateway_denials` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-15 | `s300_15_freshness_one_predicate_every_verify_and_listener_auth_too_old` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-16 | `s300_16_unsupported_provider_freshness_is_hopae_login_age` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-17 | `s300_17_reauthentication_belongs_to_the_sessions_provider` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-A1 | `s300_a1_terminated_handle_and_foreign_token_useless` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-A2 | `s300_a2_forged_identity_tampered_cookie_wrong_host` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-A3 | `s300_a3_change_between_check_and_write_wins` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-A4 | `s300_a4_unauthenticated_traffic_creates_nothing_and_cap_holds` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-A5 | `s300_a5_cross_site_requests_cannot_act` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-A6 | `s300_a6_forwarding_headers_believed_only_from_gateway` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-A7 | `s300_a7_plain_http_never_carries_the_console` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-A8 | `s300_a8_outsider_learns_nothing_about_administrators` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-A9 | `s300_a9_silent_absent_stale_or_forged_auth_time_cannot_satisfy_max_age_console` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
-| S300-A10 | `s300_a10_callback_headroom_reaches_console_and_boundaries_are_exact` | `tests/scenarios/s300_admin_access.rs` | integration | planned |
+| S300-1 | `s300_1_first_visit_logs_in_and_lands_with_console_handle` | `tests/scenarios/s300_admin_access.rs` | gateway | passing |
+| S300-2 | `s300_2_granted_user_served_from_handle_not_headers` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-3 | `s300_3_user_without_grant_is_refused_and_named` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-3 | `s300_3_aal_insufficient_is_refused_and_counted` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-4 | `s300_4_read_only_administrator_reads_but_cannot_change` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-5 | `s300_5_revoked_grant_stops_next_request` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-6 | `s300_6_max_age_provider_stale_session_gets_provider_verified_reauthentication` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-6 | `s300_6_stored_reauth_prompt_none_asks_for_max_age_only` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-6 | `s300_6_reauthentication_audits_every_handle_it_revokes` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-7 | `s300_7_console_app_policy_applies_to_console_handle` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-8 | `s300_8_preflight_prints_console_route_capabilities_and_refuses_reserved_id` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-9 | `s300_9_mutations_carry_form_token_or_api_header` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-10 | `s300_10_sign_out_from_console_ends_session_everywhere` | `tests/scenarios/s300_admin_access.rs` | gateway | passing |
+| S300-11 | `s300_11_korean_pages_and_pinned_headers` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-12 | `s300_12_console_route_without_auth_is_403_not_a_loop` | `tests/scenarios/s300_admin_access.rs` | gateway | passing |
+| S300-13 | `s300_13_peer_that_is_not_the_gateway_is_refused_by_default` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-14 | `s300_14_listener_denials_recorded_like_gateway_denials` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-15 | `s300_15_freshness_one_predicate_every_verify_and_listener_auth_too_old` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-16 | `s300_16_unsupported_provider_freshness_is_hopae_login_age` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-16 | `s300_16_a_retained_database_provider_keeps_its_stored_capability` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-17 | `s300_17_reauthentication_belongs_to_the_sessions_provider` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-A1 | `s300_a1_terminated_handle_and_foreign_token_useless` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-A2 | `s300_a2_forged_identity_tampered_cookie_wrong_host` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-A3 | `s300_a3_change_between_check_and_write_wins` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-A3 | `s300_a3_fence_each_isolated_predicate_refuses_on_its_own` | `src/store/sqlite/tests_admin.rs` | unit | passing |
+| S300-A4 | `s300_a4_unauthenticated_traffic_creates_nothing_and_cap_holds` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-A5 | `s300_a5_cross_site_requests_cannot_act` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-A6 | `s300_a6_forwarding_headers_believed_only_from_gateway` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-A7 | `s300_a7_plain_http_never_carries_the_console` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-A8 | `s300_a8_outsider_learns_nothing_about_administrators` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-A9 | `s300_a9_silent_absent_stale_or_forged_auth_time_cannot_satisfy_max_age_console` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
+| S300-A10 | `s300_a10_callback_headroom_reaches_console_and_boundaries_are_exact` | `tests/scenarios/s300_admin_access.rs` | integration | passing |
 
 Scenario 004-11's enumeration gains the `reauth_required` outcomes (`302` for
 a document navigation, `401` otherwise); the admin listener is not the gateway

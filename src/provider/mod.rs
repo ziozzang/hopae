@@ -7,5 +7,5 @@ pub mod presets;
 pub mod registry;
 pub mod types;
 
-pub use registry::Registry;
+pub use registry::{Registry, apply_stored_reauth};
 pub use types::*;

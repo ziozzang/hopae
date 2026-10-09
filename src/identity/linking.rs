@@ -123,6 +123,7 @@ mod tests {
             username: None,
             picture: None,
             raw_claims: serde_json::json!({}),
+            auth_time: None,
         }
     }
 

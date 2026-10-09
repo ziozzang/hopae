@@ -18,7 +18,7 @@ use super::rows::{self, cols, corrupt};
 use super::sessions::{
     consume_session_codes, insert_handle, revoke_session_handles, session_by_id, terminate_in,
 };
-use super::{Check, Shared, Store, WriterEnv, commit};
+use super::{Check, Shared, Store, WriterEnv, commit, commit_checked};
 use crate::crypto::{Digest, Timestamp};
 use crate::event::types::{Event, EventKind, Reason, reasons};
 use crate::identity::types::{NormalizedEmail, UserId};
@@ -281,7 +281,7 @@ impl Store {
         deadline: Deadline,
     ) -> StoreResult<Option<(User, Vec<IdentityRow>)>> {
         let target = target.clone();
-        self.read_checked("resolve_grant_target", Some(deadline), move |c, _| {
+        self.read_checked("resolve_grant_target", Some(deadline), move |c, check| {
             let (clause, arg) = match &target {
                 GrantTarget::Id(u) => ("user_id", u.to_string()),
                 GrantTarget::Email(e) => ("primary_email", e.to_string()),
@@ -298,13 +298,16 @@ impl Store {
                 return Ok(None);
             };
             let sql = format!(
-                "SELECT {} FROM identities WHERE user_id = ?1 ORDER BY first_seen_at, provider_id, subject LIMIT 50",
+                "SELECT {} FROM identities WHERE user_id = ?1 ORDER BY first_seen_at, provider_id, subject",
                 cols("", rows::IDENTITY_COLS)
             );
             let mut st = c.prepare(&sql)?;
             let mut q = st.query([user.user_id.as_str()])?;
+            // Every linked identity: this is the operator's evidence, not the
+            // console's bounded preview; only the deadline bounds it.
             let mut ids = Vec::new();
             while let Some(r) = q.next()? {
+                check.step()?;
                 ids.push(rows::identity(r, 0)?);
             }
             Ok(Some((user, ids)))
@@ -341,12 +344,23 @@ impl Store {
                 Some(_) => return Err(StoreError::Conflict("user_disabled")),
             }
             let existing = grant_row(&tx, user.as_str())?;
+            // A binding is never replaced: a grant by another address than the
+            // one the row is bound through is refused (the address a later
+            // import resolves must keep naming the user it first named).
+            if let (Some(g), Some(new)) = (&existing, &source_email)
+                && let Some(old) = &g.source_email
+                && old != new
+            {
+                return Err(StoreError::Conflict("source_email_bound"));
+            }
             let previous = existing.as_ref().map(|g| g.role);
             if let Some(g) = &existing
                 && g.revoked_at.is_none()
                 && g.role == role
                 && g.managed_by == managed_by
                 && (note.is_none() || note == g.note)
+                // Establishing a binding the row lacked is a change.
+                && (source_email.is_none() || g.source_email.is_some())
             {
                 return Ok((previous, false));
             }
@@ -355,7 +369,7 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7)
                  ON CONFLICT (user_id) DO UPDATE SET
                     role = excluded.role, managed_by = excluded.managed_by,
-                    source_email = COALESCE(excluded.source_email, admin_grants.source_email),
+                    source_email = COALESCE(admin_grants.source_email, excluded.source_email),
                     granted_at = excluded.granted_at, granted_by = excluded.granted_by,
                     revoked_at = NULL, revoked_by = NULL, note = excluded.note",
                 params![
@@ -436,7 +450,7 @@ impl Store {
             imp.run(&entries, force.as_ref())?;
             before_commit(&shared, check)?;
             let report = imp.report;
-            commit(tx, &shared, Some("admin_import"))?;
+            commit_checked(tx, &shared, Some("admin_import"), check)?;
             Ok(report)
         })
         .await
@@ -480,9 +494,14 @@ impl Store {
             }
             crash(&shared, "after_admin_status_write");
             check.now()?;
+            // The count is known only now: it travels in the same transaction.
+            let mut admin_event = admin_event;
+            if status == UserStatus::Disabled {
+                admin_event.attrs.insert("count".into(), ended.into());
+            }
             insert_events(&tx, &shared, &[admin_event])?;
             before_commit(&shared, check)?;
-            commit(tx, &shared, Some("admin_status"))?;
+            commit_checked(tx, &shared, Some("admin_status"), check)?;
             Ok((true, ended))
         })
         .await
@@ -520,7 +539,7 @@ impl Store {
                 check.now()?;
                 insert_events(&tx, &shared, &[admin_event])?;
                 before_commit(&shared, check)?;
-                commit(tx, &shared, Some("admin_terminate"))?;
+                commit_checked(tx, &shared, Some("admin_terminate"), check)?;
                 Ok(true)
             },
         )
@@ -549,9 +568,11 @@ impl Store {
                 }
                 crash(&shared, "after_admin_terminate_write");
                 check.now()?;
+                let mut admin_event = admin_event;
+                admin_event.attrs.insert("count".into(), n.into());
                 insert_events(&tx, &shared, &[admin_event])?;
                 before_commit(&shared, check)?;
-                commit(tx, &shared, Some("admin_terminate"))?;
+                commit_checked(tx, &shared, Some("admin_terminate"), check)?;
                 Ok(n)
             },
         )
@@ -570,6 +591,7 @@ impl Store {
         consume_txn: (Digest, Reason),
         deadline: Deadline,
         events: Vec<Event>,
+        ask: Ask<HandleRow, Event>,
     ) -> StoreResult<()> {
         let (id, provider) = (id.clone(), provider.clone());
         self.write_checked("reauthenticate_session", Some(deadline), move |env, check| {
@@ -607,6 +629,23 @@ impl Store {
                 ],
             )?;
             check.now()?;
+            // The audit lists exactly the handles this transaction revokes:
+            // read them here, under the write lock, then revoke them.
+            let live: Vec<HandleRow> = {
+                let mut st = tx.prepare(&format!(
+                    "SELECT {} FROM session_handles WHERE session_id = ?1 AND revoked_at IS NULL ORDER BY created_at, handle_sha256",
+                    cols("", rows::HANDLE_COLS)
+                ))?;
+                st.query_map([id.as_str()], |r| Ok(rows::handle(r, 0)))?
+                    .map(|r| r.map_err(StoreError::from).and_then(|x| x))
+                    .collect::<StoreResult<_>>()?
+            };
+            let mut events = events;
+            for row in live {
+                check.step()?;
+                events.push(ask.ask(row, check)?);
+            }
+            check.now()?;
             revoke_session_handles(&tx, &id, reasons::REAUTH.0, now)?;
             consume_session_codes(&tx, &id, reasons::REAUTH.0, now)?;
             check.now()?;
@@ -616,7 +655,7 @@ impl Store {
             insert_events(&tx, &shared, &events)?;
             crash(&shared, "after_reauth_write");
             before_commit(&shared, check)?;
-            commit(tx, &shared, Some("admin_reauth"))
+            commit_checked(tx, &shared, Some("admin_reauth"), check)
         })
         .await
     }
@@ -635,9 +674,9 @@ fn terminate_all(
 ) -> StoreResult<u32> {
     let ids: Vec<String> = {
         let mut st = tx.prepare(
-            "SELECT session_id FROM sessions WHERE user_id = ?1 AND terminated_at IS NULL ORDER BY created_at, session_id",
+            "SELECT session_id FROM sessions WHERE user_id = ?1 AND terminated_at IS NULL AND absolute_expires_at > ?2 ORDER BY created_at, session_id",
         )?;
-        st.query_map([user.as_str()], |r| r.get(0))?
+        st.query_map(params![user.as_str(), now.secs()], |r| r.get(0))?
             .collect::<Result<_, _>>()?
     };
     let mut n = 0u32;
@@ -750,7 +789,14 @@ impl Import<'_> {
                     ForceTarget::ById(u) => entry_user(&e.key) == Some(u),
                     ForceTarget::ByEmail(em) => entry_email(&e.key) == Some(em),
                 };
-                let by_row = matches!(m, Found::One(g) if Some(&g.user_id) == forced_user.as_ref());
+                let by_row = match m {
+                    Found::One(g) => Some(&g.user_id) == forced_user.as_ref(),
+                    // `--force <user_id>` names one row of an ambiguous binding set.
+                    Found::Ambiguous(rows) => rows
+                        .iter()
+                        .any(|g| Some(&g.user_id) == forced_user.as_ref()),
+                    Found::None => false,
+                };
                 by_key || by_row
             });
             if !named {
@@ -773,7 +819,15 @@ impl Import<'_> {
                     for g in &rows {
                         self.present.insert(g.user_id.to_string());
                     }
-                    self.skip(e, skip::EMAIL_BINDING_AMBIGUOUS);
+                    // `--force <user_id>` selects one row of the set: the entry
+                    // applies to it and the other bindings are left as they are.
+                    match rows
+                        .into_iter()
+                        .find(|g| Some(&g.user_id) == forced_user.as_ref())
+                    {
+                        Some(g) => self.apply_matched(e, g, forced_user.as_ref(), false)?,
+                        None => self.skip(e, skip::EMAIL_BINDING_AMBIGUOUS),
+                    }
                 }
                 Found::One(g) => self.apply_matched(e, g, forced_user.as_ref(), true)?,
                 Found::None => unmatched.push(e),
@@ -954,6 +1008,18 @@ impl Import<'_> {
         }
         // The resolved user may already hold a row bound some other way.
         if let Some(g) = grant_row(self.tx, &u.id)? {
+            // An email-only entry that resolved (verified, authoritative,
+            // active) to a row with no binding records the binding now, in this
+            // transaction, so a later reassignment of the mailbox can never be
+            // resolved to someone else (no event: no grant changes).
+            if let SeedKey::ByEmail(em) = &e.key
+                && g.source_email.is_none()
+            {
+                self.tx.execute(
+                    "UPDATE admin_grants SET source_email = ?2 WHERE user_id = ?1 AND source_email IS NULL",
+                    params![g.user_id.as_str(), em.as_str()],
+                )?;
+            }
             return self.apply_matched(e, g, forced_user, false);
         }
         let user = UserId::new(u.id);

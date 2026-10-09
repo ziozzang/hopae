@@ -1,0 +1,30 @@
+<table>
+<thead><tr>
+<th>{{ c.t.get("admin.events.col_time") }}</th>
+<th>{{ c.t.get("admin.events.col_kind") }}</th>
+<th>{{ c.t.get("admin.events.col_outcome") }}</th>
+<th>{{ c.t.get("admin.events.col_reason") }}</th>
+<th>{{ c.t.get("admin.events.col_user") }}</th>
+<th>{{ c.t.get("admin.events.col_session") }}</th>
+<th>{{ c.t.get("admin.events.col_app") }}</th>
+<th>{{ c.t.get("admin.events.col_ip") }}</th>
+<th>{{ c.t.get("admin.events.col_ua") }}</th>
+<th>{{ c.t.get("admin.events.col_attrs") }}</th>
+</tr></thead>
+<tbody>
+{% for e in events %}
+<tr id="{{ e.id }}">
+<td>{{ e.at }}</td>
+<td>{{ e.kind }}</td>
+<td>{{ e.outcome }}</td>
+<td>{{ e.reason }}</td>
+<td>{% if !e.user_id.is_empty() %}<a href="/users/{{ e.user_id }}">{{ e.user_id }}</a>{% endif %}</td>
+<td>{% if !e.session_id.is_empty() %}<a href="/sessions/{{ e.session_id }}">{{ e.session_id }}</a>{% endif %}</td>
+<td>{{ e.app }}</td>
+<td>{{ e.client_ip }}</td>
+<td>{{ e.ua_prefix }}</td>
+<td>{% if !e.actor.is_empty() %}{{ c.t.get("admin.events.by") }} <a href="/users/{{ e.actor }}">{{ e.actor }}</a>; {% endif %}{% for a in e.attrs %}{{ a.0 }}: {{ a.1 }}{% if !loop.last %}; {% endif %}{% endfor %}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>

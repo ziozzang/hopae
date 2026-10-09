@@ -201,6 +201,10 @@ pub struct Services {
     pub store_hooks: Option<Arc<StoreHooks>>,
     /// The configured providers, built from the store's rows.
     pub registry: Arc<Registry>,
+    /// When the process started (the status page's `build.started_at`).
+    pub started_at: Timestamp,
+    /// The bound listener addresses, set once every listener is bound.
+    pub listeners: Arc<std::sync::OnceLock<crate::admin::Listeners>>,
 }
 
 impl Services {
@@ -251,6 +255,8 @@ impl Services {
     /// The admin listener's state, when `admin.public_url` is set.
     pub fn admin_state(&self) -> Option<Arc<crate::admin::AdminState>> {
         let cfg = crate::admin::AdminConfig::from_config(&self.config)?;
+        let mut key = [0u8; 32];
+        self.rng.fill(&mut key);
         Some(Arc::new(crate::admin::AdminState {
             cfg,
             directory: self.directory(),
@@ -262,6 +268,14 @@ impl Services {
             in_flight: Arc::new(tokio::sync::Semaphore::new(
                 self.config.limits.admin_max_concurrent as usize,
             )),
+            snapshot: self.snapshot.clone(),
+            verify: self.verify_context(),
+            registry: self.registry.clone(),
+            key,
+            started_at: self.started_at,
+            config_digest: config_digest(&self.config),
+            listeners: self.listeners.get().cloned().unwrap_or_default(),
+            peer_warned: std::sync::Mutex::new(std::collections::HashMap::new()),
         }))
     }
 }
@@ -537,12 +551,19 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     } else {
         directory.config_generation().await?
     };
-    let snapshot = cfg.snapshot(generation);
-    let listeners_attr = format!(
-        "portal={} gateway={}",
-        cfg.portal_addr(),
-        cfg.gateway_addr()
-    );
+    let mut snapshot = cfg.snapshot(generation);
+    let listeners_attr = match cfg.admin_addr() {
+        Some(a) => format!(
+            "portal={} gateway={} admin={a}",
+            cfg.portal_addr(),
+            cfg.gateway_addr()
+        ),
+        None => format!(
+            "portal={} gateway={}",
+            cfg.portal_addr(),
+            cfg.gateway_addr()
+        ),
+    };
     let loaded = emitter.required(EventKind::ConfigLoaded, Outcome::Info, "startup", |b| {
         b.attr("config_digest", digest.as_str())
             .attr("apps", snapshot.apps.len() as u64)
@@ -559,9 +580,12 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         .await
         .context("importing providers")?;
     log_import(&report);
+    import_admin_grants_at_start(cfg, &*directory, &env).await?;
     // The provider registry, from the rows the import just settled (the
     // database is authoritative). Its reporter writes `provider.error`.
     let rows = directory.providers().await.context("reading providers")?;
+    // A stored `reauth` setting (an api-managed row) overrides the file's default.
+    crate::provider::apply_stored_reauth(&mut snapshot, &rows);
     let registry = Arc::new(Registry::from_snapshot(
         &rows,
         &|n| std::env::var(n).ok(),
@@ -602,6 +626,8 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         readiness: Readiness::default(),
         store_hooks: env.store_hooks.clone(),
         registry,
+        started_at: env.clock.now(),
+        listeners: Arc::default(),
     };
     #[cfg(feature = "test-hooks")]
     let hooks = match (&env.hooks_addr, &env.test_clock, &env.store_hooks) {
@@ -638,6 +664,12 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         .await
         .context("binding gateway listener")?;
     let gateway_addr = gateway.local_addr()?;
+    // Once set, never changed: the status page shows what is actually bound.
+    let _ = services.listeners.set(crate::admin::Listeners {
+        portal: portal_addr.to_string(),
+        gateway: gateway_addr.to_string(),
+        admin: admin.as_ref().map(|a| a.1.to_string()).unwrap_or_default(),
+    });
     match &admin {
         Some((_, a)) => tracing::info!(
             "listeners bound: portal {portal_addr}, gateway {gateway_addr}, admin {a}"
@@ -992,6 +1024,620 @@ pub async fn import_providers_cli(
     })
     .await;
     Ok(report)
+}
+
+// ---------------------------------------------------------------------------
+// hopae admin: grants from the command line, the file import, the start import
+// ---------------------------------------------------------------------------
+
+/// What a `hopae admin` command printed and how it ended. An operator
+/// refusal (bad argument, unknown or unsuitable user) is `code 2`; the store
+/// refusing the database is an error the caller maps to `2` as well.
+#[derive(Debug, Default)]
+pub struct AdminCliOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub code: u8,
+    /// Write `stdout` to the terminal at each [`AdminCliOutput::emit`] instead
+    /// of holding it until the command ends.
+    pub live: bool,
+}
+
+impl AdminCliOutput {
+    /// A live run prints what is buffered now and flushes it; otherwise the
+    /// text stays for the caller to print (tests read it whole).
+    fn emit(&mut self) -> std::io::Result<()> {
+        if self.live {
+            use std::io::Write as _;
+            let mut so = std::io::stdout().lock();
+            so.write_all(self.stdout.as_bytes())?;
+            so.flush()?;
+            self.stdout.clear();
+        }
+        Ok(())
+    }
+
+    fn out(&mut self, line: impl AsRef<str>) {
+        self.stdout.push_str(line.as_ref());
+        self.stdout.push('\n');
+    }
+
+    fn warn(&mut self, line: impl AsRef<str>) {
+        self.stderr.push_str("warning: ");
+        self.stderr.push_str(line.as_ref());
+        self.stderr.push('\n');
+    }
+
+    fn refuse(mut self, msg: impl AsRef<str>) -> Self {
+        self.stderr.push_str("error: ");
+        self.stderr.push_str(msg.as_ref());
+        self.stderr.push('\n');
+        self.code = EXIT_CONFIG;
+        self
+    }
+}
+
+/// A `hopae admin` command as parsed from the command line.
+#[derive(Debug, Clone)]
+pub enum AdminCommand {
+    Grant {
+        target: String,
+        role: crate::store::AdminRole,
+        note: Option<String>,
+        confirm: Option<String>,
+    },
+    Revoke {
+        target: String,
+    },
+    List {
+        all: bool,
+    },
+    Import {
+        force: Option<String>,
+    },
+}
+
+/// Operator-facing text for a store failure; a database error is never echoed.
+fn store_failure(
+    e: &crate::store::StoreError,
+    out: AdminCliOutput,
+) -> anyhow::Result<AdminCliOutput> {
+    use crate::store::StoreError;
+    match e {
+        StoreError::Conflict("user_disabled") => Ok(out.refuse("user is disabled: enable first")),
+        StoreError::Conflict("source_email_bound") => Ok(out.refuse(
+            "the user is already bound to another address; grant by user_id (a binding is never replaced)",
+        )),
+        StoreError::Conflict(m) => Ok(out.refuse(m)),
+        StoreError::Busy => Err(anyhow::anyhow!("the store is busy; try again")),
+        StoreError::Unavailable(_) => Err(anyhow::anyhow!("the store did not answer in time")),
+        StoreError::Sqlite(_) | StoreError::Corrupt(_) | StoreError::Io { .. } => {
+            Err(anyhow::anyhow!("the store could not be read or written"))
+        }
+        other => Err(anyhow::anyhow!("{other}")),
+    }
+}
+
+/// Terminal-safe text: control characters of provider-supplied strings become `?`.
+fn plain(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
+fn parse_target(arg: &str) -> Result<crate::store::types::GrantTarget, String> {
+    use crate::store::types::GrantTarget;
+    if arg.contains('@') {
+        crate::identity::types::NormalizedEmail::parse(arg)
+            .map(GrantTarget::Email)
+            .map_err(|_| "<target>: not a valid email address".to_string())
+    } else if crate::config::valid_user_id(arg) {
+        Ok(GrantTarget::Id(crate::identity::types::UserId::new(arg)))
+    } else {
+        Err("<target>: expected a user id (u_...) or an email address".to_string())
+    }
+}
+
+/// The resolution block printed before every grant.
+fn resolution_block(
+    user: &crate::store::types::User,
+    identities: &[crate::store::types::IdentityRow],
+) -> String {
+    let mut s = String::new();
+    let dash = |o: Option<String>| o.map_or_else(|| "-".to_string(), |v| plain(&v));
+    s.push_str(&format!("user_id {}\n", user.user_id));
+    s.push_str(&format!(
+        "display_name {}\n",
+        dash(user.display_name.clone())
+    ));
+    s.push_str(&format!(
+        "created_at {}\n",
+        preflight::iso_datetime(user.created_at.secs())
+    ));
+    s.push_str(&format!(
+        "last_login_at {}\n",
+        dash(
+            user.last_login_at
+                .map(|t| preflight::iso_datetime(t.secs()))
+        )
+    ));
+    let email = match &user.primary_email {
+        None => "(none)".to_string(),
+        Some(e) => {
+            let state = if !user.email_verified {
+                "unverified"
+            } else if user.email_authoritative {
+                "verified, authoritative"
+            } else {
+                "verified, not authoritative"
+            };
+            format!("{e} ({state})")
+        }
+    };
+    s.push_str(&format!("primary_email {email}\n"));
+    let ids: Vec<String> = identities
+        .iter()
+        .map(|i| plain(&format!("{}:{}", i.provider_id, i.subject)))
+        .collect();
+    s.push_str(&format!(
+        "identities {}\n",
+        if ids.is_empty() {
+            "-".to_string()
+        } else {
+            ids.join(", ")
+        }
+    ));
+    s
+}
+
+fn cli_event(
+    env: &Env,
+    kind: EventKind,
+    user: &crate::identity::types::UserId,
+    role: crate::store::AdminRole,
+) -> crate::event::types::Event {
+    crate::event::types::EventBuilder::new(&*env.clock, &*env.rng, kind, Outcome::Info, "admin-cli")
+        .reason(reasons::ADMIN)
+        .user(user)
+        .attr("actor", "cli")
+        .attr("role", role.as_str())
+        .attr("managed_by", "api")
+        .build()
+}
+
+/// Open the store as a command-line administrator: precheck, no lock, no
+/// migration, no backup.
+async fn open_cli_store(cfg: &Config, env: &Env) -> anyhow::Result<Store> {
+    let path = cfg.store_path();
+    let (clock, sinks) = (env.clock.clone(), cfg.event_sinks());
+    let p = path.clone();
+    let store = tokio::task::spawn_blocking(move || Store::open_cli(&p, clock, sinks))
+        .await
+        .context("store open task")?
+        .with_context(|| format!("opening store {}", path.display()))?;
+    store.set_rng(env.rng.clone());
+    Ok(store)
+}
+
+/// `hopae admin grant|revoke|list|import`. Arguments are validated before the
+/// store is opened; nothing is written for a refused command.
+pub async fn admin_cli(cfg: &Config, cmd: AdminCommand) -> anyhow::Result<AdminCliOutput> {
+    admin_cli_with(cfg, cmd, false).await
+}
+
+/// [`admin_cli`] with `live` output: the grant's resolution block reaches the
+/// terminal before the grant is written (ADR-0016 decision 6), not when the
+/// command ends. The returned `stdout` then holds only what was not yet printed.
+pub async fn admin_cli_with(
+    cfg: &Config,
+    cmd: AdminCommand,
+    live: bool,
+) -> anyhow::Result<AdminCliOutput> {
+    use crate::store::types::{Deadline, GrantTarget};
+    use crate::store::{AdminRole, GrantManagedBy};
+    let mut out = AdminCliOutput {
+        live,
+        ..AdminCliOutput::default()
+    };
+    // Validation first.
+    let parsed_target = match &cmd {
+        AdminCommand::Grant { target, .. } | AdminCommand::Revoke { target } => {
+            match parse_target(target) {
+                Ok(t) => Some(t),
+                Err(m) => return Ok(out.refuse(m)),
+            }
+        }
+        _ => None,
+    };
+    if let AdminCommand::Grant { note, confirm, .. } = &cmd {
+        if let Some(n) = note
+            && n.chars().count() > crate::admin::seed::NOTE_MAX_CHARS
+        {
+            return Ok(out.refuse(format!(
+                "--note: longer than {} characters",
+                crate::admin::seed::NOTE_MAX_CHARS
+            )));
+        }
+        if let Some(c) = confirm
+            && !crate::config::valid_user_id(c)
+        {
+            return Ok(out.refuse("--confirm: expected a user id (u_...)"));
+        }
+    }
+    let force = match &cmd {
+        AdminCommand::Import { force: Some(f) } => match crate::admin::seed::force_target(f) {
+            Ok(t) => Some(t),
+            Err(m) => return Ok(out.refuse(m)),
+        },
+        _ => None,
+    };
+
+    let env = env();
+    let store = open_cli_store(cfg, &env).await?;
+    let dir = store.directory();
+    let dl = || Deadline::after(Duration::from_secs(30));
+    let result: crate::store::StoreResult<()> = async {
+        match cmd {
+            AdminCommand::Grant {
+                role,
+                note,
+                confirm,
+                ..
+            } => {
+                let target = parsed_target.expect("validated");
+                let found = dir.resolve_grant_target(&target, dl()).await?;
+                // Only the domain is case-normalized (ADR-0011): the local part
+                // is compared exactly, never guessed across case.
+                let Some((user, identities)) = found else {
+                    out.stderr
+                        .push_str("error: no such user: sign in once first\n");
+                    out.code = EXIT_CONFIG;
+                    return Ok(());
+                };
+                out.stdout.push_str(&resolution_block(&user, &identities));
+                // The evidence is on the terminal before anything is written.
+                if let Err(e) = out.emit() {
+                    // The operator decides on this evidence: without it, no write.
+                    out.stderr.push_str(&format!(
+                        "error: the resolution evidence could not be written ({e}); nothing was granted\n"
+                    ));
+                    out.code = EXIT_CONFIG;
+                    return Ok(());
+                }
+                // The binding records the address as the store holds it.
+                let email = match &target {
+                    GrantTarget::Email(_) => user.primary_email.clone(),
+                    GrantTarget::Id(_) => None,
+                };
+                if let Some(e) = &email {
+                    if !user.email_verified {
+                        out.stderr.push_str("error: email not verified\n");
+                        out.code = EXIT_CONFIG;
+                        return Ok(());
+                    }
+                    let _ = e;
+                }
+                if user.status != crate::store::UserStatus::Active {
+                    out.stderr
+                        .push_str("error: user is disabled: enable first\n");
+                    out.code = EXIT_CONFIG;
+                    return Ok(());
+                }
+                if let Some(new) = &email
+                    && let Some(old) = dir
+                        .admin_grant(&user.user_id, dl())
+                        .await?
+                        .and_then(|g| g.source_email)
+                    && &old != new
+                {
+                    out.stderr.push_str(&format!(
+                        "error: {} is already bound to {old}; grant by user_id (a binding is never replaced)\n",
+                        user.user_id
+                    ));
+                    out.code = EXIT_CONFIG;
+                    return Ok(());
+                }
+                if let Some(c) = &confirm
+                    && c != user.user_id.as_str()
+                {
+                    out.stderr.push_str(&format!(
+                        "error: --confirm names {c} but the {} resolves to {}\n",
+                        if email.is_some() { "address" } else { "target" },
+                        user.user_id
+                    ));
+                    out.code = EXIT_CONFIG;
+                    return Ok(());
+                }
+                if let Some(e) = &email
+                    && !user.email_authoritative
+                    && confirm.is_none()
+                {
+                    out.stderr.push_str(&format!(
+                        "error: refusing: {e} is verified but not authoritative; re-run with --confirm {} if this is the intended person\n",
+                        user.user_id
+                    ));
+                    out.code = EXIT_CONFIG;
+                    return Ok(());
+                }
+                let at = env.clock.now();
+                let ev = cli_event(&env, EventKind::AdminGrant, &user.user_id, role);
+                let (_, changed) = dir
+                    .grant_admin(
+                        &user.user_id,
+                        role,
+                        GrantManagedBy::Api,
+                        email,
+                        "cli",
+                        note.as_deref().and_then(crate::admin::seed::sanitize_note),
+                        at,
+                        ev,
+                    )
+                    .await?;
+                if changed {
+                    out.out(format!("granted {} to {}", role.as_str(), user.user_id));
+                } else {
+                    out.out("unchanged");
+                }
+            }
+            AdminCommand::Revoke { .. } => {
+                let target = parsed_target.expect("validated");
+                // An address names the row bound through it before any resolution.
+                let user_id = match &target {
+                    GrantTarget::Id(u) => Some(u.clone()),
+                    GrantTarget::Email(e) => {
+                        let bound: Vec<_> = dir
+                            .admin_grants(true, dl())
+                            .await?
+                            .into_iter()
+                            .filter(|g| g.source_email.as_ref() == Some(e) && g.revoked_at.is_none())
+                            .collect();
+                        match bound.len() {
+                            0 => dir
+                                .resolve_grant_target(&target, dl())
+                                .await?
+                                .map(|(u, _)| u.user_id),
+                            1 => Some(bound[0].user_id.clone()),
+                            _ => {
+                                out.stderr.push_str(
+                                    "error: ambiguous binding; use the user id\n",
+                                );
+                                out.code = EXIT_CONFIG;
+                                return Ok(());
+                            }
+                        }
+                    }
+                };
+                let Some(user_id) = user_id else {
+                    out.stderr
+                        .push_str("error: no such user: sign in once first\n");
+                    out.code = EXIT_CONFIG;
+                    return Ok(());
+                };
+                match dir.admin_grant(&user_id, dl()).await? {
+                    None => out.out(format!("no grant for {user_id}")),
+                    Some(g) if g.revoked_at.is_some() => out.out("already revoked"),
+                    Some(g) => {
+                        let at = env.clock.now();
+                        let ev = cli_event(&env, EventKind::AdminRevoke, &user_id, g.role);
+                        if dir
+                            .revoke_admin(&user_id, "cli", GrantManagedBy::Api, at, ev)
+                            .await?
+                        {
+                            out.out(format!("revoked {} from {user_id}", g.role.as_str()));
+                        } else {
+                            out.out("already revoked");
+                        }
+                    }
+                }
+            }
+            AdminCommand::List { all } => {
+                let grants = dir.admin_grants(all, dl()).await?;
+                if grants.is_empty() {
+                    return Ok(());
+                }
+                out.out("USER_ID  EMAIL  ROLE  MANAGED_BY  GRANTED_AT  GRANTED_BY  NOTE");
+                for g in grants {
+                    let email = match &g.source_email {
+                        Some(e) => Some(e.to_string()),
+                        None => dir
+                            .resolve_grant_target(&GrantTarget::Id(g.user_id.clone()), dl())
+                            .await?
+                            .and_then(|(u, _)| u.primary_email)
+                            .map(|e| e.to_string()),
+                    };
+                    let mut line = format!(
+                        "{}  {}  {}  {}  {}  {}  {}",
+                        g.user_id,
+                        plain(email.as_deref().unwrap_or("-")),
+                        g.role.as_str(),
+                        g.managed_by.as_str(),
+                        preflight::iso_datetime(g.granted_at.secs()),
+                        plain(&g.granted_by),
+                        plain(g.note.as_deref().unwrap_or("-")),
+                    );
+                    if let Some(at) = g.revoked_at {
+                        line.push_str(&format!(
+                            "  revoked {} by {}",
+                            preflight::iso_datetime(at.secs()),
+                            plain(g.revoked_by.as_deref().unwrap_or("-"))
+                        ));
+                    }
+                    out.out(line);
+                }
+            }
+            AdminCommand::Import { .. } => {
+                let seed = crate::admin::seed::entries(cfg.admin_user_entries());
+                for (i, why) in &seed.malformed {
+                    out.warn(format!("admin.users[{i}]: {why}"));
+                }
+                let forced = force.is_some();
+                let report = crate::admin::seed::run_import(
+                    &*dir,
+                    seed.entries.clone(),
+                    force,
+                    &*env.clock,
+                    &*env.rng,
+                    "admin-cli",
+                )
+                .await?;
+                let grants = dir.admin_grants(true, dl()).await?;
+                let list = |v: &[crate::identity::types::UserId]| {
+                    v.iter().map(|u| u.to_string()).collect::<Vec<_>>().join(", ")
+                };
+                out.out("admin grants imported");
+                out.out(format!("  inserted: {}", list(&report.inserted)));
+                out.out(format!("  updated: {}", list(&report.updated)));
+                out.out(format!("  revoked: {}", list(&report.revoked)));
+                out.out(format!("  unchanged: {}", list(&report.unchanged)));
+                out.out(format!("  forced: {}", list(&report.forced)));
+                let mut reasons_seen: Vec<&'static str> = Vec::new();
+                for (_, r) in &report.skipped {
+                    if !reasons_seen.contains(r) {
+                        reasons_seen.push(r);
+                    }
+                }
+                for reason in reasons_seen {
+                    let labels: Vec<String> = report
+                        .skipped
+                        .iter()
+                        .filter(|(_, r)| *r == reason)
+                        .filter_map(|(i, _)| seed.entries.iter().find(|e| e.index == *i))
+                        .map(|e| crate::admin::seed::skip_label(e, &grants))
+                        .collect();
+                    out.out(format!(
+                        "  skipped ({}): {}",
+                        crate::admin::seed::skip_text(reason),
+                        labels.join(", ")
+                    ));
+                }
+                for w in crate::admin::seed::report_warnings(&report, &seed.entries, &grants, false)
+                {
+                    out.warn(w);
+                }
+                if forced && report.forced.is_empty() {
+                    out.warn("--force matched no file entry");
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    let _ = AdminRole::Admin;
+    store.barrier().await.ok();
+    match result {
+        Ok(()) => Ok(out),
+        Err(e) => store_failure(&e, out),
+    }
+}
+
+/// The grant import at start (decision 13): after the provider import, before
+/// the listeners bind. A defective entry is a warning; the file's removals are
+/// applied; a store failure is a start failure.
+async fn import_admin_grants_at_start(
+    cfg: &Config,
+    directory: &dyn Directory,
+    env: &Env,
+) -> anyhow::Result<()> {
+    use crate::store::types::Deadline;
+    let seed = crate::admin::seed::entries(cfg.admin_user_entries());
+    for (i, why) in &seed.malformed {
+        tracing::warn!("admin.users[{i}]: {why}");
+    }
+    let report = crate::admin::seed::run_import(
+        directory,
+        seed.entries.clone(),
+        None,
+        &*env.clock,
+        &*env.rng,
+        "startup",
+    )
+    .await
+    .context("importing administrator grants")?;
+    let grants = if report.skipped.is_empty() && report.rebound_warnings.is_empty() {
+        Vec::new()
+    } else {
+        directory
+            .admin_grants(true, Deadline::after(Duration::from_secs(30)))
+            .await
+            .context("reading administrator grants")?
+    };
+    for w in crate::admin::seed::report_warnings(&report, &seed.entries, &grants, true) {
+        tracing::warn!("{w}");
+    }
+    for (outcome, n) in [
+        ("inserted", report.inserted.len()),
+        ("updated", report.updated.len()),
+        ("revoked", report.revoked.len()),
+        ("unchanged", report.unchanged.len()),
+        ("skipped", report.skipped.len()),
+    ] {
+        if n > 0 {
+            counters::add(
+                counters::ADMIN_GRANTS_IMPORTED_TOTAL,
+                &[("outcome", outcome)],
+                n as u64,
+            );
+        }
+    }
+    if !(seed.entries.is_empty() && report.revoked.is_empty() && seed.malformed.is_empty()) {
+        tracing::info!(
+            "admin.users: inserted {}, updated {}, revoked {}, skipped {}",
+            report.inserted.len(),
+            report.updated.len(),
+            report.revoked.len(),
+            report.skipped.len()
+        );
+    }
+    Ok(())
+}
+
+/// `hopae --check`: the provider rows of an existing, migrated store (empty
+/// without one), so the report can show the stored `reauth` capability.
+pub async fn check_stored_providers(cfg: &Config) -> Vec<crate::store::types::ProviderRow> {
+    if !cfg.store_path().exists() {
+        return Vec::new();
+    }
+    let env = env();
+    match open_cli_store(cfg, &env).await {
+        Ok(store) => store.directory().providers().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// `hopae --check`: what resolving `admin.users[]` against an existing store
+/// would complain about. Without entries, without a store, or with a store an
+/// instance has not migrated yet, there is nothing to say.
+pub async fn admin_check_warnings(cfg: &Config) -> Vec<String> {
+    use crate::store::types::Deadline;
+    let seed = crate::admin::seed::entries(cfg.admin_user_entries());
+    if seed.entries.is_empty() || !cfg.store_path().exists() {
+        return Vec::new();
+    }
+    let env = env();
+    let store = match open_cli_store(cfg, &env).await {
+        Ok(s) => s,
+        Err(e) => {
+            return match e
+                .chain()
+                .find_map(|c| c.downcast_ref::<crate::store::StoreError>())
+            {
+                Some(crate::store::StoreError::SchemaTooOld { .. }) => Vec::new(),
+                Some(other) => vec![format!("admin.users: store not inspected: {other}")],
+                None => vec!["admin.users: store not inspected".to_string()],
+            };
+        }
+    };
+    let dir = store.directory();
+    match crate::admin::seed::preview(
+        &*dir,
+        &seed.entries,
+        Deadline::after(Duration::from_secs(10)),
+    )
+    .await
+    {
+        Ok(w) => w,
+        Err(_) => vec!["admin.users: store not inspected".to_string()],
+    }
 }
 
 #[cfg(test)]

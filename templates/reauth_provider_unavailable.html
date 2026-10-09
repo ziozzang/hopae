@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("reauth.unavailable_title") }}{% endblock %}
+{% block content %}
+<h1>{{ t.get("reauth.unavailable_title") }}</h1>
+<p>{{ t.fmt("reauth.unavailable_body", "provider", provider) }}</p>
+<p><a href="{{ sign_out }}">{{ t.get("reauth.sign_out") }}</a></p>
+{% endblock %}

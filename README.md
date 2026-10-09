@@ -1,6 +1,6 @@
 # Hopae
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 3 -->
 
 [Documentation](docs/README.md) · [Roadmap](docs/ROADMAP.md) · [Release notes](CHANGELOG.md) · [한국어](README.ko.md)
 
@@ -14,10 +14,10 @@ can inject verified identity into upstream requests. It is packaged around the
 authentication check, and it stays usable behind any gateway that can forward
 such a check.
 
-> **Status: milestone M1 (vertical slice), unreleased.** Version 0.1.0 is not
-> cut yet. What works today is described under [What works in M1](#what-works-in-m1);
-> everything under [Not in M1](#not-in-m1) is design only. See the
-> [roadmap](docs/ROADMAP.md).
+> **Status: milestone M1 (vertical slice) plus the M4-min management console
+> (available), unreleased.** Version 0.1.0 is not cut yet. What works today is
+> described under [What works today](#what-works-today); everything under
+> [Not yet](#not-yet) is design only. See the [roadmap](docs/ROADMAP.md).
 
 ## How it fits
 
@@ -35,28 +35,30 @@ This is close to a standard OAuth deployment; the difference is that the
 gateway already owns routing, header injection and stripping, so Hopae
 provides only the portal, providers, sessions and policy.
 
-## What works in M1
+## What works today
 
-M1 is one complete path, nothing more: **Google sign-in, server-side sessions
-and Hangang forward-authentication**.
+The base is one complete path: **Google sign-in, server-side sessions and
+Hangang forward-authentication**, with a minimal management console on top of
+it.
 
 - **Sign-in** — OpenID Connect against Google (authorization code flow with PKCE, ID-token validation, discovery and key caching). Providers are defined in the JSON configuration file; a provider whose secret variable is missing is disabled, not fatal.
 - **Sessions** — server-side sessions stored in SQLite, per-host handle cookies bound to the browser, configurable idle and absolute timers and client IP/User-Agent binding per application, logout, and explicit account linking by verified email.
 - **Gateway integration** — the verify endpoint (`/_hopae/verify`) of the [gateway contract](docs/GATEWAY_CONTRACT.md): caller-key authentication with rotation, fail-closed answers, identity headers for the gateway to inject, and cross-domain single sign-on between registered hosts through a browser-bound handoff.
 - **Operations** — `hopae --check` preflight (prints the route fragment and redirect URIs to register), single-instance lock, backup before a schema migration, graceful shutdown, structured event log with transactional audit events, `/healthz`. See [operations](docs/OPERATIONS.md).
+- **Management console (M4-min)** — an optional third listener, reached through its own protected gateway route, with pages and a JSON API to list and search users, disable and enable a user, end one or all sessions, browse the login history and the audit trail, and read the status of applications, providers, store and build. Administrators are granted with `hopae admin grant` or `admin.users[]`; console freshness is a provider-verified reauthentication where the provider supports it and Hopae login age otherwise (Google). See [administration](docs/ADMIN.md).
 - **Packaging** — a static binary and a hardened Docker Compose template in [`deploy/`](deploy/).
 
 Production use needs a gateway that sends the caller key (Hangang change HC-3);
 an unmodified gateway works for development only with caller authentication
 turned off. See the compatibility matrix in the contract.
 
-## Not in M1
+## Not yet
 
 Everything here is planned, not shipped; see the [roadmap](docs/ROADMAP.md).
 
 - Other providers (Kakao, Naver, email magic link, email and password), second factors, step-up enforcement.
-- Logout everywhere from a console, login history, blacklists and throttling beyond the per-IP bounds, shared state for several instances (PostgreSQL, Redis/Valkey).
-- A web console and management API, Lua hooks, webhooks, Prometheus metrics, configuration reload, signed self-update.
+- Blacklists and throttling beyond the per-IP bounds, shared state for several instances (PostgreSQL, Redis/Valkey), managing providers and applications from the console, Hopae's own second factor for administrators.
+- Lua hooks, webhooks, Prometheus metrics, configuration reload, signed self-update.
 
 ## Quick start
 
@@ -84,6 +86,7 @@ open a protected host in a browser. For a hardened container deployment follow
 - [Documentation index](docs/README.md)
 - [Gateway contract](docs/GATEWAY_CONTRACT.md) — the verify protocol, headers, cookies and route fragments
 - [Configuration reference](docs/CONFIG.md) — every key, default and CLI command
+- [Administration](docs/ADMIN.md) — the management console, its API, administrator grants and freshness
 - [Operations](docs/OPERATIONS.md) — running, state, backups, key rotation, logs, health, failure behavior
 - [Development process](docs/PROCESS.md) — roles, phase gates, scenario-based TDD, release and security rules
 - [Documentation system](docs/DOCUMENTATION.md) — layout, translation rules, style, required documents

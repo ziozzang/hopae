@@ -128,19 +128,19 @@ exposes a credential.
 
 | Case | Test | File | Kind | Status |
 | --- | --- | --- | --- | --- |
-| S303-1 | `s303_1_unfiltered_newest_first_in_pages` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
-| S303-2 | `s303_2_filters_choose_one_index_and_apply_rest_inside_window` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
-| S303-3 | `s303_3_cursors_stable_under_inserts_and_advance_past_examined` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
-| S303-4 | `s303_4_admin_actions_show_their_actor` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
-| S303-5 | `s303_5_rows_never_contain_credentials` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
-| S303-6 | `s303_6_time_filters_accept_seconds_refuse_nonsense` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
-| S303-A1 | `s303_a1_cursor_outlives_pruned_rows` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
-| S303-A2 | `s303_a2_forged_cursors_and_filter_injection` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
-| S303-A3 | `s303_a3_reading_while_prune_runs` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
-| S303-A4 | `s303_a4_every_page_examines_at_most_window_candidates` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
-| S303-A5 | `s303_a5_viewer_reads_nobody_else_does` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
-| S303-A6 | `s303_a6_history_is_not_a_user_directory` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
-| S303-A7 | `s303_a7_query_reaching_deadline_is_interrupted_inside_store` | `tests/scenarios/s303_admin_events.rs` | integration | planned |
+| S303-1 | `s303_1_unfiltered_newest_first_in_pages` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
+| S303-2 | `s303_2_filters_choose_one_index_and_apply_rest_inside_window` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
+| S303-3 | `s303_3_cursors_stable_under_inserts_and_advance_past_examined` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
+| S303-4 | `s303_4_admin_actions_show_their_actor` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
+| S303-5 | `s303_5_rows_never_contain_credentials` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
+| S303-6 | `s303_6_time_filters_accept_seconds_refuse_nonsense` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
+| S303-A1 | `s303_a1_cursor_outlives_pruned_rows` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
+| S303-A2 | `s303_a2_forged_cursors_and_filter_injection` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
+| S303-A3 | `s303_a3_reading_while_prune_runs` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
+| S303-A4 | `s303_a4_every_page_examines_at_most_window_candidates` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
+| S303-A5 | `s303_a5_viewer_reads_nobody_else_does` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
+| S303-A6 | `s303_a6_history_is_not_a_user_directory` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
+| S303-A7 | `s303_a7_query_reaching_deadline_is_interrupted_inside_store` | `tests/scenarios/s303_admin_events.rs` | integration | passing |
 
 The index assertions of 303-2 and the examined-row counts of 303-A4 are
 unit tests over the store's SQL (`src/store/sqlite/tests.rs`), reached from

@@ -129,19 +129,19 @@ transaction.
 
 | Case | Test | File | Kind | Status |
 | --- | --- | --- | --- | --- |
-| S302-1 | `s302_1_live_sessions_listed_by_creation_with_context` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-2 | `s302_2_session_detail_shows_handles` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-3 | `s302_3_terminate_one_ends_it_everywhere_with_record` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-4 | `s302_4_terminate_every_session_of_a_user` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-5 | `s302_5_administrator_may_end_own_session` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-6 | `s302_6_html_forms_do_the_same` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-A1 | `s302_a1_terminating_ended_session_changes_nothing` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-A2 | `s302_a2_identifiers_validated_before_store` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-A3 | `s302_a3_termination_racing_redemption_and_step_up` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-A4 | `s302_a4_terminate_all_bounded_and_listings_examine_bounded_window` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-A5 | `s302_a5_viewer_cannot_terminate_target_cannot_resist` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-A6 | `s302_a6_session_ids_reveal_nothing_to_unauthorized` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
-| S302-A7 | `s302_a7_activity_during_walk_neither_skips_nor_repeats` | `tests/scenarios/s302_admin_sessions.rs` | integration | planned |
+| S302-1 | `s302_1_live_sessions_listed_by_creation_with_context` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
+| S302-2 | `s302_2_session_detail_shows_handles` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
+| S302-3 | `s302_3_terminate_one_ends_it_everywhere_with_record` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
+| S302-4 | `s302_4_terminate_every_session_of_a_user` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
+| S302-5 | `s302_5_administrator_may_end_own_session` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
+| S302-6 | `s302_6_html_forms_do_the_same` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
+| S302-A1 | `s302_a1_terminating_ended_session_changes_nothing` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
+| S302-A2 | `s302_a2_identifiers_validated_before_store` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
+| S302-A3 | `s302_a3_termination_racing_redemption_and_step_up` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
+| S302-A4 | `s302_a4_terminate_all_bounded_and_listings_examine_bounded_window` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
+| S302-A5 | `s302_a5_viewer_cannot_terminate_target_cannot_resist` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
+| S302-A6 | `s302_a6_session_ids_reveal_nothing_to_unauthorized` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
+| S302-A7 | `s302_a7_activity_during_walk_neither_skips_nor_repeats` | `tests/scenarios/s302_admin_sessions.rs` | integration | passing |
 
 ## Live verification
 

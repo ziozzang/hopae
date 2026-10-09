@@ -1380,6 +1380,7 @@ impl Config {
             apps,
             default_app,
             providers: self.provider_configs(),
+            retained_reauth: Default::default(),
         }
     }
 

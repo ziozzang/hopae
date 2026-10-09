@@ -88,6 +88,8 @@ impl From<rusqlite::Error> for StoreError {
 #[async_trait]
 pub trait Directory: Send + Sync {
     async fn user(&self, id: &UserId) -> StoreResult<Option<User>>;
+    /// As [`Directory::user`], under an explicit deadline (the console's reads).
+    async fn user_within(&self, id: &UserId, deadline: Deadline) -> StoreResult<Option<User>>;
     /// One indexed read; used by every verify.
     async fn user_authz(&self, id: &UserId) -> StoreResult<Option<UserAuthz>>;
     async fn identity(
@@ -140,7 +142,9 @@ pub trait Directory: Send + Sync {
         include_revoked: bool,
         deadline: Deadline,
     ) -> StoreResult<Vec<AdminGrant>>;
-    /// Resolve a user id or a normalized address to the user and their identities.
+    /// Resolve a user id or a normalized address to the user and **every**
+    /// linked identity (the operator's evidence; the console's previews are
+    /// bounded separately, only the deadline bounds this).
     async fn resolve_grant_target(
         &self,
         target: &GrantTarget,
@@ -225,6 +229,13 @@ pub trait Sessions: Send + Sync {
         handle_sha256: &Digest,
         host: &Host,
     ) -> StoreResult<Option<HandleView>>;
+    /// As [`Sessions::lookup_handle`], under an explicit deadline (the console's reads).
+    async fn lookup_handle_within(
+        &self,
+        handle_sha256: &Digest,
+        host: &Host,
+        deadline: Deadline,
+    ) -> StoreResult<Option<HandleView>>;
     /// Caller coalesces to 30 s.
     async fn touch_handle(&self, handle_sha256: &Digest, at: Timestamp) -> StoreResult<()>;
     /// SSO / elevation re-handoff (same session only).
@@ -295,7 +306,8 @@ pub trait Sessions: Send + Sync {
     ) -> StoreResult<u32>;
     /// Reauthentication (decision 15): auth_time := claim or completion time, auth_time_source set, factors += entry, cred_gen += 1,
     /// every handle revoked (reason reauth), outstanding codes consumed (reason reauth), new portal handle, the login transaction consumed;
-    /// deadline checked between statements. Refuses `Conflict("provider_mismatch")` when `provider` is not the session's provider.
+    /// deadline checked between statements. One event per handle actually revoked in the transaction is built by
+    /// `mk_revoked_event` from the revoked row, never from a preview read beforehand. Refuses `Conflict("provider_mismatch")` when `provider` is not the session's provider.
     #[allow(clippy::too_many_arguments)]
     async fn reauthenticate_session(
         &self,
@@ -308,6 +320,7 @@ pub trait Sessions: Send + Sync {
         consume_txn: (Digest, Reason),
         deadline: Deadline,
         events: Vec<Event>,
+        mk_revoked_event: &(dyn for<'a> Fn(&'a HandleRow) -> Event + Sync),
     ) -> StoreResult<()>;
     async fn refresh_snapshot(
         &self,
@@ -414,6 +427,14 @@ pub trait Events: Send + Sync {
     /// dropped or batched. `session.*`, `handle.*`, `identity.*` and
     /// `session.handoff` must travel with their mutation and are refused.
     async fn append_required(&self, events: Vec<Event>) -> StoreResult<()>;
+    /// As [`Events::append_required`] under an explicit deadline: checked after
+    /// the write lock is won and again immediately before `COMMIT`, so a write
+    /// that reaches its deadline rolls back instead of committing late.
+    async fn append_required_within(
+        &self,
+        events: Vec<Event>,
+        deadline: Deadline,
+    ) -> StoreResult<()>;
     /// Diagnostic kinds only; bounded queue; returns Err(Busy) when the queue is full (the caller counts a drop).
     async fn append_diagnostic(&self, event: Event) -> StoreResult<()>;
     async fn claim_deliveries(

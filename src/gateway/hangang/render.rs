@@ -35,6 +35,11 @@ const TOO_LARGE: Reason = reasons::HEADER_TOO_LARGE;
 pub fn decision_label(decision: &Decision) -> (&'static str, &'static str) {
     match decision {
         Decision::Allow { .. } => ("allow", "ok"),
+        // A reauthentication is its own decision label, not a missing login.
+        Decision::Login {
+            kind: LoginKind::Reauth,
+            ..
+        } => ("login", "reauth_required"),
         Decision::Login { .. } => ("login", "login_required"),
         Decision::Handoff { .. } => ("handoff", "handoff"),
         Decision::CleanRedirect { .. } => ("clean_redirect", "code_already_redeemed"),
@@ -358,6 +363,8 @@ fn login(
     let (reason, error, page) = match kind {
         LoginKind::Login => (reasons::LOGIN_REQUIRED, "login_required", "login"),
         LoginKind::StepUp => (reasons::STEP_UP_REQUIRED, "step_up_required", "stepup"),
+        // The portal's `login` page; the reauthentication requirement lives in the transaction.
+        LoginKind::Reauth => (reasons::REAUTH_REQUIRED, "reauth_required", "login"),
     };
     // A non-document request starts nothing: the application URL itself is the
     // document bootstrap that plants the binding cookie.

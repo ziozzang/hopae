@@ -71,6 +71,17 @@ impl Directory for Store {
         .await
     }
 
+    async fn user_within(&self, id: &UserId, deadline: Deadline) -> StoreResult<Option<User>> {
+        let id = id.to_string();
+        self.read_checked("user", Some(deadline), move |c, _| {
+            let sql = format!("SELECT {} FROM users WHERE user_id=?1", cols("", USER_COLS));
+            c.query_row(&sql, [&id], |r| Ok(rows::user(r, 0)))
+                .optional()?
+                .transpose()
+        })
+        .await
+    }
+
     async fn user_authz(&self, id: &UserId) -> StoreResult<Option<UserAuthz>> {
         let id = id.to_string();
         self.read("user_authz", move |c| {

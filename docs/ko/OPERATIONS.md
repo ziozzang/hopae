@@ -1,10 +1,10 @@
 # 운영
 
-<!-- translation-status: source=../OPERATIONS.md source-rev=4 status=current -->
+<!-- translation-status: source=../OPERATIONS.md source-rev=5 status=current -->
 
 [문서 목차](README.md) · [English](../OPERATIONS.md)
 
-마일스톤 M1에서 Hopae 인스턴스를 실행, 관찰, 유지, 복구하는 방법입니다. 여기서
+마일스톤 M1과 M4-min에서 Hopae 인스턴스를 실행, 관찰, 유지, 복구하는 방법입니다. 여기서
 언급하는 모든 설정은 [설정 참조](CONFIG.md)에 정의되어 있고, 게이트웨이와의
 프로토콜은 [게이트웨이 계약](GATEWAY_CONTRACT.md)입니다. 운영용 Docker Compose
 템플릿과 게이트웨이 라우트 예시는 저장소의 `deploy/` 디렉터리에 있습니다.
@@ -17,6 +17,7 @@
 - 상태 디렉터리 하나에 인스턴스 하나. M1은 단일 인스턴스 제품이며 M2 이전에는 공유 저장소가 없습니다.
 - 게이트웨이의 공개 라우트 둘: 포털 호스트(공개, `listen.portal`로 프록시)와 보호할 각 애플리케이션 호스트(`hopae --check`가 출력하는 `auth` 조각 포함).
 - 두 리스너는 기본적으로 루프백에 바인딩합니다. 게이트웨이 리스너는 절대 공개적으로 접근할 수 있어서는 안 됩니다. 호출자 키는 첫 번째가 아니라 두 번째 방어선입니다.
+- 관리 콘솔을 쓰려면(선택): 전용 콘솔 호스트를 위한 세 번째 공개 라우트. `listen.admin`으로 프록시하고 `strip_request_cookies`가 **없는** `auth` 조각을 가집니다(`deploy/hangang-routes.example.json`의 `hopae-admin` 라우트이며 `hopae --check`가 출력함). 게이트웨이의 주소가 `trusted_proxies`에 있어야 하고 `admin.public_url`이 설정되어야 합니다. [관리](ADMIN.md)와 [콘솔](#관리-콘솔)을 참고하세요.
 
 ## 동작
 
@@ -28,18 +29,21 @@ hopae run     --config /etc/hopae/hopae.json     # 서비스(별칭: serve, 기�
 ```
 
 항상 `--check`를 먼저 실행하고, 설정을 바꿀 때마다 서비스가 가질 것과 같은 환경에서
-다시 실행하세요. 성공하면 `run`은 stdout에 안정적인 줄 두 개를 출력하고 서비스를
-시작합니다.
+다시 실행하세요. 성공하면 `run`은 stdout에 안정적인 줄을 출력하고(`admin` 줄은 `admin.public_url`이
+설정된 때만) 서비스를 시작합니다.
 
 ```text
 portal listening on 127.0.0.1:8700
 gateway listening on 127.0.0.1:8701
+admin listening on 127.0.0.1:8702
 ```
 
-시작 순서는 고정입니다. 인스턴스 잠금, 오래된 데이터베이스 백업, 저장소 열기와
-마이그레이션, 제공자 가져오기와 애플리케이션 반영(같은 트랜잭션에서 `config.loaded`
-이벤트), 포털 리스너 바인딩, 마지막으로 게이트웨이 리스너 바인딩, 준비 완료.
-어느 단계에서든 실패하면 리스너가 요청에 답하기 전에 종료합니다.
+시작 순서는 고정입니다. 인스턴스 잠금, 기존 데이터베이스의 읽기 전용 사전 점검,
+오래된 데이터베이스 백업, 저장소 열기와 마이그레이션, 제공자 가져오기(같은
+트랜잭션에서 `config.loaded` 이벤트), `admin.users[]`의 관리자 부여 가져오기,
+애플리케이션 반영, 포털 리스너 바인딩, 관리 리스너 바인딩(켜진 경우), 마지막으로
+게이트웨이 리스너 바인딩, 준비 완료. 어느 단계에서든 실패하면 리스너가 요청에 답하기
+전에 종료합니다.
 
 `SIGTERM` 또는 `SIGINT`로 멈춥니다. Hopae는 수락을 멈추고, 진행 중인 요청에 5초를
 주고, 백그라운드 작업자를 멈추고(나가면서 비웁니다), SQLite 선행 기록 로그를
@@ -60,7 +64,7 @@ gateway listening on 127.0.0.1:8701
 | `hopae.db`(또는 `store.path`) | WAL 모드 SQLite 데이터베이스: 사용자, 신원, 세션, 핸들, 트랜잭션, 핸드오프 코드, 이벤트와 전달 행, 제공자, 애플리케이션 | 업그레이드 전에 항상 백업하세요. 해시된 자격 증명만 담습니다. 핸들, 코드, 키는 값이 아니라 SHA-256 다이제스트로 저장됩니다. 그래도 민감하게 다루세요(이메일 주소와 주체가 들어 있습니다). |
 | `hopae.db-wal`, `hopae.db-shm` | SQLite 선행 기록 로그와 공유 메모리 | 프로세스가 실행 중일 때 직접 복사하거나 삭제하지 마세요. 정상 종료 시 데이터베이스에 합쳐집니다. |
 | `hopae.lock` | 인스턴스 잠금 | 아래를 참고하세요. |
-| `hopae.db.bak-v<N>` | 마이그레이션 전에 기록한 백업 | 아래를 참고하세요. |
+| `hopae.db.bak-v<N>` | 마이그레이션 전에 기록한 백업(0003을 적용할 때는 `hopae.db.bak-v2`) | 아래를 참고하세요. |
 
 데이터베이스 파일은 SQLite가 쓰기 전에 제한적인 모드로 만들어집니다. 제공자 클라이언트
 비밀 값과 호출자 키는 상태 디렉터리에 저장되지 않고 환경에만 존재합니다.
@@ -71,8 +75,8 @@ gateway listening on 127.0.0.1:8701
 사는 동안 유지합니다. 같은 상태 디렉터리에서 두 번째 `hopae run`은 데이터베이스를
 건드리기 전에 즉시 `store locked by another instance`와 종료 코드 `2`로 실패합니다.
 프로세스가 종료되거나 죽으면 운영체제가 잠금을 풀기 때문에 정리할 낡은 잠금이
-없으며 파일 자체는 그대로 두어도 안전합니다. `hopae --check`와 `hopae providers
-import`는 잠금을 잡지 않습니다.
+없으며 파일 자체는 그대로 두어도 안전합니다. `hopae --check`, `hopae providers
+import`, `hopae admin`은 잠금을 잡지 않습니다.
 
 컨테이너에서는 두 인스턴스가 같은 상태 볼륨을 볼 때만 잠금이 효과가 있습니다. "새
 이미지를 시험해 보려고" 운영 중인 볼륨에 두 번째 컨테이너를 띄우지 마세요. 먼저
@@ -81,10 +85,14 @@ import`는 잠금을 잡지 않습니다.
 ### 업그레이드와 마이그레이션 백업
 
 스키마 마이그레이션은 바이너리에 내장되어 있고 시작할 때 앞으로만, 각각 자신의
-트랜잭션에서 적용됩니다. 바이너리보다 오래된 기존 데이터베이스에 마이그레이션을
+트랜잭션에서 적용됩니다. 무언가를 쓰기 전에 Hopae는 기존 데이터베이스를 읽기 전용
+**사전 점검**합니다. 기록된 버전을 읽고, 더 새로운 버전을 거부하고, 기록된 버전의
+기반 구조를 검증합니다. 사전 점검을 통과한 데이터베이스만 백업하고 그 뒤에야
+마이그레이션을 적용합니다. 거부된 데이터베이스는 바이트 하나도 바뀌지 않은 채
+백업 없이 그대로 남습니다. 바이너리보다 오래된 기존 데이터베이스에 마이그레이션을
 적용하기 전에, Hopae는 옆에 일관된 복사본을 `hopae.db.bak-v<N>`으로 기록합니다.
-`<N>`은 발견된 스키마 버전이며 모드는 `0600`이고 `VACUUM INTO`로 기록하므로 WAL
-내용이 포함됩니다. 새 데이터베이스, 빈 데이터베이스, 이미 최신인 데이터베이스는
+`<N>`은 발견된 스키마 버전이며 모드는 `0600`이고 `VACUUM INTO`로 임시 파일에 기록한 뒤 완성되었을 때만 제자리로
+이름을 바꾸므로, WAL 내용이 포함되고 중단된 실행이 이전 백업을 교체하는 일이 없습니다. 새 데이터베이스, 빈 데이터베이스, 이미 최신인 데이터베이스는
 백업하지 않습니다. 같은 버전의 기존 백업은 교체됩니다. 더 새 바이너리가 쓴
 데이터베이스는 거부됩니다(시작이 실패합니다). 릴리스 이전 개발 빌드가 쓴 스키마 버전 2
 데이터베이스도 마찬가지입니다. `sessions.authz_version_at_auth` 열,
@@ -97,17 +105,52 @@ import`는 잠금을 잡지 않습니다.
 매겨진 새 마이그레이션**이며, 위의 백업 뒤에 앞으로만 적용되고, 적용된 마이그레이션 파일은
 다시 수정하지 않습니다.
 
+마이그레이션 `0003`(마일스톤 M4-min, 스키마 버전 3)은 관리자 부여 테이블, 신선도 출처를
+위한 세션 열(`auth_time_source`, `bound_ua_prefix`), 로그인 트랜잭션의 재인증 열, 콘솔
+목록을 위해 `events`, `users`, `sessions`를 대체하는 인덱스를 추가합니다. 기존 세션은
+`auth_time_source = hopae_completion`이 됩니다. 새 이벤트 인덱스를 만들 때 이벤트
+테이블을 한 번 읽으므로, 이벤트 기록이 큰 경우 업그레이드 뒤 첫 시작이 더 오래 걸립니다.
+0003 이전의 바이너리는 마이그레이션된 데이터베이스를 거부하므로(그 바이너리가 지원하는
+것보다 새롭기 때문) 0003 이전으로 롤백하려면 `.bak-v2` 파일이나 직접 만든 복사본(아래)을
+복원해야 합니다.
+
 업그레이드 절차:
 
 1. 새 바이너리의 `hopae --check`를 현재 설정에 대해 실행합니다.
 2. 데이터베이스가 체크포인트되도록 실행 중인 인스턴스를 멈춥니다(`SIGTERM`).
 3. 상태 디렉터리(최소한 `hopae.db`)를 안전한 곳에 복사합니다. 자동 백업은 실패한 마이그레이션을 위한 것이며, 나쁜 릴리스에 대비하는 이 복사본을 대신하지 않습니다.
-4. 새 바이너리를 시작합니다. 로그에서 `database backup written before migration`과 `store ready: ... (schema vN)`을 확인합니다.
+4. 새 바이너리를 시작합니다. 로그에서 `schema foundation validated (v2)`, `database backup written before migration`, `store ready: ... (schema vN)`을 확인합니다. 스키마 2에서 3으로 올라갈 때 백업은 `hopae.db.bak-v2`입니다.
 5. 새 바이너리가 실제 트래픽을 처리할 때까지 이전 이미지나 바이너리를 보관합니다.
 
 롤백: Hopae를 멈추고, 저장해 둔 복사본(또는 `.bak-v<N>` 파일)을 `hopae.db` 위에
 복원하고, 옆에 남은 `hopae.db-wal`과 `hopae.db-shm`을 지운 뒤 이전 바이너리를
-시작합니다. 백업 이후에 만들어진 세션은 사라지며 사용자는 다시 로그인합니다.
+시작합니다. 백업 이후에 만들어진 세션은 사라지고, 백업 이후에 기록된 관리자 부여와 감사 이벤트도 사라지며, 사용자는 다시 로그인합니다.
+
+### 관리 콘솔
+
+콘솔은 세 번째 리스너 `listen.admin`(기본값 `127.0.0.1:8702`)이며 `admin.public_url`이
+설정된 때만 바인딩합니다. 상태 확인 엔드포인트는 없으며 `/healthz`는 포털에 그대로 있습니다.
+다음 순서로 켭니다.
+
+1. 콘솔 호스트(예시에서는 `hopae-admin.example.test`)를 정하고 게이트웨이에 DNS와 TLS를 준비한 뒤 `deploy/hangang-routes.example.json`의 `hopae-admin` 라우트를 등록합니다. 보호 라우트이며 백엔드는 `listen.admin`, 표준 `auth` 조각을 쓰고 `strip_request_cookies`는 **없습니다**. Hopae의 쿠키를 제거하는 라우트는 모든 콘솔 요청을 `403 login_required`로 만듭니다.
+2. `admin.public_url`을 설정합니다(필요하면 `listen.admin`, `admin.max_auth_age`와 [설정 참조](CONFIG.md#관리-콘솔)의 다른 `admin.*` 키도). 게이트웨이의 주소가 `trusted_proxies`에 있어야 합니다. 리스너는 신뢰된 피어의 전달 헤더에서만 클라이언트 주소, 스킴, 호스트를 가져오며, 기본값 `admin.untrusted_peers = refuse`에서는 다른 피어에 쿠키를 읽기 전에 `403 untrusted_peer`로 답합니다. 루프백이 아닌 `listen.admin`은 경고를 냅니다. 절대 공개적으로 접근할 수 있어서는 안 됩니다.
+3. `hopae --check`를 실행합니다. 콘솔을 암묵적 애플리케이션 `admin`으로 나열하고, 실제 호스트와 관리 주소를 넣은 라우트 조각, `admin.untrusted_peers`, 활성화된 제공자별 신선도 능력(`reauth max_age: ...` 또는 `reauth unsupported: console freshness is Hopae login age; ...`)을 출력합니다. `gateway.admin_url`과 읽기 전용 토큰이 있으면 `console_route_without_auth`나 `console_route_strips_cookies`도 경고합니다. `--strict`는 모든 경고를 오류로 만듭니다.
+4. Hopae를 재시작하고 첫 관리자를 부트스트랩합니다. 콘솔 호스트에 한 번 로그인하고, `403 not_admin` 페이지에서 사용자 id를 읽고, `hopae admin grant <user_id> --config <path>`를 실행한 뒤 새로 고칩니다([부트스트랩](ADMIN.md#부트스트랩과-복구)). 컨테이너에서는 `docker compose run --rm hopae admin grant <user_id> --config /etc/hopae/hopae.json`이 인스턴스를 멈추지 않고 같은 상태 볼륨에 대해 실행됩니다.
+
+`admin.users[]`는 시작할 때마다 제공자 가져오기 뒤에 가져옵니다. 결함 있는 항목은 로그의
+경고이며(건너뜀, 시작 실패 아님), 어떤 항목도 더 이상 가리키지 않는 살아 있는 파일 부여는
+취소됩니다. `hopae admin`으로 하거나 취소한 부여는 파일이 되돌리지 않습니다. 콘솔의 모든
+변경, 거부, 부여는 `admin.*` 이벤트입니다([감사 이벤트](ADMIN.md#감사-이벤트)).
+`admin.query_budget_ms`에 도달한 저장소 작업은 중단되고 롤백되며 `503`으로 답하고,
+`hopae_store_interrupts_total`이 그것을 셉니다.
+
+리스너가 유효한 핸들 외에는 아무것도 신뢰하지 않는지 호스트에서 확인합니다(`x-forwarded-host`에
+콘솔 호스트가 없는 요청은 `404`입니다).
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' -H 'x-forwarded-host: hopae-admin.example.test' \
+  http://127.0.0.1:8702/v1/me      # 403 login_required: 핸들 없음, 요청에서 신뢰하는 것 없음
+```
 
 ### 호출자 키 교체
 
@@ -150,7 +193,9 @@ Hopae는 **stderr**에 기록하며 stdout에는 위의 시작 줄만 나갑니�
 `session.created`, `session.handoff`, `handoff.rejected`, `session.terminated`,
 `handle.revoked`, `identity.linked`, `identity.conflict`, `csrf.rejected`,
 `config.loaded`, `admin.providers_import`, `verify.denied`, `provider.error`,
-`txn.evicted`, `events.dropped`, `sink.backlog_overflow`. 상태를 바꾸는 종류는 그
+`txn.evicted`, `events.dropped`, `sink.backlog_overflow`, 그리고 콘솔의
+`admin.grant`, `admin.revoke`, `admin.user_disable`, `admin.user_enable`,
+`admin.session_terminate`, `admin.sessions_terminate`, `admin.denied`. 상태를 바꾸는 종류는 그
 변경과 같은 트랜잭션으로 데이터베이스에 기록된 뒤 로그 싱크에 최소 한 번 전달됩니다
 (충돌 후 줄이 반복될 수 있으며 `event_id`로 식별합니다). `verify.denied`,
 `provider.error`, `txn.evicted`, `events.dropped`, `sink.backlog_overflow`는
@@ -187,7 +232,7 @@ Hopae는 **stderr**에 기록하며 stdout에는 위의 시작 줄만 나갑니�
 
 ### 카운터
 
-Hopae는 프로세스 내 카운터를 유지합니다. M1에는 **운영용 노출이 없습니다**. 값은
+Hopae는 프로세스 내 카운터를 유지합니다. M7 이전에는 **운영용 노출이 없습니다**. 값은
 `test-hooks` 빌드의 루프백 테스트 훅 리스너로만 읽을 수 있으며 그 빌드는 운영에서
 절대 실행하면 안 됩니다. Prometheus 텍스트 노출은 M7입니다. 그때까지는 이벤트
 스트림(`verify.denied` 줄에 사유가 있습니다)과 게이트웨이 자체의 카운터(보호된
@@ -203,6 +248,12 @@ Hopae는 프로세스 내 카운터를 유지합니다. M1에는 **운영용 노
 | `hopae_verify_overloaded_total` | 없음 | `limits.gateway_max_concurrent`가 소진되어 거부된 verify 호출 |
 | `hopae_verify_canonical_mismatch_total` | 없음 | 정규 경로가 게이트웨이의 것과 달랐던 verify 호출 |
 | `hopae_store_errors_total` | 없음 | verify 경로의 저장소 실패(`store_unavailable`) |
+| `hopae_store_interrupts_total` | 없음 | 마감에서 SQLite 안에서 중단된 저장소 작업 |
+| `hopae_admin_requests_total` | `role`, `outcome`(`cookie.secure`가 `false`이면 `insecure_mode="true"`가 더해짐) | 관리 리스너가 답한 요청 |
+| `hopae_admin_denied_total` | `reason` | 콘솔의 거부(`untrusted_peer`, `login_required`, `not_admin`, `role_insufficient`, `auth_too_old`, `aal_insufficient`, `self_target`, `actor_revoked`, `overloaded`) |
+| `hopae_admin_mutations_total` | `kind` | 무언가를 바꾼 콘솔 변경(`user_disable`, `user_enable`, `sessions_terminate`, `session_terminate`) |
+| `hopae_admin_rows_examined_total` | `list`(`users`, `sessions`, `events`) | 콘솔 목록이 살펴본 후보 행 |
+| `hopae_admin_grants_imported_total` | `outcome` | 시작할 때의 가져오기가 적용한 부여(`inserted`, `updated`, `revoked`, `unchanged`, `skipped`) |
 | `hopae_events_total` | `kind`, `outcome` | 기록된 이벤트 |
 | `hopae_events_dropped_total` | `kind` | 저장소에 닿기 전에 버려진 진단 이벤트 |
 | `hopae_events_pruned_total` | 없음 | 정리로 삭제된 이벤트 행 |
@@ -229,6 +280,9 @@ verify는 실패 시 차단합니다(fail closed). Hopae가 해결하지 못하�
 | 알 수 없는 호스트 또는 비활성 애플리케이션 | 거부(`unknown_app`, `app_disabled`) | `apps[]`의 호스트와 포트, `hopae --check`의 반환 origin |
 | 60초를 넘는 시계 오차 | 세션이 만료된 것처럼 보이거나 ID 토큰이 실패(`clock_skew`) | 호스트의 시간 동기화 |
 | 한 상태 디렉터리의 두 번째 인스턴스 | 시작 거부, 종료 코드 `2` | 다른 인스턴스를 멈추세요 |
+| 관리 리스너 주소가 이미 사용 중이거나 다른 리스너와 같음 | 어떤 리스너도 답하기 전에 시작 실패(바인딩 실패는 종료 코드 `1`, `listen.admin`이 포털이나 게이트웨이 주소와 같으면 `2`) | `listen.admin`, `hopae --check` |
+| 콘솔 저장소 작업이 너무 느리거나 저장소가 바쁨 | 콘솔이 `503 store_unavailable`로 답하고 변경은 롤백됨. 게이트웨이 리스너의 verify는 영향 없음 | `admin.query_budget_ms`, `hopae_store_interrupts_total`, 프로세스 로그 |
+| 사전 점검이 데이터베이스를 거부함(더 새롭거나, 출시 전 스키마이거나, 손상됨) | 시작(과 모든 `hopae admin` 명령)이 종료 코드 `2`로 거부됨. 백업도 마이그레이션도 없음 | 오류 메시지. 복사본을 복원하세요 |
 | 이벤트 전달 실패 | 로그인에는 영향 없음. 행은 재시도 후 `failed`가 되고 백로그가 차면 가장 오래된 행이 `failed`(`backlog_overflow`) | `sink.backlog_overflow`, `hopae_event_deliveries_failed_total` |
 | 쓰기 도중 충돌 또는 정전 | 다음 시작 때 WAL에서 데이터베이스가 복구됩니다. 진행 중이던 마지막 트랜잭션만 잃을 수 있고, 진행 중인 로그인은 다시 해야 합니다 | 시작 시 프로세스 로그 |
 
@@ -239,14 +293,15 @@ verify는 실패 시 차단합니다(fail closed). Hopae가 해결하지 못하�
 
 - 상태 디렉터리당 인스턴스 하나이며 페일오버가 없습니다. 재시작은 빠르고 세션은 재시작을 넘어 유지됩니다. 다중 인스턴스 배포에는 M2 저장소가 필요합니다.
 - M6 이전에는 설정, 제공자 비밀 값, 호출자 키의 핫 리로드가 없습니다. 모든 변경은 재시작이며, 재시작하는 동안 verify는 실패 시 차단합니다(게이트웨이가 `503`으로 답합니다).
-- M7 이전에는 메트릭 엔드포인트가 없고 카운터는 프로세스 내에만 있습니다. M4 이전에는 관리 API나 콘솔이 없으며, 지원하는 관리 수단은 설정 파일과 `hopae providers import`입니다.
+- M7 이전에는 메트릭 엔드포인트가 없고 카운터는 프로세스 내에만 있습니다. 관리 콘솔(M4-min)은 사용자와 세션을 읽고 끝낼 수 있으며, 제공자, 애플리케이션, 블랙리스트는 설정 파일, `hopae providers import`, `hopae admin`으로 관리합니다.
 - 백업은 멈춘(또는 체크포인트된) 데이터베이스의 파일 복사입니다. 온라인 백업 도구는 M7입니다.
 - Hopae는 TLS를 종료하지 않으며 설정된 ID 제공자(디스커버리, 키, 토큰, user-info 엔드포인트) 외에는 인터넷과 통신하지 않습니다. M6 이전에는 텔레메트리도 자가 업데이트도 없습니다. 제공자 트래픽은 `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`를 무시합니다. 프록시가 목적지를 직접 해석하므로 연결 시점 주소 검사를 우회하게 되기 때문입니다. 프록시 옵션은 없습니다.
 
 ## 예제, 검증, 관련 페이지
 
 배포 템플릿(`deploy/compose.yaml`, `deploy/hopae.example.json`,
-`deploy/env.example`, `deploy/hangang-routes.example.json`)은 강화된 컨테이너를
+`deploy/env.example`, `deploy/hangang-routes.example.json`이며 마지막 파일에는
+`hopae-admin` 콘솔 라우트가 있습니다)은 강화된 컨테이너를
 보여 줍니다. 읽기 전용 루트 파일 시스템, 모든 capability 제거, `no-new-privileges`,
 메모리와 프로세스 한도, 순환하는 JSON 로그, 비공개 상태 볼륨, 그리고 루프백
 리스너를 게이트웨이와만 공유하도록 하는 호스트 네트워킹입니다. 절차는

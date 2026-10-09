@@ -15,6 +15,7 @@ use crate::crypto::{
 use crate::event::types::{EventBuilder, EventKind, Outcome, Reason, reasons};
 use crate::policy::apps;
 use crate::policy::binding::{self, BindingVerdict};
+use crate::policy::freshness;
 use crate::policy::step_up;
 use crate::policy::types::{AppPolicy, AuthzChange, ConfigSnapshot, OnMismatch};
 use crate::session::types::Generations;
@@ -257,8 +258,71 @@ async fn flow(cx: &Cx<'_>) -> Flow {
 
     match authenticate(cx, app).await? {
         Authn::Refused(cause) => login(cx, app, &target, cause, 0).await,
-        Authn::Allowed(authed) => Ok(allow(cx, app, *authed)),
+        Authn::Allowed(authed) => {
+            // The console's freshness rule, after the step-up rules (ADR-0016
+            // decision 15): one predicate at every verify.
+            if let Some(n) = app.max_auth_age {
+                let session = &authed.view.session;
+                let capability = cx.snapshot.reauth_capability(&session.provider_id);
+                if !freshness::console_fresh(session, capability, cx.now, n) {
+                    return reauth(cx, app, &target, &authed.view, n).await;
+                }
+            }
+            Ok(allow(cx, app, *authed))
+        }
     }
+}
+
+/// The session is too old (or its age is not provider-verified) for the
+/// console: a document navigation starts a reauthentication transaction that
+/// carries the server-owned freshness requirement and names the live session;
+/// any other request gets the `401`. The handle is kept.
+async fn reauth(
+    cx: &Cx<'_>,
+    app: &AppPolicy,
+    target: &url::Url,
+    view: &HandleView,
+    n: Duration,
+) -> Flow {
+    if !cx.document() {
+        return Ok(Decision::Login {
+            transaction: None,
+            bind: BindAction::Keep,
+            kind: LoginKind::Reauth,
+            clear_handle: false,
+            cause: None,
+        });
+    }
+    let (bind_digest, bind) = cx.bind_for_transaction();
+    let started = cx
+        .event(EventKind::LoginStarted, Outcome::Info, app)
+        .session(&view.session.session_id)
+        .user(&view.session.user_id)
+        .reason(reasons::REAUTH_REQUIRED)
+        .attr("navigation", "document")
+        .attr("reauth", true)
+        .build();
+    let txn = create_txn(
+        cx,
+        app,
+        NewTxn {
+            target,
+            purpose: TxnPurpose::Login,
+            bind: Some(bind_digest),
+            portal_session_id: Some(view.session.session_id.clone()),
+            recovery_depth: 0,
+            reauth_max_age: Some(u32::try_from(n.as_secs()).unwrap_or(u32::MAX)),
+            events: vec![started],
+        },
+    )
+    .await?;
+    Ok(Decision::Login {
+        transaction: Some(txn),
+        bind,
+        kind: LoginKind::Reauth,
+        clear_handle: false,
+        cause: None,
+    })
 }
 
 /// Refused before any redemption is attempted; the code (if any) stays
@@ -524,6 +588,9 @@ async fn revoke_handle(
 
 /// `last_seen_at` write coalescing: at most one write per handle per
 /// `touch_coalesce`, never awaited by the decision.
+/// The deadline of a detached handle touch.
+const TOUCH_DEADLINE: Duration = Duration::from_secs(2);
+
 fn touch(cx: &Cx<'_>, app: &AppPolicy, view: &HandleView) {
     static SCHEDULED: OnceLock<Mutex<HashMap<Digest, i64>>> = OnceLock::new();
     // Never longer than half of either idle timer (a short policy must not idle out).
@@ -557,10 +624,16 @@ fn touch(cx: &Cx<'_>, app: &AppPolicy, view: &HandleView) {
         map.insert(digest, cx.now.0);
     }
     let (sessions, at) = (cx.ctx.sessions.clone(), cx.now);
-    tokio::spawn(async move {
-        // Best effort: a lost touch only makes the next verify retry it.
-        let _ = sessions.touch_handle(&digest, at).await;
-    });
+    // A spawned task inherits no task-local deadline: the touch is bounded by
+    // its own short one, so it can neither pile up nor commit long after the
+    // verify that scheduled it.
+    tokio::spawn(with_deadline(
+        tokio::time::Instant::now() + TOUCH_DEADLINE,
+        async move {
+            // Best effort: a lost touch only makes the next verify retry it.
+            let _ = sessions.touch_handle(&digest, at).await;
+        },
+    ));
 }
 
 fn cacheability(
@@ -620,6 +693,7 @@ pub(super) async fn login(
             bind: Some(bind_digest),
             portal_session_id: None,
             recovery_depth,
+            reauth_max_age: None,
             events: vec![started],
         },
     )
@@ -640,6 +714,7 @@ struct NewTxn<'a> {
     bind: Option<Digest>,
     portal_session_id: Option<SessionId>,
     recovery_depth: u32,
+    reauth_max_age: Option<u32>,
     events: Vec<crate::event::types::Event>,
 }
 
@@ -689,7 +764,7 @@ async fn create_txn(cx: &Cx<'_>, app: &AppPolicy, t: NewTxn<'_>) -> Result<Secre
         conflicting_handle_sha256: None,
         pending_identity: None,
         recovery_depth: t.recovery_depth,
-        reauth_max_age: None,
+        reauth_max_age: t.reauth_max_age,
     };
     let admission = ctx
         .sessions
@@ -819,6 +894,7 @@ async fn logout_entry(cx: &Cx<'_>, app: &AppPolicy, target: &url::Url) -> Flow {
             bind,
             portal_session_id,
             recovery_depth: 0,
+            reauth_max_age: None,
             events: vec![],
         },
     )

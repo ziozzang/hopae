@@ -112,6 +112,13 @@ enum Part {
     /// The `site-hopae` route of the contract page (ADR-0015): `/_hopae` on a
     /// path-scoped host goes to Hopae too.
     HopaePrefix(String),
+    /// The console route (ADR-0016): the whole host goes to Hopae's admin
+    /// listener behind the contract's `auth` block **without**
+    /// `strip_request_cookies` (the listener authenticates the handle itself).
+    Console(String),
+    /// The same route with the mistake of ADR-0016's drift check: public, so
+    /// no verify call is made.
+    ConsolePublic(String),
 }
 
 impl GatewayRoutes {
@@ -152,6 +159,21 @@ impl GatewayRoutes {
         self
     }
 
+    /// The console route for `host`: protected, no cookie stripping, backed by
+    /// the admin listener of the Hopae under test (`GatewayRoutes::with_console`
+    /// takes the host; the listener's address is filled in when the gateway
+    /// starts).
+    pub fn with_console(mut self, host: &str) -> Self {
+        self.parts.push(Part::Console(host.into()));
+        self
+    }
+
+    /// The operator mistake of 300-12: the console route is `public`.
+    pub fn with_public_console(mut self, host: &str) -> Self {
+        self.parts.push(Part::ConsolePublic(host.into()));
+        self
+    }
+
     /// Alter the generated route documents (variant fragments: a different
     /// `access_mode`, `forward_response: false`, ...).
     pub fn mutate(mut self, f: impl Fn(&mut Vec<Value>) + Send + Sync + 'static) -> Self {
@@ -164,7 +186,13 @@ impl GatewayRoutes {
         Self::new().whole_host(APP_HOST).portal(PORTAL_HOST)
     }
 
-    fn render(&self, verify_url: &str, echo: SocketAddr, portal: SocketAddr) -> Vec<Value> {
+    fn render(
+        &self,
+        verify_url: &str,
+        echo: SocketAddr,
+        portal: SocketAddr,
+        admin: Option<SocketAddr>,
+    ) -> Vec<Value> {
         let echo = format!("http://{echo}");
         let portal = format!("http://{portal}");
         let mut out = Vec::new();
@@ -215,6 +243,25 @@ impl GatewayRoutes {
                     "backends": [echo],
                     "auth": auth_fragment(verify_url),
                 })),
+                Part::Console(host) | Part::ConsolePublic(host) => {
+                    let admin = admin.expect("the Hopae under test has an admin listener");
+                    let public = matches!(part, Part::ConsolePublic(_));
+                    let mut route = json!({
+                        "id": "hopae-admin",
+                        "access_mode": if public { "public" } else { "protected" },
+                        "host": host,
+                        "path_prefix": "/",
+                        "backends": [format!("http://{admin}")],
+                    });
+                    if !public {
+                        let mut auth = auth_fragment(verify_url);
+                        auth.as_object_mut()
+                            .unwrap()
+                            .remove("strip_request_cookies");
+                        route["auth"] = auth;
+                    }
+                    out.push(route);
+                }
                 Part::HostNeutral(prefix) => out.push(json!({
                     "id": "neutral-protected",
                     "access_mode": "protected",
@@ -519,7 +566,7 @@ impl Gateway {
         let tap = VerifyTap::start(hopae.gateway);
         let verify_url = format!("http://{}/_hopae/verify", tap.addr);
         let portal_tap = VerifyTap::start(hopae.portal);
-        let http = routes.render(&verify_url, echo.addr, portal_tap.addr);
+        let http = routes.render(&verify_url, echo.addr, portal_tap.addr, hopae.admin);
         let dir = tempfile::tempdir().expect("gateway dir");
         let config_path = dir.path().join("hangang.json");
         let doc = json!({"http": http, "tcp": [], "settings": {}});

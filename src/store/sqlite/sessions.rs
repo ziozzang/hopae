@@ -12,7 +12,7 @@ use super::events::insert_events;
 use super::rows::{
     self, CODE_COLS, HANDLE_COLS, SESSION_COLS, TXN_COLS, blob, cols, opt_blob, snapshot_json,
 };
-use super::{Shared, Store, WriterEnv, commit, require_provider_live};
+use super::{Shared, Store, WriterEnv, commit, commit_checked, require_provider_live};
 use crate::crypto::{Digest, Timestamp};
 use crate::event::types::{Event, Reason, reasons};
 use crate::identity::types::UserId;
@@ -198,6 +198,36 @@ impl Sessions for Store {
         .await
     }
 
+    async fn lookup_handle_within(
+        &self,
+        handle_sha256: &Digest,
+        host: &Host,
+        deadline: Deadline,
+    ) -> StoreResult<Option<HandleView>> {
+        let (d, host) = (*handle_sha256, host.to_string());
+        self.read_checked("lookup_handle", Some(deadline), move |c, _| {
+            let sql = format!(
+                "SELECT {}, {}, u.status, u.authz_version, u.groups FROM session_handles h JOIN sessions s ON s.session_id = h.session_id JOIN users u ON u.user_id = s.user_id WHERE h.handle_sha256=?1 AND h.host=?2",
+                cols("h", HANDLE_COLS),
+                cols("s", SESSION_COLS),
+            );
+            let hn = HANDLE_COLS.len();
+            let sn = SESSION_COLS.len();
+            c.query_row(&sql, params![blob(&d), host], |r| {
+                Ok((|| {
+                    Ok(HandleView {
+                        handle: rows::handle(r, 0)?,
+                        session: rows::session(r, hn)?,
+                        user: rows::user_authz(r, hn + sn)?,
+                    })
+                })())
+            })
+            .optional()?
+            .transpose()
+        })
+        .await
+    }
+
     async fn touch_handle(&self, handle_sha256: &Digest, at: Timestamp) -> StoreResult<()> {
         let d = *handle_sha256;
         self.write("touch_handle", move |env| {
@@ -303,11 +333,12 @@ impl Sessions for Store {
         events: Vec<Event>,
     ) -> StoreResult<()> {
         let id = id.clone();
-        self.write("terminate_session", move |env| {
+        self.write_checked("terminate_session", None, move |env, check| {
             let shared = env.shared.clone();
             let tx = env.begin()?;
+            check.now()?; // the lock may have been waited for
             terminate_in(&tx, &shared, &id, reason, at, &events)?;
-            finish(tx, &shared, None)
+            commit_checked(tx, &shared, None, check)
         })
         .await
     }
@@ -402,8 +433,10 @@ impl Sessions for Store {
         consume_txn: (Digest, Reason),
         deadline: Deadline,
         events: Vec<Event>,
+        mk_revoked_event: &(dyn for<'a> Fn(&'a HandleRow) -> Event + Sync),
     ) -> StoreResult<()> {
-        self.reauthenticate_session_impl(
+        let (ask, responder) = super::admin::asker();
+        let job = self.reauthenticate_session_impl(
             id,
             provider,
             auth_time,
@@ -413,8 +446,11 @@ impl Sessions for Store {
             consume_txn,
             deadline,
             events,
-        )
-        .await
+            ask,
+        );
+        responder
+            .drive(job, &|row: HandleRow| mk_revoked_event(&row))
+            .await
     }
 
     async fn refresh_snapshot(
@@ -817,7 +853,14 @@ pub(super) fn terminate_in(
         params![id.as_str(), at.secs(), reason.0],
     )?;
     revoke_session_handles(tx, id, reasons::SESSION_TERMINATED.0, at)?;
-    consume_session_codes(tx, id, reason.0, at)?;
+    // A code consumed by an administrator's termination reads like the
+    // revoked handles (scenario 302-3); every other ending keeps its own reason.
+    let code_reason = if reason == reasons::ADMIN {
+        reasons::SESSION_TERMINATED
+    } else {
+        reason
+    };
+    consume_session_codes(tx, id, code_reason.0, at)?;
     insert_events(tx, shared, events)?;
     Ok(())
 }

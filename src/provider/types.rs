@@ -117,6 +117,16 @@ pub struct ProviderIdentity {
     pub picture: Option<String>,
     /// At most 8 KiB serialized.
     pub raw_claims: serde_json::Value,
+    /// The ID token's `auth_time` claim, raw (any JSON): `freshness::validate_claim`
+    /// is the only place it is interpreted (ADR-0016).
+    pub auth_time: Option<serde_json::Value>,
+}
+
+/// A reauthentication request the portal passes to `Provider::begin` only for
+/// a provider whose capability is `max_age`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReauthRequest {
+    pub max_age: std::time::Duration,
 }
 
 /// Each variant maps to one reason code (see [`ProviderError::reason`]).
@@ -199,6 +209,19 @@ pub trait Provider: Send + Sync {
         redirect_uri: &url::Url,
         rng: &dyn Rng,
     ) -> Result<AuthorizationRequest, ProviderError>;
+    /// As [`Provider::begin`], carrying a reauthentication request the portal
+    /// passes only for a `max_age` provider (ADR-0016). A provider with no
+    /// notion of it ignores the request.
+    async fn begin_reauth(
+        &self,
+        txn: &TransactionRow,
+        redirect_uri: &url::Url,
+        rng: &dyn Rng,
+        reauth: Option<ReauthRequest>,
+    ) -> Result<AuthorizationRequest, ProviderError> {
+        let _ = reauth;
+        self.begin(txn, redirect_uri, rng).await
+    }
     async fn complete(
         &self,
         txn: &TransactionRow,

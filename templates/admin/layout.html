@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="{{ c.t.get("lang.code") }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{% block title %}{% endblock %} - {{ c.t.get("admin.common.console") }}</title>
+<link rel="stylesheet" href="/assets/admin.css">
+</head>
+<body>
+<header>
+<strong>{{ c.t.get("admin.common.console") }}</strong>
+{% block nav %}{% if c.show_nav %}
+<nav>
+<a href="/"{% if c.active == "status" %} class="active"{% endif %}>{{ c.t.get("admin.common.nav_status") }}</a>
+<a href="/users"{% if c.active == "users" %} class="active"{% endif %}>{{ c.t.get("admin.common.nav_users") }}</a>
+<a href="/sessions"{% if c.active == "sessions" %} class="active"{% endif %}>{{ c.t.get("admin.common.nav_sessions") }}</a>
+<a href="/events"{% if c.active == "events" %} class="active"{% endif %}>{{ c.t.get("admin.common.nav_events") }}</a>
+</nav>
+<p class="who">{{ c.who }} &middot; <a href="{{ c.logout_url }}">{{ c.t.get("admin.common.signout") }}</a></p>
+{% endif %}{% endblock %}
+</header>
+<main>
+{% block content %}{% endblock %}
+<p class="rid">{{ c.t.get("admin.common.request_id") }}: {{ c.request_id }}</p>
+</main>
+</body>
+</html>

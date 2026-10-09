@@ -1,0 +1,17 @@
+{% extends "admin/layout.html" %}
+{% block title %}{{ c.t.get("admin.events.title") }}{% endblock %}
+{% block content %}
+<h1>{{ c.t.get("admin.events.title") }}</h1>
+<form method="get" action="/events">
+<label>{{ c.t.get("admin.events.f_kind") }} <input name="kind" value="{{ kind }}" maxlength="64"></label>
+<label>{{ c.t.get("admin.events.f_outcome") }} <input name="outcome" value="{{ outcome }}" maxlength="16"></label>
+<label>{{ c.t.get("admin.events.f_user") }} <input name="user_id" value="{{ user_id }}" maxlength="64"></label>
+<label>{{ c.t.get("admin.events.f_session") }} <input name="session_id" value="{{ session_id }}" maxlength="64"></label>
+<label>{{ c.t.get("admin.events.f_ip") }} <input name="client_ip" value="{{ client_ip }}" maxlength="45"></label>
+<label>{{ c.t.get("admin.events.f_since") }} <input name="since" value="{{ since }}" maxlength="12"></label>
+<label>{{ c.t.get("admin.events.f_until") }} <input name="until" value="{{ until }}" maxlength="12"></label>
+<button type="submit">{{ c.t.get("admin.events.filter") }}</button>
+</form>
+{% include "admin/events_table.html" %}
+{% if let Some(n) = next %}<p><a rel="next" href="{{ n }}">{{ c.t.get("admin.events.next") }}</a></p>{% endif %}
+{% endblock %}

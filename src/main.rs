@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use hopae::app::{self, EXIT_CONFIG, preflight, state};
 use hopae::config::{self, Config};
 use hopae::crypto::{Clock, SystemClock};
@@ -44,6 +44,52 @@ enum Command {
     Providers {
         #[command(subcommand)]
         action: ProviderAction,
+    },
+    /// Administrator grants for the management console, straight against the
+    /// store (safe while an instance runs).
+    Admin {
+        #[command(subcommand)]
+        action: AdminAction,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum RoleArg {
+    Admin,
+    Viewer,
+}
+
+#[derive(Subcommand)]
+enum AdminAction {
+    /// Grant a role to an existing user (by user id, or by verified primary
+    /// email) and print the user it resolved.
+    Grant {
+        /// A user id (u_...) or an email address.
+        #[arg(value_name = "TARGET", allow_hyphen_values = false)]
+        target: String,
+        #[arg(long, value_enum, default_value = "admin")]
+        role: RoleArg,
+        /// At most 256 characters.
+        #[arg(long)]
+        note: Option<String>,
+        /// The user id an email that is not authoritative resolves to.
+        #[arg(long, value_name = "USER_ID")]
+        confirm: Option<String>,
+    },
+    /// Revoke a grant; the row stays as a tombstone.
+    Revoke {
+        #[arg(value_name = "TARGET")]
+        target: String,
+    },
+    /// List live grants (`--all`: revoked rows too).
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Apply `admin.users[]` of the configuration file to the store.
+    Import {
+        #[arg(long, value_name = "USER_ID_OR_EMAIL")]
+        force: Option<String>,
     },
 }
 
@@ -100,6 +146,7 @@ fn main() -> ExitCode {
         Some(Command::Providers {
             action: ProviderAction::Import { force },
         }) => providers_import(&cfg, force.as_deref()),
+        Some(Command::Admin { action }) => admin(&cfg, action),
         Some(Command::Run) | None => serve(cfg),
     }
 }
@@ -120,8 +167,14 @@ fn drift(cfg: &Config) -> Vec<String> {
         .filter(|a| !a.hosts.is_empty())
         .map(|a| (a.app_id.clone(), a.hosts.clone()))
         .collect();
+    let console = cfg.admin_host().map(|(h, _)| h.to_string());
     match runtime() {
-        Ok(rt) => rt.block_on(hopae::app::drift::drift_warnings(url, &token, &apps)),
+        Ok(rt) => rt.block_on(hopae::app::drift::drift_warnings_with_console(
+            url,
+            &token,
+            &apps,
+            console.as_deref(),
+        )),
         Err(_) => Vec::new(),
     }
 }
@@ -132,6 +185,9 @@ fn check(cfg: &Config, strict: bool) -> ExitCode {
         .and_then(|v| v.parse::<i64>().ok());
     let mut warnings = preflight::warnings(cfg, |n| std::env::var(n).ok(), since, now);
     warnings.extend(drift(cfg));
+    if let Ok(rt) = runtime() {
+        warnings.extend(rt.block_on(app::admin_check_warnings(cfg)));
+    }
     for w in &warnings {
         eprintln!("{}", preflight::render_warning(w));
     }
@@ -142,7 +198,10 @@ fn check(cfg: &Config, strict: bool) -> ExitCode {
         );
         return ExitCode::from(EXIT_CONFIG);
     }
-    print!("{}", preflight::report(cfg));
+    let stored = runtime()
+        .map(|rt| rt.block_on(app::check_stored_providers(cfg)))
+        .unwrap_or_default();
+    print!("{}", preflight::report_with(cfg, &stored));
     ExitCode::SUCCESS
 }
 
@@ -188,6 +247,67 @@ fn providers_import(cfg: &Config, force: Option<&str>) -> ExitCode {
     }
 }
 
+/// A database the pre-check refuses (a pre-release schema, a missing
+/// structure, a newer or older version) is refused like an unsafe
+/// configuration.
+fn store_refused(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<hopae::store::StoreError>(),
+            Some(
+                hopae::store::StoreError::DevelopmentSchema
+                    | hopae::store::StoreError::Corrupt(_)
+                    | hopae::store::StoreError::SchemaTooNew { .. }
+                    | hopae::store::StoreError::SchemaTooOld { .. }
+            )
+        )
+    })
+}
+
+fn admin(cfg: &Config, action: AdminAction) -> ExitCode {
+    use hopae::store::AdminRole;
+    telemetry::init(&cfg.log.level);
+    let cmd = match action {
+        AdminAction::Grant {
+            target,
+            role,
+            note,
+            confirm,
+        } => app::AdminCommand::Grant {
+            target,
+            role: match role {
+                RoleArg::Admin => AdminRole::Admin,
+                RoleArg::Viewer => AdminRole::Viewer,
+            },
+            note,
+            confirm,
+        },
+        AdminAction::Revoke { target } => app::AdminCommand::Revoke { target },
+        AdminAction::List { all } => app::AdminCommand::List { all },
+        AdminAction::Import { force } => app::AdminCommand::Import { force },
+    };
+    let result = runtime()
+        .map_err(anyhow::Error::from)
+        .and_then(|rt| rt.block_on(app::admin_cli_with(cfg, cmd, true)));
+    telemetry::output::Output::global().flush(std::time::Duration::from_secs(2));
+    match result {
+        Ok(out) => {
+            // A closed or full stdout is not a panic (the evidence step reports it).
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), out.stdout.as_bytes());
+            eprint!("{}", out.stderr);
+            ExitCode::from(out.code)
+        }
+        Err(e) if store_refused(&e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::from(EXIT_CONFIG)
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn serve(cfg: Config) -> ExitCode {
     telemetry::init(&cfg.log.level);
     let rt = match runtime() {
@@ -210,17 +330,7 @@ fn serve(cfg: Config) -> ExitCode {
             // A database the pre-check refuses (a pre-release schema, a missing
             // structure, a newer or older version) is refused like an unsafe
             // configuration: exit status 2.
-            if e.chain().any(|c| {
-                matches!(
-                    c.downcast_ref::<hopae::store::StoreError>(),
-                    Some(
-                        hopae::store::StoreError::DevelopmentSchema
-                            | hopae::store::StoreError::Corrupt(_)
-                            | hopae::store::StoreError::SchemaTooNew { .. }
-                            | hopae::store::StoreError::SchemaTooOld { .. }
-                    )
-                )
-            }) {
+            if store_refused(&e) {
                 eprintln!("error: {e:#}");
                 return ExitCode::from(EXIT_CONFIG);
             }

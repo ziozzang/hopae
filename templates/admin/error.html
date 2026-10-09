@@ -1,0 +1,7 @@
+{% extends "admin/layout.html" %}
+{% block title %}{{ c.t.get(title_key) }}{% endblock %}
+{% block content %}
+<h1>{{ c.t.get(title_key) }}</h1>
+<p>{{ c.t.get(body_key) }}</p>
+<p class="muted"><code>{{ code }}</code></p>
+{% endblock %}

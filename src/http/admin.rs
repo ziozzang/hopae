@@ -1,41 +1,145 @@
-//! The admin listener's router. W0 ships the minimal form — the pinned
-//! response headers, the peer check and the `403` fallback — so the listener
-//! can be bound and exercised; W1-A replaces it with the full router
-//! (authentication, pages, `/v1` API, the concurrency cap and the limits).
+//! The admin listener's router: every route of `docs/ADMIN.md`, the request
+//! id, the pinned response headers, the concurrency cap, the body and query
+//! limits, authentication, and the `404`/`405` answers.
 //!
 //! Serve it with connect info so the trusted-proxy rule can see the TCP peer:
 //! `axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>())`.
+//!
+//! Layers, outermost first: `outer` (request id, no `OPTIONS`, the security
+//! headers on whatever comes back) → `limit` (the concurrency permit before
+//! any authentication; the `413` limits) → `gate` (peer, host, handle, grant;
+//! the stylesheet is the one thing served without a handle) → the routes.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
+use axum::routing::{get, post};
 
-use crate::admin::AdminState;
-use crate::config::UntrustedPeers;
+use crate::admin::pages;
+use crate::admin::{
+    AdminState, Ctx, ReqInfo, api, auth, csrf, events, me, sessions, status, users,
+};
 use crate::crypto::random_id;
-use crate::event::types::reasons;
-use crate::http::denials::{self, DenialCounters};
 use crate::http::security;
+use crate::portal::i18n::pick_lang;
+use crate::telemetry::counters;
 
 /// The console's content security policy: the portal's, plus `img-src 'self'`.
 pub const CONTENT_SECURITY_POLICY: &str = "default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'";
 
+/// The per-request id, put into the request extensions by `outer`.
+#[derive(Clone, Debug)]
+struct RequestId(String);
+
 /// Router of the admin listener.
 pub fn router(state: Arc<AdminState>) -> Router {
+    let routes = Router::new()
+        .route("/", get(status::page))
+        .route("/v1/status", get(status::data))
+        .route("/v1/me", get(me::get))
+        .route("/assets/admin.css", get(stylesheet))
+        .route("/users", get(users::list_page))
+        .route("/v1/users", get(users::list_api))
+        .route("/users/{id}", get(users::detail_page))
+        .route("/v1/users/{id}", get(users::detail_api))
+        .route("/users/{id}/disable", post(users::disable_page))
+        .route("/v1/users/{id}/disable", post(users::disable_api))
+        .route("/users/{id}/enable", post(users::enable_page))
+        .route("/v1/users/{id}/enable", post(users::enable_api))
+        .route(
+            "/users/{id}/sessions/terminate",
+            post(users::terminate_sessions_page),
+        )
+        .route(
+            "/v1/users/{id}/sessions/terminate",
+            post(users::terminate_sessions_api),
+        )
+        .route("/sessions", get(sessions::list_page))
+        .route("/v1/sessions", get(sessions::list_api))
+        .route("/sessions/{id}", get(sessions::detail_page))
+        .route("/v1/sessions/{id}", get(sessions::detail_api))
+        .route("/sessions/{id}/terminate", post(sessions::terminate_page))
+        .route("/v1/sessions/{id}/terminate", post(sessions::terminate_api))
+        .route("/events", get(events::list_page))
+        .route("/v1/events", get(events::list_api))
+        .fallback(not_found)
+        .layer(middleware::from_fn_with_state(state.clone(), gate))
+        .layer(middleware::from_fn_with_state(state.clone(), limit))
+        .with_state(state.clone());
+    // `outer` wraps the whole route set as one service: the router adds the
+    // `allow` header of a `405` outside every layer applied to its routes.
     Router::new()
-        .fallback(refuse)
-        .layer(middleware::from_fn(headers))
-        .with_state(state)
+        .fallback_service(routes)
+        .layer(middleware::from_fn_with_state(state, outer))
 }
 
-/// The pinned headers on every response, whatever produced it.
-async fn headers(req: Request, next: Next) -> Response {
-    let mut resp = next.run(req).await;
+/// The request id of `req` (set by `outer`).
+fn request_id(req: &Request) -> String {
+    req.extensions()
+        .get::<RequestId>()
+        .map_or_else(|| "r_unknown".to_string(), |r| r.0.clone())
+}
+
+/// Request facts for a refusal made before authentication finished.
+fn facts(req: &Request, rid: &str, client_ip: std::net::IpAddr) -> ReqInfo {
+    let path = req.uri().path();
+    ReqInfo {
+        rid: rid.to_string(),
+        client_ip,
+        user_agent: None,
+        lang: pick_lang(
+            req.headers()
+                .get(header::ACCEPT_LANGUAGE)
+                .and_then(|v| v.to_str().ok()),
+        ),
+        https: false,
+        method: req.method().clone(),
+        pattern: auth::pattern_of(path),
+        api: path.starts_with("/v1/"),
+    }
+}
+
+/// The fallback store deadline of a stage of the request (`admin.query_budget_ms`):
+/// every store call made inside `fut` without a deadline of its own is bounded
+/// by it (ADR-0016 decision 12; the calls the console makes also pass theirs
+/// explicitly, and the earliest present one wins).
+async fn scoped<F: std::future::Future>(st: &AdminState, fut: F) -> F::Output {
+    crate::store::sqlite::with_deadline(tokio::time::Instant::now() + st.cfg.query_budget, fut)
+        .await
+}
+
+/// Assign the request id, refuse `OPTIONS`, run the request, and stamp the
+/// pinned headers and the id on whatever comes back, whatever produced it.
+async fn outer(State(st): State<Arc<AdminState>>, mut req: Request, next: Next) -> Response {
+    let rid = random_id(st.rng.as_ref(), "r_");
+    req.extensions_mut().insert(RequestId(rid.clone()));
+    // No `OPTIONS` handler exists anywhere: a preflight is a plain `404`
+    // without CORS headers, so a browser never sends the real request.
+    let mut resp = if req.method() == Method::OPTIONS {
+        let info = facts(
+            &req,
+            &rid,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        );
+        api::bare_error(&info, StatusCode::NOT_FOUND, "not_found")
+    } else {
+        let resp = next.run(req).await;
+        // The router answers a known path with the wrong method itself, with no
+        // body, and adds its `allow` header outside every layer: finish it here.
+        if resp.status() == StatusCode::METHOD_NOT_ALLOWED
+            && !resp.headers().contains_key(header::CONTENT_TYPE)
+        {
+            method_not_allowed(resp)
+        } else {
+            resp
+        }
+    };
     let h = resp.headers_mut();
     security::apply(h);
     h.insert(
@@ -43,36 +147,203 @@ async fn headers(req: Request, next: Next) -> Response {
         HeaderValue::from_static(CONTENT_SECURITY_POLICY),
     );
     h.insert("x-robots-tag", HeaderValue::from_static("noindex"));
+    if let Ok(v) = HeaderValue::from_str(&rid) {
+        h.insert("x-request-id", v);
+    }
     resp
 }
 
-fn json_error(status: StatusCode, code: &str) -> Response {
-    (
-        status,
-        [("content-type", "application/json")],
-        format!(r#"{{"error":"{code}"}}"#),
-    )
-        .into_response()
+/// `limits.admin_max_concurrent`: the permit is taken before the peer check
+/// and authentication, so refused and unauthenticated requests are bounded by
+/// the cap; excess requests are refused at once, not queued. Also the body
+/// (64 KiB) and query (4 KiB) limits, before anything is parsed.
+async fn limit(State(st): State<Arc<AdminState>>, req: Request, next: Next) -> Response {
+    let rid = request_id(&req);
+    let Ok(permit) = st.in_flight.clone().try_acquire_owned() else {
+        let info = facts(
+            &req,
+            &rid,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        );
+        let refused = auth::Refused::overloaded();
+        counters::inc(counters::ADMIN_DENIED_TOTAL, &[("reason", "overloaded")]);
+        count(&st, "none", "overloaded");
+        return scoped(&st, auth::respond(&st, &info, &refused)).await;
+    };
+    let declared = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    let too_large = declared.is_some_and(|n| n > api::MAX_BODY_BYTES)
+        || req
+            .uri()
+            .query()
+            .is_some_and(|q| q.len() > api::MAX_QUERY_BYTES);
+    let resp = if too_large {
+        let info = facts(
+            &req,
+            &rid,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+        );
+        api::bare_error(&info, StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large")
+    } else {
+        next.run(req).await
+    };
+    drop(permit);
+    resp
 }
 
-/// A peer outside `trusted_proxies` is refused before any header is read
-/// (`refuse`); everything else, with no authentication yet, is `login_required`.
-async fn refuse(
+/// Authenticate every request but the stylesheet's, then run the handler with
+/// the principal and the request facts in the extensions.
+async fn gate(
     State(st): State<Arc<AdminState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    mut req: Request,
+    next: Next,
 ) -> Response {
-    let trusted = st.cfg.trusted.iter().any(|n| n.contains(&peer.ip()));
-    if !trusted && st.cfg.untrusted_peers == UntrustedPeers::Refuse {
-        let rid = random_id(st.rng.as_ref(), "r_");
-        denials::record_refusal(
-            st.emitter.as_ref(),
-            &DenialCounters::ADMIN,
-            reasons::UNTRUSTED_PEER,
-            peer.ip(),
-            Some(&st.cfg.policy.app_id),
-            &rid,
-        );
-        return json_error(StatusCode::FORBIDDEN, "untrusted_peer");
+    let rid = request_id(&req);
+    let path = req.uri().path().to_string();
+    let client = match auth::admit(&st, peer.ip(), req.headers(), &rid) {
+        Ok(c) => c,
+        Err(refused) => {
+            let ip = refused.client_ip.unwrap_or_else(|| peer.ip());
+            let info = facts(&req, &rid, ip);
+            count(&st, "none", auth::code_of(&refused.denial));
+            return scoped(&st, auth::respond(&st, &info, &refused)).await;
+        }
+    };
+    let mut info = facts(&req, &rid, client.ip);
+    info.https = client.https;
+    // The stylesheet reveals nothing and the denial pages load it with a
+    // cookie that may belong to a user without a grant.
+    if path == "/assets/admin.css" && req.method() == Method::GET {
+        return next.run(req).await;
     }
-    json_error(StatusCode::FORBIDDEN, "login_required")
+    let user_agent = req
+        .headers()
+        .get(header::USER_AGENT)
+        .map(|v| crate::policy::binding::normalize_user_agent(v.as_bytes()));
+    info.user_agent = user_agent.clone();
+    let principal = match scoped(
+        &st,
+        auth::authenticate(
+            &st,
+            &client,
+            req.headers(),
+            &path,
+            req.method(),
+            user_agent,
+            &rid,
+        ),
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(refused) => {
+            count(&st, "none", auth::code_of(&refused.denial));
+            return scoped(&st, auth::respond(&st, &info, &refused)).await;
+        }
+    };
+    let role = principal.role.as_str();
+    let ctx = Ctx {
+        principal,
+        req: info,
+    };
+    // A mutation is checked here, before its handler: the form token or the
+    // API header first, then the role, so no handler can forget either and
+    // none reads the body again (it receives `Mutation` in the extensions).
+    if auth::is_mutation(req.method(), ctx.req.pattern) {
+        let (mut parts, body) = req.into_parts();
+        let mutation = match csrf::guard(&st, &ctx, &parts.headers, body).await {
+            Ok(m) => m,
+            Err(resp) => {
+                count(&st, role, "denied");
+                return resp;
+            }
+        };
+        if let Err(resp) = scoped(&st, auth::require_admin_role(&st, &ctx)).await {
+            count(&st, role, "denied");
+            return resp;
+        }
+        parts.extensions.insert(mutation);
+        req = Request::from_parts(parts, Body::empty());
+    }
+    req.extensions_mut().insert(ctx);
+    let resp = scoped(&st, next.run(req)).await;
+    let outcome = match resp.status().as_u16() {
+        200..=399 => "ok",
+        403 => "denied",
+        400..=499 => "client_error",
+        _ => "server_error",
+    };
+    count(&st, role, outcome);
+    resp
+}
+
+/// The router's `405` has no body: give it the console's JSON error, keeping
+/// the `allow` header.
+fn method_not_allowed(resp: Response) -> Response {
+    let (mut parts, _) = resp.into_parts();
+    parts.headers.remove(header::CONTENT_LENGTH);
+    // `HEAD` rides along with `GET` in the router; the console documents the
+    // methods it serves.
+    if let Some(allow) = parts
+        .headers
+        .get(header::ALLOW)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|m| *m != "HEAD")
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        && let Ok(v) = HeaderValue::from_str(&allow)
+    {
+        parts.headers.insert(header::ALLOW, v);
+    }
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    Response::from_parts(parts, Body::from(r#"{"error":"method_not_allowed"}"#))
+}
+
+fn count(st: &AdminState, role: &str, outcome: &str) {
+    if st.cfg.insecure_mode {
+        counters::inc(
+            counters::ADMIN_REQUESTS_TOTAL,
+            &[
+                ("role", role),
+                ("outcome", outcome),
+                ("insecure_mode", "true"),
+            ],
+        );
+    } else {
+        counters::inc(
+            counters::ADMIN_REQUESTS_TOTAL,
+            &[("role", role), ("outcome", outcome)],
+        );
+    }
+}
+
+async fn stylesheet() -> Response {
+    let mut r = Response::new(Body::from(pages::STYLESHEET));
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/css; charset=utf-8"),
+    );
+    r
+}
+
+/// An unknown path, for a caller who is authenticated and granted.
+async fn not_found(State(st): State<Arc<AdminState>>, ctx: Ctx) -> Response {
+    api::error(
+        &st,
+        &ctx.req,
+        &ctx.principal,
+        StatusCode::NOT_FOUND,
+        "not_found",
+    )
 }

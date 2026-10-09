@@ -17,6 +17,11 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 - Provider settings read from stored provider rows: `preset`, `userinfo`, `id_token_typ` (not yet settable from the configuration file).
 - Deployment: multi-stage `Dockerfile` (static musl binary on an empty base image), `.dockerignore`, and `deploy/` with a hardened Docker Compose template, example configuration, environment variable names and Hangang route examples.
 - Documentation: `docs/OPERATIONS.md` (with Korean translation); `docs/CONFIG.md` now lists every implemented M1 key with its default.
+- Milestone M4-min (administration console, ADR-0016): a third listener (`listen.admin`, `admin.public_url`) that authenticates every request from the `__Host-hopae` console handle and the administrator grant table, never from a header; read-only status, users, sessions and events pages with JSON twins under `/v1`; disabling and enabling a user and ending one or all sessions of a user, each with an `admin.*` audit event written in the same store transaction and an actor fence that re-reads the grant at the write; signed cursors, a bounded candidate window and a query budget (`admin.query_budget_ms`) for every list; Korean and English pages with the pinned security headers.
+- Command line `hopae admin grant|revoke|list|import` (`--role`, `--note`, `--confirm`, `--all`, `--force`) over the store without taking the instance lock, and `admin.users[]` grants imported at start (after the provider import, under a 30 s deadline; a defective entry is a warning, never a start failure). `hopae --check` prints the console route fragment (no `strip_request_cookies`), `admin.untrusted_peers`, the per-provider `reauth` capability (including a stored override) and warns for `console_route_without_auth`, `console_route_strips_cookies` and entries that cannot be resolved.
+- Migration `0003` (`admin_grants`, `sessions.auth_time` and `auth_time_source`, `sessions.bound_ua_prefix`, `login_txns.reauth_max_age`, replaced events indexes), preceded by a precheck of the foundation.
+- Freshness of the console (`admin.max_auth_age`): a provider that honors `max_age` gets a provider-verified reauthentication (`max_age`/`prompt=login`, `auth_time` validated, the same session reauthenticated); a provider that cannot (`reauth: unsupported`, the Google preset) is judged by Hopae login age and says so. The engine answers a stale console navigation `302`/`401 reauth_required`; the listener answers `403 auth_too_old`.
+- Gateway-layer scenarios for the console (300-1, 300-10, 300-12) run through the real gateway with a `hopae-admin` route in `make e2e`; the test harness gains `GatewayRoutes::with_console` and `with_public_console`.
 - Development process, documentation system, ADR and scenario templates, and roadmap.
 - Architecture design, gateway contract v1 (with proposed gateway changes HC-1 to HC-9), threat model v0, ADR-0002 to ADR-0013 (Proposed), and draft scenarios 001–014 for milestone M1.
 - `docs/CONFIG.md` configuration reference (M0 keys and the keys scheduled by the ADRs).
@@ -27,12 +32,31 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 - Gateway contract v1.1 reserves the `/_hopae/` namespace on every protected application host: an application route under it is no longer supported and is answered `403 reserved_path` once ADR-0015 is implemented. The route fragments in the contract, `deploy/hangang-routes.example.json` and the `hopae --check` output gain `strip_request_cookies`; a gateway without HC-12 rejects the key.
 
+### Changed (M4-min)
+
+- `sessions.auth_time` comes from a valid provider `auth_time` claim with `auth_time_source = provider_claim`; an absent claim records the completion time as `hopae_completion`; an invalid claim fails the login (`invalid_auth_time`). A reauthentication never changes `session_id`, `bound_ip`, `created_at`, `absolute_expires_at` or `aal`.
+- The backup before a schema migration is written (to a temporary file, then renamed) only after the store passed the precheck.
+- Handoff codes still outstanding when an administrator ends the session are consumed with `consumed_reason = session_terminated` (other endings keep their own reason).
+
 ### Changed (review pass 1 of ADR-0015)
 
 - Every handoff is delivered to `https://<host>/_hopae/login?return=<clean target>&_hopae_handoff=<code>` instead of the target itself, so redemption no longer depends on the target's route: on a path-scoped host a default or public target used to carry the code to the upstream unredeemed. The scenario 002, 003, 005 and 008 expectations read the new wire (see their wire notes); the adapter's URL bound for the reserved namespace is `3 × 2048 + 512` bytes.
 - `strip_request_cookies` (HC-12) is a route-level field that also applies to public routes (`auth.strip_request_cookies` stays an alias); criteria add last-step stripping, rejecting `cookie` as an identity output, quoted-value-aware parsing and dropping the header on ambiguity. `hopae --check` prints it as its own route field. The HC-1 criteria and the cache section bypass the whole `/_hopae` namespace.
 - `hopae --check` warns when an application sets `logout_confirm = false`; the same-origin navigation-gadget residual and the transferable logout ticket are documented (ADR-0015, threat model, configuration reference, scenario 015-A8 and A9).
 - Migration `0002` was edited in place for the last time; later schema changes are new numbered migrations (operations guide).
+
+### Fixed (code review G7 pass 2 of the M4-min console, ADR-0016)
+
+- Nested store deadline scopes keep the earliest, so the engine's larger verify budget cannot extend the console's `admin.query_budget_ms`; the detached handle touch carries its own 2 s deadline; engine session termination checks its deadline before commit.
+- `hopae admin grant` by an address records a binding the row lacked (a change, audited), and `hopae admin import` records the missing binding of a row an email-only entry resolves to, so a reassigned mailbox is never granted later; the grant aborts (exit `2`) when the resolution evidence cannot be written.
+
+### Fixed (code review G7 of the M4-min console, ADR-0016)
+
+- A database provider the file no longer lists keeps its stored reauthentication capability in verify, the callback, the write fence and the status page (one capability map); a present JSON `null` `auth_time` fails the login like any other invalid claim; a reauthentication's `handle.revoked` events list the handles revoked in its own transaction, not a truncated preview.
+- `hopae_admin_denied_total` counts `not_admin`, `role_insufficient`, `aal_insufficient` and `auth_too_old` once where `admin.denied` is written, and a freshness challenge is labelled `reauth_required` in `hopae_verify_decisions_total`. ADR-0016 decision 3 now states that the engine's own lifetime and binding consequences apply on the admin listener while the listener itself initiates no termination.
+- The actor fence tests refresh `auth_time` in the handle-idle case and gain isolated session-idle, session-created-in-the-future, `auth_time`-in-the-future and handle-digest cases.
+- `hopae admin grant` by a new address never replaces an existing `source_email` (it is refused: `already bound to <old>`), so an unchanged file import cannot grant the old address's new holder; the address fallback across local-part case is removed (only the domain is normalized); `import --force <user_id>` works inside an ambiguous binding set; the resolution block is printed and flushed before the grant is written and lists every identity.
+- The inline event-retention prune can no longer swallow a deadline or an interrupted statement and commit late; the console's authentication reads and its required refusal records (`admin.denied`, `csrf.rejected`) carry the query budget, with a fallback deadline scope in the admin middleware.
 
 ### Fixed (code review G7 pass 2 of ADR-0015)
 
@@ -54,6 +78,7 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Security
 
+- Console authentication is handle based and bound to the console host, address and timers of the implicit `admin` application; a peer outside `trusted_proxies` is refused (`untrusted_peer`) before any header is read, forwarding headers are believed only from a trusted peer, and plain HTTP never carries the console. Mutations need the form token or the `x-hopae-admin-request` header, and the fenced write refuses an actor whose grant, role, status or freshness changed after the request check (`actor_revoked`). Lists examine at most a constant candidate window and are interruptible at the query budget.
 - Design revised after adversarial design review pass 1: browser-bound cross-domain handoff, gateway caller key required in M1, explicit account linking by default, user-info subject consistency, per-handle assurance level with rotation on elevation, authorization version checked at every verify, canonical path for policy rules, explicit return-origin allowlist, transactional event outbox, verify deadline budget, full decision-cache key with an absolute freshness deadline.
 - Design revised after adversarial design review pass 2: handoff codes carry issuance level and credential generation and are consumed on elevation; Redis never caches session state and allows carry generation provenance; credential destinations are exact registered hosts only; per-sink delivery rows with at-least-once delivery and bounded backlog; the `401` names the application URL as the document bootstrap; stable per-browser binding and portal cookies; explicit account-switch confirmation; provider deletion tombstones; caller-key rotation overlap; one reserved-parameter recognition rule.
 - Design revised after adversarial design review pass 3: depth-bounded recovery from the first-use binding-cookie race on both hosts; non-document requests carrying the reserved parameter are terminated with a relayed `403`; delivery rows die with their event and terminal rows have their own retention, with a quantified prune cadence; a database epoch for generation rollback after restore (deferred to the first cache milestone).
