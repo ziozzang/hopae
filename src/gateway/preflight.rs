@@ -57,3 +57,22 @@ pub fn route_auth_fragment(verify_url: &str, timeout_ms: u64) -> Value {
         "forward_response": true,
     })
 }
+
+/// The route of the console host (ADR-0016): protected like an application,
+/// but WITHOUT `strip_request_cookies` — the console reads its own handle
+/// cookie. `host` is the console host, `backend` the admin listener.
+pub fn route_console_fragment(
+    host: &str,
+    backend: &str,
+    verify_url: &str,
+    timeout_ms: u64,
+) -> Value {
+    json!({
+        "id": "hopae-admin",
+        "access_mode": "protected",
+        "host": host,
+        "path_prefix": "/",
+        "backends": [backend],
+        "auth": route_auth_fragment(verify_url, timeout_ms),
+    })
+}

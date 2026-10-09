@@ -27,6 +27,7 @@ pub mod cursor;
 pub mod events;
 pub mod me;
 pub mod pages;
+pub mod seed;
 pub mod sessions;
 pub mod status;
 pub mod users;
