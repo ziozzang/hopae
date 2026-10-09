@@ -1,0 +1,44 @@
+{% extends "admin/layout.html" %}
+{% block title %}{{ c.t.get("admin.users.title") }}{% endblock %}
+{% block content %}
+<h1>{{ c.t.get("admin.users.title") }}</h1>
+<form method="get" action="/users">
+<label>{{ c.t.get("admin.users.search") }} <input name="q" value="{{ q }}" maxlength="128"></label>
+<label>{{ c.t.get("admin.users.status") }}
+<select name="status">
+<option value=""{% if status.is_empty() %} selected{% endif %}>{{ c.t.get("admin.users.any") }}</option>
+<option value="active"{% if status == "active" %} selected{% endif %}>active</option>
+<option value="disabled"{% if status == "disabled" %} selected{% endif %}>disabled</option>
+</select></label>
+<button type="submit">{{ c.t.get("admin.users.filter") }}</button>
+</form>
+<table>
+<thead><tr>
+<th>{{ c.t.get("admin.users.col_user") }}</th>
+<th>{{ c.t.get("admin.users.col_email") }}</th>
+<th>{{ c.t.get("admin.users.col_name") }}</th>
+<th>{{ c.t.get("admin.users.col_username") }}</th>
+<th>{{ c.t.get("admin.users.col_status") }}</th>
+<th>{{ c.t.get("admin.users.col_role") }}</th>
+<th>{{ c.t.get("admin.users.col_sessions") }}</th>
+<th>{{ c.t.get("admin.users.col_created") }}</th>
+<th>{{ c.t.get("admin.users.col_last_login") }}</th>
+</tr></thead>
+<tbody>
+{% for r in rows %}
+<tr>
+<td><a href="/users/{{ r.user_id }}">{{ r.user_id }}</a></td>
+<td>{{ r.email }}</td>
+<td>{{ r.display_name }}</td>
+<td>{{ r.username }}</td>
+<td>{{ r.status }}</td>
+<td>{{ r.role }}</td>
+<td>{{ r.live_sessions }}</td>
+<td>{{ r.created }}</td>
+<td>{{ r.last_login }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+{% if let Some(n) = next %}<p><a rel="next" href="{{ n }}">{{ c.t.get("admin.users.next") }}</a></p>{% endif %}
+{% endblock %}

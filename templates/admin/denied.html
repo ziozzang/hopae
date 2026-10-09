@@ -1,0 +1,21 @@
+{% extends "admin/layout.html" %}
+{% block title %}{{ c.t.get(title_key) }}{% endblock %}
+{% block nav %}{% endblock %}
+{% block content %}
+<h1>{{ c.t.get(title_key) }}</h1>
+<p>{{ c.t.get(body_key) }}</p>
+<p class="muted"><code>{{ code }}</code></p>
+{% if let Some(id) = user_id %}
+<dl>
+<dt>{{ c.t.get("admin.denied.user_id") }}</dt>
+<dd>{{ id }}</dd>
+{% if let Some(mail) = email %}
+<dt>{{ c.t.get("admin.denied.email") }}</dt>
+<dd>{{ mail }}</dd>
+{% endif %}
+</dl>
+{% endif %}
+{% if let Some(url) = login_url %}
+<p><a href="{{ url }}">{{ c.t.get("admin.denied.console_link") }}</a></p>
+{% endif %}
+{% endblock %}

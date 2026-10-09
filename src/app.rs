@@ -201,6 +201,10 @@ pub struct Services {
     pub store_hooks: Option<Arc<StoreHooks>>,
     /// The configured providers, built from the store's rows.
     pub registry: Arc<Registry>,
+    /// When the process started (the status page's `build.started_at`).
+    pub started_at: Timestamp,
+    /// The bound listener addresses, set once every listener is bound.
+    pub listeners: Arc<std::sync::OnceLock<crate::admin::Listeners>>,
 }
 
 impl Services {
@@ -251,6 +255,8 @@ impl Services {
     /// The admin listener's state, when `admin.public_url` is set.
     pub fn admin_state(&self) -> Option<Arc<crate::admin::AdminState>> {
         let cfg = crate::admin::AdminConfig::from_config(&self.config)?;
+        let mut key = [0u8; 32];
+        self.rng.fill(&mut key);
         Some(Arc::new(crate::admin::AdminState {
             cfg,
             directory: self.directory(),
@@ -262,6 +268,14 @@ impl Services {
             in_flight: Arc::new(tokio::sync::Semaphore::new(
                 self.config.limits.admin_max_concurrent as usize,
             )),
+            snapshot: self.snapshot.clone(),
+            verify: self.verify_context(),
+            registry: self.registry.clone(),
+            key,
+            started_at: self.started_at,
+            config_digest: config_digest(&self.config),
+            listeners: self.listeners.get().cloned().unwrap_or_default(),
+            peer_warned: std::sync::Mutex::new(std::collections::HashMap::new()),
         }))
     }
 }
@@ -538,11 +552,18 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         directory.config_generation().await?
     };
     let snapshot = cfg.snapshot(generation);
-    let listeners_attr = format!(
-        "portal={} gateway={}",
-        cfg.portal_addr(),
-        cfg.gateway_addr()
-    );
+    let listeners_attr = match cfg.admin_addr() {
+        Some(a) => format!(
+            "portal={} gateway={} admin={a}",
+            cfg.portal_addr(),
+            cfg.gateway_addr()
+        ),
+        None => format!(
+            "portal={} gateway={}",
+            cfg.portal_addr(),
+            cfg.gateway_addr()
+        ),
+    };
     let loaded = emitter.required(EventKind::ConfigLoaded, Outcome::Info, "startup", |b| {
         b.attr("config_digest", digest.as_str())
             .attr("apps", snapshot.apps.len() as u64)
@@ -602,6 +623,8 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         readiness: Readiness::default(),
         store_hooks: env.store_hooks.clone(),
         registry,
+        started_at: env.clock.now(),
+        listeners: Arc::default(),
     };
     #[cfg(feature = "test-hooks")]
     let hooks = match (&env.hooks_addr, &env.test_clock, &env.store_hooks) {
@@ -638,6 +661,12 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         .await
         .context("binding gateway listener")?;
     let gateway_addr = gateway.local_addr()?;
+    // Once set, never changed: the status page shows what is actually bound.
+    let _ = services.listeners.set(crate::admin::Listeners {
+        portal: portal_addr.to_string(),
+        gateway: gateway_addr.to_string(),
+        admin: admin.as_ref().map(|a| a.1.to_string()).unwrap_or_default(),
+    });
     match &admin {
         Some((_, a)) => tracing::info!(
             "listeners bound: portal {portal_addr}, gateway {gateway_addr}, admin {a}"

@@ -480,6 +480,11 @@ impl Store {
             }
             crash(&shared, "after_admin_status_write");
             check.now()?;
+            // The count is known only now: it travels in the same transaction.
+            let mut admin_event = admin_event;
+            if status == UserStatus::Disabled {
+                admin_event.attrs.insert("count".into(), ended.into());
+            }
             insert_events(&tx, &shared, &[admin_event])?;
             before_commit(&shared, check)?;
             commit(tx, &shared, Some("admin_status"))?;
@@ -549,6 +554,8 @@ impl Store {
                 }
                 crash(&shared, "after_admin_terminate_write");
                 check.now()?;
+                let mut admin_event = admin_event;
+                admin_event.attrs.insert("count".into(), n.into());
                 insert_events(&tx, &shared, &[admin_event])?;
                 before_commit(&shared, check)?;
                 commit(tx, &shared, Some("admin_terminate"))?;
@@ -635,9 +642,9 @@ fn terminate_all(
 ) -> StoreResult<u32> {
     let ids: Vec<String> = {
         let mut st = tx.prepare(
-            "SELECT session_id FROM sessions WHERE user_id = ?1 AND terminated_at IS NULL ORDER BY created_at, session_id",
+            "SELECT session_id FROM sessions WHERE user_id = ?1 AND terminated_at IS NULL AND absolute_expires_at > ?2 ORDER BY created_at, session_id",
         )?;
-        st.query_map([user.as_str()], |r| r.get(0))?
+        st.query_map(params![user.as_str(), now.secs()], |r| r.get(0))?
             .collect::<Result<_, _>>()?
     };
     let mut n = 0u32;

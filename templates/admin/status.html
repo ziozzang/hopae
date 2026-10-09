@@ -1,0 +1,109 @@
+{% extends "admin/layout.html" %}
+{% block title %}{{ c.t.get("admin.status.title") }}{% endblock %}
+{% block content %}
+<h1>{{ c.t.get("admin.status.title") }}</h1>
+
+<h2>{{ c.t.get("admin.status.apps") }}</h2>
+<table>
+<thead><tr>
+<th>{{ c.t.get("admin.status.app_id") }}</th>
+<th>{{ c.t.get("admin.status.display_name") }}</th>
+<th>{{ c.t.get("admin.status.hosts") }}</th>
+<th>{{ c.t.get("admin.status.ports") }}</th>
+<th>{{ c.t.get("admin.status.enabled") }}</th>
+<th>{{ c.t.get("admin.status.session") }}</th>
+<th>{{ c.t.get("admin.status.binding") }}</th>
+<th>{{ c.t.get("admin.status.on_authz_change") }}</th>
+<th>{{ c.t.get("admin.status.verify_cache") }}</th>
+<th>{{ c.t.get("admin.status.logout_confirm") }}</th>
+<th>{{ c.t.get("admin.status.max_auth_age") }}</th>
+<th>{{ c.t.get("admin.status.step_up") }}</th>
+</tr></thead>
+<tbody>
+{% for a in v.apps %}
+<tr>
+<td>{{ a.app_id }}</td>
+<td>{{ a.display_name }}</td>
+<td>{{ a.hosts }}</td>
+<td>{{ a.ports }}</td>
+<td>{{ a.enabled }}</td>
+<td>{{ a.session }}</td>
+<td>{{ a.binding }}</td>
+<td>{{ a.on_authz_change }}</td>
+<td>{{ a.verify_cache_seconds }}</td>
+<td>{{ a.logout_confirm }}</td>
+<td>{{ a.max_auth_age }}</td>
+<td>{{ a.step_up }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+
+<h2>{{ c.t.get("admin.status.providers") }}</h2>
+<table>
+<thead><tr>
+<th>{{ c.t.get("admin.status.provider_id") }}</th>
+<th>{{ c.t.get("admin.status.kind") }}</th>
+<th>{{ c.t.get("admin.status.display_name") }}</th>
+<th>{{ c.t.get("admin.status.enabled") }}</th>
+<th>{{ c.t.get("admin.status.managed_by") }}</th>
+<th>{{ c.t.get("admin.status.health") }}</th>
+<th>{{ c.t.get("admin.status.reauth") }}</th>
+<th>{{ c.t.get("admin.status.secret_env") }}</th>
+<th>{{ c.t.get("admin.status.secret_present") }}</th>
+</tr></thead>
+<tbody>
+{% for p in v.providers %}
+<tr>
+<td>{{ p.provider_id }}</td>
+<td>{{ p.kind }}</td>
+<td>{{ p.display_name }}</td>
+<td>{{ p.enabled }}</td>
+<td>{{ p.managed_by }}</td>
+<td>{{ p.health }}</td>
+<td>{{ p.reauth }}</td>
+<td>{{ p.client_secret_env }}</td>
+<td>{{ p.secret_present }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+
+<h2>{{ c.t.get("admin.status.store") }}</h2>
+<dl>
+<dt>{{ c.t.get("admin.status.kind") }}</dt><dd>{{ v.store_kind }}</dd>
+<dt>{{ c.t.get("admin.status.schema_version") }}</dt><dd>{{ v.schema_version }}</dd>
+<dt>{{ c.t.get("admin.status.users") }}</dt><dd>{{ v.users }}</dd>
+<dt>{{ c.t.get("admin.status.live_sessions") }}</dt><dd>{{ v.live_sessions }}</dd>
+<dt>{{ c.t.get("admin.status.events") }}</dt><dd>{{ v.events }}</dd>
+<dt>{{ c.t.get("admin.status.last_prune") }}</dt><dd>{{ v.last_prune_at }}</dd>
+</dl>
+<table>
+<thead><tr>
+<th>{{ c.t.get("admin.status.sink") }}</th>
+<th>{{ c.t.get("admin.status.pending") }}</th>
+<th>{{ c.t.get("admin.status.failed") }}</th>
+</tr></thead>
+<tbody>
+{% for d in v.deliveries %}
+<tr><td>{{ d.sink }}</td><td>{{ d.pending }}</td><td>{{ d.failed }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+
+<h2>{{ c.t.get("admin.status.build") }}</h2>
+<dl>
+<dt>{{ c.t.get("admin.status.version") }}</dt><dd>{{ v.version }}</dd>
+<dt>{{ c.t.get("admin.status.contract") }}</dt><dd>{{ v.contract }}</dd>
+<dt>{{ c.t.get("admin.status.started_at") }}</dt><dd>{{ v.started_at }}</dd>
+</dl>
+
+<h2>{{ c.t.get("admin.status.config") }}</h2>
+<dl>
+<dt>{{ c.t.get("admin.status.generation") }}</dt><dd>{{ v.generation }}</dd>
+<dt>{{ c.t.get("admin.status.digest") }}</dt><dd>{{ v.digest }}</dd>
+<dt>{{ c.t.get("admin.status.insecure_mode") }}</dt><dd>{{ v.insecure_mode }}</dd>
+<dt>{{ c.t.get("admin.status.unauthenticated_caller") }}</dt><dd>{{ v.unauthenticated_caller }}</dd>
+<dt>{{ c.t.get("admin.status.listeners") }}</dt><dd>{{ v.listeners }}</dd>
+</dl>
+{% endblock %}

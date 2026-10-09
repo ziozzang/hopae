@@ -1,0 +1,95 @@
+{% extends "admin/layout.html" %}
+{% block title %}{{ c.t.get("admin.users.detail_title") }}{% endblock %}
+{% block content %}
+<h1>{{ c.t.get("admin.users.detail_title") }}</h1>
+<dl>
+<dt>{{ c.t.get("admin.users.col_user") }}</dt><dd>{{ user_id }}</dd>
+<dt>{{ c.t.get("admin.users.col_email") }}</dt><dd>{{ email }}{% if !email_flags.is_empty() %} ({{ email_flags }}){% endif %}</dd>
+<dt>{{ c.t.get("admin.users.col_name") }}</dt><dd>{{ display_name }}</dd>
+<dt>{{ c.t.get("admin.users.col_username") }}</dt><dd>{{ username }}</dd>
+<dt>{{ c.t.get("admin.users.col_status") }}</dt><dd>{{ status }} (authz {{ authz_version }})</dd>
+<dt>{{ c.t.get("admin.users.col_created") }}</dt><dd>{{ created }}</dd>
+<dt>{{ c.t.get("admin.users.col_last_login") }}</dt><dd>{{ last_login }}</dd>
+<dt>{{ c.t.get("admin.users.grant") }}</dt><dd>{{ grant }}</dd>
+</dl>
+{% if is_admin %}
+<div class="actions">
+{% if active %}
+<form method="post" action="/users/{{ user_id }}/disable">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="back" value="user">
+<input type="hidden" name="user_id" value="{{ user_id }}">
+<button type="submit">{{ c.t.get("admin.users.disable") }}</button>
+</form>
+{% else %}
+<form method="post" action="/users/{{ user_id }}/enable">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="back" value="user">
+<input type="hidden" name="user_id" value="{{ user_id }}">
+<button type="submit">{{ c.t.get("admin.users.enable") }}</button>
+</form>
+{% endif %}
+<form method="post" action="/users/{{ user_id }}/sessions/terminate">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="back" value="user">
+<input type="hidden" name="user_id" value="{{ user_id }}">
+<button type="submit">{{ c.t.get("admin.users.terminate_all") }}</button>
+</form>
+</div>
+{% else %}
+<p class="readonly">{{ c.t.get("admin.users.readonly") }}<input type="hidden" name="csrf" value="{{ csrf }}"></p>
+{% endif %}
+<h2>{{ c.t.get("admin.users.identities") }}</h2>
+<table>
+<thead><tr>
+<th>{{ c.t.get("admin.users.i_provider") }}</th>
+<th>{{ c.t.get("admin.users.i_subject") }}</th>
+<th>{{ c.t.get("admin.users.col_email") }}</th>
+<th>{{ c.t.get("admin.users.col_name") }}</th>
+<th>{{ c.t.get("admin.users.i_first") }}</th>
+<th>{{ c.t.get("admin.users.i_last") }}</th>
+</tr></thead>
+<tbody>
+{% for i in identities %}
+<tr><td>{{ i.provider }}</td><td>{{ i.subject }}</td><td>{{ i.email }}</td><td>{{ i.name }}</td><td>{{ i.first_seen }}</td><td>{{ i.last_seen }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+<h2>{{ c.t.get("admin.users.live_sessions") }} ({{ live_total }})</h2>
+<table>
+<thead><tr>
+<th>{{ c.t.get("admin.sessions.col_session") }}</th>
+<th>{{ c.t.get("admin.sessions.col_hosts") }}</th>
+<th>{{ c.t.get("admin.sessions.col_aal") }}</th>
+<th>{{ c.t.get("admin.sessions.col_created") }}</th>
+<th>{{ c.t.get("admin.sessions.col_last_seen") }}</th>
+<th>{{ c.t.get("admin.sessions.col_ip") }}</th>
+<th>{{ c.t.get("admin.sessions.col_ua") }}</th>
+</tr></thead>
+<tbody>
+{% for r in live %}
+<tr>
+<td><a href="/sessions/{{ r.session_id }}">{{ r.session_id }}</a></td>
+<td>{{ r.hosts }}</td><td>{{ r.aal }}</td><td>{{ r.created }}</td><td>{{ r.last_seen }}</td><td>{{ r.bound_ip }}</td><td>{{ r.ua_prefix }}</td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+<p><a href="{{ sessions_url }}">{{ c.t.get("admin.users.more_sessions") }}</a></p>
+<h2>{{ c.t.get("admin.users.ended_sessions") }}</h2>
+<table>
+<thead><tr>
+<th>{{ c.t.get("admin.sessions.col_session") }}</th>
+<th>{{ c.t.get("admin.sessions.col_created") }}</th>
+<th>{{ c.t.get("admin.sessions.col_ended") }}</th>
+</tr></thead>
+<tbody>
+{% for r in terminated %}
+<tr><td><a href="/sessions/{{ r.session_id }}">{{ r.session_id }}</a></td><td>{{ r.created }}</td><td>{{ r.ended }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+<h2>{{ c.t.get("admin.users.recent_events") }}</h2>
+{% include "admin/events_table.html" %}
+<p><a href="{{ events_url }}">{{ c.t.get("admin.users.more_events") }}</a></p>
+{% endblock %}
