@@ -8,3 +8,6 @@ use axum::http::HeaderName;
 pub static X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 /// The protocol the client used.
 pub static X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
+/// The host the client addressed, as the gateway saw it. The admin listener
+/// compares it with the console host.
+pub static X_FORWARDED_HOST: HeaderName = HeaderName::from_static("x-forwarded-host");

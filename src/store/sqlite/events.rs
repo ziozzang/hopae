@@ -196,6 +196,10 @@ pub(super) fn prune_statements(
     p: &EventRetention,
 ) -> StoreResult<PruneReport> {
     let mut report = PruneReport::default();
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES ('last_prune_at', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [now.secs().to_string()],
+    )?;
 
     // 1. Age.
     let cutoff = secs_f(now.sub(p.retention));
@@ -427,6 +431,14 @@ impl Events for Store {
             Ok((u64::try_from(e).unwrap_or(0), u64::try_from(d).unwrap_or(0)))
         })
         .await
+    }
+
+    async fn query_page(&self, q: EventsQuery, deadline: Deadline) -> StoreResult<Page<Event>> {
+        self.query_page_impl(q, deadline).await
+    }
+
+    async fn status(&self, deadline: Deadline) -> StoreResult<StoreStatus> {
+        self.status_impl(deadline).await
     }
 
     async fn query(&self, filter: EventQuery) -> StoreResult<Vec<Event>> {

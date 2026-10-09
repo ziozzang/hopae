@@ -15,14 +15,17 @@ use std::net::IpAddr;
 use async_trait::async_trait;
 
 use crate::crypto::{Digest, Timestamp};
-use crate::event::types::{Event, EventId, Reason};
+use crate::event::types::{Event, EventId, EventKind, Reason};
 use crate::identity::types::{NormalizedEmail, UserId};
 use crate::policy::types::Host;
 use crate::provider::types::ProviderId;
 use crate::session::types::SessionId;
 
 pub use hooks::StoreHooks;
-pub use sqlite::{LATEST_SCHEMA_VERSION, Store};
+pub use sqlite::{
+    LATEST_SCHEMA_VERSION, Shape as WindowShape, Store, earliest_present, precheck,
+    validate_foundation,
+};
 pub use types::*;
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -58,6 +61,11 @@ pub enum StoreError {
     DevelopmentSchema,
     #[error("database schema version {found} is newer than this binary supports ({supported})")]
     SchemaTooNew { found: u32, supported: u32 },
+    /// A command-line tool never migrates: the instance does.
+    #[error(
+        "database schema version {found} is older than this binary ({latest}): start the instance once to migrate"
+    )]
+    SchemaTooOld { found: u32, latest: u32 },
 }
 
 impl From<rusqlite::Error> for StoreError {
@@ -118,6 +126,94 @@ pub trait Directory: Send + Sync {
     ) -> StoreResult<ImportReport>;
     async fn bump_config_generation(&self) -> StoreResult<u64>;
     async fn config_generation(&self) -> StoreResult<u64>;
+
+    // ---- management console (ADR-0016) ------------------------------------
+    /// The grant row of `user` in any state (revoked included).
+    async fn admin_grant(
+        &self,
+        user: &UserId,
+        deadline: Deadline,
+    ) -> StoreResult<Option<AdminGrant>>;
+    /// Live grants, or every row (tombstones too) with `include_revoked`.
+    async fn admin_grants(
+        &self,
+        include_revoked: bool,
+        deadline: Deadline,
+    ) -> StoreResult<Vec<AdminGrant>>;
+    /// Resolve a user id or a normalized address to the user and their identities.
+    async fn resolve_grant_target(
+        &self,
+        target: &GrantTarget,
+        deadline: Deadline,
+    ) -> StoreResult<Option<(User, Vec<IdentityRow>)>>;
+    /// Grant or re-grant. Returns `(previous role, changed)`: the role the row
+    /// held before (even a revoked one), and whether anything was written. An
+    /// identical live grant is a no-op: no row change and no event. The store
+    /// adds `previous_role` to the event's attributes; a disabled or unknown
+    /// user is refused (`Conflict`).
+    #[allow(clippy::too_many_arguments)]
+    async fn grant_admin(
+        &self,
+        user: &UserId,
+        role: AdminRole,
+        managed_by: GrantManagedBy,
+        source_email: Option<NormalizedEmail>,
+        by: &str,
+        note: Option<String>,
+        at: Timestamp,
+        event: Event,
+    ) -> StoreResult<(Option<AdminRole>, bool)>;
+    /// Revoke a live grant (tombstone). `false` = no live grant, nothing written.
+    async fn revoke_admin(
+        &self,
+        user: &UserId,
+        by: &str,
+        managed_by: GrantManagedBy,
+        at: Timestamp,
+        event: Event,
+    ) -> StoreResult<bool>;
+    /// The file rule, ONE write transaction, in this order (P2-06, P3-01): (1) match every entry — skipped ones included — by its key
+    /// (ById/Both → PK; ByEmail → EVERY row with source_email = email, in any state: file or api, live or revoked, whatever user it is
+    /// bound to; two or more such rows → `email_binding_ambiguous`, skipped, present); (2) matched live file rows: update role/note,
+    /// unless the entry is invalid (Both naming different users, etc.) → skipped, row untouched, still PRESENT; a matched api row or
+    /// tombstone → `skipped (changed|revoked at run time)`, PRESENT, never re-resolved; (3) unmatched entries: resolve once (ById: must
+    /// exist; ByEmail: exactly one verified holder AND authoritative; Both: agree) and insert as file, else skipped; (4) live file rows
+    /// matched by NO entry → revoked_by = 'file'; api rows and tombstones untouched unless `force` names them (ForceTarget::ByEmail
+    /// selects the source_email binding BEFORE any resolution and is refused when ambiguous: "use --force <user_id>").
+    /// Deadline checked after BEGIN IMMEDIATE, between the four phases and before COMMIT.
+    async fn import_grants(
+        &self,
+        entries: Vec<SeedEntry>,
+        force: Option<ForceTarget>,
+        deadline: Deadline,
+        at: Timestamp,
+        mk_event: &(
+             dyn for<'a> Fn(&'a UserId, EventKind, Option<AdminRole>, AdminRole, bool) -> Event
+                 + Sync
+         ),
+    ) -> StoreResult<GrantImportReport>;
+    async fn list_users(&self, q: UsersQuery, deadline: Deadline)
+    -> StoreResult<Page<UserSummary>>;
+    async fn user_detail(
+        &self,
+        user: &UserId,
+        now: Timestamp,
+        deadline: Deadline,
+    ) -> StoreResult<Option<UserDetail>>;
+    /// ONE write transaction: fence → status/authz_version → terminate every live session (reason user_disabled, their events) → admin event.
+    /// Deadline checked before each session's statements; expiry → rollback, Err(Unavailable("deadline")).
+    /// Returns `(changed, sessions terminated)`; setting the status a user already has writes nothing.
+    #[allow(clippy::too_many_arguments)]
+    async fn set_user_status(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        user: &UserId,
+        status: UserStatus,
+        deadline: Deadline,
+        admin_event: Event,
+        mk_session_event: &(dyn for<'a> Fn(&'a SessionRow) -> Event + Sync),
+    ) -> StoreResult<(bool, u32)>;
 }
 
 #[async_trait]
@@ -165,6 +261,54 @@ pub trait Sessions: Send + Sync {
         at: Timestamp,
         events: Vec<Event>,
     ) -> StoreResult<bool>;
+    // ---- management console (ADR-0016) ------------------------------------
+    async fn list_live_sessions(
+        &self,
+        q: SessionsQuery,
+        deadline: Deadline,
+    ) -> StoreResult<Page<SessionSummary>>;
+    /// The session with its (at most 100) handles, any state.
+    async fn session_summary(
+        &self,
+        id: &SessionId,
+        deadline: Deadline,
+    ) -> StoreResult<Option<(SessionSummary, Vec<HandleRow>)>>;
+    /// Fenced termination (reason `admin`). `false` = unknown or already ended, nothing written.
+    async fn admin_terminate_session(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        id: &SessionId,
+        deadline: Deadline,
+        admin_event: Event,
+        session_event: Event,
+    ) -> StoreResult<bool>;
+    /// Fenced termination of every live session of `user`; zero sessions writes nothing.
+    async fn admin_terminate_user_sessions(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        user: &UserId,
+        deadline: Deadline,
+        admin_event: Event,
+        mk_session_event: &(dyn for<'a> Fn(&'a SessionRow) -> Event + Sync),
+    ) -> StoreResult<u32>;
+    /// Reauthentication (decision 15): auth_time := claim or completion time, auth_time_source set, factors += entry, cred_gen += 1,
+    /// every handle revoked (reason reauth), outstanding codes consumed (reason reauth), new portal handle, the login transaction consumed;
+    /// deadline checked between statements. Refuses `Conflict("provider_mismatch")` when `provider` is not the session's provider.
+    #[allow(clippy::too_many_arguments)]
+    async fn reauthenticate_session(
+        &self,
+        id: &SessionId,
+        provider: &ProviderId,
+        auth_time: Timestamp,
+        source: AuthTimeSource,
+        factor: crate::session::types::FactorEntry,
+        new_portal_handle: HandleRow,
+        consume_txn: (Digest, Reason),
+        deadline: Deadline,
+        events: Vec<Event>,
+    ) -> StoreResult<()>;
     async fn refresh_snapshot(
         &self,
         id: &SessionId,
@@ -296,4 +440,7 @@ pub trait Events: Send + Sync {
     async fn count_rows(&self) -> StoreResult<(u64, u64)>;
     /// Tests and M2 history.
     async fn query(&self, filter: EventQuery) -> StoreResult<Vec<Event>>;
+    /// One console listing page, newest first (ADR-0016).
+    async fn query_page(&self, q: EventsQuery, deadline: Deadline) -> StoreResult<Page<Event>>;
+    async fn status(&self, deadline: Deadline) -> StoreResult<StoreStatus>;
 }

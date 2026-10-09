@@ -1,0 +1,38 @@
+//! `/users` and `/v1/users` handlers (W1-B). W0 ships stubs that answer
+//! `501 not_implemented`, so the router compiles before W1-B lands.
+
+use std::sync::Arc;
+
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+
+use super::AdminState;
+
+fn not_implemented() -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        [("content-type", "application/json")],
+        r#"{"error":"not_implemented"}"#,
+    )
+        .into_response()
+}
+
+macro_rules! stubs {
+    ($($name:ident),+ $(,)?) => {
+        $(pub async fn $name(State(_): State<Arc<AdminState>>) -> Response { not_implemented() })+
+    };
+}
+
+stubs!(
+    list_page,
+    list_api,
+    detail_page,
+    detail_api,
+    disable_page,
+    disable_api,
+    enable_page,
+    enable_api,
+    terminate_sessions_page,
+    terminate_sessions_api,
+);

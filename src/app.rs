@@ -12,7 +12,7 @@
 //!   the RNG, the [`Emitter`], the configuration snapshot, the caller keys,
 //!   the provider registry and the readiness flag.
 //!
-//! Startup order (scenario 013-5): lock → backup → store opened and migrated
+//! Startup order (scenario 013-5, 305-9): lock → read-only precheck → backup → store opened and migrated
 //! → provider import and configuration mirror (with the `config.loaded`
 //! event) → listeners bound, the gateway listener last → ready.
 
@@ -247,6 +247,25 @@ impl Services {
     }
 }
 
+impl Services {
+    /// The admin listener's state, when `admin.public_url` is set.
+    pub fn admin_state(&self) -> Option<Arc<crate::admin::AdminState>> {
+        let cfg = crate::admin::AdminConfig::from_config(&self.config)?;
+        Some(Arc::new(crate::admin::AdminState {
+            cfg,
+            directory: self.directory(),
+            sessions: self.sessions(),
+            events: self.events(),
+            emitter: Some(self.emitter.clone()),
+            clock: self.clock.clone(),
+            rng: self.rng.clone(),
+            in_flight: Arc::new(tokio::sync::Semaphore::new(
+                self.config.limits.admin_max_concurrent as usize,
+            )),
+        }))
+    }
+}
+
 /// The provider registry's reporter: a provider-side failure becomes a
 /// `provider.error` diagnostic event (reason codes only, never bodies).
 fn provider_reporter(emitter: Emitter) -> Reporter {
@@ -273,6 +292,8 @@ fn provider_reporter(emitter: Emitter) -> Reporter {
 pub struct Routers {
     pub portal: Router,
     pub gateway: Router,
+    /// Only when `admin.public_url` is set.
+    pub admin: Option<Router>,
 }
 
 /// Assemble both routers from `services`. The portal and the gateway share the
@@ -303,6 +324,7 @@ pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
     Ok(Routers {
         portal: http::portal::router(portal_state),
         gateway: http::gateway_router(gateway_state),
+        admin: services.admin_state().map(http::admin::router),
     })
 }
 
@@ -372,6 +394,8 @@ struct EventWiring {
 pub struct Bound {
     portal: TcpListener,
     gateway: TcpListener,
+    /// The admin listener, bound after the portal and before the gateway.
+    admin: Option<(TcpListener, SocketAddr)>,
     portal_addr: SocketAddr,
     gateway_addr: SocketAddr,
     services: Services,
@@ -424,7 +448,21 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     // 1. One instance per store.
     let instance_lock = lock::acquire(&cfg.state_dir)?;
 
-    // 2. A copy of an older database before it is migrated.
+    // 2. The database is validated read-only BEFORE anything is written: a
+    //    refused database (pre-release schema, missing structures, a newer
+    //    version) is left byte for byte as it is, with no backup and no
+    //    migration (scenario 305-9). Then a copy of an older database is
+    //    written before it is migrated.
+    {
+        let p = store_path.clone();
+        let version = tokio::task::spawn_blocking(move || crate::store::precheck(&p))
+            .await
+            .context("precheck task")?
+            .with_context(|| format!("checking store {}", store_path.display()))?;
+        if version > 0 {
+            tracing::info!("schema foundation validated (v{version})");
+        }
+    }
     {
         let p = store_path.clone();
         let made = tokio::task::spawn_blocking(move || {
@@ -586,14 +624,30 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         }
         _ => None,
     };
+    let admin = match cfg.admin_addr() {
+        Some(addr) => {
+            let l = TcpListener::bind(addr)
+                .await
+                .context("binding admin listener")?;
+            let a = l.local_addr()?;
+            Some((l, a))
+        }
+        None => None,
+    };
     let gateway = TcpListener::bind(cfg.gateway_addr())
         .await
         .context("binding gateway listener")?;
     let gateway_addr = gateway.local_addr()?;
-    tracing::info!("listeners bound: portal {portal_addr}, gateway {gateway_addr}");
+    match &admin {
+        Some((_, a)) => tracing::info!(
+            "listeners bound: portal {portal_addr}, gateway {gateway_addr}, admin {a}"
+        ),
+        None => tracing::info!("listeners bound: portal {portal_addr}, gateway {gateway_addr}"),
+    }
     Ok(Bound {
         portal,
         gateway,
+        admin,
         portal_addr,
         gateway_addr,
         services,
@@ -622,6 +676,11 @@ impl Bound {
 
     pub fn gateway_addr(&self) -> SocketAddr {
         self.gateway_addr
+    }
+
+    /// Address of the admin listener, when `admin.public_url` is set.
+    pub fn admin_addr(&self) -> Option<SocketAddr> {
+        self.admin.as_ref().map(|a| a.1)
     }
 
     /// Address of the test-hooks listener, when enabled (feature `test-hooks` and `HOPAE_TEST_HOOKS`).
@@ -748,6 +807,19 @@ impl Bound {
                 .into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(wait(stop_rx.clone()));
+        let admin = async {
+            match (self.admin, routers.admin) {
+                (Some((l, _)), Some(router)) => {
+                    axum::serve(
+                        l,
+                        router.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(wait(stop_rx.clone()))
+                    .await
+                }
+                _ => Ok(()),
+            }
+        };
         #[cfg(feature = "test-hooks")]
         let hooks = async {
             match self.hooks {
@@ -763,7 +835,7 @@ impl Bound {
         let hooks = async { Ok::<(), std::io::Error>(()) };
 
         self.services.readiness.set(true);
-        let servers = async { tokio::join!(portal, gateway, hooks) };
+        let servers = async { tokio::join!(portal, gateway, admin, hooks) };
         tokio::pin!(servers);
         // Serve until the stop signal, then give in-flight requests DRAIN to finish.
         let mut stopped = stop_rx.clone();
@@ -800,9 +872,10 @@ impl Bound {
         .await;
         tracing::info!("shutdown complete");
 
-        if let Some((p, g, h)) = served {
+        if let Some((p, g, a, h)) = served {
             p.context("portal listener")?;
             g.context("gateway listener")?;
+            a.context("admin listener")?;
             h.context("test hooks listener")?;
         }
         Ok(())

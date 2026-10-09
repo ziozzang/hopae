@@ -689,6 +689,7 @@ async fn create_txn(cx: &Cx<'_>, app: &AppPolicy, t: NewTxn<'_>) -> Result<Secre
         conflicting_handle_sha256: None,
         pending_identity: None,
         recovery_depth: t.recovery_depth,
+        reauth_max_age: None,
     };
     let admission = ctx
         .sessions

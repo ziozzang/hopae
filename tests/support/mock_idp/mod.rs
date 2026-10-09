@@ -25,7 +25,7 @@ use sha2::{Digest as _, Sha256};
 
 pub use super::server::RecordedRequest;
 use super::server::{Log, Served, record};
-use profiles::{Behavior, Profile};
+use profiles::{AuthTime, Behavior, Profile};
 
 /// Adapts the OS source to the `rand_core` 0.6 traits the `rsa` crate wants.
 struct KeygenRng;
@@ -127,6 +127,10 @@ pub struct AuthRequest {
     pub response_type: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    /// The OpenID Connect `max_age` parameter, as sent.
+    pub max_age: Option<String>,
+    /// The `prompt` parameter, as sent.
+    pub prompt: Option<String>,
 }
 
 struct CodeEntry {
@@ -135,6 +139,8 @@ struct CodeEntry {
     challenge: Option<String>,
     redirect_uri: Option<String>,
     used: bool,
+    /// When the code was issued (the provider's clock, seconds).
+    issued_at: i64,
 }
 
 struct Inner {
@@ -155,6 +161,8 @@ struct Inner {
     users: Mutex<HashMap<String, MockUser>>,
     next_sub: Mutex<String>,
     now_override_ms: Mutex<Option<i64>>,
+    /// A chosen `auth_time` claim value (any JSON), replacing the profile's.
+    auth_time_override: Mutex<Option<Value>>,
     log: Log,
 }
 
@@ -191,6 +199,7 @@ impl MockIdp {
             users: Mutex::new(HashMap::new()),
             next_sub: Mutex::new("sub-1".into()),
             now_override_ms: Mutex::new(None),
+            auth_time_override: Mutex::new(None),
             log: Arc::new(Mutex::new(Vec::new())),
         });
         let router = Router::new().fallback(handle).with_state(inner.clone());
@@ -225,6 +234,17 @@ impl MockIdp {
             .collect()
     }
 
+    /// Choose the `auth_time` claim the next ID tokens carry: any JSON value
+    /// (future-dated, a string, negative), or `None` for the profile's own.
+    pub fn set_auth_time(&self, v: Option<Value>) {
+        *self.inner.auth_time_override.lock().unwrap() = v;
+    }
+
+    /// The `/authorize` parameters the provider recorded, `max_age` and `prompt` included.
+    pub fn authorize_requests(&self) -> Vec<AuthRequest> {
+        self.authorizations()
+    }
+
     /// Parsed `/authorize` calls.
     pub fn authorizations(&self) -> Vec<AuthRequest> {
         self.inner.auths.lock().unwrap().clone()
@@ -252,6 +272,7 @@ impl MockIdp {
                 challenge: auth.as_ref().and_then(|a| a.code_challenge.clone()),
                 redirect_uri: auth.and_then(|a| a.redirect_uri),
                 used: false,
+                issued_at: now_secs(&self.inner),
             },
         );
         code
@@ -480,6 +501,8 @@ fn authorize(s: &Inner, beh: &Behavior, rec: &RecordedRequest) -> Response {
         response_type: q("response_type"),
         code_challenge: q("code_challenge"),
         code_challenge_method: q("code_challenge_method"),
+        max_age: q("max_age"),
+        prompt: q("prompt"),
     };
     s.auths.lock().unwrap().push(auth.clone());
     let Some(redirect_uri) = auth.redirect_uri.clone() else {
@@ -528,6 +551,7 @@ fn authorize(s: &Inner, beh: &Behavior, rec: &RecordedRequest) -> Response {
             challenge: auth.code_challenge.clone(),
             redirect_uri: Some(redirect_uri),
             used: false,
+            issued_at: now_secs(s),
         },
     );
     to.query_pairs_mut()
@@ -555,13 +579,19 @@ fn id_token(s: &Inner, beh: &Behavior, entry: &CodeEntry) -> String {
         "aud": if beh.wrong_aud { "some-other-client".to_string() } else { s.client_id.clone() },
         "exp": exp,
         "iat": exp - 300,
-        "auth_time": now,
         "email": u.email,
         "email_verified": beh.email_verified && u.email_verified,
         "name": u.name,
     });
     if beh.exp_offset_secs > 0 {
         claims["iat"] = json!(now);
+    }
+    // `auth_time`: a chosen value, else the profile's (the code issue time by default).
+    match (s.auth_time_override.lock().unwrap().clone(), beh.auth_time) {
+        (Some(v), _) => claims["auth_time"] = v,
+        (None, AuthTime::IssueTime) => claims["auth_time"] = json!(entry.issued_at),
+        (None, AuthTime::Stale(ago)) => claims["auth_time"] = json!(entry.issued_at - ago),
+        (None, AuthTime::Missing) => {}
     }
     if let Some(n) = &entry.nonce {
         claims["nonce"] = json!(if beh.wrong_nonce {

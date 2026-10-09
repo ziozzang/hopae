@@ -6,6 +6,7 @@ use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::Path;
 
+pub mod admin;
 pub mod client;
 pub mod echo;
 pub mod gateway;
@@ -14,6 +15,7 @@ pub mod mock_idp;
 pub mod process;
 pub mod server;
 
+pub use admin::{AdminClient, CliOutput};
 pub use client::{Client, RawReq, Req};
 pub use echo::Echo;
 pub use jar::{Jar, SameSite, SendContext, Site};

@@ -17,7 +17,8 @@ use crate::policy::types::{
     AppId, AppPolicy, AuthzChange, BindingPolicy, ConfigSnapshot, Host, IpBinding, Lifetimes,
     OnMismatch, ProviderConfig, SessionPolicy, StepUpRule, UaBinding,
 };
-use crate::provider::types::{ProviderId, ProviderKind};
+use crate::provider::presets;
+use crate::provider::types::{ProviderId, ProviderKind, ReauthCapability, ReauthPrompt};
 use crate::session::types::Aal;
 use crate::verify::types::VerifyLimits;
 
@@ -60,6 +61,9 @@ pub struct Config {
     pub limits: Limits,
     #[serde(default)]
     pub sessions: SessionsCfg,
+    /// The management console (ADR-0016); enabled by `admin.public_url`.
+    #[serde(default)]
+    pub admin: AdminCfg,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,6 +73,9 @@ pub struct Listen {
     pub portal: String,
     #[serde(default = "default_gateway_addr")]
     pub gateway: String,
+    /// Admin listener; `127.0.0.1:8702` when `admin.public_url` is set.
+    #[serde(default)]
+    pub admin: Option<String>,
 }
 
 impl Default for Listen {
@@ -76,8 +83,90 @@ impl Default for Listen {
         Self {
             portal: default_portal_addr(),
             gateway: default_gateway_addr(),
+            admin: None,
         }
     }
+}
+
+fn default_admin_addr() -> String {
+    "127.0.0.1:8702".into()
+}
+
+/// What the admin listener does with a TCP peer outside `trusted_proxies`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UntrustedPeers {
+    /// `403 untrusted_peer` before any header is read.
+    #[default]
+    Refuse,
+    /// Treat the peer as the client, as the portal does.
+    AsClient,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminRoleCfg {
+    Admin,
+    Viewer,
+}
+
+/// `admin` (ADR-0016): the console's address, policy and seeded grants.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminCfg {
+    /// Externally visible origin of the console; enables the listener.
+    #[serde(default)]
+    pub public_url: Option<String>,
+    #[serde(default)]
+    pub session: Option<AppSessionCfg>,
+    #[serde(default)]
+    pub binding: Option<BindingCfg>,
+    #[serde(default)]
+    pub max_auth_age: Option<ConfigDuration>,
+    #[serde(default)]
+    pub require_aal: Option<u8>,
+    #[serde(default)]
+    pub untrusted_peers: Option<UntrustedPeers>,
+    #[serde(default)]
+    pub query_budget_ms: Option<u64>,
+    #[serde(default)]
+    pub users: Vec<AdminUserEntry>,
+}
+
+/// One seeded grant: at least one of `user_id` and `email`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminUserEntry {
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    /// `admin` when absent.
+    #[serde(default)]
+    pub role: Option<AdminRoleCfg>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// The console's numbers, with defaults applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdminLimits {
+    pub max_auth_age: Duration,
+    pub require_aal: Aal,
+    pub untrusted_peers: UntrustedPeers,
+    pub query_budget: Duration,
+}
+
+const ADMIN_MAX_AUTH_AGE_DEFAULT: Duration = Duration::from_secs(12 * 3600);
+
+/// A user id as the console and the commands accept it: `u_` and up to 62
+/// letters, digits, `_` or `-`.
+pub fn valid_user_id(s: &str) -> bool {
+    s.len() >= 3
+        && s.len() <= 64
+        && s.starts_with("u_")
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 fn default_portal_addr() -> String {
@@ -530,6 +619,8 @@ pub struct Limits {
     pub gateway_max_concurrent: u32,
     #[serde(default = "d_portal_max")]
     pub portal_max_concurrent: u32,
+    #[serde(default = "d_admin_max")]
+    pub admin_max_concurrent: u32,
 }
 
 impl Default for Limits {
@@ -537,8 +628,13 @@ impl Default for Limits {
         Self {
             gateway_max_concurrent: d_gw_max(),
             portal_max_concurrent: d_portal_max(),
+            admin_max_concurrent: d_admin_max(),
         }
     }
+}
+
+fn d_admin_max() -> u32 {
+    16
 }
 
 fn d_gw_max() -> u32 {
@@ -652,11 +748,27 @@ impl Config {
         if gateway.is_err() {
             errs.push("listen.gateway must be a socket address such as 127.0.0.1:8701".to_string());
         }
-        if let (Ok(p), Ok(g)) = (portal, gateway)
+        let (portal, gateway) = (portal.ok(), gateway.ok());
+        if let (Some(p), Some(g)) = (portal, gateway)
             && p == g
             && p.port() != 0
         {
             errs.push("listen.portal and listen.gateway must differ".to_string());
+        }
+        if let Some(a) = &self.listen.admin {
+            match a.parse::<SocketAddr>() {
+                Err(_) => errs.push(
+                    "listen.admin must be a socket address such as 127.0.0.1:8702".to_string(),
+                ),
+                Ok(a) if a.port() != 0 => {
+                    for (name, other) in [("listen.portal", portal), ("listen.gateway", gateway)] {
+                        if other == Some(a) {
+                            errs.push(format!("listen.admin and {name} must differ"));
+                        }
+                    }
+                }
+                Ok(_) => {}
+            }
         }
         if self.state_dir.as_os_str().is_empty() {
             errs.push("state_dir must not be empty".to_string());
@@ -675,6 +787,7 @@ impl Config {
         }
         self.validate_cookie(&mut errs);
         self.validate_apps(&mut errs);
+        self.validate_admin(&mut errs);
         self.validate_providers(&mut errs);
         self.validate_bounds(&mut errs);
         if errs.is_empty() {
@@ -823,6 +936,90 @@ impl Config {
         }
     }
 
+    fn validate_admin(&self, errs: &mut Vec<String>) {
+        let a = &self.admin;
+        for (i, app) in self.apps.iter().enumerate() {
+            if app.app_id == "admin" {
+                errs.push(format!(
+                    "apps[{i}].app_id \"admin\" is reserved for the management console"
+                ));
+            }
+        }
+        if let Some(u) = &a.public_url {
+            match check_admin_origin(u, self.cookie.secure) {
+                Err(e) => errs.push(format!("admin.public_url {e}")),
+                Ok(host) => {
+                    for (i, app) in self.apps.iter().enumerate() {
+                        for (j, h) in app.hosts.iter().enumerate() {
+                            if h.eq_ignore_ascii_case(host.as_str()) {
+                                errs.push(format!(
+                                    "apps[{i}].hosts[{j}]: {host} is the console host, which is registered implicitly"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if a.public_url.is_none() {
+            // Settings that only apply to a console that exists are an error
+            // only when they are wrong; a configuration without a console may carry them.
+        }
+        if a.session
+            .as_ref()
+            .and_then(|s| s.idle)
+            .is_some_and(|d| d.0 < Duration::from_secs(60))
+        {
+            errs.push("admin.session.idle must be at least 60s".to_string());
+        }
+        if let Some(b) = &a.binding {
+            for (name, v) in [
+                ("ip_prefix_v4", b.ip_prefix_v4.map(|v| (v, 32))),
+                ("ip_prefix_v6", b.ip_prefix_v6.map(|v| (v, 128))),
+            ] {
+                if let Some((v, max)) = v
+                    && !(1..=max).contains(&v)
+                {
+                    errs.push(format!("admin.binding.{name} must be between 1 and {max}"));
+                }
+            }
+        }
+        if let Some(n) = a.max_auth_age
+            && n.0 < crate::policy::freshness::MIN_MAX_AUTH_AGE
+        {
+            errs.push("admin.max_auth_age must be at least 30m".to_string());
+        }
+        if let Some(n) = a.require_aal
+            && !(1..=2).contains(&n)
+        {
+            errs.push("admin.require_aal must be 1 or 2".to_string());
+        }
+        if let Some(ms) = a.query_budget_ms
+            && !(100..=30_000).contains(&ms)
+        {
+            errs.push("admin.query_budget_ms must be between 100 and 30000".to_string());
+        }
+        for (i, e) in a.users.iter().enumerate() {
+            let at = format!("admin.users[{i}]");
+            if e.user_id.is_none() && e.email.is_none() {
+                errs.push(format!("{at} needs a user_id or an email"));
+            }
+            if let Some(id) = &e.user_id
+                && !valid_user_id(id)
+            {
+                errs.push(format!("{at}.user_id is not a well-formed user id"));
+            }
+            if let Some(m) = &e.email
+                && crate::identity::types::NormalizedEmail::parse(m).is_err()
+            {
+                errs.push(format!("{at}.email is not a valid address"));
+            }
+            if e.note.as_ref().is_some_and(|n| n.chars().count() > 256) {
+                errs.push(format!("{at}.note must be at most 256 characters"));
+            }
+        }
+    }
+
     fn validate_providers(&self, errs: &mut Vec<String>) {
         let mut ids = HashSet::new();
         for (i, p) in self.providers.iter().enumerate() {
@@ -892,7 +1089,7 @@ impl Config {
     }
 
     fn validate_bounds(&self, errs: &mut Vec<String>) {
-        let positive: [(&str, u64); 11] = [
+        let positive: [(&str, u64); 12] = [
             ("txn.max_rows", u64::from(self.txn.max_rows)),
             (
                 "txn.per_ip_per_minute",
@@ -923,6 +1120,10 @@ impl Config {
             (
                 "limits.portal_max_concurrent",
                 u64::from(self.limits.portal_max_concurrent),
+            ),
+            (
+                "limits.admin_max_concurrent",
+                u64::from(self.limits.admin_max_concurrent),
             ),
             (
                 "sessions.retention_days",
@@ -969,6 +1170,99 @@ impl Config {
             .gateway
             .parse()
             .expect("validated listen.gateway")
+    }
+
+    /// The console listener exists: `admin.public_url` is set.
+    pub fn admin_enabled(&self) -> bool {
+        self.admin.public_url.is_some()
+    }
+
+    /// Parsed admin listen address (`127.0.0.1:8702` by default); `None` when
+    /// the console is not enabled. Only valid after `validate`.
+    pub fn admin_addr(&self) -> Option<SocketAddr> {
+        if !self.admin_enabled() {
+            return None;
+        }
+        self.listen
+            .admin
+            .clone()
+            .unwrap_or_else(default_admin_addr)
+            .parse()
+            .ok()
+    }
+
+    /// The tuple origin of `admin.public_url`.
+    pub fn admin_origin(&self) -> Option<url::Origin> {
+        let u = url::Url::parse(self.admin.public_url.as_deref()?).ok()?;
+        Some(u.origin())
+    }
+
+    /// The console host and the port browsers use for it.
+    pub fn admin_host(&self) -> Option<(Host, u16)> {
+        let u = url::Url::parse(self.admin.public_url.as_deref()?).ok()?;
+        let host = Host::parse(u.host_str()?).ok()?;
+        Some((host, u.port_or_known_default()?))
+    }
+
+    /// The console's numbers with defaults applied.
+    pub fn admin_limits(&self) -> Option<AdminLimits> {
+        if !self.admin_enabled() {
+            return None;
+        }
+        let a = &self.admin;
+        Some(AdminLimits {
+            max_auth_age: a.max_auth_age.map_or(ADMIN_MAX_AUTH_AGE_DEFAULT, |d| d.0),
+            require_aal: a
+                .require_aal
+                .and_then(|n| Aal::from_i64(i64::from(n)))
+                .unwrap_or(Aal::One),
+            untrusted_peers: a.untrusted_peers.unwrap_or_default(),
+            query_budget: Duration::from_millis(a.query_budget_ms.unwrap_or(2000)),
+        })
+    }
+
+    /// The seeded grants of `admin.users[]`.
+    pub fn admin_user_entries(&self) -> &[AdminUserEntry] {
+        &self.admin.users
+    }
+
+    /// The implicit application `admin` (ADR-0016): the console host with its
+    /// own lifetimes, binding and freshness bound. `None` without a console.
+    pub fn admin_policy(&self) -> Option<AppPolicy> {
+        let (host, port) = self.admin_host()?;
+        let limits = self.admin_limits()?;
+        let session = self.admin.session.clone().unwrap_or_default();
+        let base = AppPolicy::default_app();
+        let binding_cfg = self.admin.binding.clone().unwrap_or_default();
+        let secure = self.cookie.secure;
+        let _ = secure;
+        Some(AppPolicy {
+            app_id: AppId::new("admin"),
+            display_name: "admin".into(),
+            hosts: vec![host],
+            ports: vec![port],
+            enabled: true,
+            session: Lifetimes {
+                idle: session.idle.map_or(Duration::from_secs(30 * 60), |d| d.0),
+                absolute: session
+                    .absolute
+                    .map_or(Duration::from_secs(12 * 3600), |d| d.0),
+            },
+            binding: resolve_binding(&binding_cfg, &base.binding),
+            on_authz_change: AuthzChange::Terminate,
+            verify_cache_seconds: 0,
+            logout_confirm: true,
+            step_up: if limits.require_aal == Aal::Two {
+                vec![StepUpRule {
+                    path_prefix: Some("/".into()),
+                    aal: Aal::Two,
+                    max_age: None,
+                }]
+            } else {
+                Vec::new()
+            },
+            max_auth_age: Some(limits.max_auth_age),
+        })
     }
 
     /// Effective database path.
@@ -1057,6 +1351,12 @@ impl Config {
                 auto_link: p.auto_link,
                 trust_email: p.trust_email,
                 sort_order: i32::try_from(i).unwrap_or(i32::MAX),
+                // The preset's capability, else `max_age`; a stored setting
+                // overrides both where the provider is built from its row.
+                reauth: presets::by_name(&p.provider_id)
+                    .or_else(|| p.issuer.as_deref().and_then(presets::by_issuer))
+                    .map_or(ReauthCapability::MaxAge, |preset| preset.reauth),
+                reauth_prompt: ReauthPrompt::Login,
             })
             .collect()
     }
@@ -1067,12 +1367,14 @@ impl Config {
     pub fn snapshot(&self, generation: u64) -> ConfigSnapshot {
         let default_entry = self.apps.iter().find(|a| a.app_id == "default");
         let default_app = resolve_app(default_entry, &AppPolicy::default_app(), self, "default");
-        let apps = self
+        let mut apps: Vec<AppPolicy> = self
             .apps
             .iter()
             .filter(|a| a.app_id != "default")
             .map(|a| resolve_app(Some(a), &default_app, self, &a.app_id))
             .collect();
+        // The implicit console application sits beside the configured ones.
+        apps.extend(self.admin_policy());
         ConfigSnapshot {
             generation,
             apps,
@@ -1099,6 +1401,26 @@ impl Config {
             if self.gateway.caller_key_env.is_some() {
                 w.push("a non-loopback listen.gateway relies on the caller key alone".to_string());
             }
+        }
+        if let Some(a) = self.admin_addr()
+            && !a.ip().is_loopback()
+        {
+            w.push(
+                "listen.admin is not a loopback address: it must not be publicly reachable"
+                    .to_string(),
+            );
+        }
+        if self.listen.admin.is_some() && !self.admin_enabled() {
+            w.push(
+                "listen.admin is set but admin.public_url is not: the admin listener is not bound"
+                    .to_string(),
+            );
+        }
+        if self.admin_enabled() && self.admin.require_aal == Some(2) {
+            w.push(
+                "admin.require_aal: no second factor exists yet; every console request will be refused"
+                    .to_string(),
+            );
         }
         for (i, a) in self.apps.iter().enumerate() {
             if a.logout_confirm == Some(false) {
@@ -1140,21 +1462,6 @@ fn resolve_app(entry: Option<&AppEntry>, base: &AppPolicy, cfg: &Config, id: &st
         };
     };
     let binding_cfg = a.binding.clone().unwrap_or_default();
-    let ip = match binding_cfg.ip {
-        None => base.binding.ip,
-        Some(IpMode::Strict) => IpBinding::Strict,
-        Some(IpMode::Off) => IpBinding::Off,
-        Some(IpMode::Prefix) => {
-            let (b4, b6) = match base.binding.ip {
-                IpBinding::Prefix { v4, v6 } => (v4, v6),
-                _ => (24, 64),
-            };
-            IpBinding::Prefix {
-                v4: binding_cfg.ip_prefix_v4.unwrap_or(b4),
-                v6: binding_cfg.ip_prefix_v6.unwrap_or(b6),
-            }
-        }
-    };
     let session = a.session.clone().unwrap_or_default();
     AppPolicy {
         app_id: AppId::new(id),
@@ -1166,19 +1473,7 @@ fn resolve_app(entry: Option<&AppEntry>, base: &AppPolicy, cfg: &Config, id: &st
             idle: session.idle.map_or(base.session.idle, |d| d.0),
             absolute: session.absolute.map_or(base.session.absolute, |d| d.0),
         },
-        binding: BindingPolicy {
-            ip,
-            ua: match binding_cfg.ua {
-                None => base.binding.ua,
-                Some(UaMode::Strict) => UaBinding::Strict,
-                Some(UaMode::Off) => UaBinding::Off,
-            },
-            on_mismatch: match binding_cfg.on_mismatch {
-                None => base.binding.on_mismatch,
-                Some(OnMismatchCfg::TerminateSession) => OnMismatch::TerminateSession,
-                Some(OnMismatchCfg::DropHandle) => OnMismatch::DropHandle,
-            },
-        },
+        binding: resolve_binding(&binding_cfg, &base.binding),
         on_authz_change: match a.on_authz_change {
             None => base.on_authz_change,
             Some(AuthzChangeCfg::Refresh) => AuthzChange::Refresh,
@@ -1197,7 +1492,65 @@ fn resolve_app(entry: Option<&AppEntry>, base: &AppPolicy, cfg: &Config, id: &st
                 })
             })
             .collect(),
+        max_auth_age: None,
     }
+}
+
+/// A binding section over its base policy (apps and the console share it).
+fn resolve_binding(cfg: &BindingCfg, base: &BindingPolicy) -> BindingPolicy {
+    let ip = match cfg.ip {
+        None => base.ip,
+        Some(IpMode::Strict) => IpBinding::Strict,
+        Some(IpMode::Off) => IpBinding::Off,
+        Some(IpMode::Prefix) => {
+            let (b4, b6) = match base.ip {
+                IpBinding::Prefix { v4, v6 } => (v4, v6),
+                _ => (24, 64),
+            };
+            IpBinding::Prefix {
+                v4: cfg.ip_prefix_v4.unwrap_or(b4),
+                v6: cfg.ip_prefix_v6.unwrap_or(b6),
+            }
+        }
+    };
+    BindingPolicy {
+        ip,
+        ua: match cfg.ua {
+            None => base.ua,
+            Some(UaMode::Strict) => UaBinding::Strict,
+            Some(UaMode::Off) => UaBinding::Off,
+        },
+        on_mismatch: match cfg.on_mismatch {
+            None => base.on_mismatch,
+            Some(OnMismatchCfg::TerminateSession) => OnMismatch::TerminateSession,
+            Some(OnMismatchCfg::DropHandle) => OnMismatch::DropHandle,
+        },
+    }
+}
+
+/// `admin.public_url`: a tuple origin (no path, query, fragment or userinfo),
+/// `https://`, or `http://` only with `cookie.secure = false`. Returns the host.
+fn check_admin_origin(u: &str, secure: bool) -> Result<Host, String> {
+    let url = url::Url::parse(u).map_err(|_| "must be an absolute URL".to_string())?;
+    match (url.scheme(), secure) {
+        ("https", _) => {}
+        ("http", false) => {}
+        ("http", true) => {
+            return Err("must use https:// (http:// only with cookie.secure set to false)".into());
+        }
+        _ => return Err("must start with https://".into()),
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("must not contain credentials".into());
+    }
+    if url.query().is_some() || url.fragment().is_some() || !matches!(url.path(), "" | "/") {
+        return Err("must be an origin without path, query or fragment".into());
+    }
+    let host = match url.host() {
+        Some(url::Host::Domain(d)) => d.to_string(),
+        _ => return Err("must name a host (not an IP address)".into()),
+    };
+    Host::parse(&host).map_err(|_| "must name a lower-case host".to_string())
 }
 
 fn check_public_url(u: &str) -> Result<(), &'static str> {
@@ -1485,6 +1838,349 @@ mod tests {
         assert!(problems[0].contains("B") && !problems[0].contains("value-a"));
         let w = env_warnings(&c, env);
         assert_eq!(w, ["provider mock disabled: S unset"]);
+    }
+
+    // ---- the management console (ADR-0016) -------------------------------
+
+    const ADMIN: &str = r#"{"admin": {"public_url": "https://hopae-admin.example.test"}}"#;
+
+    fn admin_with(extra: &str) -> Result<Config, ConfigError> {
+        let mut v: serde_json::Value = serde_json::from_str(ADMIN).unwrap();
+        let add: serde_json::Value = serde_json::from_str(extra).unwrap();
+        for (k, val) in add.as_object().unwrap() {
+            if k == "admin" {
+                for (k2, v2) in val.as_object().unwrap() {
+                    v["admin"][k2] = v2.clone();
+                }
+            } else {
+                v[k] = val.clone();
+            }
+        }
+        with(&v.to_string())
+    }
+
+    fn admin_invalid(extra: &str) -> String {
+        match admin_with(extra) {
+            Err(ConfigError::Invalid(e)) => e.join("; "),
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected an error for {extra}"),
+        }
+    }
+
+    #[test]
+    fn without_admin_public_url_there_is_no_console_and_nothing_changes() {
+        let c = parse(BASE).unwrap();
+        assert!(!c.admin_enabled());
+        assert!(c.admin_addr().is_none() && c.admin_origin().is_none());
+        assert!(c.admin_policy().is_none() && c.admin_limits().is_none());
+        assert!(c.admin_user_entries().is_empty());
+        assert_eq!(c.limits.admin_max_concurrent, 16);
+        assert!(c.snapshot(1).apps.is_empty(), "no implicit application");
+    }
+
+    #[test]
+    fn the_console_defaults_and_the_implicit_application() {
+        let c = admin_with("{}").unwrap();
+        assert!(c.admin_enabled());
+        assert_eq!(c.admin_addr(), Some("127.0.0.1:8702".parse().unwrap()));
+        assert_eq!(
+            c.admin_origin(),
+            Some(
+                url::Url::parse("https://hopae-admin.example.test")
+                    .unwrap()
+                    .origin()
+            )
+        );
+        let l = c.admin_limits().unwrap();
+        assert_eq!(l.max_auth_age, Duration::from_secs(12 * 3600));
+        assert_eq!(
+            (l.require_aal, l.untrusted_peers),
+            (Aal::One, UntrustedPeers::Refuse)
+        );
+        assert_eq!(l.query_budget, Duration::from_millis(2000));
+        let p = c.admin_policy().unwrap();
+        assert_eq!(p.app_id.as_str(), "admin");
+        assert_eq!(
+            p.hosts,
+            vec![Host::parse("hopae-admin.example.test").unwrap()]
+        );
+        assert_eq!(p.ports, vec![443]);
+        assert_eq!(p.session.idle, Duration::from_secs(30 * 60));
+        assert_eq!(p.session.absolute, Duration::from_secs(12 * 3600));
+        assert_eq!(p.binding, BindingPolicy::default());
+        assert_eq!(p.on_authz_change, AuthzChange::Terminate);
+        assert_eq!(p.verify_cache_seconds, 0);
+        assert!(p.logout_confirm && p.step_up.is_empty());
+        assert_eq!(p.max_auth_age, Some(Duration::from_secs(12 * 3600)));
+        // The snapshot appends it beside the configured applications.
+        let snap = c.snapshot(3);
+        assert_eq!(snap.apps.len(), 1);
+        let console = snap
+            .app_for_host(&Host::parse("hopae-admin.example.test").unwrap())
+            .unwrap();
+        assert_eq!(console.app_id.as_str(), "admin");
+        assert_eq!(console.max_auth_age, Some(Duration::from_secs(12 * 3600)));
+        assert!(snap.return_origin_allowed(&Host::parse("hopae-admin.example.test").unwrap(), 443));
+        // Configured applications never carry a freshness bound (not a key).
+        let with_app =
+            admin_with(r#"{"apps": [{"app_id": "a", "hosts": ["a.example.test"]}]}"#).unwrap();
+        let snap = with_app.snapshot(1);
+        assert_eq!(snap.apps.len(), 2);
+        assert!(
+            snap.apps
+                .iter()
+                .filter(|a| a.app_id.as_str() != "admin")
+                .all(|a| a.max_auth_age.is_none())
+        );
+    }
+
+    #[test]
+    fn console_settings_override_the_defaults() {
+        let c = admin_with(
+            r#"{"listen": {"admin": "127.0.0.1:9999"},
+                "admin": {"session": {"idle": "10m", "absolute": "2h"}, "binding": {"ip": "prefix", "ua": "strict", "on_mismatch": "drop_handle"},
+                          "max_auth_age": "45m", "untrusted_peers": "as_client", "query_budget_ms": 750,
+                          "public_url": "https://hopae-admin.example.test:8443"}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.admin_addr(), Some("127.0.0.1:9999".parse().unwrap()));
+        let p = c.admin_policy().unwrap();
+        assert_eq!(p.ports, vec![8443]);
+        assert_eq!(
+            (p.session.idle, p.session.absolute),
+            (Duration::from_secs(600), Duration::from_secs(7200))
+        );
+        assert_eq!(p.binding.ip, IpBinding::Prefix { v4: 24, v6: 64 });
+        assert_eq!(
+            (p.binding.ua, p.binding.on_mismatch),
+            (UaBinding::Strict, OnMismatch::DropHandle)
+        );
+        let l = c.admin_limits().unwrap();
+        assert_eq!(l.max_auth_age, Duration::from_secs(45 * 60));
+        assert_eq!(l.untrusted_peers, UntrustedPeers::AsClient);
+        assert_eq!(l.query_budget, Duration::from_millis(750));
+    }
+
+    #[test]
+    fn require_aal_2_adds_the_step_up_rule_and_warns() {
+        let c = admin_with(r#"{"admin": {"require_aal": 2}}"#).unwrap();
+        let p = c.admin_policy().unwrap();
+        assert_eq!(
+            p.step_up,
+            vec![StepUpRule {
+                path_prefix: Some("/".into()),
+                aal: Aal::Two,
+                max_age: None
+            }]
+        );
+        assert!(c.warnings().iter().any(|w| w == "admin.require_aal: no second factor exists yet; every console request will be refused"), "{:?}", c.warnings());
+        assert!(
+            admin_with("{}")
+                .unwrap()
+                .warnings()
+                .iter()
+                .all(|w| !w.contains("require_aal"))
+        );
+    }
+
+    #[test]
+    fn console_validation_names_the_key_path() {
+        assert!(
+            admin_invalid(
+                r#"{"admin": {"public_url": "https://hopae-admin.example.test/console"}}"#
+            )
+            .contains("admin.public_url")
+        );
+        for bad in [
+            "https://hopae-admin.example.test/?q=1",
+            "https://hopae-admin.example.test/#f",
+            "https://user@hopae-admin.example.test",
+            "ftp://hopae-admin.example.test",
+            "hopae-admin.example.test",
+            "https://127.0.0.1",
+            "https://Hopae-Admin.example.test.:",
+        ] {
+            if bad == "https://Hopae-Admin.example.test.:" {
+                continue;
+            }
+            assert!(
+                admin_invalid(&format!(r#"{{"admin": {{"public_url": "{bad}"}}}}"#))
+                    .contains("admin.public_url"),
+                "{bad}"
+            );
+        }
+        // http:// only with cookie.secure = false.
+        assert!(
+            admin_invalid(r#"{"admin": {"public_url": "http://hopae-admin.example.test"}}"#)
+                .contains("https://")
+        );
+        assert!(admin_with(r#"{"cookie": {"secure": false, "name": "hopae"}, "admin": {"public_url": "http://hopae-admin.example.test"}}"#).is_ok());
+        let e = admin_invalid(r#"{"apps": [{"app_id": "admin", "hosts": ["x.example.test"]}]}"#);
+        assert!(
+            e.contains("apps[0].app_id") && e.contains("reserved"),
+            "{e}"
+        );
+        let e = admin_invalid(
+            r#"{"apps": [{"app_id": "a", "hosts": ["x.example.test", "hopae-admin.example.test"]}]}"#,
+        );
+        assert!(
+            e.contains("apps[0].hosts[1]") && e.contains("registered implicitly"),
+            "{e}"
+        );
+        assert!(admin_invalid(r#"{"listen": {"portal": "127.0.0.1:8700", "gateway": "127.0.0.1:8701", "admin": "127.0.0.1:8701"}}"#).contains("listen.admin and listen.gateway must differ"));
+        assert!(admin_invalid(r#"{"listen": {"portal": "127.0.0.1:8700", "gateway": "127.0.0.1:8701", "admin": "127.0.0.1:8700"}}"#).contains("listen.admin and listen.portal must differ"));
+        assert!(
+            admin_invalid(r#"{"listen": {"admin": "nowhere"}}"#)
+                .contains("listen.admin must be a socket address")
+        );
+        assert!(
+            admin_invalid(r#"{"admin": {"session": {"idle": "59s"}}}"#)
+                .contains("admin.session.idle must be at least 60s")
+        );
+        assert!(admin_invalid(r#"{"admin": {"require_aal": 3}}"#).contains("admin.require_aal"));
+        assert!(admin_invalid(r#"{"admin": {"require_aal": 0}}"#).contains("admin.require_aal"));
+        assert!(
+            admin_invalid(r#"{"admin": {"query_budget_ms": 99}}"#)
+                .contains("admin.query_budget_ms")
+        );
+        assert!(
+            admin_invalid(r#"{"admin": {"query_budget_ms": 30001}}"#)
+                .contains("admin.query_budget_ms")
+        );
+        assert!(
+            admin_with(r#"{"admin": {"query_budget_ms": 100}}"#).is_ok()
+                && admin_with(r#"{"admin": {"query_budget_ms": 30000}}"#).is_ok()
+        );
+        assert!(
+            admin_invalid(r#"{"admin": {"untrusted_peers": "sometimes"}}"#).contains("sometimes")
+        );
+        assert!(
+            admin_invalid(r#"{"limits": {"admin_max_concurrent": 0}}"#)
+                .contains("limits.admin_max_concurrent")
+        );
+        assert!(
+            admin_invalid(r#"{"admin": {"binding": {"ip_prefix_v4": 33}}}"#)
+                .contains("admin.binding.ip_prefix_v4")
+        );
+        assert!(admin_invalid(r#"{"admin": {"bogus": 1}}"#).contains("admin.bogus"));
+    }
+
+    #[test]
+    fn the_freshness_bound_has_a_floor_of_thirty_minutes() {
+        for bad in ["60s", "29m", "1799s"] {
+            let e = admin_invalid(&format!(r#"{{"admin": {{"max_auth_age": "{bad}"}}}}"#));
+            assert!(
+                e.contains("admin.max_auth_age must be at least 30m"),
+                "{bad}: {e}"
+            );
+        }
+        for ok in ["30m", "1801s", "12h", "7d"] {
+            assert!(
+                admin_with(&format!(r#"{{"admin": {{"max_auth_age": "{ok}"}}}}"#)).is_ok(),
+                "{ok}"
+            );
+        }
+    }
+
+    #[test]
+    fn seeded_grants_are_validated_entry_by_entry() {
+        let e = admin_invalid(r#"{"admin": {"users": [{"role": "admin"}]}}"#);
+        assert!(
+            e.contains("admin.users[0] needs a user_id or an email"),
+            "{e}"
+        );
+        let e = admin_invalid(r#"{"admin": {"users": [{"user_id": "u_a; DROP"}]}}"#);
+        assert!(e.contains("admin.users[0].user_id"), "{e}");
+        let e = admin_invalid(r#"{"admin": {"users": [{"email": "a@b@c"}]}}"#);
+        assert!(e.contains("admin.users[0].email"), "{e}");
+        let long = "x".repeat(257);
+        let e = admin_invalid(&format!(
+            r#"{{"admin": {{"users": [{{"user_id": "u_a", "note": "{long}"}}]}}}}"#
+        ));
+        assert!(e.contains("admin.users[0].note"), "{e}");
+        let e = admin_invalid(r#"{"admin": {"users": [{"user_id": "u_a", "role": "root"}]}}"#);
+        assert!(e.contains("root"), "{e}");
+        let ok = admin_with(
+            r#"{"admin": {"users": [{"user_id": "u_a", "role": "admin", "note": "seed"}, {"email": "V@Example.test", "role": "viewer"}, {"email": "n@example.test", "user_id": "u_n"}]}}"#,
+        )
+        .unwrap();
+        let entries = ok.admin_user_entries();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].role, Some(AdminRoleCfg::Admin));
+        assert_eq!(entries[1].role, Some(AdminRoleCfg::Viewer));
+        assert_eq!(
+            entries[2].role, None,
+            "role defaults to admin where the grant is made"
+        );
+        assert!(valid_user_id("u_a") && valid_user_id("u_01HZZZZZZZZZZZZZZZZZZZZZZZ"));
+        for bad in ["", "u_", "x_abc", "u_a b", "u_a;", "u_é"] {
+            assert!(!valid_user_id(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn providers_carry_their_resolved_reauth_capability() {
+        let c = with(
+            r#"{"providers": [
+                 {"provider_id": "google", "kind": "oidc", "client_id": "c"},
+                 {"provider_id": "corp", "kind": "oidc", "client_id": "c", "issuer": "https://accounts.google.com"},
+                 {"provider_id": "other", "kind": "oidc", "client_id": "c", "issuer": "https://idp.example.test"}]}"#,
+        )
+        .unwrap();
+        let caps: Vec<_> = c
+            .snapshot(1)
+            .providers
+            .iter()
+            .map(|p| (p.reauth, p.reauth_prompt))
+            .collect();
+        assert_eq!(
+            caps,
+            vec![
+                (ReauthCapability::Unsupported, ReauthPrompt::Login),
+                (ReauthCapability::Unsupported, ReauthPrompt::Login),
+                (ReauthCapability::MaxAge, ReauthPrompt::Login),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_admin_fixtures_are_accepted_or_rejected_as_documented() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/config");
+        let load = |name: &str| load(&dir.join(format!("{name}.json")));
+        let rejected = |name: &str, needle: &str| match load(name) {
+            Err(e) => assert!(e.to_string().contains(needle), "{name}: {e}"),
+            Ok(_) => panic!("{name} must be rejected"),
+        };
+        rejected("admin_reserved_app_id", "reserved");
+        rejected(
+            "admin_listener_clash",
+            "listen.admin and listen.gateway must differ",
+        );
+        rejected("admin_public_url_path", "admin.public_url");
+        rejected("admin_host_in_apps", "registered implicitly");
+        rejected("admin_untrusted_peers_bad", "sometimes");
+        rejected(
+            "admin_users_bad_entry",
+            "admin.users[0] needs a user_id or an email",
+        );
+        rejected(
+            "admin_max_auth_age_60s",
+            "admin.max_auth_age must be at least 30m",
+        );
+        rejected(
+            "admin_max_auth_age_29m",
+            "admin.max_auth_age must be at least 30m",
+        );
+        let c = load("admin_require_aal_2").unwrap();
+        assert!(
+            c.warnings()
+                .iter()
+                .any(|w| w.contains("no second factor exists yet"))
+        );
+        for name in ["../m4-admin", "../m4-admin-unsupported"] {
+            let c = load(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(c.admin_enabled(), "{name}");
+        }
     }
 
     #[test]

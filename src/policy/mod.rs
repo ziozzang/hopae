@@ -3,6 +3,7 @@
 
 pub mod apps;
 pub mod binding;
+pub mod freshness;
 pub mod step_up;
 pub mod types;
 

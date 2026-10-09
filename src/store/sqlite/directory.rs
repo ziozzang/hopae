@@ -8,7 +8,7 @@ use super::events::insert_events;
 use super::rows::{self, IDENTITY_COLS, PROVIDER_COLS, USER_COLS, cols};
 use super::{Store, commit};
 use crate::crypto::{Timestamp, random_id};
-use crate::event::types::Event;
+use crate::event::types::{Event, EventKind};
 use crate::identity::types::{NormalizedEmail, UserId};
 use crate::provider::types::ProviderId;
 use crate::store::types::*;
@@ -310,6 +310,111 @@ impl Directory for Store {
             u64::try_from(n).map_err(|_| StoreError::Corrupt("column meta.value".into()))
         })
         .await
+    }
+
+    async fn admin_grant(
+        &self,
+        user: &UserId,
+        deadline: Deadline,
+    ) -> StoreResult<Option<AdminGrant>> {
+        self.admin_grant_impl(user, deadline).await
+    }
+
+    async fn admin_grants(
+        &self,
+        include_revoked: bool,
+        deadline: Deadline,
+    ) -> StoreResult<Vec<AdminGrant>> {
+        self.admin_grants_impl(include_revoked, deadline).await
+    }
+
+    async fn resolve_grant_target(
+        &self,
+        target: &GrantTarget,
+        deadline: Deadline,
+    ) -> StoreResult<Option<(User, Vec<IdentityRow>)>> {
+        self.resolve_grant_target_impl(target, deadline).await
+    }
+
+    async fn grant_admin(
+        &self,
+        user: &UserId,
+        role: AdminRole,
+        managed_by: GrantManagedBy,
+        source_email: Option<NormalizedEmail>,
+        by: &str,
+        note: Option<String>,
+        at: Timestamp,
+        event: Event,
+    ) -> StoreResult<(Option<AdminRole>, bool)> {
+        self.grant_admin_impl(user, role, managed_by, source_email, by, note, at, event)
+            .await
+    }
+
+    async fn revoke_admin(
+        &self,
+        user: &UserId,
+        by: &str,
+        managed_by: GrantManagedBy,
+        at: Timestamp,
+        event: Event,
+    ) -> StoreResult<bool> {
+        self.revoke_admin_impl(user, by, managed_by, at, event)
+            .await
+    }
+
+    async fn import_grants(
+        &self,
+        entries: Vec<SeedEntry>,
+        force: Option<ForceTarget>,
+        deadline: Deadline,
+        at: Timestamp,
+        mk_event: &(
+             dyn for<'a> Fn(&'a UserId, EventKind, Option<AdminRole>, AdminRole, bool) -> Event
+                 + Sync
+         ),
+    ) -> StoreResult<GrantImportReport> {
+        let (ask, responder) = super::admin::asker();
+        let job = self.import_grants_job(entries, force, deadline, at, ask);
+        responder
+            .drive(job, &|(u, k, prev, role, forced)| {
+                mk_event(&u, k, prev, role, forced)
+            })
+            .await
+    }
+
+    async fn list_users(
+        &self,
+        q: UsersQuery,
+        deadline: Deadline,
+    ) -> StoreResult<Page<UserSummary>> {
+        self.list_users_impl(q, deadline).await
+    }
+
+    async fn user_detail(
+        &self,
+        user: &UserId,
+        now: Timestamp,
+        deadline: Deadline,
+    ) -> StoreResult<Option<UserDetail>> {
+        self.user_detail_impl(user, now, deadline).await
+    }
+
+    async fn set_user_status(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        user: &UserId,
+        status: UserStatus,
+        deadline: Deadline,
+        admin_event: Event,
+        mk_session_event: &(dyn for<'a> Fn(&'a SessionRow) -> Event + Sync),
+    ) -> StoreResult<(bool, u32)> {
+        let (ask, responder) = super::admin::asker();
+        let job = self.set_user_status_job(actor, policy, user, status, deadline, admin_event, ask);
+        responder
+            .drive(job, &|row: SessionRow| mk_session_event(&row))
+            .await
     }
 
     async fn config_generation(&self) -> StoreResult<u64> {

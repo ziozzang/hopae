@@ -156,6 +156,9 @@ pub struct AppPolicy {
     /// default) or ends a same-origin navigation's session at once (`false`).
     pub logout_confirm: bool,
     pub step_up: Vec<StepUpRule>,
+    /// Freshness bound of the session's `auth_time` (ADR-0016). Set only for
+    /// the implicit console application in M4-min; not a configuration key.
+    pub max_auth_age: Option<Duration>,
 }
 
 impl AppPolicy {
@@ -173,6 +176,7 @@ impl AppPolicy {
             verify_cache_seconds: 0,
             logout_confirm: true,
             step_up: Vec::new(),
+            max_auth_age: None,
         }
     }
 }
@@ -216,6 +220,10 @@ pub struct ProviderConfig {
     pub trust_email: bool,
     /// Position in the file; the chooser order.
     pub sort_order: i32,
+    /// Resolved reauthentication capability (the preset's, else `max_age`).
+    pub reauth: crate::provider::types::ReauthCapability,
+    /// Whether a reauthentication request also carries `prompt=login`.
+    pub reauth_prompt: crate::provider::types::ReauthPrompt,
 }
 
 /// Immutable snapshot of apps + providers + config generation; swapped with arc_swap on change.

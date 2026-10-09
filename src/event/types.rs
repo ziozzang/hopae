@@ -102,10 +102,18 @@ pub enum EventKind {
     TxnEvicted,
     EventsDropped,
     SinkBacklogOverflow, // diagnostic (batch writer)
+    /// Management console mutations and refusals (ADR-0016, required).
+    AdminGrant,
+    AdminRevoke,
+    AdminUserDisable,
+    AdminUserEnable,
+    AdminSessionTerminate,
+    AdminSessionsTerminate,
+    AdminDenied,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 18] = [
+    pub const ALL: [EventKind; 25] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -124,6 +132,13 @@ impl EventKind {
         EventKind::TxnEvicted,
         EventKind::EventsDropped,
         EventKind::SinkBacklogOverflow,
+        EventKind::AdminGrant,
+        EventKind::AdminRevoke,
+        EventKind::AdminUserDisable,
+        EventKind::AdminUserEnable,
+        EventKind::AdminSessionTerminate,
+        EventKind::AdminSessionsTerminate,
+        EventKind::AdminDenied,
     ];
 
     /// Required kinds travel in the transaction of the state change they
@@ -159,6 +174,13 @@ impl EventKind {
             EventKind::TxnEvicted => "txn.evicted",
             EventKind::EventsDropped => "events.dropped",
             EventKind::SinkBacklogOverflow => "sink.backlog_overflow",
+            EventKind::AdminGrant => "admin.grant",
+            EventKind::AdminRevoke => "admin.revoke",
+            EventKind::AdminUserDisable => "admin.user_disable",
+            EventKind::AdminUserEnable => "admin.user_enable",
+            EventKind::AdminSessionTerminate => "admin.session_terminate",
+            EventKind::AdminSessionsTerminate => "admin.sessions_terminate",
+            EventKind::AdminDenied => "admin.denied",
         }
     }
 
@@ -313,6 +335,24 @@ pub mod reasons {
         ID_TOKEN_MISSING = "id_token_missing",
         USERINFO_SUBJECT_MISMATCH = "userinfo_subject_mismatch",
         DISCOVERY_ISSUER_MISMATCH = "discovery_issuer_mismatch",
+        // Management console (ADR-0016)
+        NOT_ADMIN = "not_admin",
+        ROLE_INSUFFICIENT = "role_insufficient",
+        AUTH_TOO_OLD = "auth_too_old",
+        AAL_INSUFFICIENT = "aal_insufficient",
+        SELF_TARGET = "self_target",
+        ACTOR_REVOKED = "actor_revoked",
+        UNTRUSTED_PEER = "untrusted_peer",
+        REAUTH_REQUIRED = "reauth_required",
+        REAUTH_NOT_FRESH = "reauth_not_fresh",
+        REAUTH_AUTH_TIME_MISSING = "reauth_auth_time_missing",
+        INVALID_AUTH_TIME = "invalid_auth_time",
+        REAUTH = "reauth",
+        INVALID_CURSOR = "invalid_cursor",
+        INVALID_FILTER = "invalid_filter",
+        INVALID_ID = "invalid_id",
+        PAYLOAD_TOO_LARGE = "payload_too_large",
+        NOT_FOUND = "not_found",
         // Events and delivery
         BACKLOG_OVERFLOW = "backlog_overflow",
         RETRIES_EXHAUSTED = "retries_exhausted",
@@ -331,8 +371,11 @@ pub mod reasons {
 /// token-like names.
 pub const ATTR_ALLOWLIST: &[&str] = &[
     "aal",
+    "actor",
+    "actor_session",
     "app",
     "apps",
+    "auth_time_source",
     "bound_ip",
     "cause",
     "client_request_id",
@@ -343,23 +386,29 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "dropped_by_kind",
     "endpoint",
     "error",
+    "forced",
     "from_user_id",
     "host",
     "insecure_mode",
     "kind",
     "label",
     "listeners",
+    "managed_by",
     "method",
     "navigation",
+    "note",
     "observed_ip",
     "observed_sha256",
     "port",
+    "previous_role",
     "provider",
     "providers",
     "purpose",
     "recorded_sha256",
     "recovery_depth",
+    "reauth",
     "retry_after",
+    "role",
     "route_id",
     "sampled_count",
     "sink",
@@ -483,6 +532,11 @@ fn bound_value(v: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// The sanitized user-agent prefix events and sessions record (never the raw string).
+pub fn ua_prefix(ua: &str) -> String {
+    sanitize_prefix(ua, UA_PREFIX_MAX_BYTES)
+}
+
 /// Keep printable ASCII and spaces, replace everything else with `?`, cut to `max` bytes.
 fn sanitize_prefix(s: &str, max: usize) -> String {
     s.chars()
@@ -517,9 +571,70 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 13);
+        assert_eq!(required, 20);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
+    }
+
+    #[test]
+    fn console_kinds_reasons_and_attributes_are_registered() {
+        assert_eq!(EventKind::ALL.len(), 25);
+        for (kind, name) in [
+            (EventKind::AdminGrant, "admin.grant"),
+            (EventKind::AdminRevoke, "admin.revoke"),
+            (EventKind::AdminUserDisable, "admin.user_disable"),
+            (EventKind::AdminUserEnable, "admin.user_enable"),
+            (EventKind::AdminSessionTerminate, "admin.session_terminate"),
+            (
+                EventKind::AdminSessionsTerminate,
+                "admin.sessions_terminate",
+            ),
+            (EventKind::AdminDenied, "admin.denied"),
+        ] {
+            assert_eq!(kind.name(), name);
+            assert!(kind.is_required(), "{name} travels in the outbox");
+            assert_eq!(EventKind::from_name(name), Some(kind));
+        }
+        for r in [
+            "not_admin",
+            "role_insufficient",
+            "auth_too_old",
+            "aal_insufficient",
+            "self_target",
+            "actor_revoked",
+            "untrusted_peer",
+            "reauth_required",
+            "reauth_not_fresh",
+            "reauth_auth_time_missing",
+            "invalid_auth_time",
+            "reauth",
+            "invalid_cursor",
+            "invalid_filter",
+            "invalid_id",
+            "payload_too_large",
+            "not_found",
+            "user_disabled",
+        ] {
+            assert!(reasons::parse(r).is_some(), "{r}");
+        }
+        let b = builder(EventKind::AdminGrant)
+            .attr("actor", "cli")
+            .attr("actor_session", "s_1")
+            .attr("role", "admin")
+            .attr("previous_role", "viewer")
+            .attr("managed_by", "file")
+            .attr("forced", true)
+            .attr("note", "n".repeat(1000))
+            .attr("reauth", true)
+            .attr("auth_time_source", "provider_claim")
+            .attr("password", "never")
+            .build();
+        assert_eq!(b.attrs.len(), 9, "{:?}", b.attrs);
+        assert_eq!(
+            b.attrs["note"].as_str().unwrap().len(),
+            256,
+            "note is bounded"
+        );
     }
 
     #[test]

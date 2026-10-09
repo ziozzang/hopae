@@ -2,9 +2,11 @@
 //! Router assembly only: the handlers live in `gateway.rs` (verify) and, for
 //! the portal, in the portal modules.
 
+pub mod admin;
 pub mod gateway;
 
 pub mod csrf;
+pub mod denials;
 #[cfg(feature = "test-hooks")]
 pub mod hooks;
 pub mod portal;

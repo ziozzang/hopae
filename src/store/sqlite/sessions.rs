@@ -15,9 +15,10 @@ use super::rows::{
 use super::{Shared, Store, WriterEnv, commit, require_provider_live};
 use crate::crypto::{Digest, Timestamp};
 use crate::event::types::{Event, Reason, reasons};
+use crate::identity::types::UserId;
 use crate::policy::types::Host;
 use crate::provider::types::ProviderId;
-use crate::session::types::{Aal, SessionId};
+use crate::session::types::{Aal, FactorEntry, SessionId};
 use crate::store::types::*;
 use crate::store::{Sessions, StoreError, StoreResult};
 use crate::verify::lifetimes::{self, LifetimeVerdict};
@@ -25,7 +26,7 @@ use crate::verify::lifetimes::{self, LifetimeVerdict};
 const CODE_BURN_REASON_REDEEMED: &str = "redeemed";
 const CODE_BURN_REASON_CONFLICT: &str = "session_conflict";
 
-fn session_by_id(conn: &Connection, id: &SessionId) -> StoreResult<Option<SessionRow>> {
+pub(super) fn session_by_id(conn: &Connection, id: &SessionId) -> StoreResult<Option<SessionRow>> {
     let sql = format!(
         "SELECT {} FROM sessions WHERE session_id=?1",
         cols("", SESSION_COLS)
@@ -45,7 +46,7 @@ fn code_by_digest(conn: &Connection, d: &Digest) -> StoreResult<Option<HandoffCo
         .transpose()
 }
 
-fn insert_handle(conn: &Connection, h: &HandleRow) -> StoreResult<()> {
+pub(super) fn insert_handle(conn: &Connection, h: &HandleRow) -> StoreResult<()> {
     conn.execute(
         "INSERT INTO session_handles (handle_sha256, session_id, host, issued_aal, created_at, last_seen_at, absolute_expires_at, revoked_at, revoked_reason) VALUES (?1,?2,?3,?4,?5,?6,?7,NULL,NULL)",
         params![
@@ -62,7 +63,7 @@ fn insert_handle(conn: &Connection, h: &HandleRow) -> StoreResult<()> {
 }
 
 /// Revoke the session's unrevoked handles with `reason`.
-fn revoke_session_handles(
+pub(super) fn revoke_session_handles(
     tx: &Transaction<'_>,
     id: &SessionId,
     reason: &str,
@@ -76,7 +77,7 @@ fn revoke_session_handles(
 }
 
 /// Consume the session's outstanding handoff codes with `reason`.
-fn consume_session_codes(
+pub(super) fn consume_session_codes(
     tx: &Transaction<'_>,
     id: &SessionId,
     reason: &str,
@@ -112,7 +113,7 @@ impl Sessions for Store {
             let tx = env.begin()?;
             require_provider_live(&tx, s.provider_id.as_str())?;
             tx.execute(
-                "INSERT INTO sessions (session_id, user_id, provider_id, auth_time, factors, aal, authz_version, cred_gen, snapshot, bound_ip, bound_ua_sha256, created_at, last_seen_at, absolute_expires_at, terminated_at, terminated_reason, authz_version_at_auth) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL,?15)",
+                "INSERT INTO sessions (session_id, user_id, provider_id, auth_time, factors, aal, authz_version, cred_gen, snapshot, bound_ip, bound_ua_sha256, created_at, last_seen_at, absolute_expires_at, terminated_at, terminated_reason, authz_version_at_auth, auth_time_source, bound_ua_prefix) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL,?15,?16,?17)",
                 params![
                     s.session_id.as_str(),
                     s.user_id.as_str(),
@@ -129,6 +130,8 @@ impl Sessions for Store {
                     s.last_seen_at.secs(),
                     s.absolute_expires_at.secs(),
                     i64::try_from(s.authz_version_at_auth).unwrap_or(i64::MAX),
+                    s.auth_time_source.as_str(),
+                    s.bound_ua_prefix,
                 ],
             )?;
             insert_handle(&tx, &req.portal_handle)?;
@@ -339,6 +342,78 @@ impl Sessions for Store {
             finish(tx, &shared, None)?;
             Ok(true)
         })
+        .await
+    }
+
+    async fn list_live_sessions(
+        &self,
+        q: SessionsQuery,
+        deadline: Deadline,
+    ) -> StoreResult<Page<SessionSummary>> {
+        self.list_live_sessions_impl(q, deadline).await
+    }
+
+    async fn session_summary(
+        &self,
+        id: &SessionId,
+        deadline: Deadline,
+    ) -> StoreResult<Option<(SessionSummary, Vec<HandleRow>)>> {
+        self.session_summary_impl(id, deadline).await
+    }
+
+    async fn admin_terminate_session(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        id: &SessionId,
+        deadline: Deadline,
+        admin_event: Event,
+        session_event: Event,
+    ) -> StoreResult<bool> {
+        self.admin_terminate_session_impl(actor, policy, id, deadline, admin_event, session_event)
+            .await
+    }
+
+    async fn admin_terminate_user_sessions(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        user: &UserId,
+        deadline: Deadline,
+        admin_event: Event,
+        mk_session_event: &(dyn for<'a> Fn(&'a SessionRow) -> Event + Sync),
+    ) -> StoreResult<u32> {
+        let (ask, responder) = super::admin::asker();
+        let job =
+            self.admin_terminate_user_sessions_job(actor, policy, user, deadline, admin_event, ask);
+        responder
+            .drive(job, &|row: SessionRow| mk_session_event(&row))
+            .await
+    }
+
+    async fn reauthenticate_session(
+        &self,
+        id: &SessionId,
+        provider: &ProviderId,
+        auth_time: Timestamp,
+        source: AuthTimeSource,
+        factor: FactorEntry,
+        new_portal_handle: HandleRow,
+        consume_txn: (Digest, Reason),
+        deadline: Deadline,
+        events: Vec<Event>,
+    ) -> StoreResult<()> {
+        self.reauthenticate_session_impl(
+            id,
+            provider,
+            auth_time,
+            source,
+            factor,
+            new_portal_handle,
+            consume_txn,
+            deadline,
+            events,
+        )
         .await
     }
 
@@ -719,7 +794,7 @@ impl Store {
 
 /// End a session inside `tx`: idempotent (an unknown or already terminated
 /// session changes nothing and records no events).
-fn terminate_in(
+pub(super) fn terminate_in(
     tx: &Transaction<'_>,
     shared: &Shared,
     id: &SessionId,
@@ -774,7 +849,7 @@ fn insert_txn(tx: &Transaction<'_>, t: &NewTransaction) -> StoreResult<()> {
         [t.created_at.secs() - 3600],
     )?;
     tx.execute(
-        "INSERT INTO login_txns (txn_sha256, created_at, expires_at, app_id, return_target, bind_sha256, portal_bind_sha256, retry_bind_sha256, client_ip, ua_sha256, provider_id, state_sha256, nonce, pkce_verifier, portal_session_id, purpose, conflicting_handle_sha256, pending_identity, recovery_depth) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+        "INSERT INTO login_txns (txn_sha256, created_at, expires_at, app_id, return_target, bind_sha256, portal_bind_sha256, retry_bind_sha256, client_ip, ua_sha256, provider_id, state_sha256, nonce, pkce_verifier, portal_session_id, purpose, conflicting_handle_sha256, pending_identity, recovery_depth, reauth_max_age) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
         params![
             blob(&t.txn_sha256),
             t.created_at.secs(),
@@ -795,6 +870,7 @@ fn insert_txn(tx: &Transaction<'_>, t: &NewTransaction) -> StoreResult<()> {
             opt_blob(&t.conflicting_handle_sha256),
             t.pending_identity.as_ref().map(|v| v.to_string()),
             i64::from(t.recovery_depth),
+            t.reauth_max_age.map(i64::from),
         ],
     )?;
     Ok(())

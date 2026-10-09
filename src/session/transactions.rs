@@ -125,6 +125,7 @@ impl Service {
             conflicting_handle_sha256: None,
             pending_identity: None,
             recovery_depth: depth,
+            reauth_max_age: None,
         };
         // Admission: the per-IP count (against the transaction's application
         // IP, the address it is inserted with, ADR-0014) and the insert are

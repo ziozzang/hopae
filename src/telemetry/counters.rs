@@ -37,6 +37,18 @@ pub const VERIFY_OVERLOADED_TOTAL: &str = "hopae_verify_overloaded_total";
 pub const VERIFY_CANONICAL_MISMATCH_TOTAL: &str = "hopae_verify_canonical_mismatch_total";
 /// Store failures seen on the verify path.
 pub const STORE_ERRORS_TOTAL: &str = "hopae_store_errors_total";
+/// Store jobs interrupted inside SQLite at their deadline.
+pub const STORE_INTERRUPTS_TOTAL: &str = "hopae_store_interrupts_total";
+/// Management console requests, by role and outcome.
+pub const ADMIN_REQUESTS_TOTAL: &str = "hopae_admin_requests_total";
+/// Management console refusals, by reason.
+pub const ADMIN_DENIED_TOTAL: &str = "hopae_admin_denied_total";
+/// Management console mutations, by kind.
+pub const ADMIN_MUTATIONS_TOTAL: &str = "hopae_admin_mutations_total";
+/// Candidate rows examined by console listings, by list.
+pub const ADMIN_ROWS_EXAMINED_TOTAL: &str = "hopae_admin_rows_examined_total";
+/// Administrator grants imported from the file, by outcome.
+pub const ADMIN_GRANTS_IMPORTED_TOTAL: &str = "hopae_admin_grants_imported_total";
 /// Gauge: always 1, labelled with the version.
 pub const BUILD_INFO: &str = "hopae_build_info";
 /// Gauge: unix seconds of the last configuration load.

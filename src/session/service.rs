@@ -1271,6 +1271,7 @@ impl Service {
                     conflicting_handle_sha256: None,
                     pending_identity: Some(pending_json),
                     recovery_depth: txn.recovery_depth,
+                    reauth_max_age: None,
                 },
                 vec![],
                 now,
@@ -1335,6 +1336,12 @@ impl Service {
             terminated_at: None,
             terminated_reason: None,
             authz_version_at_auth: user.authz_version,
+            // W1-D fills the provider claim and its source here.
+            auth_time_source: crate::store::types::AuthTimeSource::HopaeCompletion,
+            bound_ua_prefix: ctx
+                .user_agent
+                .as_deref()
+                .map(crate::event::types::ua_prefix),
         };
         let portal_handle = HandleRow {
             handle_sha256: digest,

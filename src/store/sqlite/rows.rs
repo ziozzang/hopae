@@ -91,6 +91,8 @@ pub(super) const SESSION_COLS: &[&str] = &[
     "terminated_at",
     "terminated_reason",
     "authz_version_at_auth",
+    "auth_time_source",
+    "bound_ua_prefix",
 ];
 pub(super) const HANDLE_COLS: &[&str] = &[
     "handle_sha256",
@@ -125,6 +127,7 @@ pub(super) const TXN_COLS: &[&str] = &[
     "recovery_depth",
     "consumed_at",
     "consumed_reason",
+    "reauth_max_age",
 ];
 pub(super) const CODE_COLS: &[&str] = &[
     "code_sha256",
@@ -349,6 +352,9 @@ pub(super) fn session(row: &Row<'_>, o: usize) -> StoreResult<SessionRow> {
         terminated_at: opt_ts(row, o + 14)?,
         terminated_reason: row.get(o + 15)?,
         authz_version_at_auth: u64_of(row, o + 16, "sessions.authz_version_at_auth")?,
+        auth_time_source: AuthTimeSource::parse(&row.get::<_, String>(o + 17)?)
+            .ok_or_else(|| corrupt("sessions.auth_time_source"))?,
+        bound_ua_prefix: row.get(o + 18)?,
     })
 }
 
@@ -405,6 +411,10 @@ pub(super) fn txn(row: &Row<'_>, o: usize) -> StoreResult<TransactionRow> {
         recovery_depth: u32_of(row, o + 18, "login_txns.recovery_depth")?,
         consumed_at: opt_ts(row, o + 19)?,
         consumed_reason: row.get(o + 20)?,
+        reauth_max_age: row
+            .get::<_, Option<i64>>(o + 21)?
+            .map(|n| u32::try_from(n).map_err(|_| corrupt("login_txns.reauth_max_age")))
+            .transpose()?,
     })
 }
 
