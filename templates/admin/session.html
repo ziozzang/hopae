@@ -1,0 +1,44 @@
+{% extends "admin/layout.html" %}
+{% block title %}{{ c.t.get("admin.sessions.detail_title") }}{% endblock %}
+{% block content %}
+<h1>{{ c.t.get("admin.sessions.detail_title") }}</h1>
+<dl>
+<dt>{{ c.t.get("admin.sessions.col_session") }}</dt><dd>{{ row.session_id }}</dd>
+<dt>{{ c.t.get("admin.sessions.col_user") }}</dt><dd><a href="/users/{{ row.user_id }}">{{ row.user_id }}</a></dd>
+<dt>{{ c.t.get("admin.sessions.col_email") }}</dt><dd>{{ row.email }}</dd>
+<dt>{{ c.t.get("admin.sessions.col_provider") }}</dt><dd>{{ row.provider }}</dd>
+<dt>{{ c.t.get("admin.sessions.col_aal") }}</dt><dd>{{ row.aal }}</dd>
+<dt>{{ c.t.get("admin.sessions.col_hosts") }}</dt><dd>{{ row.hosts }}</dd>
+<dt>{{ c.t.get("admin.sessions.col_created") }}</dt><dd>{{ row.created }}</dd>
+<dt>{{ c.t.get("admin.sessions.col_last_seen") }}</dt><dd>{{ row.last_seen }}</dd>
+<dt>{{ c.t.get("admin.sessions.col_expires") }}</dt><dd>{{ row.expires }}</dd>
+<dt>{{ c.t.get("admin.sessions.col_auth_time") }}</dt><dd>{{ row.auth_time }} ({{ row.auth_source }})</dd>
+<dt>{{ c.t.get("admin.sessions.col_ip") }}</dt><dd>{{ row.bound_ip }}</dd>
+<dt>{{ c.t.get("admin.sessions.col_ua") }}</dt><dd>{{ row.ua_prefix }}</dd>
+<dt>{{ c.t.get("admin.sessions.col_ended") }}</dt><dd>{{ row.ended }}</dd>
+</dl>
+{% if is_admin && row.live %}
+<form method="post" action="/sessions/{{ row.session_id }}/terminate">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="back" value="session">
+<input type="hidden" name="session_id" value="{{ row.session_id }}">
+<button type="submit">{{ c.t.get("admin.sessions.terminate") }}</button>
+</form>
+{% endif %}
+<h2>{{ c.t.get("admin.sessions.handles") }}</h2>
+<table>
+<thead><tr>
+<th>{{ c.t.get("admin.sessions.h_host") }}</th>
+<th>{{ c.t.get("admin.sessions.col_aal") }}</th>
+<th>{{ c.t.get("admin.sessions.col_created") }}</th>
+<th>{{ c.t.get("admin.sessions.col_last_seen") }}</th>
+<th>{{ c.t.get("admin.sessions.col_expires") }}</th>
+<th>{{ c.t.get("admin.sessions.h_revoked") }}</th>
+</tr></thead>
+<tbody>
+{% for h in handles %}
+<tr><td>{{ h.host }}</td><td>{{ h.aal }}</td><td>{{ h.created }}</td><td>{{ h.last_seen }}</td><td>{{ h.expires }}</td><td>{{ h.revoked }}</td></tr>
+{% endfor %}
+</tbody>
+</table>
+{% endblock %}
