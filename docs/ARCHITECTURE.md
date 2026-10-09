@@ -1,6 +1,6 @@
 # Architecture
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/ARCHITECTURE.md)
 
@@ -43,7 +43,7 @@ start and by `hopae --check`; unknown keys are rejected.
                                    │ private network / loopback (trust boundary: gateway ↔ Hopae)
                        ┌───────────┴────────────────────────────────────────────────────────┐
                        │ Hopae process                                                      │
-                       │  portal listener :8700   gateway listener :8701   mgmt listener (M4) │
+                       │  portal listener :8700   gateway listener :8701  admin listener :8702│
                        │  ┌────────┐ ┌────────┐ ┌─────────┐ ┌────────┐ ┌───────┐ ┌───────┐  │
                        │  │ portal │ │ verify │ │ session │ │identity│ │policy │ │ event │  │
                        │  └────────┘ └────────┘ └─────────┘ └────────┘ └───────┘ └───────┘  │
@@ -73,7 +73,7 @@ start and by `hopae --check`; unknown keys are rejected.
 | Store | `Directory`, `Sessions`, `Events` traits; SQLite backend (M1), PostgreSQL backend (M2); embedded migrations. | M1 |
 | Cache | Opt-in bounded local cache of authoritative reads carrying generation provenance; Redis/Valkey for pub/sub invalidation and throttling counters only (never session state) *later*. | M2 |
 | Lua | Sandboxed worker processes copied from the gateway's model *later*. | M5 |
-| Management | Management API and console *later*; own listener. | M4 |
+| Management | Console pages and the `/v1` API on the admin listener: a Hopae application on its own host, registered as the implicit application `admin`, authenticated on every request from the session handle through the verify engine and an `admin_grants` row; users, sessions, login history and audit, read-only status ([administration](ADMIN.md), [ADR-0016](adr/0016-management-console-minimum.md)). Provider and application management *later*. | M4-min (rest M4) |
 | Update | Signed self-update *later*. | M6 |
 
 ## Trust boundaries
@@ -86,7 +86,7 @@ start and by `hopae --check`; unknown keys are rejected.
 | Hopae ↔ identity provider | Discovery, JWKS, token exchange, user info (outbound HTTPS only) | The provider's signed ID token after full validation; user-info fields per provider rules ([ADR-0010](adr/0010-provider-abstraction.md)) | Unsigned claims, email addresses without a verified flag, anything in the callback query other than `code` and `state`. |
 | Hopae ↔ stores | SQL and Redis protocols on a private network | The primary store's content; every verify reads it | Redis: it carries invalidation messages and counters only and never holds session or decision state, so a stale Redis answer cannot widen access; the local cache serves an entry only while its authoritative-read deadline and generations are current. |
 | Hopae ↔ Lua workers (M5) | Length-framed JSON over pipes | Nothing; outputs are validated as if they came from the network | Scripts; they have no network, no secrets and no filesystem. |
-| Hopae ↔ management clients (M4) | Management API on its own listener | Administrator sessions created through the console with CSRF protection | Static tokens outside break-glass use. |
+| Gateway ↔ Hopae admin listener (M4-min) | Requests for the console host, proxied by the gateway's protected route after its own verify call: the handle cookie, the forwarding headers, the injected identity headers | The `__Host-hopae` handle for the console host, evaluated by the verify engine, and the user's `admin_grants` row, both read on every request; `x-forwarded-for` and `x-forwarded-proto` only from `trusted_proxies`, and only for client binding | The injected identity headers and every other gateway context header (never read); the request's origin: a connection that bypasses the gateway gains nothing without a valid console handle ([administration](ADMIN.md)). |
 
 The gateway listener and the portal listener are separate TCP listeners with
 disjoint routers: `GET /_hopae/verify` on the portal listener answers 404,
@@ -97,6 +97,11 @@ Hopae in the same network namespace (`network_mode: host`) bound to
 `127.0.0.1:8701`, or publishes the container port on the host loopback only
 (`127.0.0.1:8701:8701`); a container-internal loopback bind would be
 unreachable by the gateway. In every arrangement the caller key is required.
+The admin listener (M4-min) is a third listener with its own router, bound
+only when `admin.public_url` is set; it serves the console host behind the
+gateway's protected route and authenticates its own requests from the handle,
+so it needs no caller key and trusts nothing a bypassing connection could add
+([administration](ADMIN.md)).
 
 ## Request flows
 
@@ -249,8 +254,9 @@ because an unmodified gateway forwards any `2xx` upstream.
    │ 200 "signed out everywhere"                       │ event per session
 ```
 
-Administrator revocation (M2) uses the same termination path with
-`reason=admin`.
+Administrator revocation (the console and API of M4-min) uses the same
+termination path with `reason=admin`; disabling a user terminates its
+sessions with `reason=user_disabled`.
 
 ### Flow 8 — Revocation by binding mismatch (client IP changed)
 
@@ -308,7 +314,7 @@ not columns.
 | `identities` | (`provider_id`, `subject`) | `user_id`, `email`, `email_verified`, `email_authoritative`, `name`, `picture`, `raw_claims` (JSON, bounded 8 KiB), `first_seen_at`, `last_seen_at` | Links a provider subject to a user ([ADR-0011](adr/0011-account-linking-policy.md)). Created only after the subject consistency check of [ADR-0010](adr/0010-provider-abstraction.md). |
 | `providers` | `provider_id` | `kind` (oidc, oauth2, email_link, password), `display_name`, `enabled`, `managed_by` (file, api), `deleted_at`, `sort_order`, `config` (JSON: issuer, endpoints, scopes, quirks), `client_secret_env`, `allowed_email_domains`, `authoritative_domains`, `auto_link`, `trust_email`, `created_at`, `updated_at` | File entries are imported at start only for rows that are absent or `managed_by = file` and not deleted; a row changed or removed through the management API (M4) is a tombstone the file never overwrites, so a runtime disable or removal survives restarts. Secrets are referenced by environment variable name, never stored. |
 | `apps` | `app_id` | `display_name`, `hosts` (JSON array of exact lower-case host names; no patterns), `ports` (JSON array, default `[443]`), `enabled`, `session_policy` (idle, absolute), `binding_policy` (ip, ua, on_mismatch), `step_up` (JSON rules, *later*), `allowed_groups` (*later*), `on_authz_change` (refresh, terminate), `gateway_ref` (informational route id), `created_at`, `updated_at` | Verify resolves the app from `x-forwarded-host`; the union of all `hosts` and `ports` is the return-origin allowlist and every entry is an exact credential destination the operator vouches for. A host that is not listed is denied; there is no "any host" and no suffix mode. The reserved app `default` carries policy defaults only. |
-| `sessions` | `session_id` | `user_id`, `provider_id`, `auth_time`, `factors` (JSON array of `{kind, provider?, at}`), `aal` (1 or 2), `authz_version` (of the user at snapshot time), `authz_version_at_auth` (of the user at authentication, never changed: the baseline a `terminate` application compares against), `cred_gen`, `bound_ip`, `bound_ua_sha256`, `bound_country` (*later*), `created_at`, `last_seen_at`, `absolute_expires_at`, `terminated_at`, `terminated_reason` | One row per browser login. Self-contained identity snapshot (`snapshot` JSON: email, name, username, groups) refreshed when `users.authz_version` moves. `cred_gen` increments in the same transaction as any handle revocation or elevation, which also consumes the session's outstanding handoff codes; it is reported in `x-hopae-gen` and in invalidation messages. |
+| `sessions` | `session_id` | `user_id`, `provider_id`, `auth_time`, `factors` (JSON array of `{kind, provider?, at}`), `aal` (1 or 2), `authz_version` (of the user at snapshot time), `authz_version_at_auth` (of the user at authentication, never changed: the baseline a `terminate` application compares against), `cred_gen`, `bound_ip`, `bound_ua_sha256`, `bound_ua_prefix` (64-byte sanitized prefix for display, migration `0003`, M4-min), `bound_country` (*later*), `created_at`, `last_seen_at`, `absolute_expires_at`, `terminated_at`, `terminated_reason` | One row per browser login. Self-contained identity snapshot (`snapshot` JSON: email, name, username, groups) refreshed when `users.authz_version` moves. `cred_gen` increments in the same transaction as any handle revocation or elevation, which also consumes the session's outstanding handoff codes; it is reported in `x-hopae-gen` and in invalidation messages. |
 | `session_handles` | `handle_sha256` | `session_id`, `host`, `issued_aal`, `created_at`, `last_seen_at`, `absolute_expires_at`, `revoked_at`, `revoked_reason` | One per (session, host). The cookie carries the handle; different hosts never share a handle. `issued_aal` is the level the handle grants; elevation revokes and reissues handles. Idle and absolute timers are per handle ([ADR-0007](adr/0007-context-binding-policy.md)). |
 | `login_txns` | `txn_sha256` | `created_at`, `expires_at` (10 min), `app_id`, `return_target` (absolute URL from the gateway, an exact entry of the return-origin allowlist), `bind_sha256` (digest of the browser's stable binding cookie on the application host), `portal_bind_sha256` (digest of the browser's stable portal binding cookie, set at first portal visit), `client_ip`, `ua_sha256`, `provider_id`, `state_sha256` (the callback locates the transaction by it), `nonce`, `pkce_verifier`, `portal_session_id` (when SSO, or the session a logout ticket names), `purpose` (login, stepup, link, switch, logout — the last is the logout ticket of an application-host entry point, [ADR-0015](adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md)), `conflicting_handle_sha256` (for `switch`), `pending_identity` (JSON, for `link_required`), `recovery_depth`, `retry_bind_sha256` (set when a callback fails with `portal_bind_mismatch`), `retry_used_at` (set by the one `POST /login/retry` that may follow), `consumed_at` | Server-side state for one login attempt; several may be open per browser; `recovery_depth` bounds binding-race recovery; `retry_bind_sha256` is what `POST /login/retry` must match, and `retry_used_at` makes that retry single-use. |
 | `handoff_codes` | `code_sha256` | `session_id`, `host`, `return_target`, `client_ip`, `bind_sha256`, `issued_aal`, `cred_gen`, `recovery_depth` (copied from the minting transaction), `created_at`, `expires_at` (60 s), `consumed_at`, `consumed_reason` | Single use; consumption is an atomic conditional update that also checks the binding cookie, the session's current `cred_gen` and the absence of another user's valid handle; the handle it mints gets `min(issued_aal, session.aal)`; a recovery transaction takes `recovery_depth + 1` from the failed code's row, never from the client. |
@@ -318,7 +324,7 @@ not columns.
 | `attempts` (*M2*) | (`scope`, `key`) | `failures`, `window_started_at`, `locked_until` | Per-account and per-IP throttling counters; in Redis when configured. |
 | `factors` (*M5*) | `factor_id` | `user_id`, `kind` (totp, webauthn, recovery), `label`, `secret_env_or_encrypted`, `public_key`, `counter`, `created_at`, `last_used_at`, `disabled_at` | Enrollments ([ADR-0008](adr/0008-second-factor-extension-point.md)). |
 | `webhooks` (*M5*) | `webhook_id` | `url`, `event_kinds`, `secret_env`, `enabled`, `created_at`, `last_delivery_at`, `last_status` | Destinations; deliveries are events with `kind=webhook.delivery`. |
-| `admins` (*M4*) | `admin_id` | `username`, `password_hash` (Argon2id), `role`, `status`, `created_at` | Management accounts, separate from `users`. |
+| `admin_grants` (*M4-min*, migration `0003`) | `user_id` | `role` (admin, viewer), `granted_at`, `granted_by` (a user id or `cli`), `revoked_at`, `revoked_by`, `note` | Administrators are users with a live grant row, read on every console request; no separate accounts or passwords ([ADR-0016](adr/0016-management-console-minimum.md)). A revoked row keeps its place; re-granting clears the revocation. History is in `admin.grant` / `admin.revoke` events. |
 | `meta` | `key` | `value` | Schema version, instance id, key ids. |
 
 Indexes: `identities(user_id)`, `identities(email)` (for linking),
@@ -326,7 +332,10 @@ Indexes: `identities(user_id)`, `identities(email)` (for linking),
 `events(at)`, `events(user_id, at)`, `events(client_ip, at)`,
 `event_deliveries(sink, state, next_attempt_at)`,
 `handoff_codes(session_id, consumed_at)`, `handoff_codes(expires_at)`,
-`login_txns(state_sha256)`, `login_txns(expires_at)`.
+`login_txns(state_sha256)`, `login_txns(expires_at)`. Migration `0003`
+(M4-min) adds `events(kind, at)`, `sessions(terminated_at, last_seen_at)` and
+`users(created_at)` for the console's filters and listings; migration `0002`
+is frozen and never edited again.
 
 Relations: a user has many identities and many sessions; a session has one
 handle per host and a snapshot of the user at login; an application has a
@@ -362,6 +371,7 @@ src/
   app.rs             wiring: stores, caches, listeners, graceful shutdown
   http/              routers per listener; middleware: request id, security headers, body and header limits
   portal/            login, callback, logout, step-up (M5) handlers; askama templates; csrf
+  admin/             console pages and /v1 API (M4-min): handle authentication via the engine, grants, users, sessions, events, status
   verify/            decision engine (pure functions over VerifyInput → Decision)
   gateway/           Adapter trait; hangang/ (contract v1); generic forward-auth (later)
   session/           sessions, handles, transactions, handoff codes, lifetimes, termination

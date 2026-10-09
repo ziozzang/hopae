@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=11 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=12 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -74,7 +74,10 @@ Hangang 게이트웨이가 최우선(first-class) 통합 대상이며, 페이지
 HC-12입니다. `strip_request_cookies`는 라우트 수준 필드이며, 브라우저가
 `Path=/` 쿠키를 공개 라우트에도 보내므로 **경로 범위 호스트의 공개 라우트를
 포함해** 애플리케이션 업스트림에 닿는 모든 라우트에 둡니다.
-`auth.strip_request_cookies`는 보호 라우트의 별칭으로 받아들입니다. 수정하지 않은 게이트웨이는 두 키를 모두
+`auth.strip_request_cookies`는 보호 라우트의 별칭으로 받아들입니다. 제거하면
+**안 되는** 유일한 라우트는 관리 콘솔 호스트의 라우트(M4-min)입니다. 그 업스트림은
+핸들을 스스로 검증하고 주입된 신원 헤더를 절대 읽지 않는 Hopae 자신의 관리
+리스너이며, 조각은 [관리 페이지](ADMIN.md#전제-조건과-설정)에 있습니다. 수정하지 않은 게이트웨이는 두 키를 모두
 거부합니다(`deny_unknown_fields`). 그런 게이트웨이는 Hopae 쪽에서
 `gateway.allow_unauthenticated_caller = true`를 설정한 개발 환경에서만, 세션
 핸들이 업스트림에 도달하는 것을 감수하고 쓸 수 있습니다(위협 TM-40).

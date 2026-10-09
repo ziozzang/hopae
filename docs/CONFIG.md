@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 10 -->
+<!-- doc-rev: 11 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -173,6 +173,13 @@ the milestone shown. Until then `hopae --check` rejects them as unknown.
 | `providers[].kind` other than `oidc` | M3 | — | Kakao, Naver, email link, password ([ADR-0010](adr/0010-provider-abstraction.md)) |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, none, none | Local cache and Redis bus ([ADR-0006](adr/0006-verify-caching-and-invalidation.md)) |
 | `store.kind = postgres`, `store.url_env` | M2 | — | Shared primary store ([ADR-0002](adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
+| `listen.admin` | M4-min | `127.0.0.1:8702` | Admin listener, bound only when `admin.public_url` is set; must differ from the other listeners; non-loopback warns ([ADR-0016](adr/0016-management-console-minimum.md), [administration](ADMIN.md)) |
+| `admin.public_url` | M4-min | none | Externally visible origin of the console; registers the implicit application `admin` (reserved id) with the policy below ([ADR-0016](adr/0016-management-console-minimum.md)) |
+| `admin.session.idle`, `admin.session.absolute`, `admin.binding.ip`, `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6`, `admin.binding.ua`, `admin.binding.on_mismatch` | M4-min | `30m`, `12h`, `strict`, `24`, `64`, `off`, `terminate_session` | Lifetimes and binding of the console host, same types and constraints as `apps[].session.*` and `apps[].binding.*` |
+| `admin.max_auth_age` | M4-min | `12h` | Oldest first-factor authentication a console request may rely on; older sessions are refused with `auth_too_old` |
+| `admin.require_aal` | M4-min | `1` | Minimum assurance level of the console handle (`1` or `2`); `2` also sets the implicit application's step-up rule and, before M5, makes `--check` warn that every request will be refused |
+| `limits.admin_max_concurrent` | M4-min | `16` | In-flight cap of the admin listener |
+| `hopae admin grant <user_id or email> [--role admin\|viewer] [--note <text>]`, `hopae admin revoke <user_id or email>`, `hopae admin list` (commands) | M4-min | — | Administrator grants from the command line against the store; an email must be a verified `primary_email` of an existing user; records `admin.grant` / `admin.revoke` ([administration](ADMIN.md)) |
 
 ## Behavior
 

@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=10 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=11 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -170,6 +170,13 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `oidc`가 아닌 `providers[].kind` | M3 | — | 카카오, 네이버, 이메일 링크, 비밀번호([ADR-0010](../adr/0010-provider-abstraction.md)) |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, 없음, 없음 | 로컬 캐시와 Redis 버스([ADR-0006](../adr/0006-verify-caching-and-invalidation.md)) |
 | `store.kind = postgres`, `store.url_env` | M2 | — | 공유 기본 저장소([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
+| `listen.admin` | M4-min | `127.0.0.1:8702` | 관리 리스너. `admin.public_url`이 설정된 때만 바인딩하며 다른 리스너와 달라야 하고 루프백이 아니면 경고([ADR-0016](../adr/0016-management-console-minimum.md), [관리](ADMIN.md)) |
+| `admin.public_url` | M4-min | 없음 | 콘솔의 외부 노출 origin. 아래 정책을 가진 암묵적 애플리케이션 `admin`(예약 id)을 등록함([ADR-0016](../adr/0016-management-console-minimum.md)) |
+| `admin.session.idle`, `admin.session.absolute`, `admin.binding.ip`, `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6`, `admin.binding.ua`, `admin.binding.on_mismatch` | M4-min | `30m`, `12h`, `strict`, `24`, `64`, `off`, `terminate_session` | 콘솔 호스트의 수명과 바인딩. 타입과 제약은 `apps[].session.*`, `apps[].binding.*`와 같음 |
+| `admin.max_auth_age` | M4-min | `12h` | 콘솔 요청이 의존할 수 있는 가장 오래된 1차 인증. 더 오래된 세션은 `auth_too_old`로 거부 |
+| `admin.require_aal` | M4-min | `1` | 콘솔 핸들의 최소 보증 수준(`1` 또는 `2`). `2`는 암묵적 애플리케이션의 단계 상승 규칙도 설정하며 M5 전에는 모든 요청이 거부된다고 `--check`가 경고 |
+| `limits.admin_max_concurrent` | M4-min | `16` | 관리 리스너의 동시 요청 상한 |
+| `hopae admin grant <user_id 또는 email> [--role admin\|viewer] [--note <text>]`, `hopae admin revoke <user_id 또는 email>`, `hopae admin list`(명령) | M4-min | — | 저장소에 대한 명령줄 관리자 부여. 이메일은 기존 사용자의 검증된 `primary_email`이어야 하며 `admin.grant` / `admin.revoke`를 기록함([관리](ADMIN.md)) |
 
 ## 동작
 

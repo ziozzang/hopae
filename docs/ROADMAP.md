@@ -1,6 +1,6 @@
 # Roadmap
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [Documentation](README.md) · [한국어](ko/ROADMAP.md)
 
@@ -10,7 +10,7 @@ scope or order changes. Completed items move to the [CHANGELOG](../CHANGELOG.md)
 Scenario ranges are defined in [`scenarios/README.md`](../scenarios/README.md).
 The design the milestones implement is in the [architecture](ARCHITECTURE.md),
 the [gateway contract](GATEWAY_CONTRACT.md), the [threat model](THREAT_MODEL.md)
-and ADR-0002 to ADR-0013.
+and ADR-0002 to ADR-0016.
 
 ## Shape of the product
 
@@ -131,16 +131,51 @@ a second application on another registrable domain is reached without a
 second provider login, a second browser behind the same IP cannot redeem the
 first browser's handoff, and logout ends access on the next request.
 
-### M2 — Sessions, abuse controls and shared state (0.2.0)
+### M4-min — Management console, minimum (0.2.0)
+
+Pulled ahead of M2 at the maintainer's request after the first live
+deployment: an administration page is needed before breadth. Designed in
+[ADR-0016](adr/0016-management-console-minimum.md) (Proposed) and specified
+on the [administration page](ADMIN.md); the rest of M4 stays in its place
+below. Later versions shift by one minor accordingly.
+
+Scope (scenarios 300–305 of the 300–399 range):
+
+- [ ] Third listener `listen.admin` serving the console host, which is the implicit application `admin` registered by `admin.public_url` behind the gateway's protected route (standard `auth` block, no `strip_request_cookies`); every request authenticated by Hopae from the `__Host-hopae` handle through the verify engine; injected identity headers never read.
+- [ ] Administrators as granted users: table `admin_grants` (roles `admin`, `viewer`) in migration `0003`; `hopae admin grant|revoke|list` for bootstrap and recovery; grant read on every request; `admin.max_auth_age` and `admin.require_aal`.
+- [ ] Users: list and search, detail with identities, sessions and recent events; disable (status, `authz_version`, every live session terminated) and enable.
+- [ ] Sessions: live sessions with user, hosts, created, last seen, client address, user-agent prefix (`sessions.bound_ua_prefix`), level; terminate one; terminate every session of a user.
+- [ ] Login history and audit: `events` browsing with filters (kind, outcome, user, session, client address, time range), keyset pagination, indexes `events(kind, at)`, `sessions(terminated_at, last_seen_at)`, `users(created_at)`.
+- [ ] Status, read-only: applications, providers (enabled, `managed_by`, health, secret variable name and presence), store, build, configuration generation.
+- [ ] Every mutation audited as an `admin.*` event in the same transaction, with the actor re-checked inside the write; `admin.denied` for every refusal.
+- [ ] Server-rendered pages in English and Korean without scripts, the portal's CSP and security headers, CSRF tokens bound to the handle plus `Origin`; JSON `/v1` API with the custom-header and content-type rule.
+- [ ] `hopae --check` prints the console route fragment; the deployment template gains the listener and the route example.
+
+| ID | Title |
+| --- | --- |
+| 300 | Administrator access to the console: handle authentication, grants, roles, freshness, CSRF, direct connections |
+| 301 | Console users: list, search, detail, disable and enable |
+| 302 | Console sessions: list live sessions, terminate one, terminate all of a user |
+| 303 | Console login history and audit browsing |
+| 304 | Console status is read-only and shows no secret |
+| 305 | Administrator grants from the command line: bootstrap, revoke, list, recovery |
+
+Exit: through the live gateway, a granted user opens the console on its own
+host, a user without a grant is refused, a disabled user's session is denied
+on the next request on every host, a terminated session is denied, every
+action has its `admin.*` record, and a request that bypasses the gateway with a
+forged identity header is refused.
+
+### M2 — Sessions, abuse controls and shared state (0.3.0)
 
 Scope (scenarios 100–199):
 
-- [ ] Login history API over the `events` table: filters by user, IP, provider, outcome, time; bounded retention.
+- [ ] Login history API over the `events` table: filters by user, IP, provider, outcome, time; bounded retention. The console view, the `/v1/events` query and the exact-address and time filters ship in M4-min; M2 adds the provider and CIDR filters and the retention controls.
 - [ ] Blacklists: subject, email, email domain and client IP (CIDR); checked at login and at verify; administrator-managed.
 - [ ] Login-attempt throttling and lockout per account and per client IP with synchronous atomic counters and constant-work responses; interaction with the gateway's failure bans documented.
 - [ ] PostgreSQL backend for the primary store (ADR-0002) so two instances share one directory.
 - [ ] Redis/Valkey for the generation-stamped invalidation channel and the throttling counters only (50 ms operations, breaker, counters fail closed); no session or decision state in Redis; opt-in bounded Hopae-local cache of authoritative reads with generation provenance (ADR-0006); `verify_cache_seconds`, `x-hopae-fresh-until` and `x-hopae-gen` per application; `authz_version` and `cred_gen` invalidation on group, status, revocation or elevation change; database epoch and `hopae store mark-restored` so a restore to lower generations is recovered by every cache (ADR-0006 decision 8).
-- [ ] Logout everywhere and administrator revocation; session listing per subject.
+- [ ] Logout everywhere for the user (`scope=all`); administrator revocation and the session listing per subject ship in M4-min.
 - [ ] Hopae-side path and host policy rules evaluated from the original URL (allow, require login, require group); such rules mark the application's decisions `no-store`.
 - [ ] Phase 1 of gateway configuration ownership (ADR-0012): `hopae gateway render` and the read-only drift report.
 
@@ -160,14 +195,15 @@ Scope (scenarios 200–299):
 
 Exit: each provider verified live against a test tenant where one exists; email flows verified against a loopback SMTP sink and one real mailbox.
 
-### M4 — Management console and API (0.4.0)
+### M4 — Management console and API, remainder (0.5.0)
 
-Scope (scenarios 300–399):
+Scope (scenarios 306–399; the listener, grants, users, sessions, history,
+audit and status are M4-min):
 
-- [ ] Management API with OpenAPI: users, sessions, applications, providers, policies, blacklists, login history, audit.
-- [ ] Administrator accounts and roles; bootstrap procedure; management surface on its own listener.
-- [ ] Web console in English and Korean covering the API; CSRF and origin checks; no secrets displayed after creation; provider secrets by environment reference (encrypted-at-rest mode decided here if adopted).
-- [ ] Durable administrator audit log as `admin.*` events.
+- [ ] Management API with OpenAPI: applications, providers (runtime add, disable, remove with `managed_by = api`, ADR-0010), policies, blacklists.
+- [ ] Grants from the console (grant, revoke, role change, with their own abuse cases); API tokens for non-browser clients.
+- [ ] Web console in English and Korean covering the whole API; no secrets displayed after creation; provider secrets by environment reference (encrypted-at-rest mode decided here if adopted).
+- [ ] Audit of reads and export of the audit trail (backlog candidates, decided here).
 
 Exit: every management operation reachable from the console and the API; audit records verified for each.
 

@@ -1,6 +1,6 @@
 # 아키텍처
 
-<!-- translation-status: source=../ARCHITECTURE.md source-rev=7 status=current -->
+<!-- translation-status: source=../ARCHITECTURE.md source-rev=8 status=current -->
 
 [문서 목차](README.md) · [English](../ARCHITECTURE.md)
 
@@ -41,7 +41,7 @@ Hopae는 JSON 파일 하나([설정 참조](CONFIG.md) 참고. YAML은 지원하
                                    │ 사설 네트워크 / 루프백 (신뢰 경계: 게이트웨이 ↔ Hopae)
                        ┌───────────┴────────────────────────────────────────────────────────┐
                        │ Hopae 프로세스                                                     │
-                       │  포털 리스너 :8700   게이트웨이 리스너 :8701   관리 리스너 (M4)       │
+                       │  포털 리스너 :8700   게이트웨이 리스너 :8701   관리 리스너 :8702      │
                        │  ┌────────┐ ┌────────┐ ┌─────────┐ ┌────────┐ ┌───────┐ ┌───────┐  │
                        │  │ portal │ │ verify │ │ session │ │identity│ │policy │ │ event │  │
                        │  └────────┘ └────────┘ └─────────┘ └────────┘ └───────┘ └───────┘  │
@@ -71,7 +71,7 @@ Hopae는 JSON 파일 하나([설정 참조](CONFIG.md) 참고. YAML은 지원하
 | 저장소 | `Directory`, `Sessions`, `Events` 트레이트. SQLite 백엔드(M1), PostgreSQL 백엔드(M2). 내장 마이그레이션. | M1 |
 | 캐시 | 세대 출처 정보를 담은, 권위 있는 읽기의 옵트인 제한 로컬 캐시. Redis/Valkey는 pub/sub 무효화와 제한 카운터 전용(세션 상태는 절대 아님)으로 *나중에*. | M2 |
 | Lua | 게이트웨이의 모델을 복제한 샌드박스 워커 프로세스는 *나중에*. | M5 |
-| 관리 | 관리 API와 콘솔은 *나중에*. 자체 리스너. | M4 |
+| 관리 | 관리 리스너의 콘솔 페이지와 `/v1` API: 자체 호스트의 Hopae 애플리케이션으로, 암묵적 애플리케이션 `admin`으로 등록되고 요청마다 verify 엔진을 통한 세션 핸들과 `admin_grants` 행으로 인증됩니다. 사용자, 세션, 로그인 기록과 감사, 읽기 전용 상태([관리](ADMIN.md), [ADR-0016](../adr/0016-management-console-minimum.md)). 제공자와 애플리케이션 관리는 *나중에*. | M4-min(나머지는 M4) |
 | 업데이트 | 서명된 자가 업데이트는 *나중에*. | M6 |
 
 ## 신뢰 경계
@@ -84,7 +84,7 @@ Hopae는 JSON 파일 하나([설정 참조](CONFIG.md) 참고. YAML은 지원하
 | Hopae ↔ ID 제공자 | 디스커버리, JWKS, 토큰 교환, 사용자 정보(아웃바운드 HTTPS만) | 완전한 검증을 거친 제공자의 서명된 ID 토큰. 제공자별 규칙에 따른 사용자 정보 필드([ADR-0010](../adr/0010-provider-abstraction.md)) | 서명되지 않은 클레임, 검증 플래그 없는 이메일 주소, 콜백 쿼리의 `code`와 `state` 이외의 모든 것. |
 | Hopae ↔ 저장소 | 사설 네트워크의 SQL과 Redis 프로토콜 | 기본 저장소의 내용. 모든 verify가 이를 읽습니다 | Redis. 무효화 메시지와 카운터만 실어 나르고 세션이나 결정 상태는 절대 보관하지 않으므로, 오래된 Redis 응답이 접근을 넓힐 수 없습니다. 로컬 캐시는 권위 있는 읽기의 마감과 세대가 현재일 때만 항목을 제공합니다. |
 | Hopae ↔ Lua 워커(M5) | 파이프를 통한 길이 프레임 JSON | 아무것도 없음. 출력은 네트워크에서 온 것처럼 검증합니다 | 스크립트. 네트워크, 비밀 정보, 파일 시스템이 없습니다. |
-| Hopae ↔ 관리 클라이언트(M4) | 자체 리스너의 관리 API | CSRF 보호를 갖춘 콘솔에서 만든 관리자 세션 | 비상용(break-glass) 외의 정적 토큰. |
+| 게이트웨이 ↔ Hopae 관리 리스너(M4-min) | 게이트웨이의 보호 라우트가 자체 verify 호출 뒤에 프록시한 콘솔 호스트 요청: 핸들 쿠키, 전달 헤더, 주입된 신원 헤더 | verify 엔진이 평가한 콘솔 호스트의 `__Host-hopae` 핸들과 사용자의 `admin_grants` 행(둘 다 요청마다 읽음). `x-forwarded-for`와 `x-forwarded-proto`는 `trusted_proxies`에서만, 그것도 클라이언트 바인딩에만 | 주입된 신원 헤더와 그 밖의 모든 게이트웨이 맥락 헤더(절대 읽지 않음). 요청의 출처: 게이트웨이를 우회한 연결은 유효한 콘솔 핸들 없이는 아무것도 얻지 못합니다([관리](ADMIN.md)). |
 
 게이트웨이 리스너와 포털 리스너는 라우터가 서로 겹치지 않는 별도의 TCP
 리스너입니다. 포털 리스너의 `GET /_hopae/verify`는 404로 답하고, 게이트웨이
@@ -94,6 +94,10 @@ Hopae는 JSON 파일 하나([설정 참조](CONFIG.md) 참고. YAML은 지원하
 host`)에서 `127.0.0.1:8701`에 바인딩하거나, 컨테이너 포트를 호스트 루프백에만
 공개합니다(`127.0.0.1:8701:8701`). 컨테이너 내부 루프백에 바인딩하면
 게이트웨이가 접근할 수 없습니다. 어떤 구성에서든 호출자 키는 필수입니다.
+관리 리스너(M4-min)는 자체 라우터를 가진 세 번째 리스너로 `admin.public_url`이
+설정된 때만 바인딩합니다. 게이트웨이의 보호 라우트 뒤에서 콘솔 호스트를 제공하고
+자신의 요청을 핸들로 인증하므로 호출자 키가 필요 없고, 우회 연결이 덧붙일 수
+있는 어떤 것도 신뢰하지 않습니다([관리](ADMIN.md)).
 
 ## 요청 흐름
 
@@ -243,7 +247,9 @@ host`)에서 `127.0.0.1:8701`에 바인딩하거나, 컨테이너 포트를 호�
    │ 200 "모든 기기에서 로그아웃됨"                      │ 세션마다 이벤트
 ```
 
-관리자 취소(M2)는 같은 종료 경로를 `reason=admin`으로 사용합니다.
+관리자 취소(M4-min의 콘솔과 API)는 같은 종료 경로를 `reason=admin`으로
+사용합니다. 사용자를 비활성화하면 그 세션들은 `reason=user_disabled`로
+종료됩니다.
 
 ### 흐름 8 — 바인딩 불일치에 의한 취소(클라이언트 IP 변경)
 
@@ -299,7 +305,7 @@ host`)에서 `127.0.0.1:8701`에 바인딩하거나, 컨테이너 포트를 호�
 | `identities` | (`provider_id`, `subject`) | `user_id`, `email`, `email_verified`, `email_authoritative`, `name`, `picture`, `raw_claims`(JSON, 8 KiB 제한), `first_seen_at`, `last_seen_at` | 제공자 subject를 사용자에 연결합니다([ADR-0011](../adr/0011-account-linking-policy.md)). [ADR-0010](../adr/0010-provider-abstraction.md)의 subject 일관성 검사를 통과한 뒤에만 생성됩니다. |
 | `providers` | `provider_id` | `kind`(oidc, oauth2, email_link, password), `display_name`, `enabled`, `managed_by`(file, api), `deleted_at`, `sort_order`, `config`(JSON: issuer, 엔드포인트, 스코프, 특이 사항), `client_secret_env`, `allowed_email_domains`, `authoritative_domains`, `auto_link`, `trust_email`, `created_at`, `updated_at` | 파일 항목은 시작 시 행이 없거나 `managed_by = file`이면서 삭제되지 않은 경우에만 가져옵니다. 관리 API(M4)로 변경되거나 제거된 행은 파일이 절대 덮어쓰지 않는 묘비(tombstone)이므로, 실행 중 비활성화나 제거가 재시작 뒤에도 유지됩니다. 비밀은 환경 변수 이름으로만 참조하고 저장하지 않습니다. |
 | `apps` | `app_id` | `display_name`, `hosts`(정확한 소문자 호스트 이름의 JSON 배열. 패턴 없음), `ports`(JSON 배열, 기본값 `[443]`), `enabled`, `session_policy`(idle, absolute), `binding_policy`(ip, ua, on_mismatch), `step_up`(JSON 규칙, *나중에*), `allowed_groups`(*나중에*), `on_authz_change`(refresh, terminate), `gateway_ref`(참고용 라우트 ID), `created_at`, `updated_at` | verify는 `x-forwarded-host`로 애플리케이션을 찾습니다. 모든 `hosts`와 `ports`의 합집합이 돌아갈 출처 허용 목록이며, 각 항목은 운영자가 보증하는 정확한 자격 증명 목적지입니다. 목록에 없는 호스트는 거부되며 "모든 호스트" 모드도 접미사 모드도 없습니다. 예약된 애플리케이션 `default`는 정책 기본값만 가집니다. |
-| `sessions` | `session_id` | `user_id`, `provider_id`, `auth_time`, `factors`(`{kind, provider?, at}`의 JSON 배열), `aal`(1 또는 2), `authz_version`(스냅샷 시점의 사용자 값), `authz_version_at_auth`(인증 시점의 사용자 값으로 바뀌지 않으며 `terminate` 애플리케이션이 비교하는 기준), `cred_gen`, `bound_ip`, `bound_ua_sha256`, `bound_country`(*나중에*), `created_at`, `last_seen_at`, `absolute_expires_at`, `terminated_at`, `terminated_reason` | 브라우저 로그인 한 번당 한 행. 자체 완결적인 신원 스냅샷(`snapshot` JSON: email, name, username, groups)을 담으며 `users.authz_version`이 바뀌면 갱신합니다. `cred_gen`은 핸들 취소나 단계 상승과 같은 트랜잭션에서 증가하며, 그 트랜잭션은 세션의 미소비 핸드오프 코드도 함께 소비 처리합니다. 이 값은 `x-hopae-gen`과 무효화 메시지에 실립니다. |
+| `sessions` | `session_id` | `user_id`, `provider_id`, `auth_time`, `factors`(`{kind, provider?, at}`의 JSON 배열), `aal`(1 또는 2), `authz_version`(스냅샷 시점의 사용자 값), `authz_version_at_auth`(인증 시점의 사용자 값으로 바뀌지 않으며 `terminate` 애플리케이션이 비교하는 기준), `cred_gen`, `bound_ip`, `bound_ua_sha256`, `bound_ua_prefix`(표시용 64바이트 정제 접두사, 마이그레이션 `0003`, M4-min), `bound_country`(*나중에*), `created_at`, `last_seen_at`, `absolute_expires_at`, `terminated_at`, `terminated_reason` | 브라우저 로그인 한 번당 한 행. 자체 완결적인 신원 스냅샷(`snapshot` JSON: email, name, username, groups)을 담으며 `users.authz_version`이 바뀌면 갱신합니다. `cred_gen`은 핸들 취소나 단계 상승과 같은 트랜잭션에서 증가하며, 그 트랜잭션은 세션의 미소비 핸드오프 코드도 함께 소비 처리합니다. 이 값은 `x-hopae-gen`과 무효화 메시지에 실립니다. |
 | `session_handles` | `handle_sha256` | `session_id`, `host`, `issued_aal`, `created_at`, `last_seen_at`, `absolute_expires_at`, `revoked_at`, `revoked_reason` | (세션, 호스트)마다 하나. 쿠키는 핸들을 담으며, 서로 다른 호스트는 절대 핸들을 공유하지 않습니다. `issued_aal`은 핸들이 부여하는 수준이며, 단계 상승은 핸들을 취소하고 다시 발급합니다. 유휴·절대 타이머는 핸들 단위입니다([ADR-0007](../adr/0007-context-binding-policy.md)). |
 | `login_txns` | `txn_sha256` | `created_at`, `expires_at`(10분), `app_id`, `return_target`(게이트웨이가 준 절대 URL, 돌아갈 출처 허용 목록의 정확한 항목), `bind_sha256`(애플리케이션 호스트에 있는 브라우저의 안정적인 바인딩 쿠키 다이제스트), `portal_bind_sha256`(첫 포털 방문 시 기록하는, 브라우저의 안정적인 포털 바인딩 쿠키 다이제스트), `client_ip`, `ua_sha256`, `provider_id`, `state_sha256`(콜백은 이 값으로 트랜잭션을 찾음), `nonce`, `pkce_verifier`, `portal_session_id`(SSO일 때, 또는 로그아웃 티켓이 가리키는 세션), `purpose`(login, stepup, link, switch, logout — 마지막은 애플리케이션 호스트 진입점의 로그아웃 티켓, [ADR-0015](../adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md)), `conflicting_handle_sha256`(`switch`용), `pending_identity`(JSON, `link_required`용), `recovery_depth`, `retry_bind_sha256`(콜백이 `portal_bind_mismatch`로 실패할 때 기록), `retry_used_at`(뒤따르는 단 한 번의 `POST /login/retry`가 기록), `consumed_at` | 로그인 시도 한 번의 서버 측 상태입니다. 브라우저마다 여러 개가 열려 있을 수 있으며, `recovery_depth`가 바인딩 경합 복구 횟수를 제한하고, `retry_bind_sha256`은 `POST /login/retry`가 일치시켜야 하는 값이고, `retry_used_at`은 그 재시도를 1회용으로 만듭니다. |
 | `handoff_codes` | `code_sha256` | `session_id`, `host`, `return_target`, `client_ip`, `bind_sha256`, `issued_aal`, `cred_gen`, `recovery_depth`(발급한 트랜잭션에서 복사), `created_at`, `expires_at`(60초), `consumed_at`, `consumed_reason` | 1회용. 소비는 바인딩 쿠키, 세션의 현재 `cred_gen`, 다른 사용자의 유효한 핸들 부재까지 함께 검사하는 원자적 조건부 갱신이며, 만들어지는 핸들은 `min(issued_aal, session.aal)`을 받습니다. 복구 트랜잭션은 실패한 코드의 행에서 `recovery_depth + 1`을 가져오며 클라이언트에서는 절대 읽지 않습니다. |
@@ -309,7 +315,7 @@ host`)에서 `127.0.0.1:8701`에 바인딩하거나, 컨테이너 포트를 호�
 | `attempts`(*M2*) | (`scope`, `key`) | `failures`, `window_started_at`, `locked_until` | 계정별·IP별 제한 카운터. 설정 시 Redis에 둡니다. |
 | `factors`(*M5*) | `factor_id` | `user_id`, `kind`(totp, webauthn, recovery), `label`, `secret_env_or_encrypted`, `public_key`, `counter`, `created_at`, `last_used_at`, `disabled_at` | 등록 정보([ADR-0008](../adr/0008-second-factor-extension-point.md)). |
 | `webhooks`(*M5*) | `webhook_id` | `url`, `event_kinds`, `secret_env`, `enabled`, `created_at`, `last_delivery_at`, `last_status` | 전송 대상. 전송 자체는 `kind=webhook.delivery` 이벤트입니다. |
-| `admins`(*M4*) | `admin_id` | `username`, `password_hash`(Argon2id), `role`, `status`, `created_at` | `users`와 분리된 관리 계정입니다. |
+| `admin_grants`(*M4-min*, 마이그레이션 `0003`) | `user_id` | `role`(admin, viewer), `granted_at`, `granted_by`(사용자 id 또는 `cli`), `revoked_at`, `revoked_by`, `note` | 관리자는 살아 있는 부여 행이 있는 사용자이며 콘솔 요청마다 읽습니다. 별도의 계정이나 비밀번호는 없습니다([ADR-0016](../adr/0016-management-console-minimum.md)). 취소된 행은 자리를 유지하며 다시 부여하면 취소가 해제됩니다. 이력은 `admin.grant` / `admin.revoke` 이벤트에 있습니다. |
 | `meta` | `key` | `value` | 스키마 버전, 인스턴스 ID, 키 ID. |
 
 인덱스: `identities(user_id)`, `identities(email)`(연결용),
@@ -317,7 +323,10 @@ host`)에서 `127.0.0.1:8701`에 바인딩하거나, 컨테이너 포트를 호�
 `events(at)`, `events(user_id, at)`, `events(client_ip, at)`,
 `event_deliveries(sink, state, next_attempt_at)`,
 `handoff_codes(session_id, consumed_at)`, `handoff_codes(expires_at)`,
-`login_txns(state_sha256)`, `login_txns(expires_at)`.
+`login_txns(state_sha256)`, `login_txns(expires_at)`. 마이그레이션
+`0003`(M4-min)은 콘솔의 필터와 목록을 위해 `events(kind, at)`,
+`sessions(terminated_at, last_seen_at)`, `users(created_at)`를 추가합니다.
+마이그레이션 `0002`는 동결되어 다시 편집하지 않습니다.
 
 관계: 사용자는 여러 신원과 여러 세션을 가집니다. 세션은 호스트마다 핸들
 하나와 로그인 시점의 사용자 스냅샷을 가집니다. 애플리케이션은 정책을 가집니다.
@@ -353,6 +362,7 @@ src/
   app.rs             배선: 저장소, 캐시, 리스너, 정상 종료
   http/              리스너별 라우터. 미들웨어: 요청 ID, 보안 헤더, 본문과 헤더 제한
   portal/            로그인, 콜백, 로그아웃, 단계 상승(M5) 핸들러. askama 템플릿. csrf
+  admin/             콘솔 페이지와 /v1 API(M4-min): 엔진을 통한 핸들 인증, 부여, 사용자, 세션, 이벤트, 상태
   verify/            결정 엔진(VerifyInput → Decision 순수 함수)
   gateway/           Adapter 트레이트. hangang/ (계약 v1). 범용 포워드 인증(나중에)
   session/           세션, 핸들, 트랜잭션, 핸드오프 코드, 수명, 종료

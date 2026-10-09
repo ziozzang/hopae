@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 11 -->
+<!-- doc-rev: 12 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -75,7 +75,11 @@ Protected application (whole host):
 is HC-12. `strip_request_cookies` is a route-level field and belongs on every
 route that reaches the application upstream, **the public routes of a
 path-scoped host included** (the browser sends `Path=/` cookies to them too);
-`auth.strip_request_cookies` is accepted as an alias on a protected route. An
+`auth.strip_request_cookies` is accepted as an alias on a protected route. The
+one route that must **not** strip is the administration console host's
+(M4-min): its upstream is Hopae's own admin listener, which validates the
+handle itself and never reads the injected identity headers; the fragment is
+on the [administration page](ADMIN.md#prerequisites-and-configuration). An
 unmodified gateway rejects both keys (`deny_unknown_fields`);
 such a gateway can be used only in development with
 `gateway.allow_unauthenticated_caller = true` on the Hopae side and with the

@@ -1,6 +1,6 @@
 # Documentation
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [한국어 목차](ko/README.md)
 
@@ -24,6 +24,7 @@ translations of their English sources and are updated in the same change. The
 - [Threat model](THREAT_MODEL.md) — assets, actors, entry points, STRIDE per flow, mitigations
 - [Configuration reference](CONFIG.md) — every key, default and constraint, the command line and exit codes
 - [Operations](OPERATIONS.md) — running, state directory, instance lock, backups, key rotation, logs, health, counters, failure behavior
+- [Administration](ADMIN.md) — the management console and `/v1` API (M4-min, specified): console host and route, grants and roles, pages, endpoints, audit events, limits
 - [Deployment template](../deploy/README.md) — hardened Docker Compose service and gateway route examples
 
 Further reference pages (providers, sessions, management) are added as
