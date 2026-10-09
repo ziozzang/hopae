@@ -57,7 +57,7 @@ fn check_fails_on_unknown_key() {
         .arg(&cfg)
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("bogus_key"));
 }
 
@@ -75,7 +75,7 @@ fn check_fails_on_invalid_values_with_clear_messages() {
         .arg(&cfg)
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("listen.portal"), "{err}");
     assert!(err.contains("portal.public_url"), "{err}");
@@ -91,7 +91,7 @@ fn check_fails_on_missing_env_and_names_only_the_variable() {
             c.env(KEY_ENV, v);
         }
         let out = c.arg("--check").arg("--config").arg(&cfg).output().unwrap();
-        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(out.status.code(), Some(2));
         assert!(String::from_utf8_lossy(&out.stderr).contains(KEY_ENV));
     }
 }
@@ -107,7 +107,7 @@ fn check_requires_caller_key_env_unless_unauthenticated_allowed() {
         .arg(&cfg)
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("caller_key_env"));
 
     let json = json.replace(
@@ -135,5 +135,5 @@ fn missing_config_is_an_error() {
         .arg("/nonexistent/hopae.json")
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(out.status.code(), Some(2));
 }

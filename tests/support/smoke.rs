@@ -29,8 +29,13 @@ fn spawn_basic_reaches_portal_gateway_and_hooks() {
     h.hooks.advance(Duration::from_secs(90));
     assert_eq!(h.hooks.now_ms(), 1_800_000_090_000);
     assert!(before > 1_600_000_000_000);
-    assert!(h.hooks.events(None, Some(10)).is_empty());
-    assert!(h.hooks.deliveries(Some("log")).is_empty());
+    // W1-F: start records exactly one `config.loaded` event (and its delivery); nothing else yet.
+    let evs = h.hooks.events(None, Some(10));
+    assert!(
+        evs.iter().all(|e| e["kind"] == "config.loaded") && evs.len() == 1,
+        "{evs:?}"
+    );
+    assert_eq!(h.hooks.deliveries(Some("log")).len(), 1);
     // Gates and stalls are accepted; a stalled store is visible in the call counters.
     h.hooks.stall(5);
     h.hooks.stall_off();
