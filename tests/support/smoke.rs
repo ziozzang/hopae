@@ -15,10 +15,11 @@ fn spawn_basic_reaches_portal_gateway_and_hooks() {
     assert_eq!(get(h.portal, "/healthz").status, 200);
     assert_eq!(h.portal_host(), "auth.example.test");
 
-    // The M0 fail-closed stub stays until W1-B replaces it.
+    // The verify endpoint answers with the contract's wire form: never a 2xx
+    // without a session (the decision itself is the verify engine's).
     let r = h.verify(VerifyRequest::document("https://app.example.test/admin/x"));
-    assert_eq!(r.status, 503, "{r:?}");
-    assert_eq!(r.header("x-hopae-reason"), Some("not_implemented"));
+    assert!(matches!(r.status, 302 | 401 | 403 | 400 | 503), "{r:?}");
+    assert!(r.header("x-hopae-reason").is_some(), "{r:?}");
 
     // Hooks: counters, clock, events.
     let c = h.hooks.counters();
@@ -83,20 +84,37 @@ fn spawn_applies_overrides_and_restart_keeps_state() {
 fn verify_caller_key_slots_and_missing_headers_are_expressible() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
-    // Every variant reaches the stub (it ignores the key); the point is that the
-    // request builder produces them without panicking.
-    for req in [
+    // Every variant is expressible, and the adapter answers each as the
+    // contract says: the caller key first, then the contract headers.
+    let refused = |req: VerifyRequest, status: u16, reason: &str| {
+        let r = h.verify(req);
+        assert_eq!(r.status, status, "{r:?}");
+        assert_eq!(r.header("x-hopae-reason"), Some(reason), "{r:?}");
+    };
+    refused(
         VerifyRequest::other("https://app.example.test/").key(KeySlot::Missing),
+        403,
+        "caller_unauthorized",
+    );
+    refused(
         VerifyRequest::document("https://app.example.test/").key(KeySlot::Wrong),
+        403,
+        "caller_unauthorized",
+    );
+    refused(
         VerifyRequest::document("https://app.example.test/").key(KeySlot::Next),
+        403,
+        "caller_unauthorized",
+    );
+    refused(
         VerifyRequest::document("https://app.example.test/")
             .without("x-forwarded-host")
             .cookie("__Host-hopae", "v1.x")
             .ua("UA")
             .ip("2001:db8::1"),
-    ] {
-        assert_eq!(h.verify(req).status, 503);
-    }
+        400,
+        "contract_violation",
+    );
     assert!(
         h.key_value(&KeySlot::Next).is_none(),
         "no next key configured in m1-basic"

@@ -22,6 +22,7 @@ pub struct Bound {
     store: Store,
     clock: Arc<dyn Clock>,
     rng: Arc<dyn Rng>,
+    gateway_state: Arc<http::gateway::GatewayState>,
     #[cfg(feature = "test-hooks")]
     hooks: Option<(TcpListener, SocketAddr, Arc<http::hooks::HooksState>)>,
 }
@@ -89,6 +90,26 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
             .with_context(|| format!("opening store {}", store_path.display()))?
     };
     store.set_rng(env.rng.clone());
+    let generation = store
+        .directory()
+        .config_generation()
+        .await
+        .context("reading the configuration generation")?;
+    let snapshot = Arc::new(arc_swap::ArcSwap::from_pointee(cfg.snapshot(generation)));
+    let verify_ctx = crate::verify::VerifyContext::new(
+        store.directory(),
+        store.sessions(),
+        env.clock.clone(),
+        env.rng.clone(),
+        snapshot,
+        cfg.verify_limits(),
+    );
+    let gateway_state = http::gateway::GatewayState::new(
+        crate::gateway::hangang::GatewayConfig::from_config(cfg, |n| std::env::var(n).ok()),
+        verify_ctx,
+        cfg.limits.gateway_max_concurrent,
+        None,
+    );
     let portal = TcpListener::bind(cfg.portal_addr())
         .await
         .context("binding portal listener")?;
@@ -125,6 +146,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         store,
         clock: env.clock,
         rng: env.rng,
+        gateway_state,
         #[cfg(feature = "test-hooks")]
         hooks,
     })
@@ -174,8 +196,11 @@ impl Bound {
         };
         let portal = axum::serve(self.portal, http::portal_router())
             .with_graceful_shutdown(wait(rx.clone()));
-        let gateway = axum::serve(self.gateway, http::gateway_router())
-            .with_graceful_shutdown(wait(rx.clone()));
+        let gateway = axum::serve(
+            self.gateway,
+            http::gateway_router(self.gateway_state.clone()),
+        )
+        .with_graceful_shutdown(wait(rx.clone()));
         #[cfg(feature = "test-hooks")]
         let hooks = async {
             match self.hooks {
