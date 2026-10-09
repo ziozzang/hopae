@@ -11,3 +11,4 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 ### Added
 
 - Development process, documentation system, ADR and scenario templates, and roadmap.
+- Architecture design, gateway contract v1 (with proposed gateway changes HC-1 to HC-5), threat model v0, ADR-0002 to ADR-0013 (Proposed), and draft scenarios 001–014 for milestone M1.

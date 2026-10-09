@@ -1,6 +1,6 @@
 # 문서
 
-<!-- translation-status: source=../README.md source-rev=1 status=current -->
+<!-- translation-status: source=../README.md source-rev=2 status=current -->
 
 [English](../README.md)
 
@@ -19,6 +19,9 @@
 
 ## 제품
 
-제품 참조 문서(설정, 게이트웨이 계약, 위협 모델, 제공자, 세션, 관리)는 마일스톤이
-완료될 때마다 추가됩니다. 그때까지는 [로드맵](ROADMAP.md)이 의도한 형태를
-설명합니다.
+- [아키텍처](ARCHITECTURE.md) — 구성 요소, 신뢰 경계, 요청 흐름, 데이터 모델, 저장소, 크레이트 구조, 장애 시 동작
+- [게이트웨이 계약](GATEWAY_CONTRACT.md) — 버전이 붙은 verify 프로토콜, 신원 헤더, 쿠키, 핸드오프, 캐시와 무효화 의미론, 제안하는 게이트웨이 변경
+- [위협 모델](THREAT_MODEL.md) — 자산, 행위자, 진입점, 흐름별 STRIDE, 완화책
+
+그 밖의 참조 문서(설정, 제공자, 세션, 관리)는 마일스톤이 완료될 때마다
+추가됩니다. [로드맵](ROADMAP.md)이 의도한 형태를 설명합니다.
