@@ -1,4 +1,1001 @@
-//! Scenario tests for this file's scenario: see scenarios/README.md and the scenario's test mapping table.
-//! Placeholder created by W0; the owning work package adds the tests.
-#![allow(unused_imports)]
+//! Scenario 004: verify returns identity headers for a valid session and
+//! fails closed otherwise.
+//!
+//! The engine cases drive `hopae::verify::decide` directly against a real
+//! SQLite store (ADR-0013: the decision needs no HTTP). The header and status
+//! renderings of the same decisions are asserted by the gateway adapter's own
+//! tests (W1-B) and by the wire cases below, which are ignored until that
+//! adapter lands.
+#![allow(dead_code)]
+
 use crate::support::*;
+
+/// Shared in-process fixture for the engine scenarios (004, 005, 010, 011).
+pub(crate) mod fx {
+    use std::net::IpAddr;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use arc_swap::ArcSwap;
+    use hopae::crypto::{
+        Clock, OsRng, Rng, Secret, TestClock, Timestamp, handle_value, random_id, random_token,
+    };
+    use hopae::event::types::{Event, EventKind, Reason};
+    use hopae::identity::types::NormalizedEmail;
+    use hopae::policy::types::{ConfigSnapshot, Host};
+    use hopae::provider::types::ProviderId;
+    use hopae::session::types::{Aal, FactorEntry, FactorKind, SessionId};
+    use hopae::store::types::*;
+    use hopae::store::{Store, StoreHooks};
+    use hopae::verify::{
+        BindAction, Cacheability, CallerAuth, CanonicalPath, Decision, DenyKind, Handoff, Identity,
+        KeySlot, Navigation, Scheme, VerifyContext, VerifyInput, decide,
+    };
+
+    /// Whole seconds so that the store's second-resolution columns round-trip.
+    pub const T0: i64 = 1_800_000_000_000;
+    pub const APP_URL: &str = "https://app.example.test/admin/x";
+    pub const PORTAL_HOST: &str = "auth.example.test";
+
+    pub fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    pub fn host(s: &str) -> Host {
+        Host::parse(s).unwrap()
+    }
+
+    pub fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    pub struct Fx {
+        pub _dir: tempfile::TempDir,
+        pub store: Store,
+        pub hooks: Arc<StoreHooks>,
+        pub clock: Arc<TestClock>,
+        pub rng: Arc<OsRng>,
+        pub snapshot: Arc<ArcSwap<ConfigSnapshot>>,
+        pub ctx: VerifyContext,
+        pub cfg: hopae::config::Config,
+    }
+
+    pub struct Sess {
+        pub row: SessionRow,
+        pub portal: Secret,
+    }
+
+    impl Fx {
+        pub fn new(fixture: &str) -> Fx {
+            Fx::with(fixture, |_| {})
+        }
+
+        /// The named fixture with `patch` applied to its JSON first.
+        pub fn with(fixture: &str, patch: impl FnOnce(&mut serde_json::Value)) -> Fx {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(format!("{fixture}.json"));
+            let mut v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            patch(&mut v);
+            let cfg = hopae::config::parse(&v.to_string()).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let clock = Arc::new(TestClock::new(Timestamp(T0)));
+            let hooks = Arc::new(StoreHooks::new());
+            let store = Store::open(
+                &dir.path().join("hopae.db"),
+                clock.clone(),
+                vec!["log".to_string()],
+                Some(hooks.clone()),
+            )
+            .unwrap();
+            store.set_rng(Arc::new(OsRng));
+            let rng = Arc::new(OsRng);
+            let snapshot = Arc::new(ArcSwap::from_pointee(cfg.snapshot(5)));
+            let ctx = VerifyContext::new(
+                store.directory(),
+                store.sessions(),
+                clock.clone(),
+                rng.clone(),
+                snapshot.clone(),
+                cfg.verify_limits(),
+            );
+            Fx {
+                _dir: dir,
+                store,
+                hooks,
+                clock,
+                rng,
+                snapshot,
+                ctx,
+                cfg,
+            }
+        }
+
+        pub fn now(&self) -> Timestamp {
+            self.clock.now()
+        }
+
+        /// Set the clock to `T0 + secs`.
+        pub fn at(&self, secs: u64) {
+            self.clock.set(Timestamp(T0).add(Duration::from_secs(secs)));
+        }
+
+        pub async fn user(
+            &self,
+            email: &str,
+            username: Option<&str>,
+            display: Option<&str>,
+        ) -> User {
+            let email = NormalizedEmail::parse(email).unwrap();
+            self.store
+                .directory()
+                .create_user(
+                    NewUser {
+                        primary_email: Some(email.clone()),
+                        email_verified: true,
+                        email_authoritative: false,
+                        display_name: display.map(str::to_string),
+                        username: username.map(str::to_string),
+                    },
+                    NewIdentity {
+                        provider_id: ProviderId::new("mock"),
+                        subject: format!("sub-{}", random_id(&*self.rng, "x_")),
+                        email: Some(email),
+                        email_verified: true,
+                        email_authoritative: false,
+                        name: display.map(str::to_string),
+                        picture: None,
+                        raw_claims: serde_json::json!({}),
+                    },
+                    vec![],
+                )
+                .await
+                .unwrap()
+        }
+
+        /// A session of `user` bound to 203.0.113.9 with no recorded user
+        /// agent, `aal=1`, `cred_gen=2`, created now, plus its portal handle.
+        pub async fn session(&self, user: &User) -> Sess {
+            self.session_with(user, |_| {}).await
+        }
+
+        pub async fn session_with(&self, user: &User, f: impl FnOnce(&mut SessionRow)) -> Sess {
+            let now = self.now();
+            let mut row = SessionRow {
+                session_id: SessionId::new(random_id(&*self.rng, "s_")),
+                user_id: user.user_id.clone(),
+                provider_id: ProviderId::new("mock"),
+                auth_time: now,
+                factors: vec![FactorEntry {
+                    kind: FactorKind::Oidc,
+                    provider: Some(ProviderId::new("mock")),
+                    at: now,
+                }],
+                aal: Aal::One,
+                authz_version: user.authz_version,
+                cred_gen: 2,
+                snapshot: IdentitySnapshot {
+                    email: user.primary_email.clone(),
+                    display_name: user.display_name.clone(),
+                    username: user.username.clone(),
+                    groups: vec![],
+                },
+                bound_ip: ip("203.0.113.9"),
+                bound_ua_sha256: None,
+                created_at: now,
+                last_seen_at: now,
+                absolute_expires_at: now.add(self.cfg.session_policy().absolute),
+                terminated_at: None,
+                terminated_reason: None,
+            };
+            f(&mut row);
+            let portal = handle_value(&*self.rng);
+            let handle = self.handle_row(&row.session_id, PORTAL_HOST, &portal, |_| {});
+            let digest = handle.handle_sha256;
+            self.store
+                .sessions()
+                .create_session(CreateSession {
+                    session: row.clone(),
+                    portal_handle: handle,
+                    portal_handle_digest: digest,
+                    events: vec![],
+                })
+                .await
+                .unwrap();
+            Sess { row, portal }
+        }
+
+        fn handle_row(
+            &self,
+            session: &SessionId,
+            host_name: &str,
+            secret: &Secret,
+            f: impl FnOnce(&mut HandleRow),
+        ) -> HandleRow {
+            let now = self.now();
+            let snap = self.snapshot.load();
+            let absolute = Host::parse(host_name)
+                .ok()
+                .and_then(|h| snap.app_for_host(&h).map(|a| a.session.absolute))
+                .unwrap_or(snap.default_app.session.absolute);
+            let mut h = HandleRow {
+                handle_sha256: secret.digest(),
+                session_id: session.clone(),
+                host: host(host_name),
+                issued_aal: Aal::One,
+                created_at: now,
+                last_seen_at: now,
+                absolute_expires_at: now.add(absolute),
+                revoked_at: None,
+                revoked_reason: None,
+            };
+            f(&mut h);
+            h
+        }
+
+        /// A handle for `host_name`, created now with that application's absolute lifetime.
+        pub async fn handle(&self, s: &Sess, host_name: &str) -> Secret {
+            self.handle_with(s, host_name, |_| {}).await
+        }
+
+        pub async fn handle_with(
+            &self,
+            s: &Sess,
+            host_name: &str,
+            f: impl FnOnce(&mut HandleRow),
+        ) -> Secret {
+            let secret = handle_value(&*self.rng);
+            let row = self.handle_row(&s.row.session_id, host_name, &secret, f);
+            self.store
+                .sessions()
+                .mint_handle(row, None, vec![])
+                .await
+                .unwrap();
+            secret
+        }
+
+        pub fn req(&self, url: &str) -> Req {
+            Req {
+                url: url.to_string(),
+                ip: ip("203.0.113.9"),
+                host: None,
+                proto: None,
+                cookie: None,
+                bind: None,
+                ua: None,
+                document: true,
+                code: None,
+                ambiguous: false,
+                contract: 1,
+            }
+        }
+
+        pub async fn decide(&self, r: Req) -> Decision {
+            decide(&self.ctx, r.build()).await
+        }
+
+        pub fn sql<T: rusqlite::types::FromSql>(&self, sql: &str) -> T {
+            self.store.conn().query_row(sql, [], |r| r.get(0)).unwrap()
+        }
+
+        pub fn exec(&self, sql: &str) {
+            self.store.conn().execute_batch(sql).unwrap();
+        }
+
+        /// `(revoked_reason, last_seen_at)` of a handle row.
+        pub fn handle_state(&self, h: &Secret) -> (Option<String>, i64) {
+            self.store
+                .conn()
+                .query_row(
+                    "SELECT revoked_reason, last_seen_at FROM session_handles WHERE handle_sha256 = ?1",
+                    [h.digest().0.to_vec()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        }
+
+        /// `(terminated_reason, cred_gen, authz_version)` of a session row.
+        pub fn session_state(&self, s: &Sess) -> (Option<String>, i64, i64) {
+            self.store
+                .conn()
+                .query_row(
+                    "SELECT terminated_reason, cred_gen, authz_version FROM sessions WHERE session_id = ?1",
+                    [s.row.session_id.as_str()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        }
+
+        pub async fn events(&self, kind: EventKind) -> Vec<Event> {
+            self.store
+                .events()
+                .query(EventQuery {
+                    kind: Some(kind),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+        }
+
+        pub fn store_calls(&self, method: &str) -> u64 {
+            self.hooks.calls().get(method).copied().unwrap_or(0)
+        }
+
+        pub fn txn_rows(&self) -> i64 {
+            self.sql("SELECT COUNT(*) FROM login_txns")
+        }
+    }
+
+    /// A verify call as the adapter would hand it to the engine.
+    #[derive(Clone)]
+    pub struct Req {
+        url: String,
+        ip: IpAddr,
+        host: Option<String>,
+        proto: Option<Scheme>,
+        cookie: Option<Secret>,
+        bind: Option<Secret>,
+        ua: Option<String>,
+        document: bool,
+        code: Option<Secret>,
+        ambiguous: bool,
+        contract: u8,
+    }
+
+    impl Req {
+        pub fn ip(mut self, v: &str) -> Self {
+            self.ip = ip(v);
+            self
+        }
+
+        pub fn host(mut self, v: &str) -> Self {
+            self.host = Some(v.to_string());
+            self
+        }
+
+        pub fn proto(mut self, v: Scheme) -> Self {
+            self.proto = Some(v);
+            self
+        }
+
+        pub fn cookie(mut self, v: &Secret) -> Self {
+            self.cookie = Some(v.clone());
+            self
+        }
+
+        pub fn raw_cookie(mut self, v: &str) -> Self {
+            self.cookie = Some(Secret::new(v.to_string()));
+            self
+        }
+
+        pub fn bind(mut self, v: &Secret) -> Self {
+            self.bind = Some(v.clone());
+            self
+        }
+
+        pub fn ua(mut self, v: &str) -> Self {
+            self.ua = Some(v.to_string());
+            self
+        }
+
+        pub fn other(mut self) -> Self {
+            self.document = false;
+            self
+        }
+
+        pub fn code(mut self, v: &Secret) -> Self {
+            self.code = Some(v.clone());
+            self
+        }
+
+        pub fn ambiguous(mut self) -> Self {
+            self.ambiguous = true;
+            self
+        }
+
+        pub fn contract(mut self, v: u8) -> Self {
+            self.contract = v;
+            self
+        }
+
+        pub fn build(self) -> VerifyInput {
+            let url = url::Url::parse(&self.url).unwrap();
+            let host_name = self
+                .host
+                .clone()
+                .unwrap_or_else(|| url.host_str().unwrap_or("").to_string());
+            VerifyInput {
+                canonical_path: CanonicalPath::new(url.path().to_string()),
+                port: url.port_or_known_default().unwrap_or(443),
+                proto: self.proto.unwrap_or(if url.scheme() == "http" {
+                    Scheme::Http
+                } else {
+                    Scheme::Https
+                }),
+                original_url: url,
+                client_ip: self.ip,
+                host: Host::parse(&host_name).unwrap(),
+                method: http::Method::GET,
+                route_id: None,
+                cookie_handle: self.cookie,
+                bind_cookie: self.bind,
+                user_agent: self.ua,
+                navigation: if self.document {
+                    Navigation::Document
+                } else {
+                    Navigation::Other
+                },
+                handoff: match (self.code, self.ambiguous) {
+                    (_, true) => Handoff::Ambiguous,
+                    (Some(c), false) => Handoff::Code(c),
+                    (None, false) => Handoff::None,
+                },
+                contract: self.contract,
+                caller: CallerAuth::Keyed {
+                    which: KeySlot::Current,
+                },
+                request_id: "req-test".to_string(),
+            }
+        }
+    }
+
+    pub fn show(d: &Decision) -> String {
+        match d {
+            Decision::Allow { .. } => "allow".into(),
+            Decision::Login {
+                transaction,
+                clear_handle,
+                ..
+            } => format!("login(txn={}, clear={clear_handle})", transaction.is_some()),
+            Decision::Handoff { .. } => "handoff".into(),
+            Decision::CleanRedirect { .. } => "clean_redirect".into(),
+            Decision::Switch { .. } => "switch".into(),
+            Decision::Deny { reason, kind } => format!("deny({}, {kind:?})", reason.0),
+        }
+    }
+
+    pub fn allow(d: Decision) -> (Identity, Cacheability) {
+        match d {
+            Decision::Allow { identity, cache } => (identity, cache),
+            other => panic!("expected allow, got {}", show(&other)),
+        }
+    }
+
+    /// `(transaction, bind, clear_handle)` of a login decision.
+    pub fn login(d: Decision) -> (Option<Secret>, BindAction, bool) {
+        match d {
+            Decision::Login {
+                transaction,
+                bind,
+                clear_handle,
+                ..
+            } => (transaction, bind, clear_handle),
+            other => panic!("expected login, got {}", show(&other)),
+        }
+    }
+
+    pub fn deny(d: Decision) -> (Reason, DenyKind) {
+        match d {
+            Decision::Deny { reason, kind } => (reason, kind),
+            other => panic!("expected deny, got {}", show(&other)),
+        }
+    }
+
+    pub fn random_secret(rng: &dyn Rng, bytes: usize) -> Secret {
+        random_token(rng, bytes)
+    }
+}
+
+use fx::*;
+use hopae::event::types::{EventKind, reasons};
+use hopae::verify::{BindAction, Cacheability, Decision, DenyKind, Scheme};
+
+/// The user and session of the S004 preconditions: `u` with
+/// `authz_version = 3`, session `s` with `aal=1`, `cred_gen=2`, and a handle
+/// `H1` on `app.example.test` created at `t0`; configuration generation 5.
+async fn precondition(f: &Fx) -> (hopae::store::types::User, Sess, hopae::crypto::Secret) {
+    let u = f
+        .user("a@example.test", Some("alice"), Some("Alice 김"))
+        .await;
+    f.exec(&format!(
+        "UPDATE users SET authz_version = 3 WHERE user_id = '{}'",
+        u.user_id
+    ));
+    let s = f.session_with(&u, |r| r.authz_version = 3).await;
+    let h1 = f.handle(&s, "app.example.test").await;
+    f.at(60);
+    (u, s, h1)
+}
+
+#[tokio::test]
+async fn s004_1_valid_handle_yields_identity_headers() {
+    let f = Fx::new("m1-basic");
+    let (u, s, h1) = precondition(&f).await;
+    let before = f.hooks.calls();
+    let d = f.decide(f.req(APP_URL).cookie(&h1).ua("UA1")).await;
+    let (id, cache) = allow(d);
+    assert_eq!(id.user_id, u.user_id);
+    assert_eq!(
+        id.email.as_ref().map(|e| e.as_str()),
+        Some("a@example.test")
+    );
+    assert_eq!(id.preferred_username.as_deref(), Some("alice"));
+    assert!(id.groups.is_empty());
+    assert_eq!(id.session_id, s.row.session_id);
+    assert_eq!(id.provider_id.as_str(), "mock");
+    assert_eq!(id.auth_time.secs(), T0 / 1000);
+    // The handle's idle deadline is the earliest timer: t0 + 12 h.
+    assert_eq!(id.expires_at.secs(), T0 / 1000 + 12 * 3600);
+    assert_eq!(id.aal, hopae::session::types::Aal::One);
+    assert_eq!(id.factors.len(), 1);
+    assert_eq!(id.factors[0].kind.as_str(), "oidc");
+    assert_eq!(id.generations.to_string(), "s2.u3.c5");
+    assert!(matches!(cache, Cacheability::NoStore));
+    // One handle/session/user read; nothing else is needed to decide.
+    let after = f.hooks.calls();
+    let delta = |m: &str| after.get(m).copied().unwrap_or(0) - before.get(m).copied().unwrap_or(0);
+    assert_eq!(delta("lookup_handle"), 1);
+    assert_eq!(delta("user_authz"), 0);
+    assert_eq!(delta("user"), 0);
+}
+
+#[tokio::test]
+async fn s004_2_non_ascii_percent_encoded() {
+    // The engine hands the display name over untouched; the adapter
+    // percent-encodes it (`Alice%20%EA%B9%80`, tested with the renderer).
+    let f = Fx::new("m1-basic");
+    let u = f.user("a@example.test", None, Some("Alice 김")).await;
+    let s = f.session(&u).await;
+    let h1 = f.handle(&s, "app.example.test").await;
+    let (id, _) = allow(f.decide(f.req(APP_URL).cookie(&h1)).await);
+    assert_eq!(id.preferred_username.as_deref(), Some("Alice 김"));
+}
+
+#[test]
+#[ignore = "needs W1-B (cookie parsing on the gateway listener)"]
+fn s004_3_other_cookies_ignored() {
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
+    let r = h.verify(
+        VerifyRequest::document("https://app.example.test/admin/x")
+            .cookie("a", "b")
+            .cookie("__Host-hopae", "v1.not-a-handle")
+            .cookie("c", "d"),
+    );
+    // A malformed Hopae cookie is an unknown handle; the foreign cookies are not read.
+    assert_eq!(r.status, 302);
+    let log = h.log();
+    assert!(!log.contains("a=b") && !log.contains("c=d"));
+    for ev in h.hooks.events(None, None) {
+        assert!(!ev.to_string().contains("a=b"));
+    }
+}
+
+#[tokio::test]
+async fn s004_4_core_decision_without_http() {
+    let f = Fx::new("m1-basic");
+    let (u, _s, h1) = precondition(&f).await;
+    let (id, _) = allow(f.decide(f.req(APP_URL).cookie(&h1)).await);
+    assert_eq!(id.user_id, u.user_id);
+    // Unknown (well-formed) handle: Login with a transaction.
+    let unknown = hopae::crypto::handle_value(&*f.rng);
+    let (txn, bind, clear) = login(f.decide(f.req(APP_URL).cookie(&unknown)).await);
+    assert!(txn.is_some() && clear);
+    assert!(matches!(bind, BindAction::Plant(_)));
+}
+
+#[tokio::test]
+async fn s004_5_store_unavailable_fails_closed() {
+    let f = Fx::new("m1-basic");
+    let (_u, _s, h1) = precondition(&f).await;
+    f.exec("DROP TABLE session_handles");
+    let (reason, kind) = deny(f.decide(f.req(APP_URL).cookie(&h1)).await);
+    assert_eq!(reason, reasons::STORE_UNAVAILABLE);
+    assert_eq!(
+        kind,
+        DenyKind::Unavailable {
+            retry_after: secs(1)
+        }
+    );
+}
+
+#[tokio::test]
+async fn s004_6_contract_violation_fails_closed() {
+    // The missing `x-original-url` half is the adapter's (W1-B parse tests);
+    // the engine refuses a contract major it does not speak.
+    let f = Fx::new("m1-basic");
+    let (_u, _s, h1) = precondition(&f).await;
+    let before = f.hooks.calls();
+    let (reason, kind) = deny(f.decide(f.req(APP_URL).cookie(&h1).contract(2)).await);
+    assert_eq!(reason, reasons::CONTRACT_UNSUPPORTED);
+    assert_eq!(kind, DenyKind::ContractViolation);
+    assert_eq!(f.hooks.calls(), before, "no store access");
+}
+
+#[tokio::test]
+async fn s004_7_host_mismatch_rejected() {
+    let f = Fx::new("m1-basic");
+    let (_u, _s, h1) = precondition(&f).await;
+    let before = f.hooks.calls();
+    let (reason, kind) = deny(
+        f.decide(f.req(APP_URL).cookie(&h1).host("other.example.org"))
+            .await,
+    );
+    assert_eq!(reason, reasons::CONTRACT_VIOLATION);
+    assert_eq!(kind, DenyKind::ContractViolation);
+    assert_eq!(f.hooks.calls(), before, "no session lookup");
+}
+
+#[tokio::test]
+async fn s004_8_cacheability_declared_safely() {
+    // verify_cache_seconds = 5 and no step_up rule.
+    let five = |v: &mut serde_json::Value| v["apps"][0]["verify_cache_seconds"] = 5.into();
+    let f = Fx::with("m1-basic", five);
+    let (_u, _s, h1) = precondition(&f).await;
+    let (id, cache) = allow(f.decide(f.req(APP_URL).cookie(&h1)).await);
+    let now = f.now();
+    match cache {
+        Cacheability::Private {
+            max_age,
+            fresh_until,
+        } => {
+            assert_eq!(max_age, secs(5));
+            assert_eq!(fresh_until, now.add(secs(5)));
+        }
+        Cacheability::NoStore => panic!("expected a cacheable decision"),
+    }
+    assert_eq!(id.generations.to_string(), "s2.u3.c5");
+
+    // With the handle 2 s from its idle deadline the deadline is read time + 2 s.
+    let f = Fx::with("m1-basic", five);
+    let (_u, s, _h) = precondition(&f).await;
+    let late = f
+        .handle_with(&s, "app.example.test", |h| {
+            h.last_seen_at = h.created_at.sub(secs(12 * 3600 - 2))
+        })
+        .await;
+    let (_, cache) = allow(f.decide(f.req(APP_URL).cookie(&late)).await);
+    match cache {
+        Cacheability::Private {
+            max_age,
+            fresh_until,
+        } => {
+            assert_eq!(max_age, secs(5));
+            assert_eq!(fresh_until, f.now().add(secs(2)));
+        }
+        Cacheability::NoStore => panic!("expected a cacheable decision"),
+    }
+
+    // A step-up rule makes the decision path-dependent: no-store.
+    let with_rule = |v: &mut serde_json::Value| {
+        v["apps"][0]["verify_cache_seconds"] = 5.into();
+        v["apps"][0]["step_up"] =
+            serde_json::json!([{"path_prefix": "/admin", "require": {"aal": 2}}]);
+    };
+    let f = Fx::with("m1-basic", with_rule);
+    let (_u, _s, h1) = precondition(&f).await;
+    let (_, cache) = allow(f.decide(f.req(APP_URL).cookie(&h1)).await);
+    assert!(matches!(cache, Cacheability::NoStore));
+
+    // Sixty seconds is refused by the configuration.
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/m1-basic.json"),
+    )
+    .unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    v["apps"][0]["verify_cache_seconds"] = 60.into();
+    let Err(err) = hopae::config::parse(&v.to_string()) else {
+        panic!("verify_cache_seconds = 60 must be rejected")
+    };
+    assert!(err.to_string().contains("verify_cache_seconds"), "{err}");
+}
+
+#[tokio::test]
+async fn s004_9_stalled_dependency_within_budget() {
+    let f = Fx::new("m1-basic");
+    let (_u, _s, h1) = precondition(&f).await;
+    f.hooks.set_stall(5_000);
+    let started = std::time::Instant::now();
+    let (reason, kind) = deny(f.decide(f.req(APP_URL).cookie(&h1)).await);
+    let took = started.elapsed();
+    assert_eq!(reason, reasons::BUDGET_EXCEEDED);
+    assert!(matches!(kind, DenyKind::Unavailable { .. }));
+    assert!(
+        took < secs_f(0.45),
+        "answered in {took:?}, the budget is 400 ms"
+    );
+    f.hooks.set_stall(0);
+}
+
+fn secs_f(s: f64) -> std::time::Duration {
+    std::time::Duration::from_secs_f64(s)
+}
+
+#[tokio::test]
+async fn s004_10_authz_change_seen_on_next_verify() {
+    // refresh (default): groups are dropped, the snapshot is brought up to date.
+    let f = Fx::new("m1-basic");
+    let (u, s, h1) = precondition(&f).await;
+    let admin = hopae::store::types::IdentitySnapshot {
+        email: u.primary_email.clone(),
+        display_name: u.display_name.clone(),
+        username: u.username.clone(),
+        groups: vec!["admin".to_string()],
+    };
+    f.store
+        .sessions()
+        .refresh_snapshot(&s.row.session_id, admin, 3)
+        .await
+        .unwrap();
+    let (id, _) = allow(f.decide(f.req(APP_URL).cookie(&h1)).await);
+    assert_eq!(id.groups, ["admin"]);
+    f.exec(&format!(
+        "UPDATE users SET authz_version = 4, groups = '[]' WHERE user_id = '{}'",
+        u.user_id
+    ));
+    let (id, _) = allow(f.decide(f.req(APP_URL).cookie(&h1)).await);
+    assert!(id.groups.is_empty());
+    assert_eq!(id.generations.to_string(), "s2.u4.c5");
+    assert_eq!(f.session_state(&s).2, 4, "snapshot refreshed");
+
+    // terminate: the session ends with reason authz_change.
+    let f = Fx::with("m1-basic", |v| {
+        v["apps"][0]["on_authz_change"] = "terminate".into()
+    });
+    let (u, s, h1) = precondition(&f).await;
+    f.exec(&format!(
+        "UPDATE users SET authz_version = 4 WHERE user_id = '{}'",
+        u.user_id
+    ));
+    let (_, _, clear) = login(f.decide(f.req(APP_URL).cookie(&h1)).await);
+    assert!(clear);
+    assert_eq!(f.session_state(&s).0.as_deref(), Some("authz_change"));
+    let ev = f.events(EventKind::SessionTerminated).await;
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].reason, Some(reasons::AUTHZ_CHANGE));
+
+    // disabled: denied on the very next verify and the session is terminated.
+    let f = Fx::new("m1-basic");
+    let (u, s, h1) = precondition(&f).await;
+    f.exec(&format!(
+        "UPDATE users SET status = 'disabled', authz_version = 4 WHERE user_id = '{}'",
+        u.user_id
+    ));
+    let (_, _, clear) = login(f.decide(f.req(APP_URL).cookie(&h1)).await);
+    assert!(clear);
+    assert_eq!(f.session_state(&s).0.as_deref(), Some("user_disabled"));
+    let (_, _, clear) = login(f.decide(f.req(APP_URL).other().cookie(&h1)).await);
+    assert!(clear);
+}
+
+#[tokio::test]
+async fn s004_11_no_non_allow_path_is_2xx() {
+    // Every engine outcome except Decision::Allow maps to a non-2xx status in
+    // the adapter (its unit test walks `render`); here every non-allow fixture
+    // must at least not be an Allow, and the one allow carries an identity.
+    let f = Fx::with("m1-two-domains", |_| {});
+    let (u, s, h1) = precondition(&f).await;
+    let unknown = hopae::crypto::handle_value(&*f.rng);
+    let mut outcomes: Vec<(&str, Decision)> = vec![];
+    outcomes.push(("no cookie document", f.decide(f.req(APP_URL)).await));
+    outcomes.push(("no cookie other", f.decide(f.req(APP_URL).other()).await));
+    outcomes.push((
+        "unknown handle",
+        f.decide(f.req(APP_URL).cookie(&unknown)).await,
+    ));
+    outcomes.push((
+        "unknown host",
+        f.decide(f.req("https://nope.example.test/").cookie(&h1))
+            .await,
+    ));
+    outcomes.push((
+        "contract",
+        f.decide(f.req(APP_URL).cookie(&h1).contract(9)).await,
+    ));
+    outcomes.push((
+        "http",
+        f.decide(f.req(APP_URL).cookie(&h1).proto(Scheme::Http))
+            .await,
+    ));
+    outcomes.push((
+        "param on non-document",
+        f.decide(f.req(APP_URL).other().cookie(&h1).ambiguous())
+            .await,
+    ));
+    outcomes.push(("ambiguous", f.decide(f.req(APP_URL).ambiguous()).await));
+    outcomes.push((
+        "unknown code",
+        f.decide(f.req(APP_URL).code(&unknown)).await,
+    ));
+    outcomes.push((
+        "binding mismatch",
+        f.decide(f.req(APP_URL).cookie(&h1).ip("198.51.100.7"))
+            .await,
+    ));
+    for (what, d) in &outcomes {
+        assert!(!matches!(d, Decision::Allow { .. }), "{what}: {}", show(d));
+    }
+    // The session was terminated by the binding mismatch: even the right IP is denied now.
+    assert!(!matches!(
+        f.decide(f.req(APP_URL).cookie(&h1)).await,
+        Decision::Allow { .. }
+    ));
+    let _ = (u, s);
+}
+
+#[tokio::test]
+async fn s004_a1_malformed_handle_rejected_early() {
+    let f = Fx::new("m1-basic");
+    let (_u, _s, _h1) = precondition(&f).await;
+    let before = f.store_calls("lookup_handle");
+    let short = format!("v1.{}", "a".repeat(10));
+    let bad_version = format!("v9.{}", "a".repeat(43));
+    for bad in [short, bad_version] {
+        let (txn, _, clear) = login(f.decide(f.req(APP_URL).raw_cookie(&bad)).await);
+        assert!(txn.is_some() && clear);
+    }
+    assert_eq!(f.store_calls("lookup_handle"), before, "no store query");
+    // The 9 KiB cookie header is refused by the adapter (`400 header_too_large`, W1-B).
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn s004_a2_last_seen_coalesced() {
+    let f = Fx::new("m1-basic");
+    let (_u, _s, h1) = precondition(&f).await;
+    let mut latencies = Vec::new();
+    for i in 0..1000u64 {
+        // 10 s of requests in 10 ms steps, starting 60 s after t0.
+        f.clock
+            .set(hopae::crypto::Timestamp(T0 + 60_000 + (i as i64) * 10));
+        let started = std::time::Instant::now();
+        let d = f.decide(f.req(APP_URL).cookie(&h1)).await;
+        latencies.push(started.elapsed());
+        allow(d);
+    }
+    latencies.sort();
+    assert!(
+        latencies[989] < std::time::Duration::from_millis(20),
+        "p99 {:?}",
+        latencies[989]
+    );
+    // Let the detached touch finish, then count the writes.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(f.store_calls("touch_handle") <= 1);
+    assert!(f.store_calls("touch_handle") >= 1);
+}
+
+#[test]
+#[ignore = "needs W1-B (gateway concurrency limit lives in the adapter)"]
+fn s004_a3_concurrency_limit_fails_closed() {
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(
+        Fixture::with(
+            "m1-basic",
+            serde_json::json!({"limits": {"gateway_max_concurrent": 64}}),
+        ),
+        &idp,
+        &[],
+    );
+    h.hooks.stall(200);
+    let h = std::sync::Arc::new(h);
+    let mut threads = vec![];
+    for _ in 0..200 {
+        let h = h.clone();
+        threads.push(std::thread::spawn(move || {
+            h.verify(VerifyRequest::document("https://app.example.test/admin/x"))
+        }));
+    }
+    let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+    let overloaded = results
+        .iter()
+        .filter(|r| r.status == 503 && r.header("x-hopae-reason") == Some("overloaded"))
+        .count();
+    assert!(overloaded >= 200 - 64, "{overloaded} overloaded answers");
+    assert!(
+        results
+            .iter()
+            .filter(|r| r.header("x-hopae-reason") == Some("overloaded"))
+            .all(|r| r.header("retry-after").is_some())
+    );
+    h.hooks.stall_off();
+    let r = h.verify(VerifyRequest::document("https://app.example.test/admin/x"));
+    assert_eq!(r.status, 302);
+}
+
+#[tokio::test]
+async fn s004_a4_handle_not_valid_on_other_host() {
+    let f = Fx::new("m1-two-domains");
+    let (_u, s, h1) = precondition(&f).await;
+    let (txn, _, clear) = login(
+        f.decide(f.req("https://other.example.org/").cookie(&h1))
+            .await,
+    );
+    assert!(txn.is_some() && clear);
+    assert_eq!(f.session_state(&s).0, None, "the session is not terminated");
+    // And H1 still works on its own host.
+    allow(f.decide(f.req(APP_URL).cookie(&h1)).await);
+}
+
+#[test]
+#[ignore = "needs W1-B (duplicate context headers are rejected by the adapter)"]
+fn s004_a5_duplicate_context_headers_rejected() {
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
+    let r = h.verify(
+        VerifyRequest::document("https://app.example.test/admin/x")
+            .header("x-forwarded-host", "other.example.org"),
+    );
+    assert_eq!(r.status, 400);
+    assert_eq!(r.header("x-hopae-reason"), Some("contract_violation"));
+    assert_eq!(h.hooks.store_calls("lookup_handle"), 0);
+}
+
+#[tokio::test]
+async fn s004_a6_downgraded_proto_refused() {
+    let f = Fx::new("m1-basic");
+    let (_u, _s, h1) = precondition(&f).await;
+    let before = f.hooks.calls();
+    let (reason, kind) = deny(
+        f.decide(f.req(APP_URL).cookie(&h1).proto(Scheme::Http))
+            .await,
+    );
+    assert_eq!(reason, reasons::INSECURE_TRANSPORT);
+    assert_eq!(kind, DenyKind::ContractViolation);
+    assert_eq!(f.hooks.calls(), before);
+}
+
+#[tokio::test]
+async fn s004_a7_unknown_and_expired_uniform() {
+    let f = Fx::new("m1-basic");
+    let (_u, s, h1) = precondition(&f).await;
+    let random = hopae::crypto::handle_value(&*f.rng);
+    f.store
+        .sessions()
+        .terminate_session(&s.row.session_id, reasons::LOGOUT, f.now(), vec![])
+        .await
+        .unwrap();
+    let shape = |d: Decision| {
+        let (txn, bind, clear) = login(d);
+        (txn.is_some(), matches!(bind, BindAction::Plant(_)), clear)
+    };
+    let unknown = shape(f.decide(f.req(APP_URL).cookie(&random)).await);
+    let terminated = shape(f.decide(f.req(APP_URL).cookie(&h1)).await);
+    assert_eq!(unknown, terminated);
+    assert_eq!(unknown, (true, true, true));
+}
+
+#[test]
+#[ignore = "needs W1-B (caller key check and metrics are the adapter's)"]
+fn s004_a8_caller_key_required() {
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(
+        Fixture::new("m1-basic"),
+        &idp,
+        &[("HOPAE_GW_KEY_B", "second-key-value")],
+    );
+    let url = "https://app.example.test/admin/x";
+    for req in [
+        VerifyRequest::document(url).key(KeySlot::Missing),
+        VerifyRequest::document(url).key(KeySlot::Wrong),
+        VerifyRequest::document(url).header(
+            "x-hopae-gateway-key",
+            &h.key_value(&KeySlot::Current).unwrap(),
+        ),
+    ] {
+        let r = h.verify(req);
+        assert_eq!(r.status, 403);
+        assert_eq!(r.header("x-hopae-reason"), Some("caller_unauthorized"));
+        assert!(r.set_cookies().is_empty());
+    }
+    assert_eq!(h.hooks.store_calls("lookup_handle"), 0);
+    assert_eq!(h.hooks.store_calls("create_transaction"), 0);
+    assert_eq!(
+        h.hooks.counters()["metrics"]["hopae_verify_unauthorized_total"],
+        3
+    );
+    // The comparison itself is constant time (W0's `ct_eq`).
+    assert!(hopae::crypto::ct_eq(b"abcdefgh", b"abcdefgh"));
+    assert!(!hopae::crypto::ct_eq(b"abcdefgh", b"abcdefgx"));
+    assert!(!hopae::crypto::ct_eq(b"abcdefgh", b"abcdefg"));
+}
