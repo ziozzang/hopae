@@ -1,6 +1,6 @@
 # ADR-0015: Application-host entry points are served by Hopae through the verify call, and the gateway strips Hopae cookies from upstream requests
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-10-09
 - Deciders: designer, orchestrator
 - Scenarios: 015, 006 (link target answered), 004 (11 extended)
