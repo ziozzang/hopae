@@ -1,11 +1,11 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=14 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=15 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
 이 페이지는 Hopae가 읽는 모든 설정 키를 타입, 기본값, 제약, 도입된 마일스톤과
-함께 나열합니다. 아래 표들은 마일스톤 M1이 구현한 내용을 설명하고, 마지막 표는
+함께 나열합니다. 아래 표들은 마일스톤 M1과 M4-min이 구현한 내용을 설명하고, 마지막 표는
 ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를 나열합니다. 그런 키는
 구현하는 변경에서 본문 표로 옮깁니다.
 
@@ -26,12 +26,21 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `hopae --check --strict --config <path>` | `--check`와 같지만 경고가 하나라도 있으면 오류입니다(종료 코드 `2`). `--strict`는 `--check`와 함께만 쓸 수 있습니다. |
 | `hopae providers import --config <path>` | 파일의 `providers[]`를 ADR-0010 규칙으로 저장소에 가져오고(파일 항목은 `managed_by = file` 행을 삽입하거나 갱신하며, 데이터베이스가 관리하거나 제거된 제공자는 건드리지 않습니다) 삽입, 갱신, 건너뛴 항목을 출력합니다. 인스턴스가 실행 중이어도 안전합니다. 변경을 반영하려면 그 인스턴스를 재시작합니다. |
 | `hopae providers import --force <provider_id> --config <path>` | 위와 같고, 지정한 파일 항목을 데이터베이스 위에 다시 덮어씁니다(비활성화, API 관리 또는 제거된 제공자). id는 파일에 있어야 합니다. `admin.providers_import` 이벤트를 기록합니다. |
+| `hopae admin grant <user_id 또는 email> [--role admin\|viewer] [--note <text>] [--confirm <user_id>] --config <path>` | 기존 사용자에게 콘솔 역할(기본 `admin`)을 부여하고 해결된 사용자를 출력합니다. 이메일은 사용자의 검증된 기본 이메일이어야 하며, 권위적이지 않은 이메일은 해결된 사용자 id를 가리키는 `--confirm`이 필요합니다. `--note`는 최대 256자입니다. 부여는 그 사용자 id에 묶이며 다시 해결되지 않습니다. `admin.grant`를 기록합니다([관리](ADMIN.md#명령줄-참조)). |
+| `hopae admin revoke <user_id 또는 email> --config <path>` | 부여를 철회합니다. 행은 묘비로 남습니다. `admin.revoke`를 기록합니다. |
+| `hopae admin list [--all] --config <path>` | 유효한 부여를 출력합니다. `--all`은 철회된 행도 더합니다. |
+| `hopae admin import [--force <user_id 또는 email>] --config <path>` | 파일의 `admin.users[]`를 저장소에 적용하고(시작할 때도 같은 가져오기가 실행됩니다) 삽입, 갱신, 철회, 변경 없음, 강제, 건너뛴 항목을 출력합니다. |
 | `hopae --version` | 버전을 출력하고 `0`으로 종료합니다. 설정이 필요 없습니다. |
 
 종료 상태: `0` 성공. `2` 유효하지 않거나 안전하지 않은 설정(호출자 키 변수가 없거나
 빈 경우 포함), `--config` 누락, 다른 인스턴스가 상태 디렉터리 잠금을 쥐고 있어
-시작이 거부됨, `--strict` 실패, 실패한 `providers import`. `1` 그 밖의 모든 런타임
-실패(예: 열 수 없는 저장소, 바인딩할 수 없는 리스너).
+시작이 거부됨, `--strict` 실패, 실패한 `providers import`, 거부된 `hopae admin`
+명령(없거나 부적합한 사용자, 잘못된 인자, 사전 점검이 거부하는 데이터베이스:
+바이너리보다 새롭거나 출시 전 스키마이거나 손상되었거나 바이너리보다 오래된
+경우이며, 마지막 경우 메시지가 인스턴스를 한 번 시작해 마이그레이션하라고 안내함).
+`1` 그 밖의 모든 런타임 실패(예: 열 수 없는 저장소, 바인딩할 수 없는 리스너).
+`hopae admin` 명령은 데이터베이스를 만들거나 마이그레이션하거나 백업하지 않고
+인스턴스 잠금도 잡지 않으며, 바쁜 데이터베이스를 최대 5초까지 기다립니다.
 
 `gateway.admin_url`과 `gateway.readonly_token_env`가 모두 설정되고 변수가 비어 있지
 않으면 `hopae --check`가 게이트웨이의 관리 API에 어떤 호스트에 라우트가 있는지
@@ -40,10 +49,10 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 0단계). 조회에 실패하면 경고일 뿐 오류가 아닙니다. `hopae run`은 두 키를 쓰지
 않습니다.
 
-### 키(M0과 M1)
+### 키(M0, M1, M4-min)
 
 아래 키는 모두 구현되어 있습니다. "선택"은 키를 생략할 수 있고 기본값이 적용된다는
-뜻입니다.
+뜻입니다. 관리 콘솔 키(마일스톤 M4-min)는 별도 표 [관리 콘솔](#관리-콘솔)에 있습니다.
 
 #### 프로세스와 저장소
 
@@ -58,8 +67,10 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `log.verify_allow` | 불리언 | `false` | 허용된 verify를 하나하나 기록합니다(거부는 항상 집계되고 샘플링됩니다). |
 | `log.accept_client_request_id` | 불리언 | `false` | 클라이언트가 보낸 `x-request-id`를 잘라서 verify와 포털 요청 이벤트의 `attrs.client_request_id`에 기록합니다([ADR-0009](../adr/0009-event-model.md)). |
 | `trusted_proxies` | IP 주소 또는 CIDR 문자열 배열 | `["127.0.0.1/32"]` | 포털 리스너가 `x-forwarded-for`와 `x-forwarded-proto`를 신뢰하는 피어. 각 항목은 주소 또는 CIDR이어야 합니다. 전달된 체인이 (모든 헤더 줄을 합쳐) 64홉을 넘으면 신뢰하지 않으며, 이때 피어 자신이 클라이언트 주소가 됩니다. |
+| `listen.admin` | 문자열, 소켓 주소 | `127.0.0.1:8702` | 관리 콘솔의 관리 리스너. `admin.public_url`이 설정된 때만 바인딩합니다(`listen.admin`만 설정하고 `admin.public_url`이 없으면 리스너가 바인딩되지 않는다는 경고를 냅니다). `listen.portal`, `listen.gateway`와 달라야 합니다(키가 설정되면 항상 검사). 루프백이 아닌 주소는 경고를 냅니다. 이 리스너는 공개적으로 접근할 수 있어서는 안 됩니다. |
 | `limits.gateway_max_concurrent` | 정수, 1 이상 | `64` | 게이트웨이 리스너의 동시 처리 요청 상한. 초과 요청은 즉시 `reason=overloaded`와 함께 `503`으로 답합니다([ADR-0003](../adr/0003-http-stack-axum-on-hyper.md)). 호출자 키는 허가를 얻기 전에 검사합니다. |
 | `limits.portal_max_concurrent` | 정수, 1 이상 | `256` | 포털 리스너의 동시 처리 요청 상한. 초과 요청은 즉시 `503`으로 답합니다. |
+| `limits.admin_max_concurrent` | 정수, 1 이상 | `16` | 관리 리스너의 동시 처리 요청 상한. 초과 요청은 피어 검사와 인증보다 먼저 즉시 `503`(`overloaded`)으로 답합니다. |
 | `sessions.retention_days` | 정수, 1 이상 | `30` | 종료된 세션과 그 핸들을 세션 보존 정리 작업이 삭제하는 기간([ADR-0007](../adr/0007-context-binding-policy.md)). |
 
 #### 포털, 쿠키, 세션
@@ -138,18 +149,40 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `providers[].auto_link` | 불리언 | `false` | 정책이 허용하면 확인 없이 로그인을 기존 사용자에 연결합니다. |
 | `providers[].trust_email` | 불리언 | `false` | 제공자의 이메일 클레임을 검증된 것으로 취급합니다. |
 
-제공자 설정 `preset`, `userinfo`, `id_token_typ`은 OIDC 제공자가 설정 파일이 아니라
-제공자 행에 저장된 `config`에서 읽습니다. M1에서 파일 가져오기는 `client_id`,
-`issuer`, `scope`만 그 행에 쓰며, `hopae --check`는 이 세 이름을 알 수 없는 키로
-거부합니다. 이를 가진 행이 데이터베이스에 있을 때만 효과가 있습니다.
+제공자 설정 `preset`, `userinfo`, `id_token_typ`, `reauth`, `reauth_prompt`는 OIDC
+제공자가 설정 파일이 아니라 제공자 행에 저장된 `config`에서 읽습니다. 파일 가져오기는
+`client_id`, `issuer`, `scope`만 그 행에 쓰며, `hopae --check`는 이 다섯 이름을 알 수
+없는 키로 거부합니다. 이를 가진 행이 데이터베이스에 있을 때만 효과가 있습니다.
+`reauth`와 `reauth_prompt`는 저장된 값이 파일이 해석한 기본값보다 우선하며(시작할 때와
+`hopae --check` 보고서 모두), 나열된 값이 아닌 저장 값은 무시합니다.
 
 | 저장된 설정 | 타입 | 기본값 | 의미 |
 | --- | --- | --- | --- |
 | `preset` | 문자열 | `provider_id`와 같은 이름의 프리셋, 없으면 issuer가 일치하는 프리셋 | 잘 알려진 제공자의 내장 기본값. M1에는 `google`만 있습니다(issuer `https://accounts.google.com`, scope `openid email profile`, user-info 호출 없음). |
 | `userinfo` | 불리언 | 프리셋의 값, 프리셋이 없으면 `true` | ID 토큰 검증 뒤 user-info 엔드포인트를 호출합니다. 주체(subject)는 ID 토큰과 일치해야 합니다. |
 | `id_token_typ` | 문자열 | 없음 | 제공자가 설정하는 경우 ID 토큰의 필수 `typ` 헤더. |
-| `reauth`(M4-min) | `max_age`, `unsupported` | 프리셋의 값. 프리셋이 없으면 `max_age` | 제공자가 OpenID Connect `max_age` 매개변수를 존중하고 `auth_time`을 돌려주어 콘솔 재인증이 제공자가 검증한 도전이 되는지 여부. `google` 프리셋은 `unsupported`이며(Google은 재인증 요청을 지원하지 않는다고 문서화함) 그런 제공자에서의 콘솔 신선도는 Hopae 로그인 경과 시간입니다([ADR-0016](../adr/0016-management-console-minimum.md) 결정 15, [관리](ADMIN.md#신선도와-재인증)). |
-| `reauth_prompt`(M4-min) | `login`, `none` | `login` | `max_age` 제공자에 대한 재인증 authorize 요청에 `prompt=login`도 실을지 여부. |
+| `reauth` | `max_age`, `unsupported` | 프리셋의 값. 프리셋이 없으면 `max_age` | 제공자가 OpenID Connect `max_age` 매개변수를 존중하고 `auth_time`을 돌려주어 콘솔 재인증이 제공자가 검증한 도전이 되는지 여부. `google` 프리셋은 `unsupported`이며(Google은 재인증 요청을 지원하지 않는다고 문서화함) 그런 제공자에서의 콘솔 신선도는 Hopae 로그인 경과 시간입니다([ADR-0016](../adr/0016-management-console-minimum.md) 결정 15, [관리](ADMIN.md#신선도와-재인증)). |
+| `reauth_prompt` | `login`, `none` | `login` | `max_age` 제공자에 대한 재인증 authorize 요청에 `prompt=login`도 실을지 여부. `reauth`가 `unsupported`인 제공자는 `max_age`도 `prompt`도 없는 일반 authorize 요청을 받습니다. |
+
+#### 관리 콘솔
+
+콘솔은 `admin.public_url`로 켭니다. 없으면 관리 리스너가 바인딩되지 않으며 다른
+`admin.*` 키는 검증만 되고 효과가 없습니다. 배경은 [관리](ADMIN.md)에 있습니다.
+
+| 키 | 타입 | 기본값 | 제약과 의미 |
+| --- | --- | --- | --- |
+| `admin.public_url` | 문자열, origin | 없음 | 콘솔의 외부 노출 origin, `https://hopae-admin.example.test`. `https://`이며, `http://`는 `cookie.secure`가 `false`일 때만. 소문자 호스트 **이름**(IP 주소 아님)과 선택적 포트이며 경로, 쿼리, 프래그먼트, 자격 증명은 없음. 설정하면 암묵적 애플리케이션 `admin`(호스트 `[host]`, 포트 `[그 포트, 없으면 443(http는 80)]`, `on_authz_change = terminate`, `verify_cache_seconds = 0`, `logout_confirm = true`)을 등록하고 `listen.admin`을 바인딩함. id `admin`은 예약됨. 그 id를 가진 `apps[]` 항목이나 콘솔 호스트를 나열한 항목은 오류. |
+| `admin.session.idle` | 기간 | `30m` | 콘솔 호스트의 핸들별 유휴 타이머. `60s` 이상. |
+| `admin.session.absolute` | 기간 | `12h` | 콘솔 호스트의 핸들별 절대 수명. |
+| `admin.binding.ip` | `strict`, `prefix`, `off` | `strict` | 콘솔 핸들의 클라이언트 IP 바인딩. `apps[].binding.ip`와 같음. |
+| `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6` | 정수 | `24`, `64` | `prefix` 모드의 접두사 길이: 1부터 32, 1부터 128. |
+| `admin.binding.ua` | `strict`, `off` | `off` | User-Agent 바인딩. |
+| `admin.binding.on_mismatch` | `terminate_session`, `drop_handle` | `terminate_session` | 바인딩 불일치 시 동작. |
+| `admin.max_auth_age` | 기간 | `12h` | 콘솔 세션의 신선도 한도. `30m` 이상: 더 작은 값은 설정 오류(`admin.max_auth_age must be at least 30m`)이며, 한도가 재인증 콜백과 뒤따르는 콘솔 verify 사이에 600초의 여유를 지키기 때문입니다. 콘솔의 모든 verify에서 하나의 술어로 평가: `auth_time ≤ now + 60초` 그리고 `now − auth_time < N`. `reauth` 능력이 `max_age`인 제공자에서는 세션이 제공자가 검증한 `auth_time`을 가져야 하고 오래되면 세션 자신의 제공자가 수행하는 재인증으로 보내며, `unsupported` 제공자(`google` 프리셋)에서는 한도가 Hopae 로그인 경과 시간뿐임([ADR-0016](../adr/0016-management-console-minimum.md) 결정 15, [관리](ADMIN.md#신선도와-재인증)). |
+| `admin.require_aal` | `1`, `2` | `1` | 콘솔 핸들의 최소 보증 수준. `2`는 호스트 전체에 대한 암묵적 애플리케이션의 단계 상승 규칙도 설정하며, 아직 두 번째 인증 요소가 없으므로 모든 콘솔 요청이 거부된다고 `--check`가 경고함. |
+| `admin.untrusted_peers` | `refuse`, `as_client` | `refuse` | `trusted_proxies` 밖의 TCP 피어를 관리 리스너가 어떻게 다루는지: `refuse`는 쿠키를 읽기 전에 `403 untrusted_peer`로 답함(집계, 속도 제한된 경고). `as_client`는 포털처럼 피어를 클라이언트로 취급. |
+| `admin.query_budget_ms` | 정수, 100부터 30000 | `2000` | 콘솔 저장소 작업 하나(목록, 검색, 변경)의 마감. 마감은 저장소 작업에 전달되어 SQLite 안에서 문장을 중단하고 롤백한 뒤 `503`으로 답함. |
+| `admin.users[]` | `{user_id?, email?, role?, note?}` 배열 | `[]` | 시작 시와 `hopae admin import`로 파일에서 심는 관리자 부여. 각 항목은 `user_id`(`u_` 다음에 문자, 숫자, `_`, `-`, 최대 64자)와 `email`(유효한 주소) 중 적어도 하나가 필요하고, `role`은 `admin`(기본) 또는 `viewer`, `note`는 최대 256자이며 알 수 없는 키는 거부됨. 이메일만 있는 항목은 검증된 주소를 정확히 한 사용자가 가지고 권위적일 때만 적용됨. 결함 있는 항목은 시작할 때 경고(건너뜀, 시작 실패 아님)이고 `--check --strict`에서는 오류. `managed_by`와 묘비를 가진 제공자 규칙으로 가져옴([관리](ADMIN.md#설정-파일의-부여)). |
 
 #### 이벤트
 
@@ -172,16 +205,6 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `oidc`가 아닌 `providers[].kind` | M3 | — | 카카오, 네이버, 이메일 링크, 비밀번호([ADR-0010](../adr/0010-provider-abstraction.md)) |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, 없음, 없음 | 로컬 캐시와 Redis 버스([ADR-0006](../adr/0006-verify-caching-and-invalidation.md)) |
 | `store.kind = postgres`, `store.url_env` | M2 | — | 공유 기본 저장소([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
-| `listen.admin` | M4-min | `127.0.0.1:8702` | 관리 리스너. `admin.public_url`이 설정된 때만 바인딩하며 다른 리스너와 달라야 하고 루프백이 아니면 경고([ADR-0016](../adr/0016-management-console-minimum.md), [관리](ADMIN.md)) |
-| `admin.public_url` | M4-min | 없음 | 콘솔의 외부 노출 origin. 아래 정책을 가진 암묵적 애플리케이션 `admin`(예약 id)을 등록함([ADR-0016](../adr/0016-management-console-minimum.md)) |
-| `admin.session.idle`, `admin.session.absolute`, `admin.binding.ip`, `admin.binding.ip_prefix_v4`, `admin.binding.ip_prefix_v6`, `admin.binding.ua`, `admin.binding.on_mismatch` | M4-min | `30m`, `12h`, `strict`, `24`, `64`, `off`, `terminate_session` | 콘솔 호스트의 수명과 바인딩. 타입과 제약은 `apps[].session.*`, `apps[].binding.*`와 같음 |
-| `admin.max_auth_age` | M4-min | `12h` | 콘솔 세션의 신선도 한도. `30m` 이상(더 작은 값은 설정 오류: 한도는 재인증 콜백과 뒤따르는 콘솔 verify 사이에 600초의 여유를 지킴). 하나의 술어(`auth_time ≤ now + 60초` 그리고 `now − auth_time < N`)로 콘솔의 모든 verify에서 평가함. `reauth` 능력이 `max_age`인 제공자에서는 세션이 제공자가 검증한 `auth_time`을 가져야 하고 오래되면 세션 자신의 제공자가 수행하는 재인증으로 보내며, `unsupported` 제공자(Google)에서는 한도가 Hopae 로그인 경과 시간뿐임([ADR-0016](../adr/0016-management-console-minimum.md) 결정 15) |
-| `admin.require_aal` | M4-min | `1` | 콘솔 핸들의 최소 보증 수준(`1` 또는 `2`). `2`는 암묵적 애플리케이션의 단계 상승 규칙도 설정하며 M5 전에는 모든 요청이 거부된다고 `--check`가 경고 |
-| `admin.untrusted_peers` | M4-min | `refuse` | `trusted_proxies` 밖의 TCP 피어를 관리 리스너가 어떻게 다루는지: `refuse`는 쿠키를 읽기 전에 `403 untrusted_peer`로 답함(기록, 집계). `as_client`는 포털처럼 피어를 클라이언트로 취급 |
-| `admin.query_budget_ms` | M4-min | `2000` | 콘솔 저장소 작업 하나(목록, 검색, 변경)의 마감(100부터 30000). 마감은 저장소 작업에 전달되어 SQLite 안에서 문장을 중단하고 롤백한 뒤 `503`으로 답함 |
-| `admin.users[]` | M4-min | `[]` | 시작 시와 `hopae admin import`로 파일에서 심는 부여: `user_id`와 `email` 중 적어도 하나를 가진 `{user_id?, email?, role?, note?}` 항목, `role`은 `admin`(기본) 또는 `viewer`. 이메일만 있는 항목은 검증된 주소를 정확히 한 사용자가 가지고 권위적일 때만 적용됨. `managed_by`와 묘비를 가진 제공자 규칙으로 가져옴([관리](ADMIN.md)) |
-| `limits.admin_max_concurrent` | M4-min | `16` | 관리 리스너의 동시 요청 상한 |
-| `hopae admin grant <user_id 또는 email> [--role admin\|viewer] [--note <text>] [--confirm <user_id>]`, `hopae admin revoke <user_id 또는 email>`, `hopae admin list [--all]`, `hopae admin import [--force <user_id 또는 email>]`(명령) | M4-min | — | 저장소에 대한 명령줄과 파일의 관리자 부여. `grant`는 해결된 사용자를 출력하고 권위적이지 않은 이메일에는 해결된 id를 가리키는 `--confirm`을 요구함. 부여는 그 사용자 id에 묶이며 다시 해결되지 않음. `admin.grant` / `admin.revoke`를 기록함([관리](ADMIN.md)) |
 
 ## 동작
 
@@ -189,7 +212,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 - 오류는 모아서 한꺼번에 보고하며, 각각 키 경로를 명시합니다.
 - 환경 변수 참조는 존재 여부만 검사합니다. 값은 절대 로그, 출력, 오류 메시지에 나타나지 않습니다.
 - 참조된 환경 변수: 호출자 키 변수가 없거나 비어 있으면 오류이고, 제공자 비밀 값이 없으면 해당 제공자를 비활성화하는 경고입니다.
-- 경고(치명적이지 않음): `gateway.allow_unauthenticated_caller`가 설정됨, `cookie.secure`가 false, `listen.gateway`가 루프백 주소가 아님, 비밀 값 변수가 없어 제공자가 비활성화됨, `gateway.caller_key_next_env`가 7일 넘게 설정됨, 게이트웨이 라우트가 없는 애플리케이션 호스트(`gateway.admin_url`을 설정한 경우만), 소문자로 정규화된 대문자 호스트 이름.
+- 경고(치명적이지 않음): `gateway.allow_unauthenticated_caller`가 설정됨, `cookie.secure`가 false, `listen.gateway`가 루프백 주소가 아님, 비밀 값 변수가 없어 제공자가 비활성화됨, `gateway.caller_key_next_env`가 7일 넘게 설정됨, 게이트웨이 라우트가 없는 애플리케이션 호스트(`gateway.admin_url`을 설정한 경우만), 소문자로 정규화된 대문자 호스트 이름, 루프백 주소가 아닌 `listen.admin`, `admin.public_url` 없이 설정된 `listen.admin`, `2`로 설정된 `admin.require_aal`, 적용할 수 없는 `admin.users[]` 항목(저장소가 있으면 그것을 기준으로 보고), 없거나 쿠키를 제거하는 콘솔 라우트(`gateway.admin_url`을 설정한 경우만: `console_route_without_auth`, `console_route_strips_cookies`).
 - 데이터베이스 경로를 지정하지 않으면 `<state_dir>/hopae.db`로 파생됩니다.
 
 ## 제한과 호환성
@@ -197,8 +220,9 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 - JSON만 지원하며 주석은 허용하지 않습니다.
 - 1.0 이전에는 마이너 릴리스에서 키의 이름이 바뀌거나 삭제될 수 있습니다. 그런 변경은 각각 CHANGELOG의 `Changed` 아래에 이전 안내와 함께 기록합니다.
 - M6 이전에는 다시 로드가 없습니다.
-- `apps[].step_up`은 파싱만 하며 M5 이전에는 강제하지 않습니다.
-- 제공자 설정 `preset`, `userinfo`, `id_token_typ`은 M1에서 파일로 지정할 수 없습니다(제공자 절 참고).
+- `apps[].step_up`은 파싱만 하며 M5 이전에는 강제하지 않습니다. 따라서 `admin.require_aal = 2`는 모든 콘솔 요청을 거부합니다.
+- 제공자 설정 `preset`, `userinfo`, `id_token_typ`, `reauth`, `reauth_prompt`는 파일로 지정할 수 없습니다(제공자 절 참고).
+- `apps[].max_auth_age`는 키가 아닙니다. 신선도 한도를 가진 것은 암묵적 콘솔 애플리케이션뿐이며 그 한도는 `admin.max_auth_age`입니다.
 
 ## 예제, 검증, 관련 페이지
 

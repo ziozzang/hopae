@@ -1,10 +1,10 @@
 # Operations
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/OPERATIONS.md)
 
-How to run, observe, maintain and recover a Hopae instance in milestone M1.
+How to run, observe, maintain and recover a Hopae instance in milestones M1 and M4-min.
 Every setting named here is defined in the [configuration
 reference](CONFIG.md); the protocol with the gateway is the [gateway
 contract](GATEWAY_CONTRACT.md). A production Docker Compose template and a
@@ -18,6 +18,7 @@ gateway route example are in the repository's `deploy/` directory.
 - One instance per state directory. M1 is a single-instance product; there is no shared store before M2.
 - Two public routes on the gateway: the portal host (public, proxied to `listen.portal`) and each protected application host (carrying the `auth` fragment that `hopae --check` prints).
 - Both listeners bind loopback by default. The gateway listener must never be publicly reachable; the caller key is a second barrier, not the first.
+- To use the management console (optional): a third public route for a dedicated console host, proxied to `listen.admin` and carrying the `auth` fragment **without** `strip_request_cookies` (the `hopae-admin` route in `deploy/hangang-routes.example.json`; `hopae --check` prints it), the gateway's address in `trusted_proxies`, and `admin.public_url` set. See [administration](ADMIN.md) and [the console](#management-console).
 
 ## Behavior
 
@@ -29,19 +30,22 @@ hopae run     --config /etc/hopae/hopae.json     # serve (alias: serve; the defa
 ```
 
 Always run `--check` first and after every configuration change, with the same
-environment the service will have. On success `run` prints three stable lines
-on stdout and then serves:
+environment the service will have. On success `run` prints stable lines on
+stdout (the `admin` line only when `admin.public_url` is set) and then serves:
 
 ```text
 portal listening on 127.0.0.1:8700
 gateway listening on 127.0.0.1:8701
+admin listening on 127.0.0.1:8702
 ```
 
-Start order is fixed: instance lock, backup of an older database, store opened
-and migrated, providers imported and applications mirrored (with the
-`config.loaded` event in the same transaction), portal listener bound, gateway
-listener bound last, ready. A failure at any step exits before a listener
-answers a request.
+Start order is fixed: instance lock, read-only precheck of an existing
+database, backup of an older database, store opened and migrated, providers
+imported (with the `config.loaded` event in the same transaction),
+administrator grants imported from `admin.users[]`, applications mirrored,
+portal listener bound, admin listener bound (when enabled), gateway listener
+bound last, ready. A failure at any step exits before a listener answers a
+request.
 
 Stop with `SIGTERM` or `SIGINT`. Hopae stops accepting, gives in-flight
 requests 5 seconds, stops its background workers (they flush on the way out),
@@ -63,7 +67,7 @@ change: the same start will fail the same way.
 | `hopae.db` (or `store.path`) | The SQLite database in WAL mode: users, identities, sessions, handles, transactions, handoff codes, events and delivery rows, providers, applications | Back up before every upgrade. Contains hashed credentials only: handles, codes and keys are stored as SHA-256 digests, never as values. Treat it as sensitive anyway (it holds email addresses and subjects). |
 | `hopae.db-wal`, `hopae.db-shm` | SQLite write-ahead log and shared memory | Never copy or delete by hand while the process runs; they are folded into the database at a clean stop. |
 | `hopae.lock` | Instance lock | See below. |
-| `hopae.db.bak-v<N>` | Backup written before a migration | See below. |
+| `hopae.db.bak-v<N>` | Backup written before a migration (`hopae.db.bak-v2` when 0003 is applied) | See below. |
 
 The database file is created with a restrictive mode before SQLite writes to
 it. Provider client secrets and caller keys are not stored in the state
@@ -76,8 +80,8 @@ holds it for the life of the process. A second `hopae run` on the same state
 directory fails immediately with `store locked by another instance` and exit
 `2`, before the database is touched. The operating system drops the lock when
 the process exits or crashes, so there is no stale lock to clean up and the
-file itself is safe to leave in place. `hopae --check` and `hopae providers
-import` do not take the lock.
+file itself is safe to leave in place. `hopae --check`, `hopae providers
+import` and `hopae admin` do not take the lock.
 
 In a container, the lock is only effective if both instances see the same
 state volume; do not run a second container "to try a new image" against the
@@ -86,10 +90,15 @@ live volume. Stop the old one first.
 ### Upgrade and migration backups
 
 Schema migrations are embedded in the binary and applied at start, forward
-only, each in its own transaction. Before applying any migration to an
+only, each in its own transaction. Before anything is written, Hopae runs a
+read-only **precheck** of an existing database: it reads the recorded version,
+refuses a newer one and validates the foundation of the recorded version. Only
+a database that passed the precheck is backed up, and only then is a migration
+applied; a refused database is left byte for byte as it is, with no backup.
+Before applying any migration to an
 existing database that is older than the binary, Hopae writes a consistent
 copy next to it as `hopae.db.bak-v<N>`, where `<N>` is the schema version found
-(mode `0600`, written with `VACUUM INTO`, so WAL content is included). No
+(mode `0600`, written with `VACUUM INTO` to a temporary file that is renamed into place only when complete, so WAL content is included and an interrupted run never replaces the previous backup). No
 backup is made for a new, empty or already current database. An existing
 backup of the same version is replaced. A database written by a newer binary is
 refused (the start fails). So is a database of schema version 2 written by a
@@ -105,18 +114,57 @@ holds a database, **every schema change is a new numbered migration**, applied
 forward only after the backup above, and an applied migration file is never
 edited again.
 
+Migration `0003` (milestone M4-min, schema version 3) adds the
+administrator grant table, the session columns for freshness provenance
+(`auth_time_source`, `bound_ua_prefix`), the reauthentication column of login
+transactions and replacement indexes on `events`, `users` and `sessions` for
+the console listings. Existing sessions get `auth_time_source =
+hopae_completion`. Creating the new event indexes reads the events table once,
+so the first start after the upgrade takes longer on a large event history. A
+binary that predates 0003 refuses the migrated database (it is newer than that
+binary supports), so rolling back past 0003 means restoring the `.bak-v2` file
+or your own copy (below).
+
 Upgrade procedure:
 
 1. Run the new binary's `hopae --check` against the current configuration.
 2. Stop the running instance (`SIGTERM`) so the database is checkpointed.
 3. Copy the state directory (or at least `hopae.db`) somewhere safe. The automatic backup covers a failed migration; it does not replace this copy, which also protects against a bad release.
-4. Start the new binary. Read the log for `database backup written before migration` and `store ready: ... (schema vN)`.
+4. Start the new binary. Read the log for `schema foundation validated (v2)`, `database backup written before migration` and `store ready: ... (schema vN)`; from schema 2 to 3 the backup is `hopae.db.bak-v2`.
 5. Keep the previous image or binary until the new one has served real traffic.
 
 Rollback: stop Hopae, restore the saved copy (or the `.bak-v<N>` file) over
 `hopae.db`, remove any `hopae.db-wal` and `hopae.db-shm` left beside it, and
-start the previous binary. Sessions created after the backup are lost; users
-sign in again.
+start the previous binary. Sessions created after the backup are lost, and so
+are administrator grants and audit events written after it; users sign in
+again.
+
+### Management console
+
+The console is a third listener, `listen.admin` (default `127.0.0.1:8702`),
+bound only when `admin.public_url` is set. It has no health endpoint; `/healthz`
+stays on the portal. Enable it in this order:
+
+1. Pick the console host (`hopae-admin.example.test` in the examples), give it DNS and TLS on the gateway and register the `hopae-admin` route from `deploy/hangang-routes.example.json`: protected, backend `listen.admin`, the standard `auth` fragment, **no** `strip_request_cookies`. A route that strips Hopae's cookies makes every console request `403 login_required`.
+2. Set `admin.public_url` (and, if needed, `listen.admin`, `admin.max_auth_age` and the other `admin.*` keys of [the configuration reference](CONFIG.md#management-console)). The gateway's address must be in `trusted_proxies`: the listener takes the client address, scheme and host from the forwarding headers of a trusted peer only, and with the default `admin.untrusted_peers = refuse` it answers any other peer `403 untrusted_peer` before reading a cookie. A non-loopback `listen.admin` produces a warning; it must never be publicly reachable.
+3. Run `hopae --check`. It lists the console as the implicit application `admin`, prints the route fragment with the real host and admin address, `admin.untrusted_peers`, and per enabled provider the freshness capability (`reauth max_age: ...` or `reauth unsupported: console freshness is Hopae login age; ...`). With `gateway.admin_url` and the read-only token it also warns `console_route_without_auth` or `console_route_strips_cookies`. `--strict` turns every warning into an error.
+4. Restart Hopae and bootstrap the first administrator: sign in once at the console host, read the user id from the `403 not_admin` page, run `hopae admin grant <user_id> --config <path>` and reload ([bootstrap](ADMIN.md#bootstrap-and-recovery)). In a container, `docker compose run --rm hopae admin grant <user_id> --config /etc/hopae/hopae.json` runs against the same state volume without stopping the instance.
+
+`admin.users[]` is imported at every start after the provider import: a defective
+entry is a warning in the log (skipped, never a start failure), and a live file
+grant that no entry names any more is revoked. Grants made or revoked with
+`hopae admin` are never undone by the file. Every console change, denial and
+grant is an `admin.*` event ([audit events](ADMIN.md#audit-events)). A store
+operation that reaches `admin.query_budget_ms` is interrupted, rolled back and
+answered `503`; `hopae_store_interrupts_total` counts it.
+
+Verify from the host that the listener trusts nothing but a valid handle (a
+request without the console host in `x-forwarded-host` is `404`):
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' -H 'x-forwarded-host: hopae-admin.example.test' \
+  http://127.0.0.1:8702/v1/me      # 403 login_required: no handle, nothing trusted from the request
+```
 
 ### Caller-key rotation
 
@@ -162,7 +210,9 @@ Event kinds: `login.started`, `login.succeeded`, `login.failed`,
 `session.created`, `session.handoff`, `handoff.rejected`, `session.terminated`,
 `handle.revoked`, `identity.linked`, `identity.conflict`, `csrf.rejected`,
 `config.loaded`, `admin.providers_import`, `verify.denied`, `provider.error`,
-`txn.evicted`, `events.dropped`, `sink.backlog_overflow`. State-changing kinds
+`txn.evicted`, `events.dropped`, `sink.backlog_overflow`, and the console's
+`admin.grant`, `admin.revoke`, `admin.user_disable`, `admin.user_enable`,
+`admin.session_terminate`, `admin.sessions_terminate`, `admin.denied`. State-changing kinds
 are written to the database in the same transaction as the change they
 describe and then delivered to the log sink at least once (a line can repeat
 after a crash; `event_id` identifies it). `verify.denied`, `provider.error`,
@@ -202,7 +252,7 @@ end-to-end check is a browser login on a protected host.
 
 ### Counters
 
-Hopae keeps in-process counters. In M1 there is **no production exposition**:
+Hopae keeps in-process counters. There is **no production exposition** before M7:
 the values are readable only through the loopback test-hooks listener of a
 `test-hooks` build, which must never run in production. Prometheus text
 exposition is M7. Until then, watch the event stream (`verify.denied` lines
@@ -218,6 +268,12 @@ protected routes). The counter names, fixed for the later exposition:
 | `hopae_verify_overloaded_total` | none | Verify calls refused because `limits.gateway_max_concurrent` was exhausted |
 | `hopae_verify_canonical_mismatch_total` | none | Verify calls whose canonical path disagreed with the gateway's |
 | `hopae_store_errors_total` | none | Store failures on the verify path (`store_unavailable`) |
+| `hopae_store_interrupts_total` | none | Store jobs interrupted inside SQLite at their deadline |
+| `hopae_admin_requests_total` | `role`, `outcome` (`insecure_mode="true"` is added when `cookie.secure` is `false`) | Requests answered by the admin listener |
+| `hopae_admin_denied_total` | `reason` | Console refusals (`untrusted_peer`, `login_required`, `not_admin`, `role_insufficient`, `auth_too_old`, `aal_insufficient`, `self_target`, `actor_revoked`, `overloaded`) |
+| `hopae_admin_mutations_total` | `kind` | Console mutations that changed something (`user_disable`, `user_enable`, `sessions_terminate`, `session_terminate`) |
+| `hopae_admin_rows_examined_total` | `list` (`users`, `sessions`, `events`) | Candidate rows examined by console listings |
+| `hopae_admin_grants_imported_total` | `outcome` | Grants applied by the import at start (`inserted`, `updated`, `revoked`, `unchanged`, `skipped`) |
 | `hopae_events_total` | `kind`, `outcome` | Events recorded |
 | `hopae_events_dropped_total` | `kind` | Diagnostic events dropped before reaching the store |
 | `hopae_events_pruned_total` | none | Event rows removed by pruning |
@@ -244,6 +300,9 @@ reasons below appear in `verify.denied` events and `x-hopae-reason`.
 | Unknown host or disabled application | Denied (`unknown_app`, `app_disabled`) | `apps[]` hosts and ports; `hopae --check` return origins |
 | Clock skew beyond 60 seconds | Sessions look expired or ID tokens fail (`clock_skew`) | Time synchronization on the host |
 | Second instance on one state directory | Start refused, exit `2` | Stop the other instance |
+| Admin listener address already in use or equal to another listener | Start fails (exit `1` for a bind failure, `2` for `listen.admin` equal to the portal or gateway address) before any listener answers | `listen.admin`; `hopae --check` |
+| Console store operation too slow or the store busy | The console answers `503 store_unavailable`; the change is rolled back; verify on the gateway listener is unaffected | `admin.query_budget_ms`, `hopae_store_interrupts_total`, process log |
+| Database refused by the precheck (newer, pre-release, damaged) | Start (and every `hopae admin` command) refused, exit `2`; no backup, no migration | The error message; restore a copy |
 | Event delivery failing | No effect on logins; rows retry, then become `failed`; a full backlog marks the oldest `failed` (`backlog_overflow`) | `sink.backlog_overflow`, `hopae_event_deliveries_failed_total` |
 | Crash or power loss mid-write | The database recovers from the WAL at next start; at-most the last in-flight transaction is lost, and a login in progress must be repeated | Process log at start |
 
@@ -254,14 +313,15 @@ counter per reason where counters exist, and no secret in any message.
 
 - Single instance per state directory; no failover. Restart is fast and sessions persist across it. Multi-instance deployments need the M2 store.
 - No hot reload of configuration, provider secrets or caller keys before M6; every change is a restart, during which verify fails closed (the gateway answers `503`) for the restart's duration.
-- No metrics endpoint before M7; counters are in-process only. There is no management API or console before M4; the supported management surface is the configuration file and `hopae providers import`.
+- No metrics endpoint before M7; counters are in-process only. The management console (M4-min) reads and ends users and sessions; providers, applications and blacklists are managed from the configuration file, `hopae providers import` and `hopae admin`.
 - Backups are file copies of a stopped (or checkpointed) database. An online backup tool is M7.
 - Hopae does not terminate TLS and does not talk to the internet except to the configured identity providers (discovery, keys, token and user-info endpoints); there is no telemetry and no self-update before M6. Provider traffic ignores `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY`: a proxy resolves the destination itself, which would bypass the connect-time address checks. There is no proxy option.
 
 ## Examples, verification and related pages
 
 The deployment template (`deploy/compose.yaml`, `deploy/hopae.example.json`,
-`deploy/env.example`, `deploy/hangang-routes.example.json`) shows a hardened
+`deploy/env.example`, `deploy/hangang-routes.example.json`, the last with the
+`hopae-admin` console route) shows a hardened
 container: a read-only root file system, all capabilities dropped,
 `no-new-privileges`, memory and process limits, rotated JSON logs, a private
 state volume and host networking so that the loopback listeners are shared
