@@ -214,3 +214,64 @@ async fn s005_a6_no_host_enumeration() {
     assert_eq!(disabled.0, reasons::APP_DISABLED);
     assert_eq!(f.txn_rows(), 0);
 }
+
+// ---- gateway layer (W2-A) ---------------------------------------------------
+
+mod gateway_layer {
+    use crate::support::gateway::*;
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn s005_a7_host_neutral_route_attacker_host_denied() {
+        // A protected route without host/hosts: any Host reaches Hopae's verify, and
+        // the gateway builds x-original-url from the (syntax-checked) client Host.
+        let Some(s) = Stack::with_routes(
+            "s005_a7",
+            GatewayRoutes::new()
+                .host_neutral("/admin")
+                .portal(PORTAL_HOST),
+        ) else {
+            return;
+        };
+        let b = s.gw.browser();
+
+        let evil = b.get("evil.example.org", "/admin/x");
+        assert_eq!(evil.status, 403, "relayed to the client: {evil:?}");
+        let calls = s.gw.tap.calls();
+        assert_eq!(calls.len(), 1, "the route called Hopae");
+        assert!(
+            calls[0]
+                .header("x-original-url")
+                .is_some_and(|u| u.starts_with("https://evil.example.org/")),
+            "{:?}",
+            calls[0].header("x-original-url")
+        );
+        let answer = s.gw.tap.answers().pop().unwrap();
+        assert_eq!(answer.status, 403);
+        assert_eq!(answer.header("x-hopae-reason"), Some("unknown_app"));
+        assert!(evil.set_cookies().is_empty(), "no binding cookie: {evil:?}");
+        assert_eq!(txn_count(&s.hopae), 0, "no transaction");
+        assert!(evil.location().is_none());
+        assert!(s.echo.requests().is_empty());
+
+        // The registered host gets the normal 302 with a transaction for that host.
+        let ok = b.get(APP_HOST, "/admin/x");
+        assert_eq!(ok.status, 302, "{ok:?}");
+        assert!(
+            ok.location()
+                .unwrap()
+                .starts_with("https://auth.example.test/login?txn=")
+        );
+        assert_eq!(
+            return_target(&s.hopae, &txn_of(&ok)).as_deref(),
+            Some("https://app.example.test/admin/x")
+        );
+        assert_eq!(txn_count(&s.hopae), 1);
+        // No Location Hopae emitted names a host outside the allowlist.
+        for a in s.gw.tap.answers() {
+            if let Some(l) = a.header("location") {
+                assert!(!l.contains("evil.example.org"), "{l}");
+            }
+        }
+    }
+}

@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -71,7 +71,13 @@ development with `gateway.allow_unauthenticated_caller = true` on the Hopae
 side.
 
 Path-scoped protection uses two routes on one host: a public route for the
-host and a higher-priority protected route for the prefix.
+host and a higher-priority protected route for the prefix. **The gateway
+matches path prefixes case-sensitively**: `/ADMIN/x` does not select
+`site-admin` and falls through to `site-public`, reaching the upstream with
+no session. Use this pattern only when the upstream treats paths
+case-sensitively; a case-insensitive upstream (IIS, some frameworks,
+case-insensitive filesystems) must be protected whole-host until gateway
+change HC-10 ships (threat TM-39).
 
 ```json
 [
@@ -393,7 +399,7 @@ validation and `authentication_identity_headers`).
 | Original URL, client IP, host, proto | Yes | Generated `x-original-url`, `x-original-uri`, `x-original-method`, `x-forwarded-{method,uri,proto,port,for,host}`, `x-real-ip`, `x-original-client-ip`; client copies replaced |
 | Cross-domain handoff | Yes | Hopae intercepts the `_hopae_handoff` parameter through the verify call; `302` + `set-cookie` relayed, upstream not contacted |
 | HTTP/2 split `cookie` fields | Yes | Joined per RFC 9113 before authorization |
-| Path scoping | Yes, per route | `path_prefix`, `path_match`, `priority`; no excludes |
+| Path scoping | Yes, per route, case-sensitive | `path_prefix`, `path_match`, `priority`; no excludes; `resource_guard::path_matches` compares bytes, so a case variant of a protected prefix selects the public route (HC-10). Encoded separators, traversal and repeated slashes are rejected with `400` before routing |
 | Outer-layer login throttling | Partial | `settings.path_failure_bans` on the portal's `/login` and `/callback/*` by client IP; `settings.path_rate_limits` global budget |
 | Session refresh cookies on `200` | Yes | Up to 16 `set-cookie` values relayed with `forward_response` |
 | Browser binding cookie on the unauthenticated `302` | Yes | `set-cookie` on relayed `3xx` responses |
@@ -410,9 +416,9 @@ validation and `authentication_identity_headers`).
 ## Proposed gateway changes
 
 Each change is small, independently shippable in a gateway worktree, and
-has acceptance criteria. Recommended order: **HC-3 (required by M1)**, HC-6,
-HC-8, HC-4, HC-1, HC-2, HC-9, HC-5, HC-7. Identifiers are stable; the order
-is the recommendation.
+has acceptance criteria. Recommended order: **HC-3 (required by M1)**,
+HC-10, HC-6, HC-8, HC-4, HC-1, HC-2, HC-9, HC-5, HC-7. Identifiers are
+stable; the order is the recommendation.
 
 | ID | Change | Gateway surface | Acceptance criteria |
 | --- | --- | --- | --- |
@@ -425,6 +431,7 @@ is the recommendation.
 | HC-9 | Strip `x-original-*` from client requests on every route, as `x-forwarded-*` already is | Ingress header handling | Client-supplied `x-original-*` never reaches an upstream or an auth service; generated values unaffected; test on a route without external authorization. |
 | HC-5 | Native entry points on application hosts: `auth.entrypoints: {"login": "/_hopae/login", "logout": "/_hopae/logout"}` answered by the gateway with a `302` to the portal carrying the original URL as the return target through a verify call with `x-hopae-phase: login \| logout` | `authorize` call site | Optional; identical observable behavior to the Hopae-side implementation, including the binding cookie; the verify call for a logout entry point carries the cookie; no gateway-side state; tests for both entry points and for a path collision with an application route. |
 | HC-7 | Field-scoped route writes: `PUT /v1/routes/http/<id>/auth` accepting only the `auth` block, and an API credential scope limited to that endpoint and to a list of route ids | Admin API, credential scopes | A scoped credential cannot call any other write endpoint or touch any other route or field (tests); revision CAS applies; audit records the scope; prerequisite for configuration-ownership phase 2 ([ADR-0012](adr/0012-service-registration-and-gateway-config-ownership.md)). |
+| HC-10 | Case-insensitive prefix matching for protected path-scoped routes: new route field `path_case: "sensitive" \| "insensitive"`; the default is `insensitive` for a route that has `auth`, `basic_auth`, `jwt_auth` or `access_mode: protected` together with a `path_prefix`, and `sensitive` otherwise; comparison folds ASCII letters only (no Unicode case folding), on the same canonical path route selection already uses; the request path is forwarded unchanged | `resource_guard::path_matches`, route validation, console route editor | `/ADMIN/x`, `/Admin/x` and `/admin/X` select the protected `/admin` route and are answered by the external check (test through a live gateway with a public sibling route); `/administrator` still misses a `segment_prefix` route; an explicit `path_case: "sensitive"` on a protected prefix route is accepted with a validation warning naming the exposure; public routes keep byte-exact matching unless `insensitive` is set; no change to `canonical_path`; the Hopae scenario 008-A1 assertion for `/ADMIN/x` becomes `302`. |
 
 Changes that were considered and not proposed: a Lua `redirect`/`set_cookie`
 API (widens the sandbox's output surface for little gain over HC-5); auth

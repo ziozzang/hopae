@@ -3,21 +3,49 @@
 //! drift report is M2. Not wired to a configuration key yet: it needs
 //! `gateway.admin_url` (a request to the configuration owner).
 
-use std::collections::BTreeSet;
 use std::time::Duration;
 
 const LIMIT: usize = 1024 * 1024;
 
-fn hosts_in(value: &serde_json::Value, out: &mut BTreeSet<String>) {
+/// The path the gateway's `auth.url` must end in for a route to count as
+/// calling a Hopae verify endpoint (the address cannot be compared: the
+/// gateway may reach Hopae under another name than `listen.gateway`).
+const VERIFY_PATH: &str = "/_hopae/verify";
+
+fn host_covers(pattern: &str, host: &str) -> bool {
+    let (pattern, host) = (pattern.to_ascii_lowercase(), host.to_ascii_lowercase());
+    match pattern.strip_prefix("*.") {
+        Some(suffix) => host
+            .strip_suffix(suffix)
+            .is_some_and(|label| label.ends_with('.') && label.len() > 1),
+        None => pattern == host,
+    }
+}
+
+/// Host patterns of every route whose `auth.url` is a Hopae verify endpoint.
+fn authenticated_host_patterns(value: &serde_json::Value, out: &mut Vec<String>) {
     match value {
-        serde_json::Value::Array(items) => items.iter().for_each(|v| hosts_in(v, out)),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .for_each(|v| authenticated_host_patterns(v, out)),
         serde_json::Value::Object(map) => {
-            if let Some(h) = map.get("host").and_then(|h| h.as_str()) {
-                out.insert(h.to_ascii_lowercase());
+            let calls_verify = map
+                .get("auth")
+                .and_then(|a| a.get("url"))
+                .and_then(|u| u.as_str())
+                .and_then(|u| url::Url::parse(u).ok())
+                .is_some_and(|u| u.path() == VERIFY_PATH);
+            if calls_verify {
+                if let Some(h) = map.get("host").and_then(|h| h.as_str()) {
+                    out.push(h.to_string());
+                }
+                if let Some(hs) = map.get("hosts").and_then(|h| h.as_array()) {
+                    out.extend(hs.iter().filter_map(|h| h.as_str()).map(String::from));
+                }
             }
             for key in ["routes", "items", "data", "http"] {
                 if let Some(v) = map.get(key) {
-                    hosts_in(v, out);
+                    authenticated_host_patterns(v, out);
                 }
             }
         }
@@ -26,9 +54,14 @@ fn hosts_in(value: &serde_json::Value, out: &mut BTreeSet<String>) {
 }
 
 /// `GET <admin_url>/v1/routes/http` with the bearer token, then one warning
-/// per application host that no route names. A failure to ask is itself a
-/// warning, never an error. The token is never printed.
-pub async fn drift_warnings(admin_url: &str, token: &str, app_hosts: &[String]) -> Vec<String> {
+/// per (application, host) that no route with a Hopae `auth.url` covers
+/// (S008-5). A failure to ask is itself a warning, never an error. The token
+/// is never printed. `apps` pairs each application id with its hosts.
+pub async fn drift_warnings(
+    admin_url: &str,
+    token: &str,
+    apps: &[(String, Vec<String>)],
+) -> Vec<String> {
     let client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(3))
@@ -57,12 +90,16 @@ pub async fn drift_warnings(admin_url: &str, token: &str, app_hosts: &[String]) 
     let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) else {
         return vec!["gateway drift check skipped: answer is not JSON".to_string()];
     };
-    let mut routed = BTreeSet::new();
-    hosts_in(&json, &mut routed);
-    app_hosts
-        .iter()
-        .filter(|h| !routed.contains(&h.to_ascii_lowercase()))
-        .map(|h| format!("application host {h} has no route on the gateway"))
+    let mut routed = Vec::new();
+    authenticated_host_patterns(&json, &mut routed);
+    apps.iter()
+        .flat_map(|(id, hosts)| hosts.iter().map(move |h| (id, h)))
+        .filter(|(_, h)| !routed.iter().any(|p| host_covers(p, h)))
+        .map(|(id, h)| {
+            format!(
+                "app {id}: no gateway route with auth.url pointing at this instance for host {h}"
+            )
+        })
         .collect()
 }
 
@@ -97,31 +134,37 @@ mod tests {
     #[tokio::test]
     async fn hosts_without_a_route_are_reported() {
         let url = serve(
-            r#"[{"id":"a","host":"app.example.test"},{"id":"p","host":"auth.example.test"}]"#,
+            r#"[{"id":"a","host":"app.example.test","auth":{"url":"http://hopae:8701/_hopae/verify"}},
+                {"id":"pub","host":"other.example.test","auth":null},
+                {"id":"p","host":"auth.example.test"}]"#,
             "tok",
         )
         .await;
-        let hosts = vec![
-            "app.example.test".to_string(),
-            "other.example.test".to_string(),
+        let apps = vec![
+            ("app".to_string(), vec!["app.example.test".to_string()]),
+            ("other".to_string(), vec!["other.example.test".to_string()]),
         ];
-        let w = drift_warnings(&url, "tok", &hosts).await;
+        let w = drift_warnings(&url, "tok", &apps).await;
         assert_eq!(
             w,
-            vec!["application host other.example.test has no route on the gateway"]
+            vec![
+                "app other: no gateway route with auth.url pointing at this instance for host other.example.test"
+            ],
+            "a public route without auth does not protect the host"
         );
     }
 
     #[tokio::test]
     async fn a_refused_or_unreachable_gateway_is_a_warning_without_the_token() {
         let url = serve("[]", "right").await;
-        let w = drift_warnings(&url, "secret-token-value", &["a.test".into()]).await;
+        let apps = vec![("a".to_string(), vec!["a.test".to_string()])];
+        let w = drift_warnings(&url, "secret-token-value", &apps).await;
         assert_eq!(w.len(), 1);
         assert!(
             w[0].contains("401") && !w[0].contains("secret-token-value"),
             "{w:?}"
         );
-        let w = drift_warnings("http://127.0.0.1:1", "t", &["a.test".into()]).await;
+        let w = drift_warnings("http://127.0.0.1:1", "t", &apps).await;
         assert!(w[0].contains("not reachable"), "{w:?}");
     }
 }
