@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use rusqlite::{Connection, params, params_from_iter, types::ToSql};
 
 use super::rows::{self, EVENT_COLS, cols};
-use super::{DIAGNOSTIC_QUEUE_CAP, Shared, Store, WriterEnv, commit};
+use super::{DIAGNOSTIC_QUEUE_CAP, Shared, Store, WriterEnv, commit, commit_checked};
 use crate::crypto::Timestamp;
 use crate::event::types::{Event, EventBuilder, EventId, EventKind, Outcome, reasons};
 use crate::store::types::*;
@@ -234,6 +234,9 @@ pub(super) fn prune_statements(
     )? as u64;
 
     // 4. Backlog cap per sink: the oldest pending deliveries are dead-lettered.
+    if let Some(h) = &shared.hooks {
+        h.pass_gate("retention_read");
+    }
     let sinks: Vec<String> = {
         let mut stmt = tx.prepare("SELECT DISTINCT sink FROM event_deliveries")?;
         stmt.query_map([], |r| r.get(0))?
@@ -272,34 +275,59 @@ pub(super) fn prune_statements(
     Ok(report)
 }
 
+/// Only required kinds that do not travel with a state change may be appended alone.
+fn check_standalone(events: &[Event]) -> StoreResult<()> {
+    for ev in events {
+        if !ev.kind.is_required() {
+            return Err(StoreError::Conflict(
+                "diagnostic kinds use append_diagnostic",
+            ));
+        }
+        if travels_with_state(ev.kind) {
+            debug_assert!(
+                false,
+                "{} must travel with its state change, not alone",
+                ev.kind.name()
+            );
+            return Err(StoreError::Conflict(
+                "this kind must travel with its state change",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[async_trait]
 impl Events for Store {
     async fn append_required(&self, events: Vec<Event>) -> StoreResult<()> {
         if events.is_empty() {
             return Ok(());
         }
-        for ev in &events {
-            if !ev.kind.is_required() {
-                return Err(StoreError::Conflict(
-                    "diagnostic kinds use append_diagnostic",
-                ));
-            }
-            if travels_with_state(ev.kind) {
-                debug_assert!(
-                    false,
-                    "{} must travel with its state change, not alone",
-                    ev.kind.name()
-                );
-                return Err(StoreError::Conflict(
-                    "this kind must travel with its state change",
-                ));
-            }
-        }
+        check_standalone(&events)?;
         self.write("append_required", move |env| {
             let shared = env.shared.clone();
             let tx = env.begin()?;
             insert_events(&tx, &shared, &events)?;
             commit(tx, &shared, Some("append_required"))
+        })
+        .await
+    }
+
+    async fn append_required_within(
+        &self,
+        events: Vec<Event>,
+        deadline: Deadline,
+    ) -> StoreResult<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        check_standalone(&events)?;
+        self.write_checked("append_required", Some(deadline), move |env, check| {
+            let shared = env.shared.clone();
+            let tx = env.begin()?;
+            check.now()?; // the lock may have been waited for
+            insert_events(&tx, &shared, &events)?;
+            commit_checked(tx, &shared, Some("append_required"), check)
         })
         .await
     }

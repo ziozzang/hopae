@@ -289,7 +289,6 @@ pub mod common {
 
     /// Refuse with `403 reason` and record `admin.denied` for the requester.
     pub async fn deny(st: &AdminState, c: &Ctx, reason: Reason) -> Fail {
-        counters::inc(counters::ADMIN_DENIED_TOTAL, &[("reason", reason.0)]);
         auth::record_denied(
             st,
             &c.req,

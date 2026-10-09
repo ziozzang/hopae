@@ -122,7 +122,10 @@ async fn reject(st: &AdminState, ctx: &Ctx, cause: &'static str) -> Response {
         )
     });
     if let Some(ev) = ev
-        && let Err(e) = st.events.append_required(vec![ev]).await
+        && let Err(e) = st
+            .events
+            .append_required_within(vec![ev], api::deadline(st))
+            .await
     {
         tracing::warn!(error = %e, "csrf.rejected could not be recorded");
     }

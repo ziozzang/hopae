@@ -511,7 +511,9 @@ async fn fence_refuses_each_of_the_thirteen_changes_between_check_and_write() {
         }),
         ("5 handle idle passed, no sweep", |c| {
             c.f.clock.advance(Duration::from_secs(12 * 3600 + 1));
-            c.sql("UPDATE sessions SET last_seen_at=last_seen_at + 43201"); // the session itself stays active
+            // The session itself stays active and fresh, so the handle's idle
+            // deadline is the only predicate that can refuse.
+            c.sql("UPDATE sessions SET last_seen_at=last_seen_at + 43201, auth_time=auth_time + 43201");
             None
         }),
         ("6 session stored absolute passed, no sweep", |c| {
@@ -571,6 +573,52 @@ async fn fence_refuses_each_of_the_thirteen_changes_between_check_and_write() {
         }),
     ];
     assert_eq!(cases.len(), 13);
+    for (name, change) in cases {
+        let c = console().await;
+        let replaced = change(&c);
+        let out = c.disable_with(replaced.as_ref().unwrap_or(&c.policy)).await;
+        assert_actor_revoked(&c, out, name);
+    }
+}
+
+/// Each of these moves the clock or one stored value so that exactly one
+/// predicate of the fence can refuse; removing that predicate from the SQL
+/// makes its case commit.
+#[tokio::test]
+async fn s300_a3_fence_each_isolated_predicate_refuses_on_its_own() {
+    type Case = (&'static str, fn(&Console) -> Option<ActorPolicy>);
+    let cases: Vec<Case> = vec![
+        ("handle idle only", |c| {
+            c.f.clock.advance(Duration::from_secs(12 * 3600 + 1));
+            // The session is kept alive and fresh; the handle was last seen long ago.
+            c.sql("UPDATE sessions SET last_seen_at=last_seen_at + 43201, auth_time=auth_time + 43201");
+            None
+        }),
+        ("session idle only", |c| {
+            c.f.clock.advance(Duration::from_secs(24 * 3600 + 1));
+            // The handle is kept alive and the claim fresh; the session was last seen long ago.
+            c.sql("UPDATE session_handles SET last_seen_at=last_seen_at + 86401; UPDATE sessions SET auth_time=auth_time + 86401");
+            None
+        }),
+        ("session created 61 s in the future", |c| {
+            c.sql(&format!(
+                "UPDATE sessions SET created_at={}",
+                c.f.now().secs() + 61
+            ));
+            None
+        }),
+        ("auth_time 61 s in the future", |c| {
+            c.sql(&format!(
+                "UPDATE sessions SET auth_time={}",
+                c.f.now().secs() + 61
+            ));
+            None
+        }),
+        ("actor handle digest differs from the stored handle", |c| {
+            c.sql("UPDATE session_handles SET handle_sha256=randomblob(32)");
+            None
+        }),
+    ];
     for (name, change) in cases {
         let c = console().await;
         let replaced = change(&c);
@@ -1021,6 +1069,7 @@ async fn reauthentication_is_atomic_rotates_handles_and_checks_the_provider() {
             (txn_secret.digest(), reasons::REAUTH),
             long(),
             vec![f.ev(EventKind::LoginSucceeded)],
+            &|_| f.ev(EventKind::HandleRevoked),
         )
         .await;
     assert!(
@@ -1047,9 +1096,15 @@ async fn reauthentication_is_atomic_rotates_handles_and_checks_the_provider() {
             (txn_secret.digest(), reasons::REAUTH),
             long(),
             vec![f.ev(EventKind::LoginSucceeded)],
+            &|_| f.ev(EventKind::HandleRevoked),
         )
         .await
         .unwrap();
+    assert_eq!(
+        f.count_kind("handle.revoked"),
+        2,
+        "one event per handle revoked in the transaction"
+    );
     let row = f.store.session(&s.row.session_id).await.unwrap().unwrap();
     assert_eq!(row.auth_time, at);
     assert_eq!(row.auth_time_source, AuthTimeSource::ProviderClaim);
@@ -1109,6 +1164,7 @@ async fn reauthentication_is_atomic_rotates_handles_and_checks_the_provider() {
             (txn_secret.digest(), reasons::REAUTH),
             long(),
             vec![],
+            &|_| f.ev(EventKind::HandleRevoked),
         )
         .await;
     assert!(matches!(out, Err(StoreError::Conflict(_))), "{out:?}");
@@ -1317,6 +1373,84 @@ async fn a_grant_goes_only_to_an_existing_active_user_and_keeps_its_source_bindi
     // A later grant by id does not drop the address binding.
     f.grant_by(&u, AdminRole::Viewer, "cli", GrantManagedBy::Api, None)
         .await;
+    assert_eq!(
+        f.grant_row(&u).await.unwrap().source_email,
+        Some(email("user1@example.test"))
+    );
+}
+
+#[tokio::test]
+async fn a_regrant_by_another_address_never_replaces_the_binding() {
+    let f = fx();
+    let u = f.user(1).await;
+    f.grant_by(
+        &u,
+        AdminRole::Admin,
+        "file",
+        GrantManagedBy::File,
+        Some("user1@example.test"),
+    )
+    .await;
+    let events = f.count_kind("admin.grant");
+    // Another address, a different role: refused, nothing written.
+    let r = f
+        .store
+        .grant_admin(
+            &u.user_id,
+            AdminRole::Viewer,
+            GrantManagedBy::Api,
+            Some(email("moved@example.test")),
+            "cli",
+            None,
+            f.now(),
+            f.ev_user(EventKind::AdminGrant, &u.user_id),
+        )
+        .await;
+    assert!(
+        matches!(r, Err(StoreError::Conflict("source_email_bound"))),
+        "{r:?}"
+    );
+    let g = f.grant_row(&u).await.unwrap();
+    assert_eq!(g.source_email, Some(email("user1@example.test")));
+    assert_eq!(
+        (g.role, g.managed_by),
+        (AdminRole::Admin, GrantManagedBy::File)
+    );
+    assert_eq!(f.count_kind("admin.grant"), events);
+    // The same address again, and by id, are fine; the binding stays.
+    f.grant_by(
+        &u,
+        AdminRole::Viewer,
+        "cli",
+        GrantManagedBy::Api,
+        Some("user1@example.test"),
+    )
+    .await;
+    f.grant_by(&u, AdminRole::Admin, "cli", GrantManagedBy::Api, None)
+        .await;
+    assert_eq!(
+        f.grant_row(&u).await.unwrap().source_email,
+        Some(email("user1@example.test"))
+    );
+    // A revoked row keeps its binding too.
+    assert!(f.revoke(&u, "cli").await);
+    let r = f
+        .store
+        .grant_admin(
+            &u.user_id,
+            AdminRole::Admin,
+            GrantManagedBy::Api,
+            Some(email("moved@example.test")),
+            "cli",
+            None,
+            f.now(),
+            f.ev_user(EventKind::AdminGrant, &u.user_id),
+        )
+        .await;
+    assert!(
+        matches!(r, Err(StoreError::Conflict("source_email_bound"))),
+        "{r:?}"
+    );
     assert_eq!(
         f.grant_row(&u).await.unwrap().source_email,
         Some(email("user1@example.test"))
@@ -2827,6 +2961,117 @@ async fn the_deadline_is_checked_after_the_lock_is_won_and_before_commit() {
         c.target_status(),
         "active",
         "a job that reaches its deadline never commits late"
+    );
+    assert_eq!(c.f.count_kind("admin.user_disable"), 0);
+}
+
+#[tokio::test]
+async fn retention_inside_the_commit_cannot_swallow_the_deadline() {
+    // The write is complete and the inline retention prune is what runs out of
+    // time: its interrupted statement must end the job, not be logged and
+    // followed by a COMMIT that lands after the deadline.
+    let c = console().await;
+    bulk_events(&c.f.store.conn(), 30_000, 0);
+    c.f.store.set_event_retention(EventRetention {
+        retention: Duration::from_secs(90 * 86400),
+        max_rows: 100,
+        prune_every: 1,
+        max_pending_per_sink: 10_000,
+        terminal_retention: Duration::from_secs(7 * 86400),
+    });
+    c.f.hooks.set_slow_scan(80);
+    let f = &c.f;
+    let started = Instant::now();
+    let out = f
+        .store
+        .set_user_status(
+            &c.actor,
+            &c.policy,
+            &c.target.user_id,
+            UserStatus::Disabled,
+            dl(400),
+            f.ev_user(EventKind::AdminUserDisable, &c.target.user_id),
+            &|row| f.session_event(row),
+        )
+        .await;
+    c.f.hooks.set_slow_scan(0);
+    assert!(
+        matches!(out, Err(StoreError::Unavailable(ref m)) if m == "interrupted" || m == "deadline"),
+        "{out:?} after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        c.target_status(),
+        "active",
+        "a job whose retention ran out of time rolled back"
+    );
+    assert_eq!(c.f.count_kind("admin.user_disable"), 0);
+    // Without a deadline the same write commits and prunes.
+    assert_eq!(c.disable_target().await.unwrap(), (true, 0));
+    assert!(c.f.count("SELECT COUNT(*) FROM events") <= 101);
+}
+
+#[tokio::test]
+async fn expiry_during_a_retention_read_rolls_the_write_back() {
+    // The review's sequence: the write is done, the inline retention prune
+    // reads the sinks, the deadline passes while it waits, and the read is
+    // interrupted without ending the write transaction. The interrupted read
+    // used to be logged and the COMMIT that followed landed the write.
+    let c = console().await;
+    c.f.store
+        .conn()
+        .execute_batch(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 40000)
+             INSERT INTO events (event_id, at, kind, outcome, user_id, session_id, client_ip, request_id, attrs)
+             SELECT printf('d_%09d', i), 4102444800.0 + i, 'login.started', 'success', 'u_w', 's_1', '192.0.2.1', 'r', '{}' FROM n;
+             INSERT INTO event_deliveries (sink, event_id, state, attempts, next_attempt_at, updated_at)
+             SELECT 'log', event_id, 'pending', 0, 4102444800, 4102444800 FROM events WHERE event_id LIKE 'd_%';",
+        )
+        .unwrap();
+    c.f.store.set_event_retention(EventRetention {
+        retention: Duration::from_secs(90 * 86400),
+        max_rows: 1_000_000,
+        prune_every: 1,
+        max_pending_per_sink: 1_000_000,
+        terminal_retention: Duration::from_secs(7 * 86400),
+    });
+    c.f.hooks.set_gate("retention_read", true);
+    let hooks = c.f.hooks.clone();
+    let release = async move {
+        let h = hooks.clone();
+        assert!(
+            tokio::task::spawn_blocking(move || h.wait_reached(
+                "retention_read",
+                1,
+                Duration::from_secs(5)
+            ))
+            .await
+            .unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        hooks.set_gate("retention_read", false);
+    };
+    let f = &c.f;
+    let mk = |row: &SessionRow| f.session_event(row);
+    let ev = f.ev_user(EventKind::AdminUserDisable, &c.target.user_id);
+    let write = f.store.set_user_status(
+        &c.actor,
+        &c.policy,
+        &c.target.user_id,
+        UserStatus::Disabled,
+        dl(250),
+        ev,
+        &mk,
+    );
+    let (out, ()) = tokio::join!(write, release);
+    assert!(
+        matches!(out, Err(StoreError::Unavailable(ref m)) if m == "interrupted" || m == "deadline"),
+        "{out:?}"
+    );
+    assert_eq!(
+        c.target_status(),
+        "active",
+        "the write did not commit after its deadline"
     );
     assert_eq!(c.f.count_kind("admin.user_disable"), 0);
 }

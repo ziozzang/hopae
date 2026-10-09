@@ -799,12 +799,7 @@ impl Service {
     /// The reauthentication capability the snapshot resolved for a provider
     /// (a stored `reauth` setting already applied); `max_age` when unknown.
     pub(crate) fn reauth_capability(&self, id: &ProviderId) -> ReauthCapability {
-        self.snapshot
-            .load()
-            .providers
-            .iter()
-            .find(|p| &p.provider_id == id)
-            .map_or(ReauthCapability::MaxAge, |p| p.reauth)
+        self.snapshot.load().reauth_capability(id)
     }
 
     /// The live session a reauthentication transaction was started for.
@@ -1397,12 +1392,6 @@ impl Service {
         let snap = self.snapshot.load_full();
         let session = &view.session;
         let deadline = Deadline::after(Duration::from_secs(5));
-        let old_handles = self
-            .sessions
-            .session_summary(&session.session_id, deadline)
-            .await?
-            .map(|(_, handles)| handles)
-            .unwrap_or_default();
         let handle = handle_value(&*self.rng);
         let digest = handle.digest();
         let handle_abs = now
@@ -1419,7 +1408,7 @@ impl Service {
             revoked_at: None,
             revoked_reason: None,
         };
-        let mut events = vec![
+        let events = vec![
             self.ev(ctx, EventKind::LoginSucceeded, Outcome::Success)
                 .user(&session.user_id)
                 .session(&session.session_id)
@@ -1429,16 +1418,15 @@ impl Service {
                 .attr("auth_time_source", source.as_str())
                 .build(),
         ];
-        for h in old_handles.iter().filter(|h| h.revoked_at.is_none()) {
-            events.push(
-                self.ev(ctx, EventKind::HandleRevoked, Outcome::Success)
-                    .user(&session.user_id)
-                    .session(&session.session_id)
-                    .reason(reasons::REAUTH)
-                    .attr("host", h.host.as_str())
-                    .build(),
-            );
-        }
+        // One `handle.revoked` per handle the transaction itself revokes.
+        let mk_revoked = |h: &HandleRow| {
+            self.ev(ctx, EventKind::HandleRevoked, Outcome::Success)
+                .user(&session.user_id)
+                .session(&session.session_id)
+                .reason(reasons::REAUTH)
+                .attr("host", h.host.as_str())
+                .build()
+        };
         let factor = FactorEntry {
             kind: factor_kind(ProviderKind::Oidc),
             provider: Some(provider_id.clone()),
@@ -1456,6 +1444,7 @@ impl Service {
                 (txn.txn_sha256, reasons::REAUTH),
                 deadline,
                 events,
+                &mk_revoked,
             )
             .await
         {

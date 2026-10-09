@@ -1300,6 +1300,56 @@ fn s301_a4_budget_interrupts_and_rolls_back() {
 }
 
 #[test]
+fn s301_a4_refusals_bound_their_required_audit_writes_by_the_budget() {
+    // A refusal's own `admin.denied` / `csrf.rejected` write waits for the
+    // same lock a mutation does; under contention it is bounded by the budget
+    // (the refusal stands, the audit write is abandoned and rolled back).
+    let k = Console::with(json!({"admin": {"query_budget_ms": 100}}));
+    let a = k.admin("sub-a", AdminRole::Admin);
+    let v = k.admin("sub-v", AdminRole::Viewer);
+    let n = k.login("sub-n", "sub-n@admin.test", "Nobody");
+    k.add_user("u_x", "x@example.test", "Ex");
+    let bounded = |what: &str, expect: (u16, &str), run: &dyn Fn() -> Response| {
+        k.h.hooks.hold_write_lock(4000);
+        let t = std::time::Instant::now();
+        let r = run();
+        let took = t.elapsed();
+        assert_eq!((r.status, code(&r).as_str()), expect, "{what}: {}", r.body);
+        assert!(
+            took < std::time::Duration::from_millis(1500),
+            "{what}: the refusal's audit write waited {took:?} for the lock"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(4300));
+    };
+    bounded("csrf_rejected", (403, "csrf_rejected"), &|| {
+        k.client(&a).post_json_raw(
+            "/v1/users/u_x/disable",
+            &[("content-type", "application/json")],
+            b"{}",
+        )
+    });
+    assert!(
+        k.events("csrf.rejected").is_empty(),
+        "nothing is recorded late"
+    );
+    bounded("role_insufficient", (403, "role_insufficient"), &|| {
+        k.client(&v).post_json("/v1/users/u_x/disable", json!({}))
+    });
+    bounded("not_admin", (403, "not_admin"), &|| {
+        k.client(&n).get("/v1/users")
+    });
+    assert!(
+        k.events("admin.denied").is_empty(),
+        "nothing is recorded late: {:?}",
+        k.events("admin.denied")
+    );
+    // Without contention the same refusals are recorded.
+    let r = k.client(&n).get("/v1/users");
+    assert_eq!(r.status, 403);
+    assert_eq!(k.events("admin.denied").len(), 1);
+}
+
+#[test]
 fn s301_a4_terminate_of_five_thousand_sessions_with_a_large_budget() {
     let k = Console::with(json!({"admin": {"query_budget_ms": 30000}}));
     let a = k.admin("sub-a", AdminRole::Admin);

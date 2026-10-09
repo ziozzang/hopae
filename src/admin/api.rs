@@ -83,13 +83,9 @@ pub fn actor(p: &Principal) -> Actor {
 /// provider of the actor's session makes the console demand a provider claim.
 pub fn actor_policy(st: &AdminState, p: &Principal) -> ActorPolicy {
     let snap = st.snapshot.load();
-    // A provider the snapshot does not list (stored only) is held to the
-    // stricter rule: the fence can only disagree with the engine by refusing.
-    let capability = snap
-        .providers
-        .iter()
-        .find(|c| c.provider_id == p.provider_id)
-        .map_or(ReauthCapability::MaxAge, |c| c.reauth);
+    // The same authoritative map as verify and callback: a retained database
+    // provider the file does not list keeps its stored capability.
+    let capability = snap.reauth_capability(&p.provider_id);
     ActorPolicy {
         console_host: st.cfg.host.clone(),
         session: st.cfg.session,

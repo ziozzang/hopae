@@ -149,6 +149,40 @@ pub(crate) fn require_provider_live(tx: &Transaction<'_>, id: &str) -> StoreResu
 
 /// Pass the commit gate `label` (if hooks are present), then commit.
 pub(crate) fn commit(tx: Transaction<'_>, shared: &Shared, gate: Option<&str>) -> StoreResult<()> {
+    commit_inner(tx, shared, gate, None)
+}
+
+/// As [`commit`] for a job that runs under a deadline: the inline retention
+/// prune may not swallow the deadline, and the deadline is checked once more
+/// after it, immediately before `COMMIT` (a job that reaches its deadline never
+/// commits late).
+pub(crate) fn commit_checked(
+    tx: Transaction<'_>,
+    shared: &Shared,
+    gate: Option<&str>,
+    check: &Check,
+) -> StoreResult<()> {
+    commit_inner(tx, shared, gate, Some(check))
+}
+
+/// Whether a retention failure is the job's deadline or an interrupt of its
+/// statement: those end the job, they are never logged and committed past.
+fn is_deadline_error(e: &StoreError) -> bool {
+    match e {
+        StoreError::Unavailable(m) => m == "deadline" || m == "interrupted",
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(f, _)) => {
+            f.code == rusqlite::ErrorCode::OperationInterrupted
+        }
+        _ => false,
+    }
+}
+
+fn commit_inner(
+    tx: Transaction<'_>,
+    shared: &Shared,
+    gate: Option<&str>,
+    check: Option<&Check>,
+) -> StoreResult<()> {
     if let (Some(h), Some(label)) = (&shared.hooks, gate) {
         h.pass_gate(label);
     }
@@ -165,8 +199,14 @@ pub(crate) fn commit(tx: Transaction<'_>, shared: &Shared, gate: Option<&str>) -
     {
         match events::prune_statements(&tx, shared, shared.clock.now(), &policy) {
             Ok(report) => pruned = Some(report),
+            // The deadline (or an interrupted statement) ends the job: the
+            // transaction is dropped, so nothing of it commits.
+            Err(e) if is_deadline_error(&e) => return Err(e),
             Err(e) => tracing::warn!(error = %e, "inline event prune failed"),
         }
+    }
+    if let Some(check) = check {
+        check.now()?;
     }
     tx.commit()?;
     match pruned {

@@ -84,6 +84,7 @@ mod tests {
             }],
             default_app: AppPolicy::default_app(),
             providers: vec![],
+            retained_reauth: Default::default(),
         }
     }
 

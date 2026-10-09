@@ -45,6 +45,14 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 - `hopae --check` warns when an application sets `logout_confirm = false`; the same-origin navigation-gadget residual and the transferable logout ticket are documented (ADR-0015, threat model, configuration reference, scenario 015-A8 and A9).
 - Migration `0002` was edited in place for the last time; later schema changes are new numbered migrations (operations guide).
 
+### Fixed (code review G7 of the M4-min console, ADR-0016)
+
+- A database provider the file no longer lists keeps its stored reauthentication capability in verify, the callback, the write fence and the status page (one capability map); a present JSON `null` `auth_time` fails the login like any other invalid claim; a reauthentication's `handle.revoked` events list the handles revoked in its own transaction, not a truncated preview.
+- `hopae_admin_denied_total` counts `not_admin`, `role_insufficient`, `aal_insufficient` and `auth_too_old` once where `admin.denied` is written, and a freshness challenge is labelled `reauth_required` in `hopae_verify_decisions_total`. ADR-0016 decision 3 now states that the engine's own lifetime and binding consequences apply on the admin listener while the listener itself initiates no termination.
+- The actor fence tests refresh `auth_time` in the handle-idle case and gain isolated session-idle, session-created-in-the-future, `auth_time`-in-the-future and handle-digest cases.
+- `hopae admin grant` by a new address never replaces an existing `source_email` (it is refused: `already bound to <old>`), so an unchanged file import cannot grant the old address's new holder; the address fallback across local-part case is removed (only the domain is normalized); `import --force <user_id>` works inside an ambiguous binding set; the resolution block is printed and flushed before the grant is written and lists every identity.
+- The inline event-retention prune can no longer swallow a deadline or an interrupted statement and commit late; the console's authentication reads and its required refusal records (`admin.denied`, `csrf.rejected`) carry the query budget, with a fallback deadline scope in the admin middleware.
+
 ### Fixed (code review G7 pass 2 of ADR-0015)
 
 - An `Accept` range with quality 0 (`text/html;q=0`) is not accepted HTML for the entry points.

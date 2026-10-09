@@ -585,7 +585,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     // database is authoritative). Its reporter writes `provider.error`.
     let rows = directory.providers().await.context("reading providers")?;
     // A stored `reauth` setting (an api-managed row) overrides the file's default.
-    crate::provider::apply_stored_reauth(&mut snapshot.providers, &rows);
+    crate::provider::apply_stored_reauth(&mut snapshot, &rows);
     let registry = Arc::new(Registry::from_snapshot(
         &rows,
         &|n| std::env::var(n).ok(),
@@ -1038,9 +1038,24 @@ pub struct AdminCliOutput {
     pub stdout: String,
     pub stderr: String,
     pub code: u8,
+    /// Write `stdout` to the terminal at each [`AdminCliOutput::emit`] instead
+    /// of holding it until the command ends.
+    pub live: bool,
 }
 
 impl AdminCliOutput {
+    /// A live run prints what is buffered now and flushes it; otherwise the
+    /// text stays for the caller to print (tests read it whole).
+    fn emit(&mut self) {
+        if self.live {
+            use std::io::Write as _;
+            let mut so = std::io::stdout().lock();
+            let _ = so.write_all(self.stdout.as_bytes());
+            let _ = so.flush();
+            self.stdout.clear();
+        }
+    }
+
     fn out(&mut self, line: impl AsRef<str>) {
         self.stdout.push_str(line.as_ref());
         self.stdout.push('\n');
@@ -1089,6 +1104,9 @@ fn store_failure(
     use crate::store::StoreError;
     match e {
         StoreError::Conflict("user_disabled") => Ok(out.refuse("user is disabled: enable first")),
+        StoreError::Conflict("source_email_bound") => Ok(out.refuse(
+            "the user is already bound to another address; grant by user_id (a binding is never replaced)",
+        )),
         StoreError::Conflict(m) => Ok(out.refuse(m)),
         StoreError::Busy => Err(anyhow::anyhow!("the store is busy; try again")),
         StoreError::Unavailable(_) => Err(anyhow::anyhow!("the store did not answer in time")),
@@ -1203,9 +1221,23 @@ async fn open_cli_store(cfg: &Config, env: &Env) -> anyhow::Result<Store> {
 /// `hopae admin grant|revoke|list|import`. Arguments are validated before the
 /// store is opened; nothing is written for a refused command.
 pub async fn admin_cli(cfg: &Config, cmd: AdminCommand) -> anyhow::Result<AdminCliOutput> {
+    admin_cli_with(cfg, cmd, false).await
+}
+
+/// [`admin_cli`] with `live` output: the grant's resolution block reaches the
+/// terminal before the grant is written (ADR-0016 decision 6), not when the
+/// command ends. The returned `stdout` then holds only what was not yet printed.
+pub async fn admin_cli_with(
+    cfg: &Config,
+    cmd: AdminCommand,
+    live: bool,
+) -> anyhow::Result<AdminCliOutput> {
     use crate::store::types::{Deadline, GrantTarget};
     use crate::store::{AdminRole, GrantManagedBy};
-    let mut out = AdminCliOutput::default();
+    let mut out = AdminCliOutput {
+        live,
+        ..AdminCliOutput::default()
+    };
     // Validation first.
     let parsed_target = match &cmd {
         AdminCommand::Grant { target, .. } | AdminCommand::Revoke { target } => {
@@ -1252,20 +1284,9 @@ pub async fn admin_cli(cfg: &Config, cmd: AdminCommand) -> anyhow::Result<AdminC
                 ..
             } => {
                 let target = parsed_target.expect("validated");
-                let mut found = dir.resolve_grant_target(&target, dl()).await?;
-                // The local part of an address keeps its case in the store; an
-                // operator typing it in another case still means the same person.
-                if found.is_none()
-                    && let GrantTarget::Email(e) = &target
-                    && let Ok(lower) = crate::identity::types::NormalizedEmail::parse(
-                        &e.as_str().to_ascii_lowercase(),
-                    )
-                    && &lower != e
-                {
-                    found = dir
-                        .resolve_grant_target(&GrantTarget::Email(lower), dl())
-                        .await?;
-                }
+                let found = dir.resolve_grant_target(&target, dl()).await?;
+                // Only the domain is case-normalized (ADR-0011): the local part
+                // is compared exactly, never guessed across case.
                 let Some((user, identities)) = found else {
                     out.stderr
                         .push_str("error: no such user: sign in once first\n");
@@ -1273,6 +1294,8 @@ pub async fn admin_cli(cfg: &Config, cmd: AdminCommand) -> anyhow::Result<AdminC
                     return Ok(());
                 };
                 out.stdout.push_str(&resolution_block(&user, &identities));
+                // The evidence is on the terminal before anything is written.
+                out.emit();
                 // The binding records the address as the store holds it.
                 let email = match &target {
                     GrantTarget::Email(_) => user.primary_email.clone(),
@@ -1289,6 +1312,20 @@ pub async fn admin_cli(cfg: &Config, cmd: AdminCommand) -> anyhow::Result<AdminC
                 if user.status != crate::store::UserStatus::Active {
                     out.stderr
                         .push_str("error: user is disabled: enable first\n");
+                    out.code = EXIT_CONFIG;
+                    return Ok(());
+                }
+                if let Some(new) = &email
+                    && let Some(old) = dir
+                        .admin_grant(&user.user_id, dl())
+                        .await?
+                        .and_then(|g| g.source_email)
+                    && &old != new
+                {
+                    out.stderr.push_str(&format!(
+                        "error: {} is already bound to {old}; grant by user_id (a binding is never replaced)\n",
+                        user.user_id
+                    ));
                     out.code = EXIT_CONFIG;
                     return Ok(());
                 }

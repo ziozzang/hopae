@@ -410,7 +410,7 @@ pub async fn authenticate(
     }
     let view = st
         .sessions
-        .lookup_handle(&digest, &st.cfg.host)
+        .lookup_handle_within(&digest, &st.cfg.host, api::deadline(st))
         .await
         .map_err(unavailable)?;
     let Some(view) = view else {
@@ -419,7 +419,7 @@ pub async fn authenticate(
     };
     let user = st
         .directory
-        .user(&identity.user_id)
+        .user_within(&identity.user_id, api::deadline(st))
         .await
         .map_err(unavailable)?;
     Ok(Principal {
@@ -442,7 +442,7 @@ async fn requester_of(st: &AdminState, handle: Option<&str>) -> Option<(UserId, 
     let digest = Secret::new(handle?.to_string()).digest();
     let view = st
         .sessions
-        .lookup_handle(&digest, &st.cfg.host)
+        .lookup_handle_within(&digest, &st.cfg.host, api::deadline(st))
         .await
         .ok()??;
     Some((view.session.user_id, view.session.session_id))
@@ -500,7 +500,9 @@ pub fn denied_event(
     ))
 }
 
-/// Write the `admin.denied` event of a refusal. A store failure is logged;
+/// Write the `admin.denied` event of a refusal and count it in
+/// `hopae_admin_denied_total{reason}`: the one place a required administrative
+/// denial is counted, so no caller counts it again. A store failure is logged;
 /// the refusal stands either way.
 pub async fn record_denied(
     st: &AdminState,
@@ -508,8 +510,12 @@ pub async fn record_denied(
     who: Option<(&UserId, &SessionId)>,
     reason: Reason,
 ) {
+    counters::inc(counters::ADMIN_DENIED_TOTAL, &[("reason", reason.0)]);
     if let Some(ev) = denied_event(st, req, who, reason)
-        && let Err(e) = st.events.append_required(vec![ev]).await
+        && let Err(e) = st
+            .events
+            .append_required_within(vec![ev], api::deadline(st))
+            .await
     {
         tracing::warn!(error = %e, reason = reason.0, "admin.denied could not be recorded");
     }

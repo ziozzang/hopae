@@ -288,7 +288,7 @@ fn admin(cfg: &Config, action: AdminAction) -> ExitCode {
     };
     let result = runtime()
         .map_err(anyhow::Error::from)
-        .and_then(|rt| rt.block_on(app::admin_cli(cfg, cmd)));
+        .and_then(|rt| rt.block_on(app::admin_cli_with(cfg, cmd, true)));
     telemetry::output::Output::global().flush(std::time::Duration::from_secs(2));
     match result {
         Ok(out) => {

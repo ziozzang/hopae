@@ -105,6 +105,15 @@ fn facts(req: &Request, rid: &str, client_ip: std::net::IpAddr) -> ReqInfo {
     }
 }
 
+/// The fallback store deadline of a stage of the request (`admin.query_budget_ms`):
+/// every store call made inside `fut` without a deadline of its own is bounded
+/// by it (ADR-0016 decision 12; the calls the console makes also pass theirs
+/// explicitly, and the earliest present one wins).
+async fn scoped<F: std::future::Future>(st: &AdminState, fut: F) -> F::Output {
+    crate::store::sqlite::with_deadline(tokio::time::Instant::now() + st.cfg.query_budget, fut)
+        .await
+}
+
 /// Assign the request id, refuse `OPTIONS`, run the request, and stamp the
 /// pinned headers and the id on whatever comes back, whatever produced it.
 async fn outer(State(st): State<Arc<AdminState>>, mut req: Request, next: Next) -> Response {
@@ -159,7 +168,7 @@ async fn limit(State(st): State<Arc<AdminState>>, req: Request, next: Next) -> R
         let refused = auth::Refused::overloaded();
         counters::inc(counters::ADMIN_DENIED_TOTAL, &[("reason", "overloaded")]);
         count(&st, "none", "overloaded");
-        return auth::respond(&st, &info, &refused).await;
+        return scoped(&st, auth::respond(&st, &info, &refused)).await;
     };
     let declared = req
         .headers()
@@ -201,7 +210,7 @@ async fn gate(
             let ip = refused.client_ip.unwrap_or_else(|| peer.ip());
             let info = facts(&req, &rid, ip);
             count(&st, "none", auth::code_of(&refused.denial));
-            return auth::respond(&st, &info, &refused).await;
+            return scoped(&st, auth::respond(&st, &info, &refused)).await;
         }
     };
     let mut info = facts(&req, &rid, client.ip);
@@ -216,21 +225,24 @@ async fn gate(
         .get(header::USER_AGENT)
         .map(|v| crate::policy::binding::normalize_user_agent(v.as_bytes()));
     info.user_agent = user_agent.clone();
-    let principal = match auth::authenticate(
+    let principal = match scoped(
         &st,
-        &client,
-        req.headers(),
-        &path,
-        req.method(),
-        user_agent,
-        &rid,
+        auth::authenticate(
+            &st,
+            &client,
+            req.headers(),
+            &path,
+            req.method(),
+            user_agent,
+            &rid,
+        ),
     )
     .await
     {
         Ok(p) => p,
         Err(refused) => {
             count(&st, "none", auth::code_of(&refused.denial));
-            return auth::respond(&st, &info, &refused).await;
+            return scoped(&st, auth::respond(&st, &info, &refused)).await;
         }
     };
     let role = principal.role.as_str();
@@ -250,7 +262,7 @@ async fn gate(
                 return resp;
             }
         };
-        if let Err(resp) = auth::require_admin_role(&st, &ctx).await {
+        if let Err(resp) = scoped(&st, auth::require_admin_role(&st, &ctx)).await {
             count(&st, role, "denied");
             return resp;
         }
@@ -258,7 +270,7 @@ async fn gate(
         req = Request::from_parts(parts, Body::empty());
     }
     req.extensions_mut().insert(ctx);
-    let resp = next.run(req).await;
+    let resp = scoped(&st, next.run(req)).await;
     let outcome = match resp.status().as_u16() {
         200..=399 => "ok",
         403 => "denied",
