@@ -197,7 +197,7 @@ fn s001_2_portal_renders_chooser_and_sets_txn_cookie() {
     assert_eq!(digest, None, "not recorded by the chooser page");
     assert_eq!(r.header("cache-control"), Some("no-store"));
     assert_eq!(r.header("x-content-type-options"), Some("nosniff"));
-    assert_eq!(r.header("referrer-policy"), Some("no-referrer"));
+    assert_eq!(r.header("referrer-policy"), Some("same-origin"));
     let csp = r.header("content-security-policy").expect("csp");
     assert!(!csp.contains("unsafe-inline"), "{csp}");
 }

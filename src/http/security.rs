@@ -48,7 +48,10 @@ pub fn apply(headers: &mut HeaderMap) {
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    // `same-origin`, not `no-referrer`: browsers send `Origin: null` on a form
+    // POST from a `no-referrer` page, which the portal's Origin check must
+    // refuse; cross-origin navigations still carry no Referer.
+    headers.insert("referrer-policy", HeaderValue::from_static("same-origin"));
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(CONTENT_SECURITY_POLICY),
@@ -89,7 +92,7 @@ mod tests {
         };
         assert_eq!(get("cache-control"), "no-store");
         assert_eq!(get("x-content-type-options"), "nosniff");
-        assert_eq!(get("referrer-policy"), "no-referrer");
+        assert_eq!(get("referrer-policy"), "same-origin");
         assert_eq!(get("x-frame-options"), "DENY");
         assert_eq!(
             get("content-security-policy"),

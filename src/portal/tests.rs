@@ -400,7 +400,7 @@ fn without_request_id(body: &str) -> String {
 fn assert_security_headers(r: &Resp, what: &str) {
     assert_eq!(r.h("cache-control"), Some("no-store"), "{what}");
     assert_eq!(r.h("x-content-type-options"), Some("nosniff"), "{what}");
-    assert_eq!(r.h("referrer-policy"), Some("no-referrer"), "{what}");
+    assert_eq!(r.h("referrer-policy"), Some("same-origin"), "{what}");
     assert_eq!(r.h("x-frame-options"), Some("DENY"), "{what}");
     // Every page keeps the base policy; only the chooser widens `form-action`
     // (with the provider origins, R-5), checked in `form_action_is_per_page`.
