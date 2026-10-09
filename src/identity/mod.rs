@@ -1,1 +1,6 @@
-//! Users, provider identities, linking policy and the identity snapshot (M1; linking policy M3). Empty in M0.
+//! Users, identities, linking policy and the identity service.
+//! W0 provides the shared types; the service arrives in M1 (W1-D).
+
+pub mod types;
+
+pub use types::*;

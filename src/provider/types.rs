@@ -1,0 +1,203 @@
+//! The provider abstraction (ADR-0010): identifiers, results, errors and the trait.
+
+use async_trait::async_trait;
+
+use crate::crypto::{Rng, Secret, Timestamp};
+use crate::event::types::{Reason, reasons};
+use crate::identity::types::NormalizedEmail;
+use crate::store::types::TransactionRow;
+
+string_newtype!(
+    /// Provider identifier from the configuration (`google`, `mock`, ...).
+    ProviderId
+);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderKind {
+    Oidc,
+    Oauth2,
+    EmailLink,
+    Password,
+}
+
+impl ProviderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderKind::Oidc => "oidc",
+            ProviderKind::Oauth2 => "oauth2",
+            ProviderKind::EmailLink => "email_link",
+            ProviderKind::Password => "password",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ProviderKind> {
+        match s {
+            "oidc" => Some(ProviderKind::Oidc),
+            "oauth2" => Some(ProviderKind::Oauth2),
+            "email_link" => Some(ProviderKind::EmailLink),
+            "password" => Some(ProviderKind::Password),
+            _ => None,
+        }
+    }
+}
+
+pub struct AuthorizationRequest {
+    pub url: url::Url,
+    pub state: Secret,
+    pub nonce: Option<String>,
+    pub pkce_verifier: Option<Secret>,
+}
+
+pub struct CallbackQuery {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
+pub struct ProviderIdentity {
+    pub subject: String,
+    pub email: Option<NormalizedEmail>,
+    pub email_verified: bool,
+    pub email_authoritative: bool,
+    pub name: Option<String>,
+    pub username: Option<String>,
+    pub picture: Option<String>,
+    /// At most 8 KiB serialized.
+    pub raw_claims: serde_json::Value,
+}
+
+/// Each variant maps to one reason code (see [`ProviderError::reason`]).
+#[derive(thiserror::Error, Debug)]
+pub enum ProviderError {
+    #[error("invalid_state")]
+    InvalidState,
+    #[error("invalid_nonce")]
+    InvalidNonce,
+    #[error("invalid_audience")]
+    InvalidAudience,
+    #[error("invalid_issuer")]
+    InvalidIssuer,
+    #[error("invalid_signature")]
+    InvalidSignature,
+    #[error("invalid_token_header")]
+    InvalidTokenHeader,
+    #[error("token_expired")]
+    TokenExpired,
+    #[error("id_token_missing")]
+    IdTokenMissing,
+    #[error("userinfo_subject_mismatch")]
+    UserinfoSubjectMismatch,
+    #[error("provider_error (status {status})")]
+    ProviderError { status: u16 },
+    #[error("provider_timeout")]
+    ProviderTimeout,
+    #[error("provider_response_invalid")]
+    ProviderResponseInvalid,
+    #[error("provider_response_too_large")]
+    ProviderResponseTooLarge,
+    #[error("provider_unavailable")]
+    ProviderUnavailable,
+    #[error("provider_disabled")]
+    ProviderDisabled,
+    #[error("discovery_issuer_mismatch")]
+    DiscoveryIssuerMismatch,
+}
+
+impl ProviderError {
+    /// The stable reason code for events and failure pages.
+    pub fn reason(&self) -> Reason {
+        match self {
+            ProviderError::InvalidState => reasons::INVALID_STATE,
+            ProviderError::InvalidNonce => reasons::INVALID_NONCE,
+            ProviderError::InvalidAudience => reasons::INVALID_AUDIENCE,
+            ProviderError::InvalidIssuer => reasons::INVALID_ISSUER,
+            ProviderError::InvalidSignature => reasons::INVALID_SIGNATURE,
+            ProviderError::InvalidTokenHeader => reasons::INVALID_TOKEN_HEADER,
+            ProviderError::TokenExpired => reasons::TOKEN_EXPIRED,
+            ProviderError::IdTokenMissing => reasons::ID_TOKEN_MISSING,
+            ProviderError::UserinfoSubjectMismatch => reasons::USERINFO_SUBJECT_MISMATCH,
+            ProviderError::ProviderError { .. } => reasons::PROVIDER_ERROR,
+            ProviderError::ProviderTimeout => reasons::PROVIDER_TIMEOUT,
+            ProviderError::ProviderResponseInvalid => reasons::PROVIDER_RESPONSE_INVALID,
+            ProviderError::ProviderResponseTooLarge => reasons::PROVIDER_RESPONSE_TOO_LARGE,
+            ProviderError::ProviderUnavailable => reasons::PROVIDER_UNAVAILABLE,
+            ProviderError::ProviderDisabled => reasons::PROVIDER_DISABLED,
+            ProviderError::DiscoveryIssuerMismatch => reasons::DISCOVERY_ISSUER_MISMATCH,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderHealth {
+    Ok,
+    Degraded(&'static str),
+    Disabled,
+}
+
+#[async_trait]
+pub trait Provider: Send + Sync {
+    fn id(&self) -> &ProviderId;
+    fn kind(&self) -> ProviderKind;
+    fn display_name(&self) -> &str;
+    fn enabled(&self) -> bool;
+    async fn begin(
+        &self,
+        txn: &TransactionRow,
+        redirect_uri: &url::Url,
+        rng: &dyn Rng,
+    ) -> Result<AuthorizationRequest, ProviderError>;
+    async fn complete(
+        &self,
+        txn: &TransactionRow,
+        callback: &CallbackQuery,
+        redirect_uri: &url::Url,
+        now: Timestamp,
+    ) -> Result<ProviderIdentity, ProviderError>;
+    async fn health(&self) -> ProviderHealth;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_error_reason_matches_its_display_code() {
+        let all = [
+            ProviderError::InvalidState,
+            ProviderError::InvalidNonce,
+            ProviderError::InvalidAudience,
+            ProviderError::InvalidIssuer,
+            ProviderError::InvalidSignature,
+            ProviderError::InvalidTokenHeader,
+            ProviderError::TokenExpired,
+            ProviderError::IdTokenMissing,
+            ProviderError::UserinfoSubjectMismatch,
+            ProviderError::ProviderTimeout,
+            ProviderError::ProviderResponseInvalid,
+            ProviderError::ProviderResponseTooLarge,
+            ProviderError::ProviderUnavailable,
+            ProviderError::ProviderDisabled,
+            ProviderError::DiscoveryIssuerMismatch,
+        ];
+        for e in all {
+            assert_eq!(e.reason().0, e.to_string());
+        }
+        let e = ProviderError::ProviderError { status: 500 };
+        assert_eq!(e.reason().0, "provider_error");
+    }
+
+    #[test]
+    fn kind_round_trips() {
+        for k in [
+            ProviderKind::Oidc,
+            ProviderKind::Oauth2,
+            ProviderKind::EmailLink,
+            ProviderKind::Password,
+        ] {
+            assert_eq!(ProviderKind::parse(k.as_str()), Some(k));
+        }
+        assert_eq!(ProviderKind::parse("saml"), None);
+    }
+}

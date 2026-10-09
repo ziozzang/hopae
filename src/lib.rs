@@ -2,9 +2,39 @@
 //! forward-authentication check. The crate is a library plus one binary;
 //! the library exists so integration tests can start the listeners in-process.
 //!
-//! Milestone M0 provides only the foundation: configuration, the two
-//! listeners with their fixed routes, the SQLite store with migrations and
-//! telemetry. Every other module is a documented placeholder for later work.
+//! Milestone M0 provided the foundation (configuration, the two listeners,
+//! the SQLite store, telemetry). The M1 shared core (identifiers, policy,
+//! events, store traits, test hooks) is frozen by W0; the remaining modules
+//! are filled by the M1 work packages.
+
+/// String newtype with transparent serde, `new`, `as_str` and `Display`.
+macro_rules! string_newtype {
+    ($(#[$m:meta])* $name:ident) => {
+        $(#[$m])*
+        #[derive(
+            Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord,
+            serde::Serialize, serde::Deserialize,
+        )]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(s: impl Into<String>) -> Self {
+                Self(s.into())
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    };
+}
 
 pub mod app;
 pub mod cache;

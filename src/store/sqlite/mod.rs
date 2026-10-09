@@ -1,38 +1,132 @@
-//! SQLite backend: open with WAL, busy timeout and foreign keys, then apply
-//! embedded, versioned migrations.
+//! SQLite backend: WAL, one writer thread fed by a channel, readers on the
+//! blocking pool, embedded versioned migrations (ADR-0002).
+//!
+//! Every mutation runs as a closure on the single writer thread inside one
+//! `BEGIN IMMEDIATE` transaction together with its events and delivery rows,
+//! so a state change and its audit record commit or vanish together.
 
+mod directory;
+mod events;
+mod rows;
+mod sessions;
+#[cfg(test)]
+mod tests;
+
+use std::collections::VecDeque;
 use std::fs::OpenOptions;
+use std::future::Future;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+
+use super::hooks::StoreHooks;
+use super::{Directory, Events, Sessions, StoreError, StoreResult};
+use crate::crypto::{Clock, OsRng, Rng};
+use crate::event::types::Event;
 
 /// Embedded migrations in order. The version is the position + 1 and must
 /// match the numeric prefix of the file name.
-const MIGRATIONS: &[(u32, &str, &str)] =
-    &[(1, "0001_meta", include_str!("../migrations/0001_meta.sql"))];
+const MIGRATIONS: &[(u32, &str, &str)] = &[
+    (1, "0001_meta", include_str!("../migrations/0001_meta.sql")),
+    (
+        2,
+        "0002_m1_schema",
+        include_str!("../migrations/0002_m1_schema.sql"),
+    ),
+];
 
-#[derive(Debug, thiserror::Error)]
-pub enum StoreError {
-    #[error("store I/O error at {path}: {source}")]
-    Io {
-        path: String,
-        source: std::io::Error,
-    },
-    #[error("store error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
-    #[error("database schema version {found} is newer than this binary supports ({supported})")]
-    SchemaTooNew { found: u32, supported: u32 },
+/// Bound of the best-effort diagnostic event queue.
+pub const DIAGNOSTIC_QUEUE_CAP: usize = 4096;
+/// Read connections kept for reuse.
+const READER_POOL_MAX: usize = 4;
+
+tokio::task_local! {
+    /// Real-time deadline for store calls made inside [`with_deadline`].
+    static STORE_DEADLINE: tokio::time::Instant;
 }
 
+/// Run `fut` with every store call inside it bounded by `deadline`: a call
+/// that is not finished by then fails with [`StoreError::Unavailable`].
+/// (The plan names an `Option<Timestamp>`; a real-time `Instant` is used
+/// because a test clock does not advance while a stalled call sleeps.)
+pub async fn with_deadline<F: Future>(deadline: tokio::time::Instant, fut: F) -> F::Output {
+    STORE_DEADLINE.scope(deadline, fut).await
+}
+
+type Job = Box<dyn FnOnce(&mut WriterEnv) + Send>;
+
+/// State shared by the handle and the writer thread.
+pub(crate) struct Shared {
+    pub(crate) clock: Arc<dyn Clock>,
+    pub(crate) sinks: Vec<String>,
+    pub(crate) hooks: Option<Arc<StoreHooks>>,
+    pub(crate) rng: RwLock<Arc<dyn Rng>>,
+    pub(crate) diag: Mutex<VecDeque<Event>>,
+    pub(crate) diag_flush_queued: AtomicBool,
+}
+
+impl Shared {
+    pub(crate) fn rng(&self) -> Arc<dyn Rng> {
+        self.rng.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+}
+
+/// What a writer job gets: the write connection and the shared state.
+pub(crate) struct WriterEnv {
+    pub(crate) conn: Connection,
+    pub(crate) shared: Arc<Shared>,
+}
+
+impl WriterEnv {
+    pub(crate) fn begin(&mut self) -> StoreResult<Transaction<'_>> {
+        Ok(self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?)
+    }
+
+    pub(crate) fn now(&self) -> crate::crypto::Timestamp {
+        self.shared.clock.now()
+    }
+}
+
+/// Pass the commit gate `label` (if hooks are present), then commit.
+pub(crate) fn commit(tx: Transaction<'_>, shared: &Shared, gate: Option<&str>) -> StoreResult<()> {
+    if let (Some(h), Some(label)) = (&shared.hooks, gate) {
+        h.pass_gate(label);
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+struct Inner {
+    shared: Arc<Shared>,
+    tx: mpsc::Sender<Job>,
+    path: PathBuf,
+    readers: Mutex<Vec<Connection>>,
+    util: Mutex<Connection>,
+}
+
+/// The SQLite store. Cheap to clone; clones share the writer thread.
+#[derive(Clone)]
 pub struct Store {
-    conn: Connection,
+    inner: Arc<Inner>,
 }
 
 impl Store {
     /// Create the parent directory (0700 when newly created) and the database
-    /// file (0600), open it and run pending migrations.
-    pub fn open(path: &Path) -> Result<Self, StoreError> {
+    /// file (0600), open it, run pending migrations and start the writer.
+    /// `sinks` names the event sinks that get a delivery row per required event.
+    pub fn open(
+        path: &Path,
+        clock: Arc<dyn Clock>,
+        sinks: Vec<String>,
+        hooks: Option<Arc<StoreHooks>>,
+    ) -> Result<Self, StoreError> {
         let io = |p: &Path| {
             let p = p.display().to_string();
             move |source| StoreError::Io {
@@ -56,25 +150,184 @@ impl Store {
             .open(path)
             .map_err(io(path))?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(io(path))?;
-        let conn = Connection::open(path)?;
-        configure(&conn)?;
-        migrate(&conn)?;
-        Ok(Self { conn })
+        let util = Connection::open(path)?;
+        configure(&util)?;
+        migrate(&util)?;
+        let writer = Connection::open(path)?;
+        configure(&writer)?;
+
+        let shared = Arc::new(Shared {
+            clock,
+            sinks,
+            hooks,
+            rng: RwLock::new(Arc::new(OsRng)),
+            diag: Mutex::new(VecDeque::new()),
+            diag_flush_queued: AtomicBool::new(false),
+        });
+        let (tx, rx) = mpsc::channel::<Job>();
+        let mut env = WriterEnv {
+            conn: writer,
+            shared: shared.clone(),
+        };
+        std::thread::Builder::new()
+            .name("hopae-store-writer".into())
+            .spawn(move || {
+                while let Ok(job) = rx.recv() {
+                    job(&mut env);
+                }
+            })
+            .map_err(io(path))?;
+        Ok(Self {
+            inner: Arc::new(Inner {
+                shared,
+                tx,
+                path: path.to_path_buf(),
+                readers: Mutex::new(Vec::new()),
+                util: Mutex::new(util),
+            }),
+        })
     }
 
-    /// Borrow the connection (tests and the future store implementation).
-    pub fn conn(&self) -> &Connection {
-        &self.conn
+    pub fn directory(&self) -> Arc<dyn Directory> {
+        Arc::new(self.clone())
+    }
+
+    pub fn sessions(&self) -> Arc<dyn Sessions> {
+        Arc::new(self.clone())
+    }
+
+    pub fn events(&self) -> Arc<dyn Events> {
+        Arc::new(self.clone())
+    }
+
+    /// Replace the random source used for ids the store mints (user ids).
+    pub fn set_rng(&self, rng: Arc<dyn Rng>) {
+        *self
+            .inner
+            .shared
+            .rng
+            .write()
+            .unwrap_or_else(|p| p.into_inner()) = rng;
+    }
+
+    /// Borrow a utility connection (tests, operators, the test hooks). Not for request paths.
+    pub fn conn(&self) -> MutexGuard<'_, Connection> {
+        self.inner.util.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     /// Highest applied migration version.
     pub fn schema_version(&self) -> Result<u32, StoreError> {
-        current_version(&self.conn)
+        current_version(&self.conn())
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.inner.path
+    }
+
+    pub(crate) fn shared(&self) -> &Arc<Shared> {
+        &self.inner.shared
+    }
+
+    /// Account for the call, apply the stall hook and the task-local deadline.
+    async fn run<T>(
+        &self,
+        method: &'static str,
+        work: impl Future<Output = StoreResult<T>>,
+    ) -> StoreResult<T> {
+        let stall = self.inner.shared.hooks.as_ref().map(|h| {
+            h.count_call(method);
+            h.stall()
+        });
+        let work = async move {
+            if let Some(d) = stall.filter(|d| !d.is_zero()) {
+                tokio::time::sleep(d).await;
+            }
+            work.await
+        };
+        match STORE_DEADLINE.try_with(|d| *d) {
+            Ok(deadline) => tokio::time::timeout_at(deadline, work)
+                .await
+                .unwrap_or_else(|_| Err(StoreError::Unavailable("deadline exceeded".into()))),
+            Err(_) => work.await,
+        }
+    }
+
+    /// Run a mutation on the writer thread.
+    pub(crate) async fn write<T: Send + 'static>(
+        &self,
+        method: &'static str,
+        f: impl FnOnce(&mut WriterEnv) -> StoreResult<T> + Send + 'static,
+    ) -> StoreResult<T> {
+        let tx = self.inner.tx.clone();
+        self.run(method, async move {
+            let (reply, rx) = tokio::sync::oneshot::channel();
+            let job: Job = Box::new(move |env| {
+                let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(env)))
+                    .unwrap_or_else(|_| Err(StoreError::Unavailable("internal error".into())));
+                let _ = reply.send(out);
+            });
+            tx.send(job)
+                .map_err(|_| StoreError::Unavailable("store writer stopped".into()))?;
+            rx.await
+                .map_err(|_| StoreError::Unavailable("store writer stopped".into()))?
+        })
+        .await
+    }
+
+    /// Run a read on the blocking pool with a pooled read-only connection.
+    pub(crate) async fn read<T: Send + 'static>(
+        &self,
+        method: &'static str,
+        f: impl FnOnce(&Connection) -> StoreResult<T> + Send + 'static,
+    ) -> StoreResult<T> {
+        let inner = self.inner.clone();
+        self.run(method, async move {
+            tokio::task::spawn_blocking(move || {
+                let pooled = inner
+                    .readers
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .pop();
+                let conn = match pooled {
+                    Some(c) => c,
+                    None => open_reader(&inner.path)?,
+                };
+                let out = f(&conn);
+                let mut pool = inner.readers.lock().unwrap_or_else(|p| p.into_inner());
+                if pool.len() < READER_POOL_MAX {
+                    pool.push(conn);
+                }
+                out
+            })
+            .await
+            .map_err(|_| StoreError::Unavailable("store reader failed".into()))?
+        })
+        .await
+    }
+
+    /// Wait until every job queued before this call (including queued
+    /// diagnostic events) has run.
+    pub async fn barrier(&self) -> StoreResult<()> {
+        self.write("barrier", |env| {
+            events::flush_diagnostics(env);
+            Ok(())
+        })
+        .await
     }
 }
 
+fn open_reader(path: &Path) -> StoreResult<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(Duration::from_millis(5000))?;
+    conn.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(conn)
+}
+
 fn configure(conn: &Connection) -> Result<(), StoreError> {
-    conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    conn.busy_timeout(Duration::from_millis(5000))?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;

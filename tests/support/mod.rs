@@ -1,10 +1,24 @@
 //! Shared helpers for integration tests: config writing and a tiny loopback
 //! HTTP/1.1 client (no network beyond loopback, no extra dependencies).
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::path::Path;
+
+pub mod client;
+pub mod echo;
+pub mod jar;
+pub mod mock_idp;
+pub mod process;
+pub mod server;
+
+pub use client::{Client, RawReq, Req};
+pub use echo::Echo;
+pub use jar::{Jar, SameSite, SendContext, Site};
+pub use mock_idp::MockIdp;
+pub use process::{Fixture, Hooks, Hopae, KeySlot, VerifyRequest};
+pub use server::RecordedRequest;
 
 pub const KEY_ENV: &str = "HOPAE_TEST_GATEWAY_KEY";
 
@@ -39,6 +53,47 @@ impl Response {
             .iter()
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// Every value of a header that may repeat (`set-cookie`), in order.
+    pub fn header_all(&self, name: &str) -> Vec<&str> {
+        self.headers
+            .iter()
+            .filter(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+            .collect()
+    }
+
+    pub fn location(&self) -> Option<&str> {
+        self.header("location")
+    }
+
+    pub fn set_cookies(&self) -> Vec<&str> {
+        self.header_all("set-cookie")
+    }
+
+    /// The body parsed as JSON; panics (a test failure) when it is not.
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::from_str(&self.body)
+            .unwrap_or_else(|e| panic!("response body is not JSON ({e}): {:.200}", self.body))
+    }
+}
+
+impl std::fmt::Debug for Response {
+    /// Status and header names only: values can carry cookies, bodies can carry tokens.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Response")
+            .field("status", &self.status)
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(k, _)| k.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field("body_len", &self.body.len())
+            .finish()
     }
 }
 

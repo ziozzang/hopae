@@ -80,6 +80,9 @@ fn run(cfg: config::Config) -> anyhow::Result<()> {
         // Stable, machine-readable lines so supervisors and tests can find the ports.
         println!("portal listening on {}", bound.portal_addr());
         println!("gateway listening on {}", bound.gateway_addr());
+        if let Some(h) = bound.hooks_addr() {
+            println!("hooks listening on {h}");
+        }
         bound.run(app::shutdown_signal()).await
     })
 }

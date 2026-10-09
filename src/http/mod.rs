@@ -1,6 +1,9 @@
 //! Routers, one per listener, with disjoint route sets (ADR-0003).
 //! Middleware (request id, security headers, limits) is added in M1.
 
+#[cfg(feature = "test-hooks")]
+pub mod hooks;
+
 use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::get;

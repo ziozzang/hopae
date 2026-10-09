@@ -1,12 +1,25 @@
-//! Typed configuration (M0): schema, loading, environment references and
-//! validation. JSON only in M0; ARCHITECTURE also mentions `hopae.yaml`, which
-//! is not implemented yet. Unknown keys are rejected everywhere. Secrets are
-//! referenced by environment variable name only and never appear in output.
+//! Typed configuration: schema, loading, environment references and
+//! validation. JSON only. Unknown keys are rejected everywhere (with their
+//! path and the nearest known key). Secrets are referenced by environment
+//! variable name only and never appear in output.
 
+mod keys;
+
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Deserialize;
+
+use crate::identity::types::valid_domain;
+use crate::policy::types::{
+    AppId, AppPolicy, AuthzChange, BindingPolicy, ConfigSnapshot, Host, IpBinding, Lifetimes,
+    OnMismatch, ProviderConfig, SessionPolicy, StepUpRule, UaBinding,
+};
+use crate::provider::types::{ProviderId, ProviderKind};
+use crate::session::types::Aal;
+use crate::verify::types::VerifyLimits;
 
 /// Largest configuration file accepted, in bytes.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -24,6 +37,29 @@ pub struct Config {
     pub gateway: Gateway,
     #[serde(default)]
     pub log: Log,
+    /// Session-wide timers (`session.idle`, `session.absolute`).
+    #[serde(default)]
+    pub session: SessionTimers,
+    #[serde(default)]
+    pub cookie: Cookie,
+    #[serde(default)]
+    pub apps: Vec<AppEntry>,
+    #[serde(default)]
+    pub providers: Vec<ProviderEntry>,
+    #[serde(default)]
+    pub linking: Linking,
+    #[serde(default)]
+    pub txn: Txn,
+    #[serde(default)]
+    pub handoff: HandoffCfg,
+    #[serde(default)]
+    pub events: EventsCfg,
+    #[serde(default = "default_trusted_proxies")]
+    pub trusted_proxies: Vec<String>,
+    #[serde(default)]
+    pub limits: Limits,
+    #[serde(default)]
+    pub sessions: SessionsCfg,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +85,9 @@ fn default_portal_addr() -> String {
 }
 fn default_gateway_addr() -> String {
     "127.0.0.1:8701".into()
+}
+fn default_trusted_proxies() -> Vec<String> {
+    vec!["127.0.0.1/32".into()]
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -82,6 +121,9 @@ pub enum StoreKind {
 pub struct Portal {
     /// Externally visible portal origin, used for every emitted `Location`.
     pub public_url: String,
+    /// One-click confirmation before the first handoff of a session to a host.
+    #[serde(default)]
+    pub sso_confirm_new_host: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,9 +133,22 @@ pub struct Gateway {
     /// Name of the environment variable holding the shared caller key.
     #[serde(default)]
     pub caller_key_env: Option<String>,
+    /// Name of the variable holding the second accepted key during rotation.
+    #[serde(default)]
+    pub caller_key_next_env: Option<String>,
     /// Development only: skip caller-key authentication.
     #[serde(default)]
     pub allow_unauthenticated_caller: bool,
+    /// Total verify budget in milliseconds (default 400).
+    #[serde(default = "default_budget_ms")]
+    pub verify_budget_ms: u64,
+    /// Read-only gateway credential, used only by `hopae --check`.
+    #[serde(default)]
+    pub readonly_token_env: Option<String>,
+}
+
+fn default_budget_ms() -> u64 {
+    400
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -107,18 +162,393 @@ pub enum GatewayKind {
 pub struct Log {
     #[serde(default = "default_level")]
     pub level: String,
+    /// Log every allowed verify individually.
+    #[serde(default)]
+    pub verify_allow: bool,
+    /// Record a client-supplied `x-request-id` (truncated) in `attrs.client_request_id`.
+    #[serde(default)]
+    pub accept_client_request_id: bool,
 }
 
 impl Default for Log {
     fn default() -> Self {
         Self {
             level: default_level(),
+            verify_allow: false,
+            accept_client_request_id: false,
         }
     }
 }
 
 fn default_level() -> String {
     "info".into()
+}
+
+/// A duration written as an integer and a unit: `30s`, `10m`, `12h`, `7d`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigDuration(pub Duration);
+
+impl ConfigDuration {
+    pub fn parse(s: &str) -> Option<Duration> {
+        let (num, unit) = s.split_at(s.len().checked_sub(1)?);
+        let n: u64 = num.parse().ok().filter(|n| *n > 0)?;
+        let secs = match unit {
+            "s" => 1,
+            "m" => 60,
+            "h" => 3600,
+            "d" => 86400,
+            _ => return None,
+        };
+        n.checked_mul(secs).map(Duration::from_secs)
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfigDuration {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        ConfigDuration::parse(&s)
+            .map(ConfigDuration)
+            .ok_or_else(|| serde::de::Error::custom("duration must look like 30s, 10m, 12h or 7d"))
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionTimers {
+    #[serde(default)]
+    pub idle: Option<ConfigDuration>,
+    #[serde(default)]
+    pub absolute: Option<ConfigDuration>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cookie {
+    /// Handle cookie name; the binding and portal cookies append `_bind` and `_portal`.
+    /// Default `__Host-hopae` (`hopae` when `secure` is false).
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default = "default_true")]
+    pub secure: bool,
+}
+
+impl Default for Cookie {
+    fn default() -> Self {
+        Self {
+            name: None,
+            secure: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// The three cookie names derived from `cookie.name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CookieNames {
+    pub handle: String,
+    pub bind: String,
+    pub portal: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppEntry {
+    pub app_id: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    /// Default `[443]` (`[80]` when `cookie.secure` is false).
+    #[serde(default)]
+    pub ports: Option<Vec<u16>>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub session: Option<AppSessionCfg>,
+    #[serde(default)]
+    pub binding: Option<BindingCfg>,
+    #[serde(default)]
+    pub on_authz_change: Option<AuthzChangeCfg>,
+    #[serde(default)]
+    pub verify_cache_seconds: Option<u32>,
+    #[serde(default)]
+    pub step_up: Vec<StepUpEntry>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppSessionCfg {
+    #[serde(default)]
+    pub idle: Option<ConfigDuration>,
+    #[serde(default)]
+    pub absolute: Option<ConfigDuration>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindingCfg {
+    #[serde(default)]
+    pub ip: Option<IpMode>,
+    #[serde(default)]
+    pub ip_prefix_v4: Option<u8>,
+    #[serde(default)]
+    pub ip_prefix_v6: Option<u8>,
+    #[serde(default)]
+    pub ua: Option<UaMode>,
+    #[serde(default)]
+    pub on_mismatch: Option<OnMismatchCfg>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IpMode {
+    Strict,
+    Prefix,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UaMode {
+    Strict,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnMismatchCfg {
+    TerminateSession,
+    DropHandle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthzChangeCfg {
+    Refresh,
+    Terminate,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepUpEntry {
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    pub require: StepUpRequire,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StepUpRequire {
+    pub aal: u8,
+    /// Seconds.
+    #[serde(default)]
+    pub max_age: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderEntry {
+    pub provider_id: String,
+    pub kind: ProviderKind,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub client_id: String,
+    /// Environment variable *name* holding the client secret.
+    #[serde(default)]
+    pub client_secret_env: Option<String>,
+    #[serde(default)]
+    pub issuer: Option<String>,
+    #[serde(default = "default_scope")]
+    pub scope: String,
+    #[serde(default)]
+    pub allowed_email_domains: Vec<String>,
+    #[serde(default)]
+    pub authoritative_domains: Vec<String>,
+    #[serde(default)]
+    pub auto_link: bool,
+    #[serde(default)]
+    pub trust_email: bool,
+}
+
+fn default_scope() -> String {
+    "openid email profile".into()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Linking {
+    #[serde(default)]
+    pub on_conflict: LinkConflict,
+    #[serde(default)]
+    pub mode: LinkMode,
+}
+
+impl Default for Linking {
+    fn default() -> Self {
+        Self {
+            on_conflict: LinkConflict::LinkRequired,
+            mode: LinkMode::VerifiedEmail,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkConflict {
+    #[default]
+    LinkRequired,
+    Separate,
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkMode {
+    #[default]
+    VerifiedEmail,
+    Off,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Txn {
+    #[serde(default = "d_txn_max_rows")]
+    pub max_rows: u32,
+    #[serde(default = "d_txn_per_ip")]
+    pub per_ip_per_minute: u32,
+}
+
+impl Default for Txn {
+    fn default() -> Self {
+        Self {
+            max_rows: d_txn_max_rows(),
+            per_ip_per_minute: d_txn_per_ip(),
+        }
+    }
+}
+
+fn d_txn_max_rows() -> u32 {
+    1000
+}
+fn d_txn_per_ip() -> u32 {
+    30
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffCfg {
+    #[serde(default = "d_handoff_failures")]
+    pub per_ip_failures_per_minute: u32,
+    #[serde(default = "d_handoff_recoveries")]
+    pub max_recoveries: u32,
+}
+
+impl Default for HandoffCfg {
+    fn default() -> Self {
+        Self {
+            per_ip_failures_per_minute: d_handoff_failures(),
+            max_recoveries: d_handoff_recoveries(),
+        }
+    }
+}
+
+fn d_handoff_failures() -> u32 {
+    10
+}
+fn d_handoff_recoveries() -> u32 {
+    3
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventsCfg {
+    #[serde(default = "d_ev_retention")]
+    pub retention_days: u32,
+    #[serde(default = "d_ev_max_rows")]
+    pub max_rows: u64,
+    #[serde(default = "d_ev_prune")]
+    pub prune_every: u64,
+    #[serde(default = "d_ev_pending")]
+    pub max_pending_per_sink: u64,
+    #[serde(default = "d_ev_terminal")]
+    pub delivery_terminal_retention_days: u32,
+}
+
+impl Default for EventsCfg {
+    fn default() -> Self {
+        Self {
+            retention_days: d_ev_retention(),
+            max_rows: d_ev_max_rows(),
+            prune_every: d_ev_prune(),
+            max_pending_per_sink: d_ev_pending(),
+            delivery_terminal_retention_days: d_ev_terminal(),
+        }
+    }
+}
+
+fn d_ev_retention() -> u32 {
+    90
+}
+fn d_ev_max_rows() -> u64 {
+    1_000_000
+}
+fn d_ev_prune() -> u64 {
+    1000
+}
+fn d_ev_pending() -> u64 {
+    10_000
+}
+fn d_ev_terminal() -> u32 {
+    7
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Limits {
+    #[serde(default = "d_gw_max")]
+    pub gateway_max_concurrent: u32,
+    #[serde(default = "d_portal_max")]
+    pub portal_max_concurrent: u32,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            gateway_max_concurrent: d_gw_max(),
+            portal_max_concurrent: d_portal_max(),
+        }
+    }
+}
+
+fn d_gw_max() -> u32 {
+    64
+}
+fn d_portal_max() -> u32 {
+    256
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionsCfg {
+    #[serde(default = "d_sessions_retention")]
+    pub retention_days: u32,
+}
+
+impl Default for SessionsCfg {
+    fn default() -> Self {
+        Self {
+            retention_days: d_sessions_retention(),
+        }
+    }
+}
+
+fn d_sessions_retention() -> u32 {
+    30
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -153,7 +583,12 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
 
 /// Parse and validate configuration text.
 pub fn parse(text: &str) -> Result<Config, ConfigError> {
-    let cfg: Config = serde_json::from_str(text)?;
+    let value: serde_json::Value = serde_json::from_str(text)?;
+    let unknown = keys::check(&value);
+    if !unknown.is_empty() {
+        return Err(ConfigError::Invalid(unknown));
+    }
+    let cfg: Config = serde_json::from_value(value)?;
     cfg.validate()?;
     Ok(cfg)
 }
@@ -164,6 +599,29 @@ fn valid_env_name(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `[a-z0-9][a-z0-9_-]{0,31}`: safe in a URL path segment and a log line.
+fn valid_slug(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= 32
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_' || *c == b'-')
+}
+
+fn valid_cookie_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+}
+
+fn parse_proxy(s: &str) -> Option<ipnet::IpNet> {
+    s.parse::<ipnet::IpNet>()
+        .ok()
+        .or_else(|| s.parse::<std::net::IpAddr>().ok().map(ipnet::IpNet::from))
 }
 
 impl Config {
@@ -195,7 +653,24 @@ impl Config {
         if let Err(e) = check_public_url(&self.portal.public_url) {
             errs.push(format!("portal.public_url {e}"));
         }
-        match (&self.gateway.caller_key_env, self.gateway.allow_unauthenticated_caller) {
+        self.validate_gateway(&mut errs);
+        if !LEVELS.contains(&self.log.level.as_str()) {
+            errs.push(format!("log.level must be one of {}", LEVELS.join(", ")));
+        }
+        self.validate_cookie(&mut errs);
+        self.validate_apps(&mut errs);
+        self.validate_providers(&mut errs);
+        self.validate_bounds(&mut errs);
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(ConfigError::Invalid(errs))
+        }
+    }
+
+    fn validate_gateway(&self, errs: &mut Vec<String>) {
+        let g = &self.gateway;
+        match (&g.caller_key_env, g.allow_unauthenticated_caller) {
             (Some(name), _) if !valid_env_name(name) => {
                 errs.push("gateway.caller_key_env must be an environment variable name ([A-Za-z_][A-Za-z0-9_]*)".to_string());
             }
@@ -204,13 +679,221 @@ impl Config {
             ),
             _ => {}
         }
-        if !LEVELS.contains(&self.log.level.as_str()) {
-            errs.push(format!("log.level must be one of {}", LEVELS.join(", ")));
+        if let Some(next) = &g.caller_key_next_env {
+            if !valid_env_name(next) {
+                errs.push("gateway.caller_key_next_env must be an environment variable name ([A-Za-z_][A-Za-z0-9_]*)".to_string());
+            }
+            if g.caller_key_env.is_none() {
+                errs.push(
+                    "gateway.caller_key_next_env requires gateway.caller_key_env".to_string(),
+                );
+            }
+            if g.caller_key_env.as_ref() == Some(next) {
+                errs.push(
+                    "gateway.caller_key_next_env must differ from gateway.caller_key_env"
+                        .to_string(),
+                );
+            }
         }
-        if errs.is_empty() {
-            Ok(())
-        } else {
-            Err(ConfigError::Invalid(errs))
+        if let Some(name) = &g.readonly_token_env
+            && !valid_env_name(name)
+        {
+            errs.push("gateway.readonly_token_env must be an environment variable name ([A-Za-z_][A-Za-z0-9_]*)".to_string());
+        }
+        if !(1..=10_000).contains(&g.verify_budget_ms) {
+            errs.push("gateway.verify_budget_ms must be between 1 and 10000".to_string());
+        }
+    }
+
+    fn validate_cookie(&self, errs: &mut Vec<String>) {
+        let name = self.cookie_names().handle;
+        if !valid_cookie_name(&name) {
+            errs.push(
+                "cookie.name must be 1-64 characters of letters, digits, '_' and '-'".to_string(),
+            );
+        } else if self.cookie.secure && !name.starts_with("__Host-") {
+            errs.push("cookie.name must start with __Host- when cookie.secure is true".to_string());
+        } else if !self.cookie.secure && name.starts_with("__Host-") {
+            errs.push("cookie.name must not start with __Host- when cookie.secure is false (browsers refuse such cookies)".to_string());
+        }
+    }
+
+    fn validate_apps(&self, errs: &mut Vec<String>) {
+        let mut ids = HashSet::new();
+        let mut hosts: HashMap<String, String> = HashMap::new();
+        for (i, a) in self.apps.iter().enumerate() {
+            let at = format!("apps[{i}]");
+            if !valid_slug(&a.app_id) {
+                errs.push(format!("{at}.app_id must match [a-z0-9][a-z0-9_-]{{0,31}}"));
+            } else if !ids.insert(a.app_id.clone()) {
+                errs.push(format!(
+                    "{at}.app_id {:?} is used by more than one application",
+                    a.app_id
+                ));
+            }
+            let is_default = a.app_id == "default";
+            if is_default && !a.hosts.is_empty() {
+                errs.push(format!("{at}.hosts: the default application carries policy defaults only and must not list hosts"));
+            }
+            if !is_default && a.hosts.is_empty() {
+                errs.push(format!("{at}.hosts must list at least one host"));
+            }
+            for (j, h) in a.hosts.iter().enumerate() {
+                match Host::parse(h) {
+                    Ok(host) => {
+                        if let Some(first) = hosts.insert(host.to_string(), a.app_id.clone()) {
+                            errs.push(format!(
+                                "{at}.hosts[{j}]: host {host} is already claimed by application {first:?}"
+                            ));
+                        }
+                    }
+                    Err(_) => errs.push(format!(
+                        "{at}.hosts[{j}]: hosts must be exact lower-case host names (no scheme, wildcard, port, path or trailing dot)"
+                    )),
+                }
+            }
+            if let Some(ports) = &a.ports {
+                if ports.is_empty() {
+                    errs.push(format!("{at}.ports must not be empty when set"));
+                }
+                if ports.contains(&0) {
+                    errs.push(format!("{at}.ports must not contain 0"));
+                }
+            }
+            if let Some(n) = a.verify_cache_seconds
+                && n > 30
+            {
+                errs.push(format!("{at}.verify_cache_seconds must be at most 30"));
+            }
+            if let Some(b) = &a.binding {
+                for (name, v) in [
+                    ("ip_prefix_v4", b.ip_prefix_v4.map(|v| (v, 32))),
+                    ("ip_prefix_v6", b.ip_prefix_v6.map(|v| (v, 128))),
+                ] {
+                    if let Some((v, max)) = v
+                        && !(1..=max).contains(&v)
+                    {
+                        errs.push(format!("{at}.binding.{name} must be between 1 and {max}"));
+                    }
+                }
+            }
+            for (k, rule) in a.step_up.iter().enumerate() {
+                if !(1..=2).contains(&rule.require.aal) {
+                    errs.push(format!("{at}.step_up[{k}].require.aal must be 1 or 2"));
+                }
+                if let Some(p) = &rule.path_prefix
+                    && !p.starts_with('/')
+                {
+                    errs.push(format!("{at}.step_up[{k}].path_prefix must start with '/'"));
+                }
+                if rule.require.max_age == Some(0) {
+                    errs.push(format!(
+                        "{at}.step_up[{k}].require.max_age must be positive seconds"
+                    ));
+                }
+            }
+        }
+    }
+
+    fn validate_providers(&self, errs: &mut Vec<String>) {
+        let mut ids = HashSet::new();
+        for (i, p) in self.providers.iter().enumerate() {
+            let at = format!("providers[{i}]");
+            if !valid_slug(&p.provider_id) {
+                errs.push(format!(
+                    "{at}.provider_id must match [a-z0-9][a-z0-9_-]{{0,31}}"
+                ));
+            } else if !ids.insert(p.provider_id.clone()) {
+                errs.push(format!(
+                    "{at}.provider_id {:?} is used more than once",
+                    p.provider_id
+                ));
+            }
+            if p.kind != ProviderKind::Oidc {
+                errs.push(format!(
+                    "{at}.kind {:?} is not supported before M3; use oidc",
+                    p.kind.as_str()
+                ));
+            }
+            if p.client_id.is_empty() {
+                errs.push(format!("{at}.client_id must not be empty"));
+            }
+            if let Some(env) = &p.client_secret_env
+                && !valid_env_name(env)
+            {
+                errs.push(format!("{at}.client_secret_env must be an environment variable name ([A-Za-z_][A-Za-z0-9_]*)"));
+            }
+            if let Some(issuer) = &p.issuer
+                && let Err(e) = check_issuer(issuer)
+            {
+                errs.push(format!("{at}.issuer {e}"));
+            }
+            if p.scope.trim().is_empty() {
+                errs.push(format!("{at}.scope must not be empty"));
+            }
+            for (name, list) in [
+                ("allowed_email_domains", &p.allowed_email_domains),
+                ("authoritative_domains", &p.authoritative_domains),
+            ] {
+                for d in list {
+                    if !valid_domain(&d.to_ascii_lowercase()) {
+                        errs.push(format!("{at}.{name} entries must be plain domain names"));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    fn validate_bounds(&self, errs: &mut Vec<String>) {
+        let positive: [(&str, u64); 11] = [
+            ("txn.max_rows", u64::from(self.txn.max_rows)),
+            (
+                "txn.per_ip_per_minute",
+                u64::from(self.txn.per_ip_per_minute),
+            ),
+            (
+                "handoff.per_ip_failures_per_minute",
+                u64::from(self.handoff.per_ip_failures_per_minute),
+            ),
+            (
+                "events.retention_days",
+                u64::from(self.events.retention_days),
+            ),
+            ("events.max_rows", self.events.max_rows),
+            ("events.prune_every", self.events.prune_every),
+            (
+                "events.max_pending_per_sink",
+                self.events.max_pending_per_sink,
+            ),
+            (
+                "events.delivery_terminal_retention_days",
+                u64::from(self.events.delivery_terminal_retention_days),
+            ),
+            (
+                "limits.gateway_max_concurrent",
+                u64::from(self.limits.gateway_max_concurrent),
+            ),
+            (
+                "limits.portal_max_concurrent",
+                u64::from(self.limits.portal_max_concurrent),
+            ),
+            (
+                "sessions.retention_days",
+                u64::from(self.sessions.retention_days),
+            ),
+        ];
+        for (name, v) in positive {
+            if v == 0 {
+                errs.push(format!("{name} must be at least 1"));
+            }
+        }
+        for (i, p) in self.trusted_proxies.iter().enumerate() {
+            if parse_proxy(p).is_none() {
+                errs.push(format!(
+                    "trusted_proxies[{i}] must be an IP address or CIDR such as 127.0.0.1/32"
+                ));
+            }
         }
     }
 
@@ -235,19 +918,212 @@ impl Config {
             .unwrap_or_else(|| self.state_dir.join("hopae.db"))
     }
 
+    /// Event sinks that get a delivery row per required event: the structured log.
+    pub fn event_sinks(&self) -> Vec<String> {
+        vec!["log".to_string()]
+    }
+
+    /// The handle, binding and portal cookie names derived from `cookie.name`.
+    pub fn cookie_names(&self) -> CookieNames {
+        let handle = self.cookie.name.clone().unwrap_or_else(|| {
+            if self.cookie.secure {
+                "__Host-hopae"
+            } else {
+                "hopae"
+            }
+            .to_string()
+        });
+        CookieNames {
+            bind: format!("{handle}_bind"),
+            portal: format!("{handle}_portal"),
+            handle,
+        }
+    }
+
+    /// Trusted proxy networks. Only valid after `validate`.
+    pub fn trusted_proxy_nets(&self) -> Vec<ipnet::IpNet> {
+        self.trusted_proxies
+            .iter()
+            .filter_map(|s| parse_proxy(s))
+            .collect()
+    }
+
+    /// Session-wide timers with defaults (24 h idle, 30 d absolute).
+    pub fn session_policy(&self) -> SessionPolicy {
+        let d = SessionPolicy::default();
+        SessionPolicy {
+            idle: self.session.idle.map_or(d.idle, |v| v.0),
+            absolute: self.session.absolute.map_or(d.absolute, |v| v.0),
+        }
+    }
+
+    /// The numbers the verify engine needs.
+    pub fn verify_limits(&self) -> VerifyLimits {
+        VerifyLimits {
+            max_recoveries: self.handoff.max_recoveries,
+            budget: Duration::from_millis(self.gateway.verify_budget_ms),
+            session: self.session_policy(),
+            touch_coalesce: Duration::from_secs(30),
+            secure: self.cookie.secure,
+        }
+    }
+
+    /// Providers as the snapshot and the import carry them, in file order.
+    pub fn provider_configs(&self) -> Vec<ProviderConfig> {
+        self.providers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| ProviderConfig {
+                provider_id: ProviderId::new(p.provider_id.clone()),
+                kind: p.kind,
+                display_name: p
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| p.provider_id.clone()),
+                enabled: p.enabled,
+                client_id: p.client_id.clone(),
+                client_secret_env: p.client_secret_env.clone(),
+                issuer: p.issuer.clone(),
+                scope: p.scope.clone(),
+                allowed_email_domains: lowered(&p.allowed_email_domains),
+                authoritative_domains: lowered(&p.authoritative_domains),
+                auto_link: p.auto_link,
+                trust_email: p.trust_email,
+                sort_order: i32::try_from(i).unwrap_or(i32::MAX),
+            })
+            .collect()
+    }
+
+    /// The immutable policy snapshot. Applications inherit unset policy from
+    /// the reserved `default` application, which inherits from the built-in
+    /// defaults (ADR-0007). Only valid after `validate`.
+    pub fn snapshot(&self, generation: u64) -> ConfigSnapshot {
+        let default_entry = self.apps.iter().find(|a| a.app_id == "default");
+        let default_app = resolve_app(default_entry, &AppPolicy::default_app(), self, "default");
+        let apps = self
+            .apps
+            .iter()
+            .filter(|a| a.app_id != "default")
+            .map(|a| resolve_app(Some(a), &default_app, self, &a.app_id))
+            .collect();
+        ConfigSnapshot {
+            generation,
+            apps,
+            default_app,
+            providers: self.provider_configs(),
+        }
+    }
+
     /// Non-fatal findings shown by `--check` and at start.
     pub fn warnings(&self) -> Vec<String> {
         let mut w = Vec::new();
         if self.gateway.allow_unauthenticated_caller {
             w.push("gateway.allow_unauthenticated_caller is true: development only".to_string());
+            w.push("WARNING: verify caller authentication disabled (development only)".to_string());
+        }
+        if !self.cookie.secure {
+            w.push("WARNING: insecure cookie mode (development only)".to_string());
         }
         if !self.gateway_addr().ip().is_loopback() {
             w.push(
                 "listen.gateway is not a loopback address: it must not be publicly reachable"
                     .to_string(),
             );
+            if self.gateway.caller_key_env.is_some() {
+                w.push("a non-loopback listen.gateway relies on the caller key alone".to_string());
+            }
+        }
+        for (i, a) in self.apps.iter().enumerate() {
+            for (j, h) in a.hosts.iter().enumerate() {
+                if h.as_str() != h.to_ascii_lowercase() {
+                    w.push(format!(
+                        "apps[{i}].hosts[{j}]: {h:?} normalized to lower case"
+                    ));
+                }
+            }
         }
         w
+    }
+
+    /// Whether the insecure development modes are on (reported by the health body).
+    pub fn insecure_mode(&self) -> bool {
+        !self.cookie.secure
+    }
+}
+
+fn lowered(v: &[String]) -> Vec<String> {
+    v.iter().map(|s| s.to_ascii_lowercase()).collect()
+}
+
+fn resolve_app(entry: Option<&AppEntry>, base: &AppPolicy, cfg: &Config, id: &str) -> AppPolicy {
+    let default_ports = if cfg.cookie.secure {
+        vec![443]
+    } else {
+        vec![80]
+    };
+    let Some(a) = entry else {
+        return AppPolicy {
+            app_id: AppId::new(id),
+            ..base.clone()
+        };
+    };
+    let binding_cfg = a.binding.clone().unwrap_or_default();
+    let ip = match binding_cfg.ip {
+        None => base.binding.ip,
+        Some(IpMode::Strict) => IpBinding::Strict,
+        Some(IpMode::Off) => IpBinding::Off,
+        Some(IpMode::Prefix) => {
+            let (b4, b6) = match base.binding.ip {
+                IpBinding::Prefix { v4, v6 } => (v4, v6),
+                _ => (24, 64),
+            };
+            IpBinding::Prefix {
+                v4: binding_cfg.ip_prefix_v4.unwrap_or(b4),
+                v6: binding_cfg.ip_prefix_v6.unwrap_or(b6),
+            }
+        }
+    };
+    let session = a.session.clone().unwrap_or_default();
+    AppPolicy {
+        app_id: AppId::new(id),
+        display_name: a.display_name.clone().unwrap_or_else(|| id.to_string()),
+        hosts: a.hosts.iter().filter_map(|h| Host::parse(h).ok()).collect(),
+        ports: a.ports.clone().unwrap_or(default_ports),
+        enabled: a.enabled,
+        session: Lifetimes {
+            idle: session.idle.map_or(base.session.idle, |d| d.0),
+            absolute: session.absolute.map_or(base.session.absolute, |d| d.0),
+        },
+        binding: BindingPolicy {
+            ip,
+            ua: match binding_cfg.ua {
+                None => base.binding.ua,
+                Some(UaMode::Strict) => UaBinding::Strict,
+                Some(UaMode::Off) => UaBinding::Off,
+            },
+            on_mismatch: match binding_cfg.on_mismatch {
+                None => base.binding.on_mismatch,
+                Some(OnMismatchCfg::TerminateSession) => OnMismatch::TerminateSession,
+                Some(OnMismatchCfg::DropHandle) => OnMismatch::DropHandle,
+            },
+        },
+        on_authz_change: match a.on_authz_change {
+            None => base.on_authz_change,
+            Some(AuthzChangeCfg::Refresh) => AuthzChange::Refresh,
+            Some(AuthzChangeCfg::Terminate) => AuthzChange::Terminate,
+        },
+        verify_cache_seconds: a.verify_cache_seconds.unwrap_or(base.verify_cache_seconds),
+        step_up: a
+            .step_up
+            .iter()
+            .filter_map(|r| {
+                Some(StepUpRule {
+                    path_prefix: r.path_prefix.clone(),
+                    aal: Aal::from_i64(i64::from(r.require.aal))?,
+                    max_age: r.require.max_age.map(Duration::from_secs),
+                })
+            })
+            .collect(),
     }
 }
 
@@ -265,17 +1141,226 @@ fn check_public_url(u: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Verify that every environment variable the configuration references exists
-/// and is non-empty. Returns messages naming only the variable, never a value.
+/// An issuer is an absolute `https://` URL without query or fragment;
+/// `http://` is accepted only for a loopback host (a local test provider).
+fn check_issuer(u: &str) -> Result<(), &'static str> {
+    let url = url::Url::parse(u).map_err(|_| "must be an absolute URL")?;
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("must not contain a query or fragment");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("must not contain credentials");
+    }
+    match (url.scheme(), url.host()) {
+        ("https", Some(_)) => Ok(()),
+        ("http", Some(url::Host::Ipv4(ip))) if ip.is_loopback() => Ok(()),
+        ("http", Some(url::Host::Ipv6(ip))) if ip.is_loopback() => Ok(()),
+        ("http", Some(url::Host::Domain("localhost"))) => Ok(()),
+        _ => Err("must use https:// (http:// only for a loopback host)"),
+    }
+}
+
+/// Verify that every environment variable the configuration references
+/// exists and is non-empty, for the caller keys. Returns messages naming only
+/// the variable, never a value. A missing provider secret is a warning, not an
+/// error: see [`env_warnings`].
 pub fn check_env(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(name) = &cfg.gateway.caller_key_env
-        && !cfg.gateway.allow_unauthenticated_caller
-        && lookup(name).is_none_or(|v| v.is_empty())
-    {
-        out.push(format!(
-            "environment variable {name} (gateway.caller_key_env) is not set or is empty"
-        ));
+    if !cfg.gateway.allow_unauthenticated_caller {
+        for (key, name) in [
+            ("gateway.caller_key_env", &cfg.gateway.caller_key_env),
+            (
+                "gateway.caller_key_next_env",
+                &cfg.gateway.caller_key_next_env,
+            ),
+        ] {
+            if let Some(name) = name
+                && lookup(name).is_none_or(|v| v.is_empty())
+            {
+                out.push(format!(
+                    "environment variable {name} ({key}) is not set or is empty"
+                ));
+            }
+        }
     }
     out
+}
+
+/// Warnings about referenced variables that only disable a provider
+/// (`provider mock disabled: HOPAE_TEST_MOCK_SECRET unset`).
+pub fn env_warnings(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    cfg.providers
+        .iter()
+        .filter(|p| p.enabled)
+        .filter_map(|p| {
+            let name = p.client_secret_env.as_ref()?;
+            lookup(name)
+                .is_none_or(|v| v.is_empty())
+                .then(|| format!("provider {} disabled: {name} unset", p.provider_id))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE: &str = r#"{
+      "state_dir": "/tmp/x",
+      "portal": {"public_url": "https://auth.example.test"},
+      "gateway": {"kind": "hangang", "caller_key_env": "K"}
+    }"#;
+
+    fn with(extra: &str) -> Result<Config, ConfigError> {
+        let mut v: serde_json::Value = serde_json::from_str(BASE).unwrap();
+        let add: serde_json::Value = serde_json::from_str(extra).unwrap();
+        for (k, val) in add.as_object().unwrap() {
+            v[k] = val.clone();
+        }
+        parse(&v.to_string())
+    }
+
+    fn invalid(extra: &str) -> String {
+        match with(extra) {
+            Err(ConfigError::Invalid(e)) => e.join("; "),
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected an error for {extra}"),
+        }
+    }
+
+    #[test]
+    fn m0_config_still_parses_with_defaults() {
+        let c = parse(BASE).unwrap();
+        assert_eq!(c.cookie_names().handle, "__Host-hopae");
+        assert_eq!(c.cookie_names().bind, "__Host-hopae_bind");
+        assert_eq!(c.cookie_names().portal, "__Host-hopae_portal");
+        assert_eq!(c.gateway.verify_budget_ms, 400);
+        assert_eq!(c.session_policy(), SessionPolicy::default());
+        assert_eq!(c.events.max_rows, 1_000_000);
+        assert_eq!(c.trusted_proxies, ["127.0.0.1/32"]);
+        let snap = c.snapshot(1);
+        assert!(snap.apps.is_empty());
+        assert_eq!(snap.default_app.session, Lifetimes::default());
+    }
+
+    #[test]
+    fn app_policy_inherits_from_default_and_applies_overrides() {
+        let c = with(
+            r#"{"apps": [
+              {"app_id": "default", "session": {"idle": "2h", "absolute": "30d"}},
+              {"app_id": "app", "hosts": ["App.Example.Test"], "binding": {"ip": "prefix", "on_mismatch": "drop_handle"}, "verify_cache_seconds": 5,
+               "step_up": [{"path_prefix": "/admin", "require": {"aal": 2, "max_age": 900}}]},
+              {"app_id": "short", "hosts": ["short.example.test"], "session": {"idle": "1h", "absolute": "1d"}, "ports": [443, 8443]}
+            ]}"#,
+        )
+        .unwrap();
+        let snap = c.snapshot(7);
+        assert_eq!(snap.generation, 7);
+        assert_eq!(snap.default_app.session.idle, Duration::from_secs(7200));
+        let app = snap
+            .app_for_host(&Host::parse("app.example.test").unwrap())
+            .unwrap();
+        assert_eq!(app.session.idle, Duration::from_secs(7200));
+        assert_eq!(app.binding.ip, IpBinding::Prefix { v4: 24, v6: 64 });
+        assert_eq!(app.binding.on_mismatch, OnMismatch::DropHandle);
+        assert_eq!(app.verify_cache_seconds, 5);
+        assert_eq!(app.ports, vec![443]);
+        assert_eq!(app.step_up.len(), 1);
+        assert_eq!(app.step_up[0].aal, Aal::Two);
+        assert_eq!(app.step_up[0].max_age, Some(Duration::from_secs(900)));
+        let short = snap
+            .app_for_host(&Host::parse("short.example.test").unwrap())
+            .unwrap();
+        assert_eq!(short.session.idle, Duration::from_secs(3600));
+        assert_eq!(short.session.absolute, Duration::from_secs(86400));
+        assert!(snap.return_origin_allowed(&Host::parse("short.example.test").unwrap(), 8443));
+        assert!(c.warnings().iter().any(|w| w.contains("apps[1].hosts[0]")));
+    }
+
+    #[test]
+    fn invalid_values_are_rejected_with_key_paths() {
+        assert!(
+            invalid(r#"{"apps": [{"app_id": "a", "hosts": ["*.example.test"]}]}"#)
+                .contains("apps[0].hosts[0]")
+        );
+        assert!(
+            invalid(r#"{"apps": [{"app_id": "a", "hosts": ["https://a.example.test/x"]}]}"#)
+                .contains("exact lower-case host names")
+        );
+        assert!(
+            invalid(r#"{"apps": [{"app_id": "a", "hosts": ["a.example.test:8443"]}]}"#)
+                .contains("apps[0].hosts[0]")
+        );
+        assert!(invalid(r#"{"apps": [{"app_id": "a", "hosts": ["x.example.test"]}, {"app_id": "b", "hosts": ["X.example.test"]}]}"#).contains("already claimed"));
+        assert!(invalid(r#"{"apps": [{"app_id": "a", "hosts": ["x.example.test"], "verify_cache_seconds": 60}]}"#).contains("verify_cache_seconds"));
+        assert!(
+            invalid(r#"{"apps": [{"app_id": "default", "hosts": ["x.example.test"]}]}"#)
+                .contains("must not list hosts")
+        );
+        assert!(invalid(r#"{"cookie": {"name": "hopae"}}"#).contains("__Host-"));
+        assert!(
+            invalid(r#"{"cookie": {"secure": false, "name": "__Host-hopae"}}"#)
+                .contains("must not start with __Host-")
+        );
+        assert!(invalid(r#"{"cookie": {"same_site": "none"}}"#).contains("cookie.same_site"));
+        assert!(invalid(r#"{"session": {"idle": "soon"}}"#).contains("duration"));
+        assert!(invalid(r#"{"trusted_proxies": ["not-an-ip"]}"#).contains("trusted_proxies[0]"));
+        assert!(invalid(r#"{"events": {"max_rows": 0}}"#).contains("events.max_rows"));
+        assert!(invalid(r#"{"providers": [{"provider_id": "g", "kind": "oidc", "client_id": "c", "client_secret": "literal"}]}"#).contains("environment variable name"));
+        assert!(!invalid(r#"{"providers": [{"provider_id": "g", "kind": "oidc", "client_id": "c", "client_secret": "literal"}]}"#).contains("literal\""));
+        assert!(invalid(r#"{"providers": [{"provider_id": "g", "kind": "oidc", "client_id": "c", "issuer": "http://example.org"}]}"#).contains("providers[0].issuer"));
+        assert!(
+            invalid(
+                r#"{"providers": [{"provider_id": "g", "kind": "password", "client_id": "c"}]}"#
+            )
+            .contains("not supported before M3")
+        );
+        assert!(invalid(r#"{"gateway": {"kind": "hangang"}}"#).contains("caller_key_env"));
+        assert!(invalid(r#"{"gateway": {"kind": "hangang", "caller_key_env": "K", "caller_key_next_env": "K"}}"#).contains("must differ"));
+    }
+
+    #[test]
+    fn insecure_modes_warn_loudly_and_allow_dev_cookie_name() {
+        let c = with(r#"{"cookie": {"name": "hopae", "secure": false}}"#).unwrap();
+        assert!(
+            c.warnings()
+                .iter()
+                .any(|w| w.contains("insecure cookie mode"))
+        );
+        assert!(c.insecure_mode());
+        assert_eq!(c.cookie_names().bind, "hopae_bind");
+        let c = with(r#"{"cookie": {"secure": false}}"#).unwrap();
+        assert_eq!(c.cookie_names().handle, "hopae");
+        assert_eq!(c.snapshot(1).default_app.ports, Vec::<u16>::new());
+    }
+
+    #[test]
+    fn env_checks_name_variables_only() {
+        let c = with(
+            r#"{"gateway": {"kind": "hangang", "caller_key_env": "A", "caller_key_next_env": "B"},
+                "providers": [{"provider_id": "mock", "kind": "oidc", "client_id": "c", "client_secret_env": "S", "issuer": "http://127.0.0.1:9"}]}"#,
+        )
+        .unwrap();
+        let env = |n: &str| (n == "A").then(|| "value-a".to_string());
+        let problems = check_env(&c, env);
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("B") && !problems[0].contains("value-a"));
+        let w = env_warnings(&c, env);
+        assert_eq!(w, ["provider mock disabled: S unset"]);
+    }
+
+    #[test]
+    fn durations_parse_strictly() {
+        assert_eq!(
+            ConfigDuration::parse("12h"),
+            Some(Duration::from_secs(43200))
+        );
+        assert_eq!(
+            ConfigDuration::parse("7d"),
+            Some(Duration::from_secs(604800))
+        );
+        for bad in ["", "h", "0h", "-1h", "1w", "1.5h", "12", " 1h"] {
+            assert_eq!(ConfigDuration::parse(bad), None, "{bad:?}");
+        }
+    }
 }

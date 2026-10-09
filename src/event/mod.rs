@@ -1,1 +1,6 @@
-//! Typed events, the in-process bus and the log and store sinks (M1); webhooks (M5). Empty in M0.
+//! Events: the typed model (W0), the emitter, bus, sinks and pruning (W1-F).
+
+pub mod types;
+
+pub use types::reasons;
+pub use types::*;

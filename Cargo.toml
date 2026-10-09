@@ -17,20 +17,46 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+arc-swap = "1"
+async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+base64 = "0.22"
+bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
+data-encoding = "2"
+http = "1"
+ipnet = "2"
+rand = "0.9"
+rand_chacha = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-normalization = "0.1"
+url = "2"
+
+[features]
+# Loopback-only test control surface (clock, stall, commit gate, crash points,
+# deterministic RNG). Never enabled in a release build.
+test-hooks = []
 
 [dev-dependencies]
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+rsa = { version = "0.9", features = ["pem"] }
 tempfile = "3"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Dependencies run optimized in dev/test builds: RSA key generation in the mock
+# provider is minutes-slow unoptimized, seconds-fast optimized.
+[profile.dev.package."*"]
+opt-level = 2

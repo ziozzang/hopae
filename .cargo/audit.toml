@@ -1,4 +1,10 @@
 # Accepted advisories are listed here with a reason and an expiry date
-# (docs/PROCESS.md, G6). None are accepted.
+# (docs/PROCESS.md, G6).
 [advisories]
-ignore = []
+# RUSTSEC-2023-0071 (rsa 0.9, Marvin timing side channel; no fixed release).
+# Reason: Hopae only performs RSA *signature verification* with providers'
+# public keys (jsonwebtoken rust_crypto backend). The advisory concerns
+# private-key operations (decryption/signing) leaking timing; Hopae holds no
+# RSA private key in production. The test mock IdP signs with throwaway keys.
+# Expiry: 2027-04-09 — re-evaluate (fixed rsa release or alternative backend).
+ignore = ["RUSTSEC-2023-0071"]

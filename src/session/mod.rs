@@ -1,1 +1,6 @@
-//! Sessions, per-host handles, login transactions, handoff codes, lifetimes and termination (M1). Empty in M0.
+//! Sessions, handles, transactions, handoff codes and lifetimes.
+//! W0 provides the shared types; the service arrives in M1 (W1-D).
+
+pub mod types;
+
+pub use types::*;
