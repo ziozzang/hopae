@@ -1002,3 +1002,236 @@ fn s004_a8_caller_key_required() {
     assert!(!hopae::crypto::ct_eq(b"abcdefgh", b"abcdefgx"));
     assert!(!hopae::crypto::ct_eq(b"abcdefgh", b"abcdefg"));
 }
+
+// ---- gateway layer (W2-A) ---------------------------------------------------
+//
+// S004-11 and S004-A8 through the real gateway: what the client and the
+// upstream see. The names do not start with `s004_` because the mapped cases
+// above are the scenario's tests; these add the gateway-wire half.
+
+mod gateway_layer {
+    use std::time::Duration;
+
+    use crate::support::gateway::*;
+    use crate::support::*;
+
+    const KEY: &str = "x-hopae-gateway-key";
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn gateway_s004_11_no_non_allow_path_is_2xx() {
+        let Some(s) = Stack::with_routes(
+            "s004_11",
+            GatewayRoutes::standard().host_neutral("/neutral"),
+        ) else {
+            return;
+        };
+        let b = s.gw.browser();
+        let l = b.login(&s.idp, APP_HOST, "/admin/x");
+        assert_eq!(l.handoff.status, 302);
+        s.echo.clear();
+
+        let mut outcomes: Vec<(String, u16)> = Vec::new();
+        let mut check = |name: &str, r: Response, allowed: &[u16]| {
+            assert!(
+                allowed.contains(&r.status),
+                "{name}: status {} not in {allowed:?}",
+                r.status
+            );
+            assert!(
+                !(200..300).contains(&r.status),
+                "{name}: a 2xx for a non-allow outcome"
+            );
+            assert!(
+                r.header("x-hangang-auth-terminal").is_none(),
+                "{name}: terminal marker"
+            );
+            outcomes.push((name.to_string(), r.status));
+        };
+
+        // no cookie: document and non-document
+        let anon = s.gw.browser();
+        check(
+            "no cookie, document",
+            anon.get(APP_HOST, "/admin/x"),
+            &[302],
+        );
+        check(
+            "no cookie, non-document",
+            anon.fetch(APP_HOST, "/admin/x"),
+            &[401, 403, 302],
+        );
+        // unknown handle (a well-formed but never issued value)
+        let unknown = s.gw.browser();
+        let r = unknown.get_with(
+            APP_HOST,
+            "/admin/x",
+            &[("cookie", &format!("__Host-hopae=v1.{}", "A".repeat(43)))],
+        );
+        check("unknown handle", r, &[302]);
+        // binding mismatch: the right handle from another address
+        check(
+            "binding mismatch",
+            b.at_ip("198.51.100.77").get(APP_HOST, "/admin/x"),
+            &[302, 403],
+        );
+        // unknown host on a host-neutral route
+        check(
+            "unknown host",
+            anon.get("evil.example.org", "/neutral/x"),
+            &[403],
+        );
+        // the reserved parameter: non-document, ambiguous
+        check(
+            "reserved parameter, non-document",
+            anon.fetch(APP_HOST, "/admin/x?_hopae_handoff=abc"),
+            &[403],
+        );
+        check(
+            "ambiguous parameter",
+            anon.get_cross_site(APP_HOST, "/admin/x?_hopae_handoff=a&_hopae_handoff=b"),
+            &[403],
+        );
+        // caller key missing / contract violation (the call as a broken gateway would send it)
+        s.gw.tap.set_mods(TapMods {
+            drop_request_headers: vec![KEY.into()],
+            ..TapMods::default()
+        });
+        check("caller key missing", anon.get(APP_HOST, "/admin/x"), &[403]);
+        s.gw.tap.set_mods(TapMods {
+            drop_request_headers: vec!["x-forwarded-proto".into()],
+            ..TapMods::default()
+        });
+        check(
+            "contract violation",
+            anon.get(APP_HOST, "/admin/x"),
+            &[403, 503],
+        );
+        s.gw.tap.reset_mods();
+        // overload of the store: every call stalls past the verify budget
+        s.hopae.hooks.stall(2_000);
+        check("stalled store", anon.get(APP_HOST, "/admin/x"), &[503]);
+        s.hopae.hooks.stall_off();
+        // rate limit of handoff failures (10 per minute per address)
+        let noisy = s.gw.browser().at_ip("198.51.100.99");
+        let mut last = None;
+        for i in 0..12 {
+            let r = noisy.get_cross_site(
+                APP_HOST,
+                &format!("/admin/x?_hopae_handoff=made-up-code-{i}"),
+            );
+            assert!(!(200..300).contains(&r.status), "attempt {i}: {r:?}");
+            last = Some(r);
+        }
+        check("rate limit", last.unwrap(), &[403]);
+        // an expired handle
+        s.hopae.advance(Duration::from_secs(8 * 24 * 3600));
+        check("expired handle", b.get(APP_HOST, "/admin/x"), &[302]);
+
+        eprintln!("S004-11 gateway outcomes: {outcomes:?}");
+        assert!(
+            s.echo.requests().is_empty(),
+            "no non-allow outcome reached the upstream: {outcomes:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn gateway_s004_11_the_only_200_is_the_allow() {
+        let Some(s) = Stack::basic("s004_11_allow") else {
+            return;
+        };
+        let b = s.gw.browser();
+        let l = b.login(&s.idp, APP_HOST, "/admin/x");
+        assert_eq!(l.handoff.status, 302);
+        s.echo.clear();
+        let r = b.get(&s.app, "/admin/x");
+        assert_eq!(r.status, 200);
+        let seen = s.echo.requests();
+        assert_eq!(seen.len(), 1);
+        assert!(
+            seen[0].header("x-forwarded-user").is_some(),
+            "identity headers"
+        );
+        let a = s.gw.tap.answers().pop().unwrap();
+        assert_eq!(a.status, 200);
+        assert!(a.header("x-hangang-auth-terminal").is_none());
+    }
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn gateway_s004_a8_caller_key_required() {
+        let Some(s) = Stack::basic("s004_a8") else {
+            return;
+        };
+        let b = s.gw.browser();
+        let l = b.login(&s.idp, APP_HOST, "/admin/x");
+        assert_eq!(l.handoff.status, 302);
+        s.echo.clear();
+        s.gw.tap.clear();
+        let key = s.hopae.env_value(KEY_ENV).unwrap().to_string();
+        let lookups = s.hopae.hooks.store_calls("lookup_handle");
+        let creates = s.hopae.hooks.store_calls("create_transaction");
+        let txns = txn_count(&s.hopae);
+        let unauthorized = |s: &Stack| {
+            s.hopae.hooks.counters()["metrics"]["hopae_verify_unauthorized_total"]
+                .as_u64()
+                .unwrap_or(0)
+        };
+        assert_eq!(unauthorized(&s), 0);
+
+        let variants: [(&str, TapMods); 3] = [
+            (
+                "missing",
+                TapMods {
+                    drop_request_headers: vec![KEY.into()],
+                    ..TapMods::default()
+                },
+            ),
+            (
+                "wrong",
+                TapMods {
+                    request_headers: vec![(KEY.into(), "not-the-key".into())],
+                    ..TapMods::default()
+                },
+            ),
+            (
+                "duplicated",
+                TapMods {
+                    request_headers: vec![(KEY.into(), key.clone()), (KEY.into(), key.clone())],
+                    ..TapMods::default()
+                },
+            ),
+        ];
+        for (name, mods) in variants {
+            s.gw.tap.set_mods(mods);
+            let r = b.get(APP_HOST, "/admin/x");
+            assert_eq!(r.status, 403, "{name}: relayed to the client: {r:?}");
+            assert!(r.set_cookies().is_empty(), "{name}: no cookie");
+            let a = s.gw.tap.answers().pop().unwrap();
+            assert_eq!(a.status, 403, "{name}");
+            assert_eq!(
+                a.header("x-hopae-reason"),
+                Some("caller_unauthorized"),
+                "{name}"
+            );
+            assert!(
+                a.header_all("set-cookie").is_empty(),
+                "{name}: no binding cookie"
+            );
+        }
+        s.gw.tap.reset_mods();
+        assert!(s.echo.requests().is_empty(), "the upstream saw nothing");
+        assert_eq!(
+            s.hopae.hooks.store_calls("lookup_handle"),
+            lookups,
+            "no store read"
+        );
+        assert_eq!(s.hopae.hooks.store_calls("create_transaction"), creates);
+        assert_eq!(txn_count(&s.hopae), txns, "no transaction");
+        assert_eq!(unauthorized(&s), 3, "hopae_verify_unauthorized_total");
+        // The right key (the gateway's own static header) is processed as S004-1.
+        let ok = b.get(APP_HOST, "/admin/x");
+        assert_eq!(ok.status, 200);
+    }
+}

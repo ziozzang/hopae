@@ -114,13 +114,14 @@ fn drift(cfg: &Config) -> Vec<String> {
     let Some(token) = std::env::var(token_env).ok().filter(|t| !t.is_empty()) else {
         return Vec::new();
     };
-    let hosts: Vec<String> = cfg
+    let apps: Vec<(String, Vec<String>)> = cfg
         .apps
         .iter()
-        .flat_map(|a| a.hosts.iter().cloned())
+        .filter(|a| !a.hosts.is_empty())
+        .map(|a| (a.app_id.clone(), a.hosts.clone()))
         .collect();
     match runtime() {
-        Ok(rt) => rt.block_on(hopae::app::drift::drift_warnings(url, &token, &hosts)),
+        Ok(rt) => rt.block_on(hopae::app::drift::drift_warnings(url, &token, &apps)),
         Err(_) => Vec::new(),
     }
 }
