@@ -53,6 +53,49 @@ fn authenticated_host_patterns(value: &serde_json::Value, out: &mut Vec<String>)
     }
 }
 
+/// What the gateway's routes say about one host: the patterns of routes with
+/// a Hopae `auth.url` that cover it, and whether any of them strips cookies.
+fn console_route_facts(value: &serde_json::Value, host: &str, facts: &mut (bool, bool)) {
+    match value {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .for_each(|v| console_route_facts(v, host, facts)),
+        serde_json::Value::Object(map) => {
+            let calls_verify = map
+                .get("auth")
+                .and_then(|a| a.get("url"))
+                .and_then(|u| u.as_str())
+                .and_then(|u| url::Url::parse(u).ok())
+                .is_some_and(|u| u.path() == VERIFY_PATH);
+            let mut patterns: Vec<&str> = Vec::new();
+            if let Some(h) = map.get("host").and_then(|h| h.as_str()) {
+                patterns.push(h);
+            }
+            if let Some(hs) = map.get("hosts").and_then(|h| h.as_array()) {
+                patterns.extend(hs.iter().filter_map(|h| h.as_str()));
+            }
+            if patterns.iter().any(|p| host_covers(p, host)) {
+                if calls_verify {
+                    facts.0 = true;
+                }
+                let strips = map
+                    .get("strip_request_cookies")
+                    .and_then(|c| c.as_array())
+                    .is_some_and(|c| !c.is_empty());
+                if strips {
+                    facts.1 = true;
+                }
+            }
+            for key in ["routes", "items", "data", "http"] {
+                if let Some(v) = map.get(key) {
+                    console_route_facts(v, host, facts);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// `GET <admin_url>/v1/routes/http` with the bearer token, then one warning
 /// per (application, host) that no route with a Hopae `auth.url` covers
 /// (S008-5). A failure to ask is itself a warning, never an error. The token
@@ -61,6 +104,19 @@ pub async fn drift_warnings(
     admin_url: &str,
     token: &str,
     apps: &[(String, Vec<String>)],
+) -> Vec<String> {
+    drift_warnings_with_console(admin_url, token, apps, None).await
+}
+
+/// As [`drift_warnings`], and for the console host: `console_route_without_auth`
+/// when no route with a Hopae `auth.url` covers it (every console request would
+/// be refused), `console_route_strips_cookies` when a covering route sets
+/// `strip_request_cookies` (the console would never see its handle).
+pub async fn drift_warnings_with_console(
+    admin_url: &str,
+    token: &str,
+    apps: &[(String, Vec<String>)],
+    console_host: Option<&str>,
 ) -> Vec<String> {
     let client = match reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -92,7 +148,8 @@ pub async fn drift_warnings(
     };
     let mut routed = Vec::new();
     authenticated_host_patterns(&json, &mut routed);
-    apps.iter()
+    let mut out: Vec<String> = apps
+        .iter()
         .flat_map(|(id, hosts)| hosts.iter().map(move |h| (id, h)))
         .filter(|(_, h)| !routed.iter().any(|p| host_covers(p, h)))
         .map(|(id, h)| {
@@ -100,7 +157,22 @@ pub async fn drift_warnings(
                 "app {id}: no gateway route with auth.url pointing at this instance for host {h}"
             )
         })
-        .collect()
+        .collect();
+    if let Some(host) = console_host {
+        let mut facts = (false, false);
+        console_route_facts(&json, host, &mut facts);
+        if !facts.0 {
+            out.push(format!(
+                "console_route_without_auth: no gateway route with auth.url pointing at this instance for the console host {host}"
+            ));
+        }
+        if facts.1 {
+            out.push(format!(
+                "console_route_strips_cookies: a gateway route for the console host {host} sets strip_request_cookies; the console would never see its handle cookie"
+            ));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -152,6 +224,36 @@ mod tests {
             ],
             "a public route without auth does not protect the host"
         );
+    }
+
+    #[tokio::test]
+    async fn the_console_route_needs_auth_and_must_not_strip_cookies() {
+        let apps: Vec<(String, Vec<String>)> = Vec::new();
+        let good = serve(
+            r#"[{"id":"hopae-admin","host":"c.example.test","auth":{"url":"http://hopae:8701/_hopae/verify"}}]"#,
+            "t",
+        )
+        .await;
+        assert!(
+            drift_warnings_with_console(&good, "t", &apps, Some("c.example.test"))
+                .await
+                .is_empty()
+        );
+        let bare = serve(r#"[{"id":"hopae-admin","host":"c.example.test"}]"#, "t").await;
+        let w = drift_warnings_with_console(&bare, "t", &apps, Some("c.example.test")).await;
+        assert_eq!(w.len(), 1);
+        assert!(w[0].starts_with("console_route_without_auth"), "{w:?}");
+        let strips = serve(
+            r#"[{"id":"hopae-admin","host":"c.example.test","auth":{"url":"http://hopae:8701/_hopae/verify"},"strip_request_cookies":["__Host-hopae"]}]"#,
+            "t",
+        )
+        .await;
+        let w = drift_warnings_with_console(&strips, "t", &apps, Some("c.example.test")).await;
+        assert_eq!(w.len(), 1);
+        assert!(w[0].starts_with("console_route_strips_cookies"), "{w:?}");
+        let none = serve("[]", "t").await;
+        let w = drift_warnings_with_console(&none, "t", &apps, Some("c.example.test")).await;
+        assert!(w[0].starts_with("console_route_without_auth"), "{w:?}");
     }
 
     #[tokio::test]

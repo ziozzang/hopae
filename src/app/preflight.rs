@@ -31,6 +31,18 @@ pub fn iso_date(unix_secs: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// `YYYY-MM-DDTHH:MM:SSZ` for a unix time (UTC).
+pub fn iso_datetime(unix_secs: i64) -> String {
+    let rem = unix_secs.rem_euclid(86_400);
+    format!(
+        "{}T{:02}:{:02}:{:02}Z",
+        iso_date(unix_secs),
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60
+    )
+}
+
 fn dur(d: Duration) -> String {
     let s = d.as_secs();
     if s > 0 && s.is_multiple_of(86_400) {
@@ -79,6 +91,13 @@ pub fn report(cfg: &Config) -> String {
         cfg.portal.public_url.trim_end_matches('/')
     );
     let _ = writeln!(out, "  gateway  {}", cfg.gateway_addr());
+    if let (Some(addr), Some(url)) = (cfg.admin_addr(), cfg.admin.public_url.as_deref()) {
+        let _ = writeln!(
+            out,
+            "  admin    {addr}  (public url {})",
+            url.trim_end_matches('/')
+        );
+    }
     let _ = writeln!(out, "store: sqlite {}", cfg.store_path().display());
 
     let _ = writeln!(out, "applications:");
@@ -88,9 +107,14 @@ pub fn report(cfg: &Config) -> String {
     for a in &snap.apps {
         let hosts: Vec<&str> = a.hosts.iter().map(|h| h.as_str()).collect();
         let ports: Vec<String> = a.ports.iter().map(u16::to_string).collect();
+        let implicit = if cfg.admin_enabled() && a.app_id.as_str() == "admin" {
+            ", implicit"
+        } else {
+            ""
+        };
         let _ = writeln!(
             out,
-            "  {} ({}): hosts {}; ports {}; {}; session idle {} absolute {}; on_authz_change {:?}; verify_cache_seconds {}; logout_confirm {}{}",
+            "  {} ({}{implicit}): hosts {}; ports {}; {}; session idle {} absolute {}; on_authz_change {:?}; verify_cache_seconds {}; logout_confirm {}{}{}",
             a.app_id,
             if a.enabled { "enabled" } else { "disabled" },
             hosts.join(", "),
@@ -101,6 +125,9 @@ pub fn report(cfg: &Config) -> String {
             a.on_authz_change,
             a.verify_cache_seconds,
             a.logout_confirm,
+            a.max_auth_age
+                .map(|n| format!("; max_auth_age {}", dur(n)))
+                .unwrap_or_default(),
             if a.step_up.is_empty() {
                 String::new()
             } else {
@@ -217,6 +244,45 @@ pub fn report(cfg: &Config) -> String {
         "{}",
         serde_json::to_string_pretty(&strip).unwrap_or_default()
     );
+    if let (Some(host), Some(limits)) = (cfg.admin_host(), cfg.admin_limits()) {
+        let admin_addr = cfg.admin_addr().map(|a| a.to_string()).unwrap_or_default();
+        let _ = writeln!(
+            out,
+            "gateway route for the console host (id hopae-admin; no strip_request_cookies: the console reads its own handle cookie; the gateway must reach the admin listener {admin_addr}):"
+        );
+        let route = gateway_facts::route_console_fragment(
+            host.0.as_str(),
+            &format!("http://{admin_addr}"),
+            &verify_url,
+            timeout,
+        );
+        let _ = writeln!(
+            out,
+            "{}",
+            serde_json::to_string_pretty(&route).unwrap_or_default()
+        );
+        let _ = writeln!(
+            out,
+            "admin.untrusted_peers {}",
+            match limits.untrusted_peers {
+                crate::config::UntrustedPeers::Refuse => "refuse",
+                crate::config::UntrustedPeers::AsClient => "as_client",
+            }
+        );
+        for p in snap.providers.iter().filter(|p| p.enabled) {
+            let _ = writeln!(
+                out,
+                "  {}: reauth {}",
+                p.provider_id,
+                match p.reauth {
+                    crate::provider::types::ReauthCapability::MaxAge =>
+                        "max_age: console freshness is a provider-verified challenge",
+                    crate::provider::types::ReauthCapability::Unsupported =>
+                        "unsupported: console freshness is Hopae login age; enforce a second factor at the provider for administrators",
+                }
+            );
+        }
+    }
     let _ = writeln!(out, "config ok");
     out
 }

@@ -3,6 +3,7 @@
 //! router and the pages, W1-B the users, sessions and events handlers.
 
 pub mod events;
+pub mod seed;
 pub mod sessions;
 pub mod users;
 
