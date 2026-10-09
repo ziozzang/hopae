@@ -35,13 +35,13 @@ an unauthenticated flood cannot exhaust the store.
 
 - Given: S001-1 completed.
 - When: `GET https://auth.example.test/login?txn=T1` through the portal listener from `203.0.113.9` with `user-agent: UA1`.
-- Then: `200 text/html` listing the enabled provider; `set-cookie: __Host-hopae_portal=P1; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` (an existing well-formed value would be kept and refreshed instead); the transaction row now has `portal_bind_sha256 = sha256(P1)`; response security headers present (`cache-control: no-store`, `x-content-type-options: nosniff`, `referrer-policy: no-referrer`, `content-security-policy` without `unsafe-inline` scripts).
+- Then: `200 text/html` listing the enabled provider; `set-cookie: __Host-hopae_portal=P1; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600` (an existing well-formed value would be kept and refreshed instead); the transaction row's `portal_bind_sha256` is still empty — it is recorded only when the provider redirect is issued (`POST /login/<provider>` in S002-1, or the auto-redirect of S001-3) and is immutable afterwards (ADR-0004); response security headers present (`cache-control: no-store`, `x-content-type-options: nosniff`, `referrer-policy: no-referrer`, `content-security-policy` without `unsafe-inline` scripts).
 
 ### S001-3 Single enabled provider redirects immediately
 
 - Given: exactly one enabled provider.
 - When: as S001-2.
-- Then: `302` to the provider's authorization endpoint with `state`, `nonce`, `code_challenge`, `code_challenge_method=S256`, `redirect_uri=https://auth.example.test/callback/mock`; the portal binding cookie is set on the same response.
+- Then: `302` to the provider's authorization endpoint with `state`, `nonce`, `code_challenge`, `code_challenge_method=S256`, `redirect_uri=https://auth.example.test/callback/mock`; the portal binding cookie is set on the same response and its digest is recorded in the transaction at this moment.
 
 ## Alternative flows
 

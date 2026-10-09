@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=5 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=6 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -243,20 +243,23 @@ Hopae는 다음이 모두 성립할 때만 코드를 소비합니다. 1회용이
 쿠키를 전혀 바꾸지 않고 깨끗한 `302`로 답합니다(`code_already_redeemed`).
 **다른 사용자**의 유효한 핸들이 있으면
 `https://auth.example.test/switch?txn=…`(목적 `switch`)으로 `302`를 답하고,
-코드를 태워 버리며, 모든 쿠키를 그대로 둡니다(`session_conflict`). 바인딩
-다이제스트가 제시된 바인딩과 다른데 브라우저에 유효한 핸들이 **없으면**(탭
-사이의 첫 사용 경쟁) 코드를 태워 버리고, 제시된 바인딩을 유지하며
+코드를 태워 버리며, 모든 쿠키를 그대로 둡니다(`session_conflict`). 브라우저에
+유효한 핸들이 **없는** 상태에서 **알려진 코드가 어떤 사유로든 거부되면**(탭
+사이의 첫 사용 경쟁, 두 호스트가 다르게 본 IP, 오래된 세대, 만료되거나 재사용된
+코드) 코드를 태워 버리고, 제시된 바인딩을 유지하며
 `recovery_depth = code.recovery_depth + 1`을 갖는 새 트랜잭션으로 가는 통상의
 미인증 `302`로 답하므로(깊이는 코드를 만든 트랜잭션에서 복사되어 코드의 행에
-실려 다니며 클라이언트에서는 절대 읽지 않음) 포털이 싱글 사인온으로 다시
+실려 다니며 클라이언트에서는 절대 읽지 않음. 알 수 없는 코드는 깊이 0에서
+시작하고 IP별 실패 상한으로 제한됨) 포털이 싱글 사인온으로 다시
 핸드오프합니다. 태워 버린 코드의 깊이가 이미 `handoff.max_recoveries`와 같으면
 트랜잭션을 만들지 않고 작은 HTML 본문을 실은 중계된
 **`403`**(`handoff_recovery_exhausted`)으로 답합니다. 위의 상태 코드 불변식에
-따라 절대 `2xx`가 아닙니다. 그 밖의 모든 실패는 코드를
-태워 버리고, 포털로 가는 인증되지 않은 `302`(기존 바인딩 쿠키는 유지)로
-답하며, 사유(`code_consumed`, `code_expired`, `code_stale_generation`,
-`code_host_mismatch`, `code_path_mismatch`, `bind_mismatch`,
-`handoff_ambiguous`)와 함께 `handoff.rejected`를 발생시킵니다.
+따라 절대 `2xx`가 아닙니다([ADR-0014](../adr/0014-handoff-recovery-on-any-rejected-code.md)).
+모든 거부는 사유(`code_consumed`, `code_expired`, `code_stale_generation`,
+`code_host_mismatch`, `code_path_mismatch`, `code_ip_mismatch`, `bind_mismatch`,
+`handoff_ambiguous`)와 함께 `handoff.rejected`를 발생시키며, 코드의 클라이언트
+IP는 로그인을 시작한 애플리케이션 호스트 verify가 기록한 값이지 포털의 값이
+아닙니다.
 
 ### 예약 매개변수 인식
 

@@ -4,7 +4,7 @@
 
 - Area: sessions
 - Milestone: M1
-- ADRs: 0004, 0005, 0008
+- ADRs: 0004, 0005, 0008, 0014
 - Threat model: TM-02, TM-04, TM-05, TM-22, TM-23, TM-31, TM-33, TM-36, TM-38
 - Gateway contract: Cross-domain handoff, Reserved parameter recognition, Cookies, Verify endpoint (`302` with `set-cookie`)
 
@@ -171,9 +171,9 @@ yields a session handle and never replaces another user's session.
 
 ### S003-A13 Binding-race recovery cannot loop
 
-- Given: a harness client that discards every `set-cookie` for `__Host-hopae_bind` and always presents a bind that matches no code (a browser with a broken cookie jar, or an attacker trying to make Hopae redirect forever); the portal holds a valid `H0`.
+- Given: a harness client that discards every `set-cookie` for `__Host-hopae_bind` and always presents a bind that matches no code (a browser with a broken cookie jar, or an attacker trying to make Hopae redirect forever); the portal holds a valid `H0`. A second run presents the right bind but a client IP that differs from the transaction's recorded IP on every redemption (`code_ip_mismatch`, ADR-0014); a third replays consumed codes without a handle (`code_consumed`).
 - When: the client follows the redirects: navigation with a code → unauthenticated `302` (depth 1) → portal SSO → code → `302` (depth 2) → … 
-- Then: each recovery transaction's `recovery_depth` is the burned code's depth plus one (depths 1, 2, 3 are observed on the codes the portal mints); when the burned code's depth equals `handoff.max_recoveries` (default: the fourth mismatching navigation) Hopae creates no transaction and answers **`403`** with a small HTML body, `content-type: text/html`, `cache-control: no-store` and `x-hopae-reason: handoff_recovery_exhausted` — never a `2xx` — which the live gateway relays to the client; the echo upstream records **zero requests** during the whole chain; the event records the depth; the client's existing cookies are untouched; a fresh navigation without a code starts over at depth 0. A client that tampers with nothing but presents a crafted depth anywhere (query, cookie, header) has no effect, because depth is read only from the code's row. The redirect count per browser is therefore bounded by `3 × (portal round trip)` and the store writes per recovery are one transaction and one code.
+- Then: each recovery transaction's `recovery_depth` is the burned code's depth plus one (depths 1, 2, 3 are observed on the codes the portal mints); when the burned code's depth equals `handoff.max_recoveries` (default: the fourth mismatching navigation) Hopae creates no transaction and answers **`403`** with a small HTML body, `content-type: text/html`, `cache-control: no-store` and `x-hopae-reason: handoff_recovery_exhausted` — never a `2xx` — which the live gateway relays to the client; the echo upstream records **zero requests** during the whole chain; the event records the depth; the client's existing cookies are untouched; a fresh navigation without a code starts over at depth 0. A client that tampers with nothing but presents a crafted depth anywhere (query, cookie, header) has no effect, because depth is read only from the code's row. All three runs end at the same `403` after the same number of round trips: depth carries on every rejection of a known code, whatever the reason. The redirect count per browser is therefore bounded by `3 × (portal round trip)` and the store writes per recovery are one transaction and one code.
 
 ## Observability expectations
 

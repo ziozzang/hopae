@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 5 -->
+<!-- doc-rev: 6 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -251,21 +251,24 @@ together with the valid handle it produced (a prefetch or a retried
 navigation already redeemed it) answers the clean `302` without changing any
 cookie (`code_already_redeemed`); a valid handle of **another user** answers
 `302` to `https://auth.example.test/switch?txn=…` (purpose `switch`), burns
-the code and leaves every cookie as it is (`session_conflict`); a code whose
-bind digest does not match the presented bind while the browser holds **no**
-valid handle (the first-use race between tabs) is burned and answered with
+the code and leaves every cookie as it is (`session_conflict`); **any
+rejection of a known code** while the browser holds **no** valid handle
+(the first-use race between tabs, an IP seen differently by the two hosts, a
+stale generation, an expired or replayed code) burns the code and answers
 the ordinary unauthenticated `302` to a new transaction that keeps the
 presented bind and takes `recovery_depth = code.recovery_depth + 1` (the
 depth travels on the code's row, copied from the transaction that minted it,
-and is never read from the client), so the portal re-hands-off by single
+and is never read from the client; an unknown code starts at depth 0 and is
+bounded by the per-IP failure cap), so the portal re-hands-off by single
 sign-on; when the burned code's depth already equals `handoff.max_recoveries`
 no transaction is created and the answer is a relayed **`403`** with a small
 HTML body (`handoff_recovery_exhausted`) — never a `2xx`, per the status
-invariant above; every other failure burns the code, answers the unauthenticated
-`302` to the portal (which keeps an existing binding cookie) and emits
-`handoff.rejected` with the reason (`code_consumed`, `code_expired`,
-`code_stale_generation`, `code_host_mismatch`, `code_path_mismatch`,
-`bind_mismatch`, `handoff_ambiguous`).
+invariant above ([ADR-0014](adr/0014-handoff-recovery-on-any-rejected-code.md)).
+Every rejection emits `handoff.rejected` with the reason (`code_consumed`,
+`code_expired`, `code_stale_generation`, `code_host_mismatch`,
+`code_path_mismatch`, `code_ip_mismatch`, `bind_mismatch`,
+`handoff_ambiguous`); the code's client IP is the one recorded by the
+application-host verify that started the login, never the portal's.
 
 ### Reserved parameter recognition
 

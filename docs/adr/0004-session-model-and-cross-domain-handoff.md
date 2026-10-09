@@ -6,6 +6,7 @@
 - Scenarios: 001, 002, 003, 005, 006, 009, 010
 - Threat model: TM-01, TM-02, TM-03, TM-04, TM-05, TM-13, TM-20, TM-21, TM-22, TM-26
 - Supersedes: none
+- Amended by: [ADR-0014](0014-handoff-recovery-on-any-rejected-code.md) (recovery depth on every rejected known code; codes carry the transaction's client IP)
 
 ## Context
 
