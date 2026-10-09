@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=6 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=7 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -70,7 +70,13 @@ Hangang 게이트웨이가 최우선(first-class) 통합 대상이며, 페이지
 쓸 수 있습니다.
 
 경로 범위 보호는 한 호스트에 두 라우트를 사용합니다. 호스트용 공개 라우트
-하나와, 접두사용으로 우선순위가 더 높은 보호 라우트 하나입니다.
+하나와, 접두사용으로 우선순위가 더 높은 보호 라우트 하나입니다. **게이트웨이는
+경로 접두사를 대소문자를 구분해 대조합니다**: `/ADMIN/x`는 `site-admin`을
+선택하지 않고 `site-public`으로 넘어가 세션 없이 업스트림에 도달합니다. 이
+패턴은 업스트림이 경로의 대소문자를 구분할 때만 사용하십시오. 대소문자를
+구분하지 않는 업스트림(IIS, 일부 프레임워크, 대소문자를 구분하지 않는 파일
+시스템)은 게이트웨이 변경 HC-10이 출시될 때까지 호스트 전체를 보호해야
+합니다(위협 TM-39).
 
 ```json
 [
@@ -379,7 +385,7 @@ Hopae는 세션 종료와 핸들 취소(둘 다 세션의 `cred_gen`을 올림),
 | 원래 URL, 클라이언트 IP, 호스트, 프로토콜 | 예 | `x-original-url`, `x-original-uri`, `x-original-method`, `x-forwarded-{method,uri,proto,port,for,host}`, `x-real-ip`, `x-original-client-ip`를 생성. 클라이언트 복사본은 교체 |
 | 도메인 간 핸드오프 | 예 | Hopae가 verify 호출을 통해 `_hopae_handoff` 매개변수를 가로챔. `302` + `set-cookie`가 중계되고 업스트림에는 접속하지 않음 |
 | HTTP/2에서 분할된 `cookie` 필드 | 예 | 인가 전에 RFC 9113에 따라 결합 |
-| 경로 범위 지정 | 예, 라우트 단위 | `path_prefix`, `path_match`, `priority`. 제외 규칙 없음 |
+| 경로 범위 지정 | 예, 라우트 단위, 대소문자 구분 | `path_prefix`, `path_match`, `priority`. 제외 규칙 없음. `resource_guard::path_matches`는 바이트를 비교하므로 보호된 접두사의 대소문자 변형은 공개 라우트를 선택함(HC-10). 인코딩된 구분자, 순회, 반복 슬래시는 라우팅 전에 `400`으로 거부됨 |
 | 바깥 계층의 로그인 제한 | 부분적 | 포털의 `/login`과 `/callback/*`에 클라이언트 IP별 `settings.path_failure_bans`. `settings.path_rate_limits`는 전역 예산 |
 | `200`에서의 세션 갱신 쿠키 | 예 | `forward_response`로 최대 16개의 `set-cookie` 값을 중계 |
 | 미인증 `302`에서의 브라우저 바인딩 쿠키 | 예 | 중계되는 `3xx` 응답의 `set-cookie` |
@@ -396,8 +402,8 @@ Hopae는 세션 종료와 핸들 취소(둘 다 세션의 `cred_gen`을 올림),
 ## 제안하는 게이트웨이 변경
 
 각 변경은 작고, 게이트웨이 워크트리에서 독립적으로 출시할 수 있으며, 수락 기준을
-갖습니다. 권장 순서는 **HC-3(M1 필수)**, HC-6, HC-8, HC-4, HC-1, HC-2, HC-9,
-HC-5, HC-7입니다. 식별자는 고정이며, 순서는 권장 사항입니다.
+갖습니다. 권장 순서는 **HC-3(M1 필수)**, HC-10, HC-6, HC-8, HC-4, HC-1, HC-2,
+HC-9, HC-5, HC-7입니다. 식별자는 고정이며, 순서는 권장 사항입니다.
 
 | ID | 변경 | 게이트웨이 표면 | 수락 기준 |
 | --- | --- | --- | --- |
@@ -410,6 +416,7 @@ HC-5, HC-7입니다. 식별자는 고정이며, 순서는 권장 사항입니다
 | HC-9 | `x-forwarded-*`처럼 모든 라우트에서 클라이언트 요청의 `x-original-*`를 제거 | 수신 헤더 처리 | 클라이언트가 보낸 `x-original-*`는 업스트림이나 인증 서비스에 절대 도달하지 않음. 생성된 값은 영향 없음. 외부 인가가 없는 라우트에 대한 테스트. |
 | HC-5 | 애플리케이션 호스트의 네이티브 진입점: `auth.entrypoints: {"login": "/_hopae/login", "logout": "/_hopae/logout"}`. 게이트웨이가 `x-hopae-phase: login \| logout`을 실은 verify 호출을 거쳐, 원래 URL을 돌아갈 대상으로 담은 포털행 `302`로 답함 | `authorize` 호출 지점 | 선택 사항. 바인딩 쿠키를 포함해 Hopae 측 구현과 관찰 가능한 동작이 동일. 로그아웃 진입점의 verify 호출은 쿠키를 실음. 게이트웨이 측 상태 없음. 두 진입점과 애플리케이션 라우트와의 경로 충돌에 대한 테스트. |
 | HC-7 | 필드 범위 라우트 쓰기: `auth` 블록만 받는 `PUT /v1/routes/http/<id>/auth`와, 그 엔드포인트와 라우트 ID 목록으로 범위가 제한된 API 자격 증명 범위 | 관리 API, 자격 증명 범위 | 범위가 제한된 자격 증명은 다른 어떤 쓰기 엔드포인트도 호출할 수 없고 다른 라우트나 필드를 건드릴 수 없음(테스트). 리비전 CAS 적용. 감사가 범위를 기록. 설정 소유권 2단계의 전제 조건([ADR-0012](../adr/0012-service-registration-and-gateway-config-ownership.md)). |
+| HC-10 | 보호된 경로 범위 라우트의 대소문자 구분 없는 접두사 대조: 새 라우트 필드 `path_case: "sensitive" \| "insensitive"`. `auth`, `basic_auth`, `jwt_auth` 또는 `access_mode: protected`와 `path_prefix`를 함께 가진 라우트의 기본값은 `insensitive`, 그 밖에는 `sensitive`. 비교는 ASCII 문자만 접고(유니코드 케이스 폴딩 없음) 라우트 선택이 이미 쓰는 정규 경로에 적용하며, 요청 경로는 그대로 전달 | `resource_guard::path_matches`, 라우트 검증, 콘솔 라우트 편집기 | `/ADMIN/x`, `/Admin/x`, `/admin/X`가 보호된 `/admin` 라우트를 선택해 외부 확인이 답함(공개 형제 라우트가 있는 실제 게이트웨이 테스트). `/administrator`는 여전히 `segment_prefix` 라우트에 맞지 않음. 보호된 접두사 라우트에 명시한 `path_case: "sensitive"`는 노출을 명시한 검증 경고와 함께 허용. 공개 라우트는 `insensitive`를 지정하지 않는 한 바이트 단위 대조 유지. `canonical_path`는 변경 없음. Hopae 시나리오 008-A1의 `/ADMIN/x` 단언은 `302`가 됨. |
 
 검토했으나 제안하지 않은 변경: Lua `redirect`/`set_cookie` API(HC-5 대비 이득은
 적고 샌드박스의 출력 표면을 넓힘), 전체 URL을 키로 하는 인증 결정 캐싱(SPA에서는

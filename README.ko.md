@@ -1,6 +1,6 @@
 # Hopae
 
-<!-- translation-status: source=README.md source-rev=1 status=current -->
+<!-- translation-status: source=README.md source-rev=2 status=current -->
 
 [문서 목차](docs/ko/README.md) · [로드맵](docs/ko/ROADMAP.md) · [릴리스 노트](CHANGELOG.md) · [English](README.md)
 
@@ -14,9 +14,10 @@ Hopae(호패)라는 이름은 조선시대에 국가가 발급한 신분패에�
 패키징하며, 그런 확인 요청을 전달할 수 있는 어떤 게이트웨이 뒤에서도 사용할 수
 있도록 유지합니다.
 
-> **상태: 설계 중.** 아직 릴리스는 없습니다. 아래 문서는 프로젝트를 만드는
-> 방법을 정의하며, 제품 문서는 마일스톤이 완료될 때마다 추가됩니다.
-> [로드맵](docs/ko/ROADMAP.md)을 참고하세요.
+> **상태: 마일스톤 M1(수직 슬라이스), 미릴리스.** 버전 0.1.0은 아직 발행하지
+> 않았습니다. 현재 동작하는 범위는 [M1에서 동작하는 것](#m1에서-동작하는-것)에,
+> [M1에 없는 것](#m1에-없는-것)은 설계일 뿐입니다. [로드맵](docs/ko/ROADMAP.md)을
+> 참고하세요.
 
 ## 동작 흐름
 
@@ -32,26 +33,56 @@ Hopae(호패)라는 이름은 조선시대에 국가가 발급한 신분패에�
 표준 OAuth 배포와 거의 같지만, 라우팅과 헤더 주입·제거는 게이트웨이가 이미
 맡고 있으므로 Hopae는 포털, 제공자, 세션, 정책만 제공합니다.
 
-## 계획된 범위
+## M1에서 동작하는 것
 
-*설계 중*으로 표시한 항목은 의도를 설명하는 것이며, 구현된 동작이 아닙니다.
+M1은 완결된 경로 하나이며 그 이상은 없습니다. **Google 로그인, 서버 측 세션,
+Hangang 포워드 인증**입니다.
 
-- **로그인 제공자** *(설계 중)* — OIDC/OAuth 2.0(Google 우선), 카카오, 네이버,
-  이메일 매직 링크, 이메일과 비밀번호.
-- **세션** *(설계 중)* — 서버 측 세션, 모든 기기에서 로그아웃, 다중 인스턴스
-  배포를 위한 선택적 Redis/Valkey 공유 캐시.
-- **게이트웨이 연동** *(설계 중)* — 게이트웨이가 주입할 검증된 신원 헤더를
-  돌려주는 포워드 인증(forward-authentication) 엔드포인트, 경로 범위 보호,
-  로그인/로그아웃 진입점.
-- **남용 제어** *(설계 중)* — 로그인 기록, 블랙리스트, 로그인 시도 제한과 잠금.
-- **관리** *(설계 중)* — 사용자, 세션, 제공자, 정책, 감사를 위한 웹 콘솔과 관리 API.
-- **확장 지점** *(설계 중)* — Lua 훅, 로그인 알림 웹훅, 플러그인 방식의 2차 인증
-  메커니즘(TOTP, WebAuthn 등).
-- **수명 주기** *(설계 중)* — GitHub 릴리스에서 서명을 검증하는 자가 업데이트.
+- **로그인** — Google에 대한 OpenID Connect(PKCE를 쓰는 인가 코드 흐름, ID 토큰 검증, 디스커버리와 키 캐시). 제공자는 JSON 설정 파일에 정의합니다. 비밀 값 변수가 없는 제공자는 치명적 오류가 아니라 비활성화됩니다.
+- **세션** — SQLite에 저장하는 서버 측 세션, 브라우저에 묶인 호스트별 핸들 쿠키, 애플리케이션별로 설정 가능한 유휴·절대 타이머와 클라이언트 IP/User-Agent 바인딩, 로그아웃, 검증된 이메일에 의한 명시적 계정 연결.
+- **게이트웨이 연동** — [게이트웨이 계약](docs/ko/GATEWAY_CONTRACT.md)의 verify 엔드포인트(`/_hopae/verify`). 로테이션이 가능한 호출자 키 인증, 실패 시 차단(fail closed) 응답, 게이트웨이가 주입할 신원 헤더, 브라우저에 묶인 핸드오프를 통한 등록된 호스트 간 교차 도메인 SSO.
+- **운영** — `hopae --check` 사전 점검(등록할 라우트 조각과 redirect URI를 출력), 단일 인스턴스 잠금, 스키마 마이그레이션 전 백업, 우아한 종료, 트랜잭션 방식 감사 이벤트를 갖춘 구조화 이벤트 로그, `/healthz`. [운영](docs/ko/OPERATIONS.md)을 참고하세요.
+- **패키징** — 정적 바이너리와 [`deploy/`](deploy/)의 강화된 Docker Compose 템플릿.
+
+운영 환경에서는 호출자 키를 보내는 게이트웨이(Hangang 변경 HC-3)가 필요합니다.
+수정되지 않은 게이트웨이는 호출자 인증을 끈 개발 용도로만 쓸 수 있습니다. 계약의
+호환성 표를 참고하세요.
+
+## M1에 없는 것
+
+여기 있는 것은 모두 계획이며 구현되지 않았습니다. [로드맵](docs/ko/ROADMAP.md)을
+참고하세요.
+
+- 다른 제공자(카카오, 네이버, 이메일 매직 링크, 이메일과 비밀번호), 2차 인증, 스텝업 강제.
+- 콘솔에서의 모든 기기 로그아웃, 로그인 기록, 블랙리스트와 IP별 한도를 넘는 제한, 여러 인스턴스를 위한 공유 상태(PostgreSQL, Redis/Valkey).
+- 웹 콘솔과 관리 API, Lua 훅, 웹훅, Prometheus 메트릭, 설정 다시 로드, 서명된 자가 업데이트.
+
+## 빠른 시작
+
+빌드(Rust 1.96 이상)하거나 컨테이너 이미지를 사용하고, 설정 파일을 작성한 뒤
+실행하기 전에 점검합니다.
+
+```sh
+cargo build --release --locked
+export HOPAE_GATEWAY_KEY=change-me                    # 게이트웨이와 공유하는 호출자 키
+export HOPAE_PROVIDER_GOOGLE_CLIENT_SECRET=change-me  # Google OAuth 클라이언트 비밀 값
+target/release/hopae --check --config deploy/hopae.example.json
+target/release/hopae run     --config deploy/hopae.example.json
+```
+
+`--check`는 다른 곳에 등록해야 할 것을 출력합니다. 게이트웨이 라우트 `auth` 조각,
+반환 origin, 제공자 redirect URI(`<portal.public_url>/callback/google`)입니다.
+그다음 게이트웨이에 포털 라우트와 보호할 라우트를 등록하고(예시는
+[`deploy/hangang-routes.example.json`](deploy/hangang-routes.example.json)),
+브라우저로 보호된 호스트를 엽니다. 강화된 컨테이너 배포는
+[`deploy/README.md`](deploy/README.md)를 따르세요.
 
 ## 문서
 
 - [문서 목차](docs/ko/README.md)
+- [게이트웨이 계약](docs/ko/GATEWAY_CONTRACT.md) — verify 프로토콜, 헤더, 쿠키, 라우트 조각
+- [설정 참조](docs/ko/CONFIG.md) — 모든 키, 기본값, CLI 명령
+- [운영](docs/ko/OPERATIONS.md) — 실행, 상태, 백업, 키 교체, 로그, 상태 확인, 장애 동작
 - [개발 프로세스](docs/ko/PROCESS.md) — 역할, 단계 게이트, 시나리오 기반 TDD, 릴리스와 보안 규칙
 - [문서 체계](docs/ko/DOCUMENTATION.md) — 구성, 번역 규칙, 문체, 필수 문서
 - [아키텍처 결정 기록(ADR) · 영문](docs/adr/)

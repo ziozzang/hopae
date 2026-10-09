@@ -514,3 +514,57 @@ fn s009_a5_samesite_not_configurable() {
         }
     }
 }
+
+// ---- gateway layer (W2-A) ---------------------------------------------------
+
+mod gateway_layer {
+    use crate::support::gateway::*;
+    use crate::support::*;
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn s009_a4_attributes_survive_gateway_relay() {
+        let Some(s) = Stack::basic("s009_a4") else {
+            return;
+        };
+        let b = s.gw.browser();
+
+        // The binding cookie on the unauthenticated 302.
+        let first = b.get(APP_HOST, "/admin/x");
+        assert_eq!(first.status, 302);
+        let hopae_side = s.gw.tap.answers().pop().unwrap();
+        let sent = hopae_side.header_all("set-cookie");
+        assert!(!sent.is_empty());
+        assert_eq!(
+            first.set_cookies(),
+            sent,
+            "byte for byte: the gateway relays set-cookie unchanged"
+        );
+        let bind = first
+            .set_cookies()
+            .into_iter()
+            .find(|c| c.starts_with("__Host-hopae_bind="))
+            .expect("bind cookie");
+        for attr in ["Secure", "HttpOnly", "SameSite=Lax", "Path=/"] {
+            assert!(bind.contains(attr), "{attr} missing in {bind}");
+        }
+        assert!(!bind.contains("Domain"));
+
+        // The handle cookie on the handoff 302.
+        let c = b.login_from(&s.idp, first);
+        s.gw.tap.clear();
+        let handoff = b.redeem(&c);
+        assert_eq!(handoff.status, 302);
+        let hopae_side = s.gw.tap.answers().pop().unwrap();
+        assert_eq!(handoff.set_cookies(), hopae_side.header_all("set-cookie"));
+        let handle = handoff
+            .set_cookies()
+            .into_iter()
+            .find(|c| c.starts_with("__Host-hopae="))
+            .expect("handle cookie");
+        for attr in ["Secure", "HttpOnly", "SameSite=Lax", "Path=/", "Max-Age="] {
+            assert!(handle.contains(attr), "{attr} missing in {handle}");
+        }
+        assert!(!handle.contains("Domain"));
+    }
+}

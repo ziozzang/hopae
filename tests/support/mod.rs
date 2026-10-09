@@ -8,6 +8,7 @@ use std::path::Path;
 
 pub mod client;
 pub mod echo;
+pub mod gateway;
 pub mod jar;
 pub mod mock_idp;
 pub mod process;

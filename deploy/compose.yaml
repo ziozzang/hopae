@@ -1,0 +1,46 @@
+# Hopae production template. Copy this directory, then:
+#   cp env.example hopae.env            # fill in; the file is git-ignored
+#   cp hopae.example.json hopae.local.json   # edit hosts, client_id
+#   install -d -m 700 -o 1000 -g 1000 state
+#   docker compose run --rm hopae --check --config /etc/hopae/hopae.json
+#   docker compose up -d
+#
+# Network model: the container shares the host network namespace and Hopae
+# binds 127.0.0.1 only (portal :8700, gateway listener :8701). A gateway on
+# the same host reaches both on loopback; nothing else can. Nothing is
+# published with `ports:`. If your gateway runs in another network namespace,
+# put both in one namespace instead; never bind the gateway listener to a
+# routable address.
+
+x-hardened: &hardened
+  user: "1000:1000"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  hopae:
+    <<: *hardened
+    image: hopae:${HOPAE_TAG:-dev}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: hopae
+    network_mode: host
+    env_file: hopae.env
+    command: ["run", "--config", "/etc/hopae/hopae.json"]
+    volumes:
+      - ./hopae.local.json:/etc/hopae/hopae.json:ro
+      - ./state:/var/lib/hopae
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    mem_limit: 256m
+    pids_limit: 128
+    stop_grace_period: 15s
+    # The image has no shell or curl, so there is no container healthcheck.
+    # Probe from the host: curl -fsS http://127.0.0.1:8700/healthz  (read the
+    # "ready" field; the status code is 200 whenever the process serves).

@@ -1337,3 +1337,519 @@ async fn g7_c06_switch_transaction_is_bound_to_the_incoming_browser() {
         .unwrap();
     assert!(matches!(out, SwitchOutcome::Kept { .. }));
 }
+
+// ---- gateway layer (W2-A) ---------------------------------------------------
+//
+// The cases below run through the real gateway binary (`HOPAE_E2E_GATEWAY_BINARY`,
+// `make e2e`); without the variable they skip.
+
+mod gateway_layer {
+    use crate::support::gateway::*;
+    use crate::support::*;
+
+    fn two_domains(test: &str) -> Option<Stack> {
+        Stack::start(
+            test,
+            Fixture::new("m1-two-domains"),
+            GatewayRoutes::new()
+                .whole_host(APP_HOST)
+                .whole_host(OTHER_HOST)
+                .portal(PORTAL_HOST),
+            Edge::Terminator,
+        )
+    }
+
+    fn rejected_reasons(s: &Stack) -> Vec<String> {
+        s.hopae
+            .hooks
+            .events(Some("handoff.rejected"), None)
+            .iter()
+            .map(|e| e["reason"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    fn has_bind(b: &Browser, host: &str) -> Option<String> {
+        b.jar.for_host(host).value("__Host-hopae_bind")
+    }
+
+    fn handle_of(b: &Browser, host: &str) -> Option<String> {
+        b.jar.for_host(host).value("__Host-hopae")
+    }
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn s003_5_handoff_through_live_gateway() {
+        let Some(s) = two_domains("s003_5") else {
+            return;
+        };
+        let b = s.gw.browser();
+        // First application: login, handoff, final 200.
+        let first = b.get(APP_HOST, "/admin/x");
+        assert_eq!(first.status, 302);
+        assert_eq!(
+            first.header("referrer-policy"),
+            Some("no-referrer"),
+            "present on the relayed 302"
+        );
+        let c1 = b.login_from(&s.idp, first);
+        let code1 = c1.code();
+        let handoff1 = b.redeem(&c1);
+        assert_eq!(handoff1.status, 302, "{handoff1:?}");
+        assert_eq!(
+            handoff1.location(),
+            Some("https://app.example.test/admin/x")
+        );
+        assert_eq!(handoff1.header("referrer-policy"), Some("no-referrer"));
+        assert!(
+            handoff1
+                .set_cookies()
+                .iter()
+                .any(|c| c.starts_with("__Host-hopae=")),
+            "the handle is planted by the relayed 302"
+        );
+        let r1 = b.follow(APP_HOST, &handoff1);
+        assert_eq!(r1.status, 200, "{r1:?}");
+        assert_eq!(r1.body, "echo /admin/x\n");
+
+        // Second application on another registrable domain: single sign-on.
+        let first2 = b.get(OTHER_HOST, "/");
+        assert_eq!(first2.status, 302);
+        assert_eq!(first2.header("referrer-policy"), Some("no-referrer"));
+        assert!(
+            first2
+                .set_cookies()
+                .iter()
+                .any(|c| c.starts_with("__Host-hopae_bind=")),
+            "the binding cookie is planted on the second host"
+        );
+        let c2 = b.sso_to_code(first2);
+        let code2 = c2.code();
+        let handoff2 = b.redeem(&c2);
+        assert_eq!(handoff2.status, 302, "{handoff2:?}");
+        assert_eq!(handoff2.location(), Some("https://other.example.org/"));
+        assert_eq!(handoff2.header("referrer-policy"), Some("no-referrer"));
+        let r2 = b.follow(OTHER_HOST, &handoff2);
+        assert_eq!(r2.status, 200, "{r2:?}");
+
+        // Cookies exist per host only, and differ.
+        let (h_app, h_other) = (handle_of(&b, APP_HOST), handle_of(&b, OTHER_HOST));
+        assert!(h_app.is_some() && h_other.is_some());
+        assert_ne!(h_app, h_other);
+        assert_ne!(
+            h_app,
+            handle_of(&b, PORTAL_HOST),
+            "the portal session has its own handle"
+        );
+        for (host, resp) in [(APP_HOST, &handoff1), (OTHER_HOST, &handoff2)] {
+            let own = b.jar.for_host(host).names();
+            assert!(own.contains(&"__Host-hopae".to_string()), "{host}: {own:?}");
+            assert!(
+                resp.set_cookies().iter().all(|c| !c.contains("Domain=")),
+                "host-only cookies"
+            );
+        }
+
+        // The upstream never received a code, in any form.
+        let seen = s.echo.requests();
+        assert!(seen.len() >= 2);
+        for r in &seen {
+            assert!(!r.raw_path.contains("_hopae_handoff"), "{r:?}");
+            for (_, v) in &r.headers {
+                assert!(!v.contains(&code1) && !v.contains(&code2), "{r:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn s003_7_non_document_with_parameter_terminated() {
+        let Some(s) = Stack::basic("s003_7") else {
+            return;
+        };
+        let b = s.gw.browser();
+        let c1 = b.login_to_code(&s.idp, APP_HOST, "/admin/x");
+        let (k1, pq1) = (c1.code(), c1.path_and_query());
+        let bind = has_bind(&b, APP_HOST).expect("B1 held");
+        let unconsumed = |s: &Stack| code_row(&s.hopae, &k1).expect("K1 row").0.is_none();
+        assert!(unconsumed(&s));
+        s.echo.clear();
+        s.gw.tap.clear();
+
+        let expect_terminated = |s: &Stack, b: &Browser, pq: &str, what: &str| {
+            let before = s.gw.tap.answers().len();
+            let r = b.fetch(APP_HOST, pq);
+            assert_eq!(r.status, 403, "{what}: {r:?}");
+            assert_eq!(
+                r.body.trim(),
+                r#"{"error":"handoff_parameter_not_allowed"}"#,
+                "{what}"
+            );
+            assert!(r.set_cookies().is_empty(), "{what}: no set-cookie");
+            let answers = s.gw.tap.answers();
+            assert_eq!(answers.len(), before + 1);
+            let a = answers.last().unwrap();
+            assert_eq!(a.status, 403);
+            assert_eq!(
+                a.header("x-hopae-reason"),
+                Some("handoff_parameter_not_allowed"),
+                "{what}"
+            );
+            assert!(
+                s.echo.requests().is_empty(),
+                "{what}: the gateway forwarded the query"
+            );
+        };
+
+        // (1) no handle
+        expect_terminated(&s, &b, &pq1, "without a handle");
+        assert!(unconsumed(&s), "K1 stays unconsumed");
+        assert_eq!(has_bind(&b, APP_HOST).as_deref(), Some(bind.as_str()));
+
+        // Another tab finishes first: a valid handle H1 for the same session.
+        let first = b.get(APP_HOST, "/admin/y");
+        assert_eq!(first.status, 302);
+        let c2 = b.sso_to_code(first);
+        let planted = b.redeem(&c2);
+        assert_eq!(planted.status, 302, "{planted:?}");
+        let h1 = handle_of(&b, APP_HOST).expect("H1");
+        assert!(unconsumed(&s));
+        s.echo.clear();
+
+        // (2) valid handle + K1, (3) valid handle + an invalid code: still 403,
+        // never a 200 that would make the gateway forward the query.
+        expect_terminated(&s, &b, &pq1, "valid handle and K1");
+        expect_terminated(
+            &s,
+            &b,
+            "/admin/x?_hopae_handoff=bogus-code-value",
+            "valid handle, invalid code",
+        );
+        assert!(unconsumed(&s), "K1 stays unconsumed");
+        assert_eq!(
+            handle_of(&b, APP_HOST).as_deref(),
+            Some(h1.as_str()),
+            "H1 untouched"
+        );
+        assert_eq!(
+            has_bind(&b, APP_HOST).as_deref(),
+            Some(bind.as_str()),
+            "B1 untouched"
+        );
+
+        // The user's later document navigation with K1 succeeds (same session, so
+        // the handle is replaced) and reaches the clean URL.
+        let later = b.get_cross_site(APP_HOST, &pq1);
+        assert_eq!(later.status, 302, "{later:?}");
+        assert_eq!(later.location(), Some("https://app.example.test/admin/x"));
+        assert!(!unconsumed(&s), "K1 is consumed by the document navigation");
+        assert!(s.echo.requests().is_empty());
+    }
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn s003_a5_upstream_never_sees_code() {
+        let Some(s) = two_domains("s003_a5") else {
+            return;
+        };
+        let b = s.gw.browser();
+        let c = b.login_to_code(&s.idp, APP_HOST, "/admin/x");
+        let code = c.code();
+        // A second code for the same session, which is the one a compromised
+        // application could construct a URL for on another host.
+        let c_other = b.sso_to_code(b.get(APP_HOST, "/admin/x"));
+        let stolen_code = c_other.code();
+        let stolen = b.fetch(OTHER_HOST, &format!("/?_hopae_handoff={stolen_code}"));
+        assert_eq!(
+            stolen.status, 403,
+            "non-document: terminated at the gateway"
+        );
+        let stolen = b.get_cross_site(OTHER_HOST, &format!("/?_hopae_handoff={stolen_code}"));
+        assert_eq!(
+            stolen.status, 302,
+            "document: unauthenticated, to the portal: {stolen:?}"
+        );
+        assert!(stolen.location().unwrap().contains("/login?txn="));
+        assert!(
+            handle_of(&b, OTHER_HOST).is_none(),
+            "no handle for the other host"
+        );
+        assert!(
+            stolen
+                .set_cookies()
+                .iter()
+                .all(|c| !c.starts_with("__Host-hopae=")),
+            "{stolen:?}"
+        );
+        assert_eq!(
+            code_row(&s.hopae, &stolen_code).unwrap().0.as_deref(),
+            Some("code_host_mismatch"),
+            "burned"
+        );
+        // Whatever Hopae decided, the upstream saw nothing.
+        assert!(s.echo.requests().is_empty(), "{:?}", s.echo.requests());
+        // The legitimate redemption never forwards the code either.
+        let handoff = b.redeem(&c);
+        assert_eq!(handoff.status, 302, "{handoff:?}");
+        let after = b.follow(APP_HOST, &handoff);
+        assert_eq!(after.status, 200, "{after:?}");
+        for r in s.echo.requests() {
+            assert!(!r.raw_path.contains("_hopae_handoff"));
+            for (_, v) in &r.headers {
+                assert!(
+                    !v.contains(&code) && !v.contains(&stolen_code),
+                    "a code reached the upstream in a header"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn s003_a9_two_browsers_same_ip_cannot_swap_sessions() {
+        let Some(s) = Stack::basic("s003_a9") else {
+            return;
+        };
+        let nat = "203.0.113.9";
+        let x = s.gw.browser().at_ip(nat);
+
+        // (a) X completed a login and captured its unconsumed code Kx; Y holds no
+        // cookie on the application host.
+        let kx = x.login_to_code(&s.idp, APP_HOST, "/admin/x");
+        let y = s.gw.browser().at_ip(nat);
+        let taken = y.get_cross_site(APP_HOST, &kx.path_and_query());
+        assert_eq!(taken.status, 302, "{taken:?}");
+        assert!(
+            taken.location().unwrap().contains("/login?txn="),
+            "{taken:?}"
+        );
+        assert!(
+            taken
+                .set_cookies()
+                .iter()
+                .all(|c| !c.starts_with("__Host-hopae=")),
+            "no handle for Y"
+        );
+        assert!(handle_of(&y, APP_HOST).is_none());
+        // Y had none, so a fresh binding cookie is planted.
+        assert!(has_bind(&y, APP_HOST).is_some());
+        assert_eq!(
+            code_row(&s.hopae, &kx.code()).unwrap().0.as_deref(),
+            Some("bind_mismatch")
+        );
+        assert!(rejected_reasons(&s).contains(&"bind_mismatch".to_string()));
+        // X's own later navigation with Kx is refused; X recovers by single sign-on.
+        let again = x.redeem(&kx);
+        assert_eq!(again.status, 302, "{again:?}");
+        assert!(again.location().unwrap().contains("/login?txn="));
+        assert!(
+            again
+                .set_cookies()
+                .iter()
+                .all(|c| !c.starts_with("__Host-hopae=")),
+            "the replay yields no handle"
+        );
+        assert!(
+            rejected_reasons(&s).contains(&"code_consumed".to_string()),
+            "{:?}",
+            rejected_reasons(&s)
+        );
+        let recovered = x.sso_to_code(again);
+        let ok = x.redeem(&recovered);
+        assert_eq!(ok.status, 302, "{ok:?}");
+        assert_eq!(x.follow(APP_HOST, &ok).status, 200);
+
+        // (b) Y holds its own binding cookie By from a login it started.
+        x.jar.for_host(APP_HOST).remove("__Host-hopae");
+        let y = s.gw.browser().at_ip(nat);
+        let started = y.get(APP_HOST, "/admin/x");
+        assert_eq!(started.status, 302);
+        let by = has_bind(&y, APP_HOST).expect("By");
+        let kx2 = x.sso_to_code(x.get(APP_HOST, "/admin/x3"));
+        let taken = y.get_cross_site(APP_HOST, &kx2.path_and_query());
+        assert_eq!(taken.status, 302, "{taken:?}");
+        assert!(taken.location().unwrap().contains("/login?txn="));
+        assert_eq!(
+            has_bind(&y, APP_HOST).as_deref(),
+            Some(by.as_str()),
+            "By kept"
+        );
+        assert!(
+            taken
+                .set_cookies()
+                .iter()
+                .all(|c| !c.starts_with("__Host-hopae="))
+        );
+        assert!(handle_of(&y, APP_HOST).is_none());
+
+        // The code is burned by the failed attempt.
+        assert_eq!(
+            code_row(&s.hopae, &kx2.code()).unwrap().0.as_deref(),
+            Some("bind_mismatch")
+        );
+        assert!(
+            s.echo
+                .requests()
+                .iter()
+                .all(|r| !r.raw_path.contains("_hopae_handoff"))
+        );
+    }
+
+    /// The recovery chain of S003-A13 for a client whose jar drops the binding
+    /// cookie before every request. Returns the final response and the last
+    /// code (the burned one) navigated.
+    fn chase_without_bind(s: &Stack, b: &Browser) -> (Response, LastCode) {
+        let mut r = b.get(APP_HOST, "/admin/x");
+        let mut last = LastCode(String::new());
+        for _ in 0..8 {
+            assert_eq!(r.status, 302, "{r:?}");
+            b.jar.for_host(APP_HOST).remove("__Host-hopae_bind");
+            let c = b.sso_to_code(r);
+            last = LastCode(c.path_and_query());
+            r = b.redeem(&c);
+            b.jar.for_host(APP_HOST).remove("__Host-hopae_bind");
+            if r.status != 302 {
+                break;
+            }
+        }
+        let _ = s;
+        (r, last)
+    }
+
+    pub struct LastCode(pub String);
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn s003_a13_recovery_bounded_no_upstream() {
+        let Some(s) = Stack::basic("s003_a13") else {
+            return;
+        };
+        let b = s.gw.browser();
+        // The portal holds a valid H0 after one ordinary login; then the
+        // application cookies are dropped.
+        let l = b.login(&s.idp, APP_HOST, "/admin/x");
+        assert_eq!(l.handoff.status, 302);
+        let cookies = b.jar.for_host(APP_HOST);
+        cookies.remove("__Host-hopae");
+        cookies.remove("__Host-hopae_bind");
+        s.echo.clear();
+        s.gw.tap.clear();
+        let before_txns = txn_depths(&s.hopae).len();
+
+        // Run 1: a jar that discards every binding cookie.
+        let (end, last) = chase_without_bind(&s, &b);
+        assert_eq!(end.status, 403, "exhaustion is never a 2xx: {end:?}");
+        assert_eq!(
+            end.header("content-type")
+                .map(|c| c.starts_with("text/html")),
+            Some(true)
+        );
+        assert_eq!(end.header("cache-control"), Some("no-store"));
+        let answer = s.gw.tap.answers().last().cloned().unwrap();
+        assert_eq!(answer.status, 403);
+        assert_eq!(
+            answer.header("x-hopae-reason"),
+            Some("handoff_recovery_exhausted")
+        );
+        assert!(
+            s.echo.requests().is_empty(),
+            "zero upstream requests during the whole chain"
+        );
+        let depths = txn_depths(&s.hopae);
+        assert_eq!(
+            &depths[before_txns..],
+            &[0, 1, 2, 3],
+            "depth is the burned code's depth plus one; the fourth mismatch creates no transaction"
+        );
+        assert!(
+            s.hopae
+                .hooks
+                .events(Some("handoff.rejected"), None)
+                .iter()
+                .any(|e| e["reason"] == "handoff_recovery_exhausted"),
+            "the event records the exhaustion"
+        );
+        // A crafted depth anywhere has no effect: a fresh navigation starts at depth 0.
+        let fresh = b.fresh().get(APP_HOST, "/admin/x?depth=3");
+        assert_eq!(fresh.status, 302);
+        assert_eq!(*txn_depths(&s.hopae).last().unwrap(), 0);
+
+        // Run 3 (before run 2: it needs the burned code): replaying the burned
+        // depth-3 code from other browsers restarts at depth 0 and never reaches
+        // the exhaustion page.
+        for i in 0..3 {
+            let other = s.gw.browser().at_ip(&format!("198.51.100.{}", 20 + i));
+            let r = other.get_cross_site(APP_HOST, &last.0);
+            assert_eq!(r.status, 302, "replay {i}: {r:?}");
+            assert!(r.location().unwrap().contains("/login?txn="));
+            assert_eq!(
+                *txn_depths(&s.hopae).last().unwrap(),
+                0,
+                "a consumed code restarts at depth 0"
+            );
+        }
+        assert!(s.echo.requests().is_empty());
+    }
+
+    #[test]
+    #[ignore = "gateway layer: needs HOPAE_E2E_GATEWAY_BINARY (make e2e)"]
+    fn gateway_s003_a13_ip_mismatch_recovery_bounded() {
+        // The right binding cookie, but a client address that differs on every
+        // redemption (code_ip_mismatch). The `open` application of m1-binding (and the
+        // `default` policy that governs the portal session) have `binding.ip: off`, so
+        // the portal itself accepts the changing address and the code's recorded
+        // address is what stops the redemption.
+        const OPEN: &str = "open.example.test";
+        let Some(s) = Stack::start(
+            "s003_a13_ip",
+            // the portal session is evaluated with the `default` application's binding
+            Fixture::with(
+                "m1-binding",
+                serde_json::json!({"apps": [{"app_id": "default", "binding": {"ip": "off"}}]}),
+            ),
+            GatewayRoutes::new().whole_host(OPEN).portal(PORTAL_HOST),
+            Edge::Terminator,
+        ) else {
+            return;
+        };
+        let b = s.gw.browser();
+        let l = b.login(&s.idp, OPEN, "/admin/x");
+        assert_eq!(l.handoff.status, 302);
+        b.jar.for_host(OPEN).remove("__Host-hopae");
+        s.echo.clear();
+        s.gw.tap.clear();
+        let before = txn_depths(&s.hopae).len();
+        let ip = |n: u32| format!("198.51.100.{n}");
+        let mut n = 1;
+        let mut r = b.at_ip(&ip(n)).get(OPEN, "/admin/x");
+        let mut end = None;
+        for _ in 0..8 {
+            assert_eq!(r.status, 302, "{r:?}");
+            let c = b.at_ip(&ip(n)).sso_to_code(r);
+            n += 1;
+            r = b.at_ip(&ip(n)).redeem(&c);
+            if r.status != 302 {
+                end = Some(r);
+                break;
+            }
+        }
+        let end = end.expect("the chain ends");
+        assert_eq!(end.status, 403, "{end:?}");
+        assert_eq!(
+            s.gw.tap.answers().last().unwrap().header("x-hopae-reason"),
+            Some("handoff_recovery_exhausted")
+        );
+        assert!(s.echo.requests().is_empty());
+        assert_eq!(
+            &txn_depths(&s.hopae)[before..],
+            &[0, 1, 2, 3],
+            "same number of round trips"
+        );
+        assert!(
+            s.hopae
+                .hooks
+                .events(Some("handoff.rejected"), None)
+                .iter()
+                .any(|e| e["reason"] == "code_ip_mismatch")
+        );
+    }
+}
