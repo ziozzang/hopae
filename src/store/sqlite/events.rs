@@ -106,12 +106,56 @@ pub(super) fn flush_diagnostics(env: &mut WriterEnv) {
     }
 }
 
+/// Kinds whose event must commit with the mutation it describes
+/// (`session.*`, `handle.*`, `identity.*`, `session.handoff`).
+fn travels_with_state(kind: EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::SessionCreated
+            | EventKind::SessionHandoff
+            | EventKind::SessionTerminated
+            | EventKind::HandleRevoked
+            | EventKind::IdentityLinked
+            | EventKind::IdentityConflict
+    )
+}
+
 fn secs_f(t: Timestamp) -> f64 {
     t.0 as f64 / 1000.0
 }
 
 #[async_trait]
 impl Events for Store {
+    async fn append_required(&self, events: Vec<Event>) -> StoreResult<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        for ev in &events {
+            if !ev.kind.is_required() {
+                return Err(StoreError::Conflict(
+                    "diagnostic kinds use append_diagnostic",
+                ));
+            }
+            if travels_with_state(ev.kind) {
+                debug_assert!(
+                    false,
+                    "{} must travel with its state change, not alone",
+                    ev.kind.name()
+                );
+                return Err(StoreError::Conflict(
+                    "this kind must travel with its state change",
+                ));
+            }
+        }
+        self.write("append_required", move |env| {
+            let shared = env.shared.clone();
+            let tx = env.begin()?;
+            insert_events(&tx, &shared, &events)?;
+            commit(tx, &shared, Some("append_required"))
+        })
+        .await
+    }
+
     async fn append_diagnostic(&self, event: Event) -> StoreResult<()> {
         if event.kind.is_required() {
             return Err(StoreError::Conflict(

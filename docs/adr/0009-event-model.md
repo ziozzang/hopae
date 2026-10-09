@@ -33,9 +33,10 @@ Kinds in M1: `login.started`, `login.succeeded`, `login.failed`,
 `session.created`, `session.handoff`, `handoff.rejected`,
 `session.terminated`, `verify.denied` (sampled: at most one per
 (session or client IP, reason) per 60 s), `provider.error`,
-`config.loaded`, `txn.evicted`. Reserved for later: `factor.enrolled`,
-`factor.verified`, `factor.failed`, `block.created`, `lockout.started`,
-`admin.*`, `webhook.delivery`, `update.*`.
+`config.loaded`, `txn.evicted`, `admin.providers_import`
+(`hopae providers import --force`, required). Reserved for later:
+`factor.enrolled`, `factor.verified`, `factor.failed`, `block.created`,
+`lockout.started`, other `admin.*`, `webhook.delivery`, `update.*`.
 
 Delivery is a **transactional outbox**, not a bus (review finding R10):
 

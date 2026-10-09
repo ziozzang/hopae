@@ -124,7 +124,6 @@ async fn s011_5_ua_binding_when_enabled() {
 }
 
 #[test]
-#[ignore = "needs W1-B, W1-D and W1-E (transaction continuation is the portal's)"]
 fn s011_6_txn_inherits_policy() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
@@ -146,10 +145,29 @@ fn s011_6_txn_inherits_policy() {
         .with_ip("198.51.100.7")
         .get(&format!("/login?txn={txn}"));
     assert_eq!(other.status, 400);
-    let own = h
+    // S001-A3: the refused transaction is consumed, so the original client
+    // restarts too; its fresh transaction, from its own address, proceeds.
+    let again = h
         .portal()
         .with_ip("203.0.113.9")
         .get(&format!("/login?txn={txn}"));
+    assert_eq!(again.status, 400, "the consumed transaction stays refused");
+    let r = h.verify(
+        VerifyRequest::document("https://app.example.test/admin/x")
+            .ip("203.0.113.9")
+            .ua("UA1"),
+    );
+    let txn2 = r
+        .location()
+        .unwrap()
+        .split("txn=")
+        .nth(1)
+        .unwrap()
+        .to_string();
+    let own = h
+        .portal()
+        .with_ip("203.0.113.9")
+        .get(&format!("/login?txn={txn2}"));
     assert_ne!(own.status, 400);
 }
 
@@ -245,7 +263,6 @@ async fn s011_a4_drop_handle_dos_bounded() {
 }
 
 #[test]
-#[ignore = "needs W1-B (x-forwarded-for parsing is the adapter's)"]
 fn s011_a5_forwarded_for_list_rejected() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);

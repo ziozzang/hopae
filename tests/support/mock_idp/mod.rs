@@ -254,6 +254,21 @@ impl MockIdp {
         code
     }
 
+    /// What the user's browser does at the provider: follow the authorization
+    /// URL the portal redirected to, once. The provider records the request
+    /// (nonce, PKCE challenge, redirect URI), signs `next_sub` in, and answers
+    /// with a redirect to the callback; returns that callback's path and query
+    /// (`/callback/mock?code=..&state=..`) for the portal client to GET.
+    pub fn follow_authorization(&self, authorization_url: &str) -> String {
+        let u = url::Url::parse(authorization_url).expect("authorization url");
+        let port = u.port().expect("loopback provider port");
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        let r = crate::support::get(addr, &format!("{}?{}", u.path(), u.query().unwrap_or("")));
+        let loc = r.location().expect("authorize redirects to the callback");
+        let cb = url::Url::parse(loc).expect("callback url");
+        format!("{}?{}", cb.path(), cb.query().unwrap_or(""))
+    }
+
     /// The subject `/authorize` signs in next (default `sub-1`).
     pub fn set_subject(&self, sub: &str) {
         *self.inner.next_sub.lock().unwrap() = sub.to_string();

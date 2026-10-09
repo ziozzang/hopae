@@ -50,6 +50,13 @@ async fn outer(State(st): State<PortalState>, mut req: Request, next: Next) -> R
     req.extensions_mut().insert(RequestId(rid.clone()));
     let mut resp = next.run(req).await;
     security::apply(resp.headers_mut());
+    if let Some(origins) = resp
+        .extensions()
+        .get::<security::FormActionOrigins>()
+        .cloned()
+    {
+        security::with_form_action(resp.headers_mut(), &origins.0);
+    }
     if let Ok(v) = HeaderValue::from_str(&rid) {
         resp.headers_mut().insert(handlers::request_id_header(), v);
     }

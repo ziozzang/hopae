@@ -1,10 +1,45 @@
 //! Security headers for every portal response, and the `Origin` check.
 
 use axum::http::{HeaderMap, HeaderValue};
+use url::Origin;
 
-/// The pinned content security policy: no scripts, no inline styles, no framing.
+/// The pinned base content security policy: no scripts, no inline styles, no
+/// framing, forms to the portal itself. A page whose form is followed by a
+/// redirect to another origin widens only `form-action`, per page
+/// ([`with_form_action`]); the browser enforces `form-action` on that redirect.
 pub const CONTENT_SECURITY_POLICY: &str =
     "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'";
+
+/// Response extension a handler sets to name the extra `form-action` origins
+/// of its page; the portal's outer middleware turns it into the header.
+#[derive(Clone, Debug)]
+pub struct FormActionOrigins(pub Vec<Origin>);
+
+/// The policy with `form-action 'self'` plus `origins` (tuple origins only,
+/// each once, in a stable order). Origins come from configuration or
+/// discovery, never from request input.
+pub fn csp_with_form_action(origins: &[Origin]) -> String {
+    let mut list: Vec<String> = origins
+        .iter()
+        .filter(|o| o.is_tuple())
+        .map(Origin::ascii_serialization)
+        .collect();
+    list.sort();
+    list.dedup();
+    let mut form = String::from("'self'");
+    for o in &list {
+        form.push(' ');
+        form.push_str(o);
+    }
+    format!("default-src 'none'; style-src 'self'; form-action {form}; frame-ancestors 'none'")
+}
+
+/// Replace the policy in `headers` with one whose `form-action` also lists `origins`.
+pub fn with_form_action(headers: &mut HeaderMap, origins: &[Origin]) {
+    if let Ok(v) = HeaderValue::from_str(&csp_with_form_action(origins)) {
+        headers.insert("content-security-policy", v);
+    }
+}
 
 /// Set the portal's security headers, replacing any value a handler chose.
 pub fn apply(headers: &mut HeaderMap) {
@@ -62,6 +97,29 @@ mod tests {
         );
         assert!(!get("content-security-policy").contains("unsafe"));
         assert_eq!(h.get_all("cache-control").iter().count(), 1);
+    }
+
+    #[test]
+    fn form_action_is_per_page_and_lists_tuple_origins_once() {
+        let o = |s: &str| url::Url::parse(s).unwrap().origin();
+        let mut h = HeaderMap::new();
+        apply(&mut h);
+        with_form_action(
+            &mut h,
+            &[
+                o("https://accounts.example.test/o/auth?x=1"),
+                o("https://accounts.example.test/other"),
+                o("http://127.0.0.1:9000/a"),
+                Origin::new_opaque(),
+            ],
+        );
+        let csp = h["content-security-policy"].to_str().unwrap().to_string();
+        assert_eq!(
+            csp,
+            "default-src 'none'; style-src 'self'; form-action 'self' http://127.0.0.1:9000 https://accounts.example.test; frame-ancestors 'none'"
+        );
+        assert_eq!(csp_with_form_action(&[]), CONTENT_SECURITY_POLICY);
+        assert_eq!(h["x-frame-options"], "DENY");
     }
 
     #[test]

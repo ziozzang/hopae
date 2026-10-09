@@ -6,18 +6,21 @@
 //! `Decision::Allow` ever renders to a `2xx`.
 
 use crate::config::{Config, CookieNames};
-use crate::crypto::Secret;
 use crate::verify::types::{Decision, VerifyInput};
 
 mod parse;
 mod render;
 #[cfg(test)]
 mod tests;
+#[cfg(any(test, feature = "test-hooks"))]
+mod walk;
 #[cfg(test)]
 mod wire_tests;
 
-pub use parse::{key_matches, parse};
+pub use parse::{authenticate, parse, presented_key};
 pub use render::{decision_label, render};
+#[cfg(any(test, feature = "test-hooks"))]
+pub use walk::assert_only_allow_is_2xx;
 
 /// Path of the verify endpoint on the gateway listener.
 pub const VERIFY_PATH: &str = "/_hopae/verify";
@@ -33,31 +36,16 @@ pub struct GatewayConfig {
     pub portal_url: url::Url,
     /// `cookie.secure`.
     pub secure: bool,
-    /// The value of the variable named by `gateway.caller_key_env`.
-    pub caller_current: Option<Secret>,
-    /// The value of the variable named by `gateway.caller_key_next_env`.
-    pub caller_next: Option<Secret>,
-    /// `gateway.allow_unauthenticated_caller` (development only).
-    pub allow_unauthenticated: bool,
 }
 
 impl GatewayConfig {
-    /// Resolve the caller keys with `lookup` (the environment in production).
-    /// An unset or empty variable yields no key, which accepts nothing.
-    pub fn from_config(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Self {
-        let key = |name: &Option<String>| {
-            name.as_deref()
-                .and_then(&lookup)
-                .filter(|v| !v.is_empty())
-                .map(Secret::new)
-        };
+    /// Resolve the adapter's view of the configuration. The caller keys are
+    /// not here: `app::CallerKeys` is the one place they are held and compared.
+    pub fn from_config(cfg: &Config) -> Self {
         GatewayConfig {
             cookies: cfg.cookie_names(),
             portal_url: portal_origin(&cfg.portal.public_url),
             secure: cfg.cookie.secure,
-            caller_current: key(&cfg.gateway.caller_key_env),
-            caller_next: key(&cfg.gateway.caller_key_next_env),
-            allow_unauthenticated: cfg.gateway.allow_unauthenticated_caller,
         }
     }
 }
@@ -100,4 +88,22 @@ pub struct Rejected {
     pub env: RenderEnv,
     /// Counter to increment for this refusal, when it has one.
     pub metric: Option<&'static str>,
+}
+
+/// Parse a request that is taken to be authenticated already (for tests that
+/// are not about the caller key).
+#[cfg(any(test, feature = "test-hooks"))]
+pub fn parse_for_tests(
+    cfg: &GatewayConfig,
+    h: &axum::http::HeaderMap,
+    request_id: String,
+) -> Result<Parsed, Box<Rejected>> {
+    parse(
+        cfg,
+        h,
+        request_id,
+        crate::verify::types::CallerAuth::Keyed {
+            which: crate::verify::types::KeySlot::Current,
+        },
+    )
 }

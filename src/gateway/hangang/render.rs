@@ -29,7 +29,7 @@ const MAX_PROVIDER: usize = 64;
 const MAX_FACTORS: usize = 256;
 const MAX_TOTAL: usize = 8 * 1024;
 
-const TOO_LARGE: Reason = Reason("header_too_large");
+const TOO_LARGE: Reason = reasons::HEADER_TOO_LARGE;
 
 /// Short labels of a decision for counters: (decision, reason).
 pub fn decision_label(decision: &Decision) -> (&'static str, &'static str) {
@@ -111,11 +111,13 @@ pub fn render(
             bind,
             kind,
             clear_handle,
+            cause,
         } => login(
             transaction.as_ref().map(|t| t.expose()),
             bind,
             kind,
             clear_handle,
+            cause,
             document,
             env,
             cfg,
@@ -152,8 +154,9 @@ pub fn render(
 }
 
 fn internal_error(env: &RenderEnv) -> Response {
+    tracing::error!(request_id = %env.request_id, "internal_error: a decision could not be rendered");
     deny(
-        Reason("internal_error"),
+        reasons::INTERNAL_ERROR,
         DenyKind::Unavailable {
             retry_after: Duration::from_secs(1),
         },
@@ -304,11 +307,13 @@ fn portal_url(cfg: &GatewayConfig, page: &str, txn: &str) -> Option<String> {
     Some(u.to_string())
 }
 
+#[allow(clippy::too_many_arguments)] // the fields of `Decision::Login` plus the request context
 fn login(
     transaction: Option<&str>,
     bind: BindAction,
     kind: LoginKind,
     clear_handle: bool,
+    cause: Option<Reason>,
     document: bool,
     env: &RenderEnv,
     cfg: &GatewayConfig,
@@ -333,8 +338,9 @@ fn login(
             return o.finish();
         }
         // A document navigation without a transaction cannot be sent anywhere.
+        tracing::error!(request_id = %env.request_id, "internal_error: a document navigation had no transaction");
         return deny(
-            Reason("internal_error"),
+            reasons::INTERNAL_ERROR,
             DenyKind::Unavailable {
                 retry_after: Duration::from_secs(1),
             },
@@ -345,7 +351,9 @@ fn login(
     let Some(location) = portal_url(cfg, page, txn) else {
         return internal_error(env);
     };
-    let mut o = Out::new(StatusCode::FOUND, reason.0);
+    // The redirect says why the presented handle was refused (`session_terminated`,
+    // `idle`, `unknown_handle`, ...); without a handle it is `login_required`.
+    let mut o = Out::new(StatusCode::FOUND, cause.unwrap_or(reason).0);
     o.set("location", &location);
     let bind_value = match &bind {
         BindAction::Plant(secret) => Some(secret.expose()),

@@ -7,7 +7,7 @@
 
 use hopae::crypto::{OsRng, Secret, random_token};
 use hopae::event::types::{EventKind, reasons};
-use hopae::session::{LoginEntry, LogoutOutcome, RedeemResult, SwitchChoice, SwitchOutcome};
+use hopae::session::{LoginEntry, LogoutOutcome, SwitchChoice, SwitchOutcome};
 
 use super::s002_oidc_login::kit::*;
 use super::s003_handoff::switch_setup;
@@ -31,7 +31,13 @@ async fn signed_in_everywhere(k: &Kit) -> Signed {
     let t2 = k.start(OTHER, "/", Some(&b2)).await;
     let LoginEntry::Sso { location, .. } = k
         .svc
-        .sso_or_chooser(&k.ctx(), &t2.transaction, Some(&l.portal_handle), false)
+        .sso_or_chooser(
+            &k.ctx(),
+            &t2.transaction,
+            Some(&l.portal_handle),
+            None,
+            false,
+        )
         .await
         .unwrap()
     else {
@@ -65,7 +71,8 @@ fn http_login(h: &Hopae, idp: &MockIdp) -> (Jar, String) {
         .expect("portal path")
         .to_string();
     let jar = Jar::new();
-    let c = h.portal_with(jar.clone());
+    // The browser is at the address the application host saw.
+    let c = h.portal_with(jar.clone()).with_ip("203.0.113.9");
     let page = c.get(&path);
     let authorize = if page.status == 302 {
         page.location().expect("provider redirect").to_string()
@@ -83,25 +90,18 @@ fn http_login(h: &Hopae, idp: &MockIdp) -> (Jar, String) {
         assert_eq!(r.status, 302);
         r.location().expect("provider redirect").to_string()
     };
-    let state = url(&authorize)
-        .query_pairs()
-        .find(|(k, _)| k == "state")
-        .map(|(_, v)| v.to_string())
-        .expect("state");
-    let code = idp.issue_code(&state, "sub-1");
-    let cb = c.get(&format!("/callback/mock?code={code}&state={state}"));
+    let cb = c.get(&idp.follow_authorization(&authorize));
     assert_eq!(cb.status, 302);
     (jar, cb.location().expect("handoff redirect").to_string())
 }
 
 #[tokio::test]
-#[ignore = "needs W1-E (portal listener)"]
 async fn s006_1_confirmation_page() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-two-domains"), &idp, &[]);
     let (jar, _) = http_login(&h, &idp);
     let before = h.hooks.events(Some("session.terminated"), None).len();
-    let r = h.portal_with(jar).get("/logout");
+    let r = h.portal_with(jar).with_ip("203.0.113.9").get("/logout");
     assert_eq!(r.status, 200);
     assert!(
         r.body.contains("csrf"),
@@ -197,6 +197,7 @@ async fn s006_3_next_request_denied_cookie_cleared() {
             &k.ctx(),
             &started.transaction,
             Some(&s.l.portal_handle),
+            None,
             false,
         )
         .await
@@ -238,6 +239,60 @@ async fn s006_4_logout_without_session() {
         k.count("SELECT COUNT(*) FROM sessions WHERE terminated_at IS NOT NULL"),
         0
     );
+}
+
+#[tokio::test]
+async fn extra_s006_4_logout_accepts_an_expired_portal_handle_but_not_a_dead_one() {
+    // R-7: the user asks to leave, which grants nothing, so a handle whose only
+    // defect is idle or absolute expiry still terminates its session; a revoked
+    // handle or a terminated session behaves as "no session".
+    let k = Kit::new().await;
+    let l = k.login().await;
+    k.advance(13 * 3600); // past the default app's idle window
+    assert_eq!(
+        k.svc
+            .logout(&k.ctx(), Some(&l.portal_handle))
+            .await
+            .unwrap(),
+        LogoutOutcome::SignedOut {
+            session_id: l.session_id.clone()
+        }
+    );
+    let ev = k.events(EventKind::SessionTerminated).await;
+    assert_eq!(ev.len(), 1);
+    assert_eq!(ev[0].reason, Some(hopae::event::types::reasons::LOGOUT));
+    assert_eq!(
+        k.count("SELECT COUNT(*) FROM sessions WHERE terminated_at IS NOT NULL"),
+        1
+    );
+    // Again: the session is terminated, so this is "no session" and records nothing.
+    assert_eq!(
+        k.svc
+            .logout(&k.ctx(), Some(&l.portal_handle))
+            .await
+            .unwrap(),
+        LogoutOutcome::NoSession
+    );
+    assert_eq!(k.events(EventKind::SessionTerminated).await.len(), 1);
+
+    // A revoked handle on a live session is also "no session".
+    let k = Kit::new().await;
+    let l = k.login().await;
+    k.store
+        .conn()
+        .execute(
+            "UPDATE session_handles SET revoked_at = ?1, revoked_reason = 'test' WHERE handle_sha256 = ?2",
+            rusqlite::params![k.now().secs(), l.portal_handle.digest().0.to_vec()],
+        )
+        .unwrap();
+    assert_eq!(
+        k.svc
+            .logout(&k.ctx(), Some(&l.portal_handle))
+            .await
+            .unwrap(),
+        LogoutOutcome::NoSession
+    );
+    assert!(k.events(EventKind::SessionTerminated).await.is_empty());
 }
 
 #[tokio::test]
@@ -363,12 +418,11 @@ async fn s006_a1_replayed_logout_harmless() {
 }
 
 #[tokio::test]
-#[ignore = "needs W1-E (portal listener)"]
 async fn s006_a2_csrf_mismatch_rejected() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-two-domains"), &idp, &[]);
     let (jar, _) = http_login(&h, &idp);
-    let c = h.portal_with(jar);
+    let c = h.portal_with(jar).with_ip("203.0.113.9");
     for fields in [vec![], vec![("csrf", "not-a-token-of-this-session")]] {
         let r = c.post_form("/logout", &fields);
         assert_eq!(r.status, 403);
@@ -438,7 +492,6 @@ async fn s006_a3_logout_racing_handoff() {
 }
 
 #[tokio::test]
-#[ignore = "needs W1-E (portal listener)"]
 async fn s006_a4_cross_site_logout_rejected() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-two-domains"), &idp, &[]);

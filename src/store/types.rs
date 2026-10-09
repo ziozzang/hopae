@@ -330,6 +330,10 @@ pub struct CreateSession {
     pub session: SessionRow,
     pub portal_handle: HandleRow,
     pub portal_handle_digest: Digest,
+    /// The login transaction to consume in the same store transaction as the
+    /// session (at `session.created_at`); `Err(Conflict)` and nothing created
+    /// when it was already consumed.
+    pub consume_txn: Option<(Digest, Reason)>,
     pub events: Vec<Event>,
 }
 
@@ -343,6 +347,9 @@ pub struct RedeemRequest {
     pub presented_handle: Option<HandleView>,
     pub new_handle: HandleRow,
     pub now: Timestamp,
+    /// `handoff.max_recoveries`: a rejected known code at this depth is
+    /// recorded as `handoff_recovery_exhausted` (the engine decides the answer).
+    pub max_recoveries: u32,
 }
 
 pub enum RedeemOutcome {

@@ -266,11 +266,49 @@ pub fn random_id(rng: &dyn Rng, prefix: &'static str) -> String {
 
 /// Like [`random_id`] but the first 48 bits are `at` in milliseconds, so ids
 /// sort by time (ADR-0009: event ids are time-ordered).
+///
+/// Within one millisecond ids stay ordered by creation (the ULID monotonic
+/// rule): a second id for the same millisecond is the previous one plus one,
+/// so events built in order sort in order even when the clock does not move
+/// (a test clock, or a burst inside one tick).
 pub fn time_ordered_id(rng: &dyn Rng, prefix: &'static str, at: Timestamp) -> String {
-    let mut b = [0u8; 16];
-    rng.fill(&mut b[6..]);
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, OnceLock};
+    /// Milliseconds remembered; older ones are forgotten (ids are only ever
+    /// generated for the present, so a few recent milliseconds are enough).
+    const KEEP: usize = 64;
+    static LAST: OnceLock<Mutex<BTreeMap<u64, [u8; 10]>>> = OnceLock::new();
     let ms = u64::try_from(at.0).unwrap_or(0) & 0xFFFF_FFFF_FFFF;
+    let mut fresh = [0u8; 10];
+    rng.fill(&mut fresh);
+    let mut last = LAST
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let rand = match last.get(&ms) {
+        Some(prev) => {
+            // Increment the 80-bit value; on the (practically impossible) wrap keep the fresh one.
+            let mut next = *prev;
+            let mut carry = true;
+            for byte in next.iter_mut().rev() {
+                if carry {
+                    let (v, c) = byte.overflowing_add(1);
+                    *byte = v;
+                    carry = c;
+                }
+            }
+            if carry { fresh } else { next }
+        }
+        None => fresh,
+    };
+    last.insert(ms, rand);
+    while last.len() > KEEP {
+        last.pop_first();
+    }
+    drop(last);
+    let mut b = [0u8; 16];
     b[..6].copy_from_slice(&ms.to_be_bytes()[2..]);
+    b[6..].copy_from_slice(&rand);
     format!("{prefix}{}", crockford().encode(&b))
 }
 
@@ -389,6 +427,21 @@ mod tests {
         assert!(!is_well_formed_handle(
             "v2.0123456789012345678901234567890123456789012"
         ));
+    }
+
+    #[test]
+    fn ids_within_one_millisecond_stay_in_creation_order() {
+        let r = SeededRng::new(9);
+        let ids: Vec<String> = (0..200)
+            .map(|_| time_ordered_id(&r, "e_", Timestamp(7_000_000)))
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "unique");
+        // Other threads may interleave ids of the same millisecond, so check
+        // order only: each id sorts after the one before it.
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "monotonic");
     }
 
     #[test]

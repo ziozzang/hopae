@@ -148,6 +148,11 @@ struct JwksState {
     cache: Cache<KeySet>,
     /// The `jwks_uri` the cached set was fetched from.
     uri: Option<url::Url>,
+    /// When the last refetch for an unknown `kid` happened. Only these count
+    /// against [`JWKS_REFETCH_INTERVAL`]: scheduled refreshes do not, so a key
+    /// rotation never fails a login unless an unknown-`kid` refetch already
+    /// happened in the last 60 s (ADR-0010).
+    last_unknown_kid_refetch: Option<Timestamp>,
 }
 
 pub struct OidcProvider {
@@ -179,6 +184,7 @@ impl OidcProvider {
             jwks: Mutex::new(JwksState {
                 cache: Cache::empty(),
                 uri: None,
+                last_unknown_kid_refetch: None,
             }),
             jwks_flight: tokio::sync::Mutex::new(()),
         })
@@ -394,13 +400,15 @@ impl OidcProvider {
         j.cache.valid(self.clock.now())
     }
 
-    async fn keys(&self, disc: &Discovery) -> Result<Arc<KeySet>, ProviderError> {
+    /// The current key set and whether this call fetched it (a set fetched
+    /// for this very token is not refetched for its unknown `kid`).
+    async fn keys(&self, disc: &Discovery) -> Result<(Arc<KeySet>, bool), ProviderError> {
         if let Some(k) = self.cached_keys(disc) {
-            return Ok(k);
+            return Ok((k, false));
         }
         let _flight = self.jwks_flight.lock().await;
         if let Some(k) = self.cached_keys(disc) {
-            return Ok(k);
+            return Ok((k, false));
         }
         {
             let mut j = lock(&self.jwks);
@@ -411,12 +419,12 @@ impl OidcProvider {
                 return Err(ProviderError::ProviderUnavailable);
             }
         }
-        self.fetch_jwks(disc).await
+        self.fetch_jwks(disc).await.map(|k| (k, true))
     }
 
-    /// A token named a `kid` the cached set lacks. Fetch again unless an
-    /// attempt happened within [`JWKS_REFETCH_INTERVAL`] (which includes the
-    /// fetch that produced `seen`). Returns the newest set either way.
+    /// A token named a `kid` the cached set lacks. Fetch again unless a
+    /// refetch for an unknown `kid` happened within [`JWKS_REFETCH_INTERVAL`]
+    /// (scheduled refreshes do not count). Returns the newest set either way.
     async fn keys_after_unknown_kid(
         &self,
         disc: &Discovery,
@@ -430,11 +438,15 @@ impl OidcProvider {
         }
         let now = self.clock.now();
         let allowed = {
-            let j = lock(&self.jwks);
-            j.cache
-                .last_attempt()
+            let mut j = lock(&self.jwks);
+            let ok = j
+                .last_unknown_kid_refetch
                 .is_none_or(|t| now.since(t) >= JWKS_REFETCH_INTERVAL)
-                && j.cache.may_attempt(now)
+                && j.cache.may_attempt(now);
+            if ok {
+                j.last_unknown_kid_refetch = Some(now);
+            }
+            ok
         };
         if !allowed {
             return Ok(seen.clone());
@@ -575,8 +587,7 @@ impl OidcProvider {
         if idtoken::peek_issuer(token).is_some_and(|i| i != disc.issuer) {
             return Err(ProviderError::InvalidIssuer);
         }
-        let mut keys = self.keys(disc).await?;
-        let mut refetched = false;
+        let (mut keys, mut refetched) = self.keys(disc).await?;
         let payload = loop {
             match keys.select(header.alg, header.kid.as_deref()) {
                 Selection::Candidates(cands) => {
@@ -773,6 +784,22 @@ impl Provider for OidcProvider {
                 trust_email: self.s.trust_email,
             },
         ))
+    }
+
+    async fn ensure_ready(&self) -> ProviderHealth {
+        let h = self.health().await;
+        if h == ProviderHealth::Ok || h == ProviderHealth::Disabled {
+            return h;
+        }
+        // Waits for an in-flight fetch, or starts one if the backoff allows.
+        let _ = tokio::time::timeout(Duration::from_secs(2), self.refresh_discovery()).await;
+        self.health().await
+    }
+
+    fn authorization_origin(&self) -> Option<url::Origin> {
+        let disc = lock(&self.disc).valid(self.clock.now())?;
+        let o = disc.authorization_endpoint.origin();
+        o.is_tuple().then_some(o)
     }
 
     async fn health(&self) -> ProviderHealth {

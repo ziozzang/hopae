@@ -145,6 +145,10 @@ pub struct Gateway {
     /// Read-only gateway credential, used only by `hopae --check`.
     #[serde(default)]
     pub readonly_token_env: Option<String>,
+    /// Base URL of the gateway's admin API, used only by `hopae --check`
+    /// (with `readonly_token_env`) to warn about application hosts without a route.
+    #[serde(default)]
+    pub admin_url: Option<String>,
 }
 
 fn default_budget_ms() -> u64 {
@@ -700,6 +704,18 @@ impl Config {
         {
             errs.push("gateway.readonly_token_env must be an environment variable name ([A-Za-z_][A-Za-z0-9_]*)".to_string());
         }
+        if let Some(u) = &g.admin_url {
+            match url::Url::parse(u) {
+                Ok(p)
+                    if matches!(p.scheme(), "http" | "https")
+                        && p.host_str().is_some()
+                        && p.username().is_empty()
+                        && p.password().is_none() => {}
+                _ => errs.push(
+                    "gateway.admin_url must be an http(s) URL without credentials".to_string(),
+                ),
+            }
+        }
         if !(1..=10_000).contains(&g.verify_budget_ms) {
             errs.push("gateway.verify_budget_ms must be between 1 and 10000".to_string());
         }
@@ -961,6 +977,10 @@ impl Config {
     pub fn verify_limits(&self) -> VerifyLimits {
         VerifyLimits {
             max_recoveries: self.handoff.max_recoveries,
+            txn_per_ip_per_minute: self.txn.per_ip_per_minute,
+            txn_max_rows: self.txn.max_rows,
+            handoff_failures_per_minute: self.handoff.per_ip_failures_per_minute,
+            txn_lifetime: Duration::from_secs(600),
             budget: Duration::from_millis(self.gateway.verify_budget_ms),
             session: self.session_policy(),
             touch_coalesce: Duration::from_secs(30),

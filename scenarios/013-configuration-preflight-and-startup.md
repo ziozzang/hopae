@@ -58,7 +58,7 @@ unsafe configuration.
 
 - Given: a store at schema version 1 (fixture file); separately, a store whose `providers` row `google` is `enabled = false, managed_by = api` while the configuration file lists `google` as enabled; separately, a store where `google` was **removed** through the management API (tombstone row with `deleted_at` set) while the file still lists it.
 - When: `run`, then a callback for `google`.
-- Then: migrated to the current version inside a transaction; `meta.schema_version` updated; a backup copy `hopae.sqlite.bak-v1` is written first for SQLite. For the disabled case: `google` stays disabled after start, the log says `provider google: database authoritative (managed_by=api); file entry ignored`, callbacks answer `provider_disabled`. For the removed case: the tombstone is kept, the provider is absent from the chooser, the log says `provider google: removed at run time; file entry ignored`, and the callback answers `provider_disabled`. `hopae providers import --force google` is the only way to reassert the file in either case and it logs an `admin.*` event.
+- Then: migrated to the current version inside a transaction; `meta.schema_version` updated; a backup copy `hopae.db.bak-v1` is written first for SQLite. For the disabled case: `google` stays disabled after start, the log says `provider google: database authoritative (managed_by=api); file entry ignored`, callbacks answer `provider_disabled`. For the removed case: the tombstone is kept, the provider is absent from the chooser, the log says `provider google: removed at run time; file entry ignored`, and the callback answers `provider_disabled`. `hopae providers import --force google` is the only way to reassert the file in either case and it logs an `admin.*` event.
 
 ### S013-7 Reload is not supported in M1; caller-key rotation uses restarts without an outage
 
@@ -95,7 +95,7 @@ unsafe configuration.
 
 - Given: a 50 MiB configuration file.
 - When: `--check`.
-- Then: exit 2 `configuration too large (limit 4 MiB)` without reading it fully.
+- Then: exit 2 `configuration too large (limit 1 MiB)` without reading it fully.
 
 ### S013-A4 Secrets are not read from the configuration file
 

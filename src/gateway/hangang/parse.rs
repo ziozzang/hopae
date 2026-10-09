@@ -6,14 +6,14 @@ use std::net::IpAddr;
 use axum::http::{HeaderMap, HeaderValue};
 
 use super::{CONTRACT_VERSION, GatewayConfig, Parsed, Rejected, RenderEnv};
-use crate::crypto::{Secret, ct_eq, is_well_formed_bind, is_well_formed_handle};
+use crate::app::{CallerKeys, KeyVerdict};
+use crate::crypto::{Secret, is_well_formed_bind, is_well_formed_handle};
 use crate::event::types::{Reason, reasons};
 use crate::gateway::{canonical, recognition};
 use crate::policy::types::Host;
+use crate::telemetry::counters;
 use crate::verify::types::Decision;
-use crate::verify::types::{
-    CallerAuth, DenyKind, Handoff, KeySlot, Navigation, Scheme, VerifyInput,
-};
+use crate::verify::types::{CallerAuth, DenyKind, Handoff, Navigation, Scheme, VerifyInput};
 
 const H_KEY: &str = "x-hopae-gateway-key";
 const H_CONTRACT: &str = "x-hopae-contract";
@@ -34,13 +34,6 @@ const MAX_COOKIE: usize = 8 * 1024;
 const MAX_UA: usize = 1024;
 /// `x-hangang-route-id` bytes kept.
 const MAX_ROUTE: usize = 128;
-
-const HEADER_TOO_LARGE: Reason = Reason("header_too_large");
-
-/// Constant-time comparison of a presented key with a configured one.
-pub fn key_matches(configured: &Secret, presented: &[u8]) -> bool {
-    ct_eq(configured.expose().as_bytes(), presented)
-}
 
 fn refuse(
     request_id: &str,
@@ -70,34 +63,35 @@ fn single<'a>(h: &'a HeaderMap, name: &str) -> Result<Option<&'a HeaderValue>, (
     Ok(first)
 }
 
-fn match_caller(cfg: &GatewayConfig, h: &HeaderMap) -> Option<CallerAuth> {
-    if cfg.allow_unauthenticated {
-        return Some(CallerAuth::Unauthenticated);
-    }
+/// The caller key the request presents: `None` when the header is absent or
+/// repeated (a repeated key header is never trusted).
+pub fn presented_key(h: &HeaderMap) -> Option<&[u8]> {
     let mut values = h.get_all(H_KEY).iter();
     let first = values.next()?;
-    let duplicated = values.next().is_some();
-    // Both comparisons always run, so the time does not depend on which key matched.
-    let current = cfg
-        .caller_current
-        .as_ref()
-        .is_some_and(|k| key_matches(k, first.as_bytes()));
-    let next = cfg
-        .caller_next
-        .as_ref()
-        .is_some_and(|k| key_matches(k, first.as_bytes()));
-    if duplicated {
-        None
-    } else if current {
-        Some(CallerAuth::Keyed {
-            which: KeySlot::Current,
-        })
-    } else if next {
-        Some(CallerAuth::Keyed {
-            which: KeySlot::Next,
-        })
-    } else {
-        None
+    if values.next().is_some() {
+        return None;
+    }
+    Some(first.as_bytes())
+}
+
+/// Authenticate the caller before anything else is read or any resource is
+/// taken (the concurrency permit included). `keys` compares in constant time
+/// and counts the verdict.
+pub fn authenticate(
+    keys: &CallerKeys,
+    h: &HeaderMap,
+    request_id: &str,
+) -> Result<CallerAuth, Box<Rejected>> {
+    match keys.check(presented_key(h)) {
+        KeyVerdict::Accepted(which) => Ok(CallerAuth::Keyed { which }),
+        KeyVerdict::NotRequired => Ok(CallerAuth::Unauthenticated),
+        KeyVerdict::Rejected => Err(refuse(
+            request_id,
+            reasons::CALLER_UNAUTHORIZED,
+            DenyKind::Forbidden,
+            None,
+            None,
+        )),
     }
 }
 
@@ -240,12 +234,13 @@ fn truncate_utf8(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-/// Parse a verify request. `Err` carries a ready denial; nothing but the
-/// caller key has been trusted or looked up by then.
+/// Parse a verify request from a caller that [`authenticate`] accepted. `Err`
+/// carries a ready denial; nothing has been looked up by then.
 pub fn parse(
     cfg: &GatewayConfig,
     h: &HeaderMap,
     request_id: String,
+    caller: CallerAuth,
 ) -> Result<Parsed, Box<Rejected>> {
     let violation = |detail: &'static str| {
         refuse(
@@ -257,16 +252,7 @@ pub fn parse(
         )
     };
 
-    // 1. Caller key, before any other header is read.
-    let Some(caller) = match_caller(cfg, h) else {
-        return Err(refuse(
-            &request_id,
-            reasons::CALLER_UNAUTHORIZED,
-            DenyKind::Forbidden,
-            None,
-            Some("hopae_verify_unauthorized_total"),
-        ));
-    };
+    // 1. The caller key was checked by `authenticate`, before any other header was read.
 
     // 2. Contract version.
     let contract = match parse_contract(h) {
@@ -373,7 +359,7 @@ pub fn parse(
                     reasons::CANONICAL_PATH_MISMATCH,
                     DenyKind::Forbidden,
                     None,
-                    Some("hopae_verify_canonical_mismatch_total"),
+                    Some(counters::VERIFY_CANONICAL_MISMATCH_TOTAL),
                 ));
             }
         }
@@ -394,7 +380,7 @@ pub fn parse(
     let cookies = read_cookies(cfg, h).map_err(|()| {
         refuse(
             &request_id,
-            HEADER_TOO_LARGE,
+            reasons::HEADER_TOO_LARGE,
             DenyKind::ContractViolation,
             Some("cookie"),
             None,
@@ -417,7 +403,9 @@ pub fn parse(
         detail: None,
     };
     let input = VerifyInput {
-        original_url,
+        // The core never looks at the query: it gets the URL with every
+        // handoff pair removed (ADR-0013); `env` keeps the URL as received.
+        original_url: recognition::clean_target(&original_url),
         canonical_path,
         client_ip,
         host,

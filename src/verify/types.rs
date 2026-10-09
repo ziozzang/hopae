@@ -132,6 +132,9 @@ pub enum Decision {
         bind: BindAction,
         kind: LoginKind, /* Login|StepUp */
         clear_handle: bool,
+        /// Why a presented handle was refused (`unknown_handle`, `idle`, ...);
+        /// `None` when no handle was presented. The `verify.denied` reason.
+        cause: Option<Reason>,
     },
     Handoff {
         location: url::Url,
@@ -156,6 +159,14 @@ pub enum Decision {
 pub struct VerifyLimits {
     /// `handoff.max_recoveries`.
     pub max_recoveries: u32,
+    /// `txn.per_ip_per_minute`.
+    pub txn_per_ip_per_minute: u32,
+    /// `txn.max_rows`.
+    pub txn_max_rows: u32,
+    /// `handoff.per_ip_failures_per_minute`.
+    pub handoff_failures_per_minute: u32,
+    /// Lifetime of a login transaction: the ADR-0004 constant (600 s), no config key.
+    pub txn_lifetime: Duration,
     /// `gateway.verify_budget_ms`.
     pub budget: Duration,
     /// `session.idle` / `session.absolute`.
@@ -170,6 +181,10 @@ impl Default for VerifyLimits {
     fn default() -> Self {
         VerifyLimits {
             max_recoveries: 3,
+            txn_per_ip_per_minute: 30,
+            txn_max_rows: 1000,
+            handoff_failures_per_minute: 10,
+            txn_lifetime: Duration::from_secs(600),
             budget: Duration::from_millis(400),
             session: SessionPolicy::default(),
             touch_coalesce: Duration::from_secs(30),
@@ -189,6 +204,11 @@ pub struct VerifyContext {
     pub limits: VerifyLimits,
     /// Real-time deadline for this request's store calls (`None` = unbounded).
     pub deadline: Option<tokio::time::Instant>,
+    /// Counts required events as they are built (and tells the prune
+    /// trigger); `None` in core unit tests.
+    pub emitter: Option<crate::event::bus::Emitter>,
+    /// For required events with no state change (a rate-limited redemption).
+    pub events: Option<Arc<dyn crate::store::Events>>,
 }
 
 impl VerifyContext {
@@ -208,7 +228,21 @@ impl VerifyContext {
             snapshot,
             limits,
             deadline: None,
+            emitter: None,
+            events: None,
         }
+    }
+
+    /// The same context counting its required events through `emitter` and
+    /// recording stateless ones through `events`.
+    pub fn with_events(
+        mut self,
+        emitter: crate::event::bus::Emitter,
+        events: Arc<dyn crate::store::Events>,
+    ) -> Self {
+        self.emitter = Some(emitter);
+        self.events = Some(events);
+        self
     }
 
     /// The same context with the request's budget deadline set to now + budget.

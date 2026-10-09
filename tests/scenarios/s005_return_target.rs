@@ -32,7 +32,7 @@ async fn s005_1_valid_target_round_trips_unchanged() {
     // The handoff target is the stored one plus the parameter, and removing
     // the parameter again gives the stored target back byte for byte.
     let with_param = format!("{stored}&_hopae_handoff=K");
-    let clean = hopae::verify::handoff::clean_target(&url::Url::parse(&with_param).unwrap());
+    let clean = hopae::gateway::recognition::clean_target(&url::Url::parse(&with_param).unwrap());
     assert_eq!(clean.as_str(), stored);
 }
 
@@ -99,7 +99,6 @@ async fn s005_3_only_exact_hosts_are_destinations() {
 }
 
 #[test]
-#[ignore = "needs W1-B, W1-D and W1-E (portal parameter handling)"]
 fn s005_a1_portal_parameters_cannot_alter_target() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
@@ -138,7 +137,6 @@ fn s005_a2_pathological_urls_bounded() {
 }
 
 #[test]
-#[ignore = "needs W1-C, W1-D and W1-E (provider callback)"]
 fn s005_a3_provider_redirect_ignored() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
@@ -150,22 +148,16 @@ fn s005_a3_provider_redirect_ignored() {
         .nth(1)
         .unwrap()
         .to_string();
-    let go = h.portal().get(&format!("/login?txn={txn}"));
+    // One browser: the portal binding cookie planted by /login must come back on the callback.
+    let portal = h.portal();
+    let go = portal.get(&format!("/login?txn={txn}"));
     // Single provider: straight to the provider; the flow is then completed at
     // the mock and the callback carries an extra `next` parameter.
     let authorize = go.location().expect("provider redirect").to_string();
     assert!(authorize.starts_with(idp.issuer.as_str()));
-    let state = url::Url::parse(&authorize)
-        .unwrap()
-        .query_pairs()
-        .find(|(k, _)| k == "state")
-        .unwrap()
-        .1
-        .to_string();
-    let code = idp.issue_code(&state, "sub-1");
-    let cb = h.portal().get(&format!(
-        "/callback/mock?code={code}&state={state}&next=https://evil.example.org/"
-    ));
+    // The browser follows the provider; the callback then carries an extra `next` parameter.
+    let callback = idp.follow_authorization(&authorize);
+    let cb = portal.get(&format!("{callback}&next=https://evil.example.org/"));
     let loc = cb.location().expect("handoff redirect");
     assert!(
         loc.starts_with("https://app.example.test/a?_hopae_handoff="),

@@ -11,7 +11,7 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use url::Url;
+use url::{Origin, Url};
 
 use crate::crypto::Secret;
 use crate::event::types::Reason;
@@ -89,12 +89,18 @@ pub enum LoginVisit {
     /// Show the chooser (several providers, or one that is unavailable).
     Chooser {
         providers: Vec<ProviderChoice>,
+        /// Origin of every enabled provider's authorization endpoint, from
+        /// discovery: the page's CSP `form-action` lists them (R-5), because
+        /// the browser enforces it on the redirect that follows the POST.
+        form_origins: Vec<Origin>,
     },
     /// Immediate redirect: single enabled provider, or single sign-on from a valid portal handle.
     Redirect(Redirect),
     /// `portal.sso_confirm_new_host`: ask once before the first handoff to `host`.
     ConfirmNewHost {
         host: String,
+        /// Origin of the transaction's return target (`form-action`, R-5).
+        form_origin: Origin,
     },
     Failed(Failure),
 }
@@ -113,6 +119,8 @@ pub enum CallbackOutcome {
     /// `handoff.max_recoveries` is reached.
     RetryOffer {
         can_retry: bool,
+        /// Origin of the interrupted transaction's provider (`form-action`, R-5).
+        form_origin: Option<Origin>,
     },
     Failed(Failure),
 }
@@ -123,6 +131,8 @@ pub struct SwitchView {
     pub host: String,
     pub current_account: String,
     pub incoming_account: String,
+    /// Origin of the transaction's return target (`form-action`, R-5).
+    pub form_origin: Origin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

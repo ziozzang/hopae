@@ -21,14 +21,6 @@ use crate::session::types::Generations;
 use crate::store::types::{HandleView, IdentitySnapshot, NewTransaction, TxnPurpose, UserStatus};
 use crate::store::{StoreError, sqlite::with_deadline};
 
-/// Lifetime of a login transaction.
-pub(super) const TXN_TTL: Duration = Duration::from_secs(600);
-/// `txn.per_ip_per_minute` default (the configured value is not in `VerifyLimits`; see the W1-A report).
-pub(super) const TXN_PER_IP_PER_MINUTE: u32 = 30;
-/// `txn.max_rows` default.
-pub(super) const TXN_MAX_ROWS: u32 = 1000;
-/// `handoff.per_ip_failures_per_minute` default.
-pub(super) const HANDOFF_FAILURES_PER_MINUTE: u32 = 10;
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 const UNAVAILABLE_RETRY: Duration = Duration::from_secs(1);
 /// Most handles remembered for `last_seen_at` coalescing before old entries are dropped.
@@ -44,6 +36,10 @@ pub(super) struct Cx<'a> {
     pub snapshot: Arc<ConfigSnapshot>,
     pub now: Timestamp,
     pub deadline: Instant,
+    /// Why a presented handle was refused, once known; whatever the request
+    /// ends up being answered (a login `302`, or a rate-limit denial), this
+    /// is the primary reason it is recorded under (`verify.denied`).
+    pub cause: std::sync::Mutex<Option<Reason>>,
 }
 
 impl Cx<'_> {
@@ -72,16 +68,19 @@ impl Cx<'_> {
 
     /// A required event for this request, ready for `.reason(..)`/`.attr(..)`.
     pub fn event(&self, kind: EventKind, outcome: Outcome, app: &AppPolicy) -> EventBuilder {
-        EventBuilder::new(
-            &*self.ctx.clock,
-            &*self.ctx.rng,
-            kind,
-            outcome,
-            self.input.request_id.clone(),
-        )
-        .app(&app.app_id)
-        .ip(self.input.client_ip)
-        .ua(self.input.user_agent.as_deref())
+        let b = match &self.ctx.emitter {
+            Some(e) => e.counted(kind, outcome, self.input.request_id.clone()),
+            None => EventBuilder::new(
+                &*self.ctx.clock,
+                &*self.ctx.rng,
+                kind,
+                outcome,
+                self.input.request_id.clone(),
+            ),
+        };
+        b.app(&app.app_id)
+            .ip(self.input.client_ip)
+            .ua(self.input.user_agent.as_deref())
     }
 
     fn view_event(
@@ -164,7 +163,7 @@ impl Cx<'_> {
     }
 }
 
-pub(super) async fn run(ctx: &VerifyContext, input: VerifyInput) -> Decision {
+pub(super) async fn run(ctx: &VerifyContext, input: VerifyInput) -> (Decision, Option<Reason>) {
     let deadline = ctx
         .deadline
         .unwrap_or_else(|| Instant::now() + ctx.limits.budget);
@@ -174,13 +173,14 @@ pub(super) async fn run(ctx: &VerifyContext, input: VerifyInput) -> Decision {
         snapshot: ctx.snapshot.load_full(),
         now: ctx.clock.now(),
         deadline,
+        cause: std::sync::Mutex::new(None),
     };
     let work = with_deadline(deadline, async {
         match flow(&cx).await {
             Ok(d) | Err(d) => d,
         }
     });
-    match tokio::time::timeout_at(deadline, work).await {
+    let decision = match tokio::time::timeout_at(deadline, work).await {
         Ok(d) => d,
         Err(_) => cx.deny(
             reasons::BUDGET_EXCEEDED,
@@ -188,7 +188,9 @@ pub(super) async fn run(ctx: &VerifyContext, input: VerifyInput) -> Decision {
                 retry_after: UNAVAILABLE_RETRY,
             },
         ),
-    }
+    };
+    let cause = *cx.cause.lock().unwrap_or_else(|p| p.into_inner());
+    (decision, cause)
 }
 
 async fn flow(cx: &Cx<'_>) -> Flow {
@@ -227,6 +229,19 @@ async fn flow(cx: &Cx<'_>) -> Flow {
         (Handoff::None, _) => {}
         (Handoff::Code(code), true) => return handoff::redeem(cx, app, &target, code).await,
         (Handoff::Ambiguous, true) => {
+            // Refused before any redemption is attempted; the code (if any)
+            // stays unconsumed. Recorded as `handoff.rejected` (required, its
+            // own transaction: nothing else changes).
+            if let Some(events) = &ctx.events {
+                let ev = cx
+                    .event(EventKind::HandoffRejected, Outcome::Failure, app)
+                    .attr("host", input.host.as_str())
+                    .reason(reasons::HANDOFF_AMBIGUOUS)
+                    .build();
+                if let Err(e) = events.append_required(vec![ev]).await {
+                    tracing::warn!(error = %e, "handoff.rejected (ambiguous) could not be recorded");
+                }
+            }
             return Err(cx.deny(reasons::HANDOFF_AMBIGUOUS, DenyKind::Forbidden));
         }
         (_, false) => {
@@ -240,7 +255,11 @@ async fn flow(cx: &Cx<'_>) -> Flow {
         .as_ref()
         .filter(|c| is_well_formed_handle(c.expose()))
     else {
-        return login(cx, app, &target, input.cookie_handle.is_some(), 0).await;
+        let cause = input
+            .cookie_handle
+            .is_some()
+            .then_some(reasons::MALFORMED_HANDLE);
+        return login(cx, app, &target, cause, 0).await;
     };
     let digest = cookie.digest();
     let Some(view) = ctx
@@ -249,10 +268,13 @@ async fn flow(cx: &Cx<'_>) -> Flow {
         .await
         .map_err(|e| cx.store_err(e))?
     else {
-        return login(cx, app, &target, true, 0).await;
+        return login(cx, app, &target, Some(reasons::UNKNOWN_HANDLE), 0).await;
     };
-    if view.handle.revoked_at.is_some() || view.session.terminated_at.is_some() {
-        return login(cx, app, &target, true, 0).await;
+    if view.session.terminated_at.is_some() {
+        return login(cx, app, &target, Some(reasons::SESSION_TERMINATED), 0).await;
+    }
+    if view.handle.revoked_at.is_some() {
+        return login(cx, app, &target, Some(reasons::UNKNOWN_HANDLE), 0).await;
     }
 
     // Lifetimes: session timers first, then the handle's.
@@ -274,11 +296,11 @@ async fn flow(cx: &Cx<'_>) -> Flow {
         }
         LifetimeVerdict::HandleExpired(reason) => {
             revoke_handle(cx, app, &view, reason, vec![]).await?;
-            return login(cx, app, &target, true, 0).await;
+            return login(cx, app, &target, Some(reason), 0).await;
         }
         LifetimeVerdict::SessionExpired(reason) => {
             terminate(cx, app, &view, reason, vec![]).await?;
-            return login(cx, app, &target, true, 0).await;
+            return login(cx, app, &target, Some(reason), 0).await;
         }
     };
 
@@ -293,20 +315,20 @@ async fn flow(cx: &Cx<'_>) -> Flow {
                 revoke_handle(cx, app, &view, signal.reason(), attrs).await?;
             }
         }
-        return login(cx, app, &target, true, 0).await;
+        return login(cx, app, &target, Some(signal.reason()), 0).await;
     }
 
     // User status and authorization version, read with the handle.
     if view.user.status == UserStatus::Disabled {
         terminate(cx, app, &view, reasons::USER_DISABLED, vec![]).await?;
-        return login(cx, app, &target, true, 0).await;
+        return login(cx, app, &target, Some(reasons::USER_DISABLED), 0).await;
     }
     let mut snapshot = view.session.snapshot.clone();
     if view.user.authz_version != view.session.authz_version {
         match app.on_authz_change {
             AuthzChange::Terminate => {
                 terminate(cx, app, &view, reasons::AUTHZ_CHANGE, vec![]).await?;
-                return login(cx, app, &target, true, 0).await;
+                return login(cx, app, &target, Some(reasons::AUTHZ_CHANGE), 0).await;
             }
             AuthzChange::Refresh => {
                 let Some(user) = ctx
@@ -316,7 +338,7 @@ async fn flow(cx: &Cx<'_>) -> Flow {
                     .map_err(|e| cx.store_err(e))?
                 else {
                     terminate(cx, app, &view, reasons::USER_DISABLED, vec![]).await?;
-                    return login(cx, app, &target, true, 0).await;
+                    return login(cx, app, &target, Some(reasons::USER_DISABLED), 0).await;
                 };
                 snapshot = IdentitySnapshot {
                     email: user.primary_email,
@@ -498,15 +520,18 @@ pub(super) async fn login(
     cx: &Cx<'_>,
     app: &AppPolicy,
     target: &url::Url,
-    clear_handle: bool,
+    cause: Option<Reason>,
     recovery_depth: u32,
 ) -> Flow {
+    let clear_handle = cause.is_some();
+    *cx.cause.lock().unwrap_or_else(|p| p.into_inner()) = cause;
     if !cx.document() {
         return Ok(Decision::Login {
             transaction: None,
             bind: BindAction::Keep,
             kind: LoginKind::Login,
             clear_handle,
+            cause,
         });
     }
     let (ctx, input) = (cx.ctx, cx.input);
@@ -515,7 +540,7 @@ pub(super) async fn login(
         .count_transactions_since(input.client_ip, cx.now.sub(RATE_WINDOW))
         .await
         .map_err(|e| cx.store_err(e))?;
-    if recent >= TXN_PER_IP_PER_MINUTE {
+    if recent >= ctx.limits.txn_per_ip_per_minute {
         return Err(cx.deny(
             reasons::TXN_RATE_LIMITED,
             DenyKind::RateLimited {
@@ -528,9 +553,9 @@ pub(super) async fn login(
     let row = NewTransaction {
         txn_sha256: txn.digest(),
         created_at: cx.now,
-        expires_at: cx.now.add(TXN_TTL),
+        expires_at: cx.now.add(ctx.limits.txn_lifetime),
         app_id: app.app_id.clone(),
-        return_target: handoff::clean_target(target),
+        return_target: target.clone(),
         bind_sha256: Some(bind_digest),
         portal_bind_sha256: None,
         retry_bind_sha256: None,
@@ -556,14 +581,29 @@ pub(super) async fn login(
         .await
         .map_err(|e| cx.store_err(e))?;
     // Keep the table bounded; best effort, never on the decision's path.
-    let (sessions, now) = (ctx.sessions.clone(), cx.now);
+    let (sessions, now, max_rows) = (ctx.sessions.clone(), cx.now, ctx.limits.txn_max_rows);
+    let (emitter, request_id, app_id) = (
+        ctx.emitter.clone(),
+        input.request_id.clone(),
+        app.app_id.clone(),
+    );
     tokio::spawn(async move {
-        let _ = sessions.evict_transactions(TXN_MAX_ROWS, now).await;
+        if let Ok(evicted) = sessions.evict_transactions(max_rows, now).await
+            && evicted > 0
+            && let Some(emitter) = emitter
+        {
+            emitter.diagnostic(EventKind::TxnEvicted, Outcome::Info, request_id, |b| {
+                b.app(&app_id)
+                    .reason(reasons::TXN_EVICTED)
+                    .attr("count", evicted)
+            });
+        }
     });
     Ok(Decision::Login {
         transaction: Some(txn),
         bind,
         kind: LoginKind::Login,
         clear_handle,
+        cause,
     })
 }

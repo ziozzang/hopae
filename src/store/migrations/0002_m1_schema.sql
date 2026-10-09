@@ -124,6 +124,7 @@ CREATE TABLE login_txns (
     pending_identity          TEXT,
     recovery_depth            INTEGER NOT NULL DEFAULT 0,
     retry_bind_sha256         BLOB,
+    retry_used_at             INTEGER,
     consumed_at               INTEGER,
     consumed_reason           TEXT
 ) STRICT;

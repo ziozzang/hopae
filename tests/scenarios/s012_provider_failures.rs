@@ -456,54 +456,6 @@ fn unsigned(header: &Value, claims: &Value) -> String {
     )
 }
 
-// ---- log capture ------------------------------------------------------------
-
-#[derive(Clone, Default)]
-struct Captured(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for Captured {
-    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(b);
-        Ok(b.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
-    type Writer = Captured;
-    fn make_writer(&'a self) -> Captured {
-        self.clone()
-    }
-}
-
-impl Captured {
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-    }
-}
-
-/// One process-wide capture: scoped subscribers race with tracing's callsite
-/// interest cache when tests run in parallel, a global one does not. Tests
-/// filter the shared buffer by their own unique provider id.
-fn capture_logs() -> Captured {
-    static CAP: OnceLock<Captured> = OnceLock::new();
-    CAP.get_or_init(|| {
-        let cap = Captured::default();
-        let sub = tracing_subscriber::fmt()
-            .with_writer(cap.clone())
-            .with_max_level(tracing::Level::TRACE)
-            .with_ansi(false)
-            .finish();
-        // If another test module already installed a global subscriber this
-        // capture stays empty and the assertions below say so.
-        let _ = tracing::subscriber::set_global_default(sub);
-        cap
-    })
-    .clone()
-}
-
 // ===========================================================================
 // S012 main flow
 // ===========================================================================
@@ -559,7 +511,6 @@ async fn s012_1_discovery_down_at_start_degraded() {
 }
 
 #[tokio::test]
-#[ignore = "needs W1-E (/login, /healthz) and W1-F (provider wiring at start)"]
 async fn provider_s012_1_portal_shows_provider_unavailable() {
     // Spawn the binary with `discovery_down`: the process starts, /healthz
     // reports providers.mock = degraded and /login lists the provider as
@@ -568,9 +519,19 @@ async fn provider_s012_1_portal_shows_provider_unavailable() {
     let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
     let body = get(h.portal, "/healthz").body;
     assert!(body.contains("degraded"), "{body}");
-    let login = h.portal().get("/login?txn=none");
+    // Verify keeps answering and starts a login; /login for that transaction
+    // lists the provider as temporarily unavailable (no redirect to it).
+    let r = h.verify(VerifyRequest::document("https://app.example.test/admin/x").ip("203.0.113.9"));
+    assert_eq!(r.status, 302, "{r:?}");
+    let path = r.location().expect("login redirect").to_string();
+    let path = path.split("auth.example.test").nth(1).expect("portal path");
+    let login = h.portal().with_ip("203.0.113.9").get(path);
+    assert_eq!(login.status, 200, "{login:?}");
     assert!(
-        login.body.to_lowercase().contains("unavailable"),
+        login
+            .body
+            .to_lowercase()
+            .contains("temporarily unavailable"),
         "{}",
         login.body
     );
@@ -625,33 +586,36 @@ async fn s012_4_key_rotation_handled() {
     assert!(rig.login().await.is_ok(), "first login fetches the JWKS");
     assert_eq!(rig.idp.jwks_fetches(), 1);
     // Token signed by the new key, cached set has only the old one: the
-    // refetch is rate limited to once per 60 s, so right away it is refused.
-    let e = err_of(rig.login().await);
-    assert!(matches!(e, ProviderError::InvalidSignature), "{e:?}");
-    assert_eq!(rig.idp.jwks_fetches(), 1, "no refetch inside 60 s");
-    rig.advance(Duration::from_secs(61));
-    let id = rig
-        .login()
-        .await
-        .expect("refetch on unknown kid after 60 s");
+    // unknown `kid` triggers one refetch at once (no unknown-kid refetch has
+    // happened yet), so a rotation never fails the login (ADR-0010).
+    let id = rig.login().await.expect("refetch on unknown kid");
     assert_eq!(id.subject, "sub-1");
     assert_eq!(rig.idp.jwks_fetches(), 2, "exactly one refetch");
     // The new set is cached: further logins do not fetch.
     assert!(rig.login().await.is_ok());
     assert_eq!(rig.idp.jwks_fetches(), 2);
 
-    // A kid that is never published: invalid_signature, one fetch per 60 s.
+    // A kid that is never published: the login that fills the cache already
+    // has a fresh set; the next unknown kid is refetched once, then not again
+    // inside 60 s (rate limited to once per 60 s, unknown-kid refetches only).
     let rig = Rig::new("jwks_unknown_kid");
     let e = err_of(rig.login().await);
     assert!(matches!(e, ProviderError::InvalidSignature), "{e:?}");
-    assert_eq!(rig.idp.jwks_fetches(), 1);
+    assert_eq!(
+        rig.idp.jwks_fetches(),
+        1,
+        "the fetch of this request is fresh"
+    );
     let e = err_of(rig.login().await);
     assert!(matches!(e, ProviderError::InvalidSignature), "{e:?}");
-    assert_eq!(rig.idp.jwks_fetches(), 1, "no second refetch within 60 s");
+    assert_eq!(rig.idp.jwks_fetches(), 2, "one refetch on the unknown kid");
+    let e = err_of(rig.login().await);
+    assert!(matches!(e, ProviderError::InvalidSignature), "{e:?}");
+    assert_eq!(rig.idp.jwks_fetches(), 2, "no second refetch within 60 s");
     rig.advance(Duration::from_secs(61));
     let e = err_of(rig.login().await);
     assert!(matches!(e, ProviderError::InvalidSignature), "{e:?}");
-    assert_eq!(rig.idp.jwks_fetches(), 2, "one refetch per 60 s window");
+    assert_eq!(rig.idp.jwks_fetches(), 3, "one refetch per 60 s window");
 }
 
 #[tokio::test]
@@ -711,7 +675,6 @@ async fn s012_6_userinfo_failure_no_session() {
 }
 
 #[tokio::test]
-#[ignore = "needs W1-A+W1-B+W1-D+W1-E: a real session and a verify call through the binary"]
 async fn s012_7_sessions_unaffected_by_provider() {
     // Complete a login against the default profile, switch the mock to a
     // failing profile, then verify with the session's handle: 200, and the
@@ -733,44 +696,84 @@ async fn s012_7_sessions_unaffected_by_provider() {
 // S012 abuse cases
 // ===========================================================================
 
-#[tokio::test]
-async fn s012_a1_malformed_token_response_safe() {
-    let cap = capture_logs();
-    let rig = Rig::with("token_malformed", "a1logprov", json!({}), |_| {});
-    let (txn, cb) = rig.authorize().await;
+/// One login up to and including the portal callback; returns the callback's
+/// answer. Drives the real binary: verify, the portal, the provider, the callback.
+fn callback_of_new_login(h: &Hopae, idp: &MockIdp, ip: &str) -> Response {
+    let r = h.verify(VerifyRequest::document("https://app.example.test/admin/x").ip(ip));
+    assert_eq!(r.status, 302, "{r:?}");
+    let loc = r.location().expect("login redirect").to_string();
+    let path = loc.split("auth.example.test").nth(1).expect("portal path");
+    let portal = h.portal().with_ip(ip);
+    let go = portal.get(path);
+    assert_eq!(go.status, 302, "single provider redirects at once: {go:?}");
+    portal.get(&idp.follow_authorization(go.location().expect("provider redirect")))
+}
+
+#[test]
+fn s012_a1_malformed_token_response_safe() {
+    let idp = MockIdp::start("token_malformed");
+    let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
     // The mock cycles: invalid JSON, numeric id_token, undecodable JWT.
     for round in 0..3 {
-        let e = err_of(rig.p.complete(&txn, &cb, &redirect(), rig.now()).await);
+        let r = callback_of_new_login(&h, &idp, "203.0.113.9");
+        assert_eq!(r.status, 400, "round {round}: {r:?}");
         assert!(
-            matches!(e, ProviderError::ProviderResponseInvalid),
-            "round {round}: {e:?}"
+            !r.body.contains("provider_response_invalid"),
+            "the page never shows the reason code"
         );
-        assert_eq!(e.reason().0, "provider_response_invalid");
     }
-    // The process (here: the provider) keeps serving.
-    rig.idp.set_profile("default");
-    assert!(rig.login().await.is_ok());
-    let all = cap.text();
-    let log: String = all
-        .lines()
-        .filter(|l| l.contains("a1logprov"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        log.contains("provider_response_invalid"),
-        "no log line captured: {all}"
-    );
-    assert!(
-        log.contains("endpoint=\"token\"") || log.contains("endpoint=token"),
-        "{log}"
-    );
-    for leak in ["12345", "!!!.@@@.###", "Bearer", "access_token", "id_token"] {
-        assert!(!log.contains(leak), "log leaks {leak:?}: {log}");
+    // The failures are diagnostics: wait for the best-effort writer, then read
+    // them through the test hooks (the events table, not a process-wide log).
+    let mut errors = Vec::new();
+    for _ in 0..100 {
+        errors = h.hooks.events(Some("provider.error"), Some(100));
+        if !errors.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(
-        !all.contains(SECRET),
-        "the client secret reached a log line"
+    // The token endpoint answered malformed bodies: reported with the endpoint
+    // and the reason only (an ID token that fails to decode after a good
+    // exchange is a login failure, not a provider outage).
+    assert!(!errors.is_empty(), "{errors:?}");
+    for e in &errors {
+        assert_eq!(e["reason"], "provider_response_invalid", "{e}");
+        assert_eq!(e["provider_id"], "mock", "{e}");
+        assert_eq!(e["attrs"]["endpoint"], "token", "{e}");
+    }
+    let failed = h.hooks.events(Some("login.failed"), Some(100));
+    assert_eq!(
+        failed
+            .iter()
+            .filter(|e| e["reason"] == "provider_response_invalid")
+            .count(),
+        3,
+        "{failed:?}"
     );
+    // Nothing from the provider's bodies, and no secret, reaches events or log.
+    let everything = format!(
+        "{}\n{}",
+        h.log(),
+        h.hooks
+            .events(None, Some(1000))
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    for leak in ["12345", "!!!.@@@.###", "Bearer", "access_token"] {
+        assert!(!everything.contains(leak), "leaks {leak:?}");
+    }
+    for secret in h.secret_values() {
+        assert!(
+            !everything.contains(&secret),
+            "a secret value reached the log or events"
+        );
+    }
+    // The process keeps serving: with a healthy provider a login completes.
+    idp.set_profile("default");
+    let r = callback_of_new_login(&h, &idp, "203.0.113.10");
+    assert_eq!(r.status, 302, "{r:?}");
 }
 
 #[tokio::test]

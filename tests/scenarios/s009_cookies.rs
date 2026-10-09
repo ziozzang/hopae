@@ -1,11 +1,10 @@
 //! S009 — cookie attributes and host scope (scenarios/009-cookie-attributes-and-host-scope.md).
 //!
-//! Cases that run a login through the real process need the verify engine
-//! (W1-A), its adapter (W1-B), the session and identity services (W1-D) and
-//! the portal wired to them; those are `#[ignore]`d until the orchestrator
-//! has merged and wired W1. The portal's own cookie rules are also covered
-//! in-process by `src/portal/{cookies,tests}.rs`. S009-A4 is a gateway-layer
-//! case and belongs to W2-A.
+//! Cases that run a login through the real process drive the verify engine,
+//! its adapter, the session and identity services and the portal as wired in
+//! the binary. The portal's own cookie rules are also covered in-process by
+//! `src/portal/{cookies,tests}.rs`. S009-A4 is a gateway-layer case and
+//! belongs to W2-A.
 #![allow(unused_imports, dead_code)]
 use std::net::SocketAddr;
 
@@ -14,7 +13,6 @@ use crate::support::*;
 
 const APP: &str = "app.example.test";
 const APP_URL: &str = "https://app.example.test/admin/x";
-const NEEDS_STACK: &str = "needs W1-A, W1-B, W1-D and the portal wiring";
 
 /// `path?query` of an absolute URL.
 fn path_of(url: &str) -> String {
@@ -117,7 +115,6 @@ fn assert_b64url_len(s: &str, n: usize) {
 }
 
 #[test]
-#[ignore = "needs W1-A, W1-B, W1-D and the portal wiring"]
 fn s009_1_session_cookie_attributes() {
     let (h, _idp) = spawn("m1-two-domains");
     let jar = Jar::new();
@@ -144,7 +141,6 @@ fn s009_1_session_cookie_attributes() {
 }
 
 #[test]
-#[ignore = "needs W1-A, W1-B, W1-D and the portal wiring"]
 fn s009_2_portal_binding_cookie_attributes() {
     let (h, _idp) = spawn("m1-basic");
     let jar = Jar::new();
@@ -203,7 +199,6 @@ fn s009_2_portal_binding_cookie_attributes() {
 }
 
 #[test]
-#[ignore = "needs W1-A, W1-B, W1-D and the portal wiring"]
 fn s009_3_clearing_matches_attributes() {
     let (h, _idp) = spawn("m1-two-domains");
     let jar = Jar::new();
@@ -273,7 +268,6 @@ fn s009_4_jar_isolation_across_hosts() {
 }
 
 #[test]
-#[ignore = "needs W1-A, W1-B, W1-D and the portal wiring"]
 fn s009_5_dev_mode_drops_prefix() {
     let (h, _idp) = spawn("m1-dev-insecure");
     let jar = Jar::new();
@@ -297,7 +291,6 @@ fn s009_5_dev_mode_drops_prefix() {
 }
 
 #[test]
-#[ignore = "needs W1-A, W1-B, W1-D and the portal wiring"]
 fn s009_6_custom_cookie_name() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(
@@ -328,15 +321,13 @@ fn s009_6_custom_cookie_name() {
     .unwrap();
     let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
     v["cookie"]["name"] = serde_json::json!("corp_sso");
-    let cfg = hopae::config::parse(&v.to_string()).expect("parses");
-    assert!(
-        cfg.validate().is_err(),
-        "name without __Host- must be rejected when secure"
-    );
+    // Loading a configuration validates it: the refusal is the parse error.
+    let err = hopae::config::parse(&v.to_string())
+        .expect_err("name without __Host- must be rejected when secure");
+    assert!(format!("{err:?}").contains("__Host-"), "{err:?}");
 }
 
 #[test]
-#[ignore = "needs W1-A, W1-B, W1-D and the portal wiring"]
 fn s009_7_binding_cookie_attributes() {
     let (h, _idp) = spawn("m1-basic");
     let jar = Jar::new();
@@ -406,7 +397,6 @@ fn s009_7_binding_cookie_attributes() {
 }
 
 #[test]
-#[ignore = "needs W1-A, W1-B, W1-D and the portal wiring"]
 fn s009_a1_client_value_never_adopted() {
     let (h, _idp) = spawn("m1-two-domains");
     let jar = Jar::new();
@@ -428,10 +418,11 @@ fn s009_a1_client_value_never_adopted() {
 }
 
 #[test]
-#[ignore = "needs W1-A, W1-B, W1-D and the portal wiring"]
 fn s009_a2_many_cookies_bounded() {
     let (h, _idp) = spawn("m1-basic");
-    let many = (0..200)
+    // Well-formed pairs: as many as fit under the 8 KiB header bound (a pair
+    // is 59 bytes plus the separator, so 130 fit; 200 would be `header_too_large`).
+    let many = (0..130)
         .map(|i| format!("__Host-hopae=v1.{i:0>43}"))
         .collect::<Vec<_>>()
         .join("; ");
@@ -439,6 +430,17 @@ fn s009_a2_many_cookies_bounded() {
     assert!(r.status == 302 || r.status == 401, "{r:?}");
     let calls_before = h.hooks.store_calls("lookup_handle");
     assert!(calls_before <= 1, "only the first pair is evaluated");
+    // Short pairs: all 200 fit; the same bound holds.
+    let short = (0..200)
+        .map(|i| format!("__Host-hopae=A{i}"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let r = h.verify(VerifyRequest::document(APP_URL).header("cookie", &short));
+    assert!(r.status == 302 || r.status == 401, "{r:?}");
+    assert!(
+        h.hooks.store_calls("lookup_handle") <= 1,
+        "malformed handles never reach the store"
+    );
     let huge = format!("a={}", "x".repeat(9 * 1024));
     let r = h.verify(VerifyRequest::document(APP_URL).header("cookie", &huge));
     assert_eq!(r.status, 400, "{r:?}");
@@ -446,7 +448,6 @@ fn s009_a2_many_cookies_bounded() {
 }
 
 #[test]
-#[ignore = "needs W1-A, W1-B, W1-D and the portal wiring"]
 fn s009_a3_sibling_cookie_tossing_ineffective() {
     let (h, _idp) = spawn("m1-two-domains");
     let jar = Jar::new();

@@ -7,6 +7,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
 
 use super::*;
+use crate::app::CallerKeys;
 use crate::crypto::{Secret, Timestamp};
 use crate::event::types::{Reason, reasons};
 use crate::identity::types::{NormalizedEmail, UserId};
@@ -29,10 +30,12 @@ fn cfg() -> GatewayConfig {
         },
         portal_url: url::Url::parse("https://auth.example.test/").unwrap(),
         secure: true,
-        caller_current: Some(Secret::new(KEY.into())),
-        caller_next: None,
-        allow_unauthenticated: false,
     }
+}
+
+fn keys() -> CallerKeys {
+    CallerKeys::new(Some(Secret::new(KEY.into())), None, false)
+        .with_counter(std::sync::Arc::new(|_, _| {}))
 }
 
 fn insecure_cfg() -> GatewayConfig {
@@ -44,7 +47,6 @@ fn insecure_cfg() -> GatewayConfig {
         },
         portal_url: url::Url::parse("http://auth.example.test/").unwrap(),
         secure: false,
-        ..cfg()
     }
 }
 
@@ -92,7 +94,7 @@ fn without(mut v: Vec<(&'static str, String)>, k: &str) -> Vec<(&'static str, St
 }
 
 fn ok(v: &[(&str, String)]) -> Parsed {
-    match parse(&cfg(), &hm(v), "r1".into()) {
+    match parse_for_tests(&cfg(), &hm(v), "r1".into()) {
         Ok(p) => p,
         Err(r) => panic!("expected parse to succeed, got {:?}", denial(&r.decision)),
     }
@@ -106,7 +108,7 @@ fn denial(d: &Decision) -> (Reason, DenyKind) {
 }
 
 fn refused(c: &GatewayConfig, h: &HeaderMap) -> Rejected {
-    match parse(c, h, "r1".into()) {
+    match parse_for_tests(c, h, "r1".into()) {
         Ok(_) => panic!("expected the request to be refused"),
         Err(r) => *r,
     }
@@ -183,8 +185,19 @@ fn parse_explicit_port_and_real_ip_fallback() {
     assert_eq!(ok(&base("https://app.example.test/")).input.port, 443);
 }
 
+/// Authenticate with `keys` the way the listener does, then parse.
+fn authed(
+    keys: &CallerKeys,
+    c: &GatewayConfig,
+    v: &[(&str, String)],
+) -> Result<Parsed, Box<Rejected>> {
+    let h = hm(v);
+    let caller = authenticate(keys, &h, "r")?;
+    parse(c, &h, "r".into(), caller)
+}
+
 #[test]
-fn s004_a8_caller_key_is_checked_first_and_in_constant_time() {
+fn adapter_s004_a8_caller_key_is_checked_first_and_in_constant_time() {
     // No header at all besides a wrong key: the answer is the caller refusal,
     // not a contract violation.
     for h in [
@@ -192,36 +205,39 @@ fn s004_a8_caller_key_is_checked_first_and_in_constant_time() {
         headers(&[("x-hopae-gateway-key", "wrong")]),
         headers(&[("x-hopae-gateway-key", "")]),
     ] {
-        let r = refused(&cfg(), &h);
+        let r = *authenticate(&keys(), &h, "r1").err().expect("refused");
         let (reason, kind) = denial(&r.decision);
         assert_eq!(reason, reasons::CALLER_UNAUTHORIZED);
         assert_eq!(kind, DenyKind::Forbidden);
-        assert_eq!(r.metric, Some("hopae_verify_unauthorized_total"));
     }
     // Right value twice is refused.
     let v = base("https://app.example.test/");
     let mut h = hm(&v);
     h.append("x-hopae-gateway-key", HeaderValue::from_static(KEY));
     assert_eq!(
-        denial(&refused(&cfg(), &h).decision).0,
+        denial(&authenticate(&keys(), &h, "r").err().unwrap().decision).0,
         reasons::CALLER_UNAUTHORIZED
     );
     // Rotation: the next key is accepted when configured, a third value never.
-    let mut c = cfg();
-    c.caller_next = Some(Secret::new(NEXT.into()));
+    let both = CallerKeys::new(
+        Some(Secret::new(KEY.into())),
+        Some(Secret::new(NEXT.into())),
+        false,
+    )
+    .with_counter(std::sync::Arc::new(|_, _| {}));
     let next = with(
         base("https://app.example.test/"),
         "x-hopae-gateway-key",
         NEXT,
     );
-    let p = parse(&c, &hm(&next), "r".into()).ok().unwrap();
+    let p = authed(&both, &cfg(), &next).ok().unwrap();
     assert!(matches!(
         p.input.caller,
         CallerAuth::Keyed {
             which: KeySlot::Next
         }
     ));
-    let cur = parse(&c, &hm(&base("https://app.example.test/")), "r".into())
+    let cur = authed(&both, &cfg(), &base("https://app.example.test/"))
         .ok()
         .unwrap();
     assert!(matches!(
@@ -235,38 +251,37 @@ fn s004_a8_caller_key_is_checked_first_and_in_constant_time() {
         "x-hopae-gateway-key",
         "third",
     );
-    assert!(parse(&c, &hm(&third), "r".into()).is_err());
+    assert!(authed(&both, &cfg(), &third).is_err());
     // Without a configured next key its value is refused.
-    assert!(parse(&cfg(), &hm(&next), "r".into()).is_err());
+    assert!(authed(&keys(), &cfg(), &next).is_err());
     // A configured key that is unset accepts nothing, not even the empty string.
-    let mut none = cfg();
-    none.caller_current = None;
+    let none = CallerKeys::new(None, None, false).with_counter(std::sync::Arc::new(|_, _| {}));
     let empty = with(base("https://app.example.test/"), "x-hopae-gateway-key", "");
-    assert!(parse(&none, &hm(&empty), "r".into()).is_err());
+    assert!(authed(&none, &cfg(), &empty).is_err());
 }
 
 #[test]
-fn s004_a8_unauthenticated_caller_is_a_development_switch() {
-    let mut c = cfg();
-    c.allow_unauthenticated = true;
+fn adapter_s004_a8_unauthenticated_caller_is_a_development_switch() {
+    let dev = CallerKeys::new(None, None, true).with_counter(std::sync::Arc::new(|_, _| {}));
     let v = without(base("https://app.example.test/"), "x-hopae-gateway-key");
-    let p = parse(&c, &hm(&v), "r".into()).ok().unwrap();
+    let p = authed(&dev, &cfg(), &v).ok().unwrap();
     assert!(matches!(p.input.caller, CallerAuth::Unauthenticated));
 }
 
 #[test]
-fn s004_a8_key_compare_equal_length_inputs() {
-    let k = Secret::new("abcdefgh".into());
-    assert!(key_matches(&k, b"abcdefgh"));
-    assert!(!key_matches(&k, b"abcdefgx"));
-    assert!(!key_matches(&k, b"xbcdefgh"));
-    assert!(!key_matches(&k, b"abcdefg"));
-    assert!(!key_matches(&k, b"abcdefghi"));
-    assert!(!key_matches(&k, b""));
+fn adapter_s004_a8_key_compare_equal_length_inputs() {
+    use crate::crypto::ct_eq;
+    // The one comparison `CallerKeys` uses, on equal-length and unequal inputs.
+    assert!(ct_eq(b"abcdefgh", b"abcdefgh"));
+    assert!(!ct_eq(b"abcdefgh", b"abcdefgx"));
+    assert!(!ct_eq(b"abcdefgh", b"xbcdefgh"));
+    assert!(!ct_eq(b"abcdefgh", b"abcdefg"));
+    assert!(!ct_eq(b"abcdefgh", b"abcdefghi"));
+    assert!(!ct_eq(b"abcdefgh", b""));
 }
 
 #[test]
-fn s004_6_contract_header_and_required_headers() {
+fn adapter_s004_6_contract_header_and_required_headers() {
     let b = || base("https://app.example.test/x");
     // Version: absent and 1 are v1; higher is unsupported; garbage is a violation.
     assert_eq!(ok(&with(b(), "x-hopae-contract", "1")).input.contract, 1);
@@ -302,7 +317,7 @@ fn s004_6_contract_header_and_required_headers() {
 }
 
 #[test]
-fn s004_7_and_a5_host_mismatch_and_duplicates() {
+fn adapter_s004_7_and_a5_host_mismatch_and_duplicates() {
     let v = with(
         base("https://app.example.test/"),
         "x-forwarded-host",
@@ -354,7 +369,7 @@ fn s004_7_and_a5_host_mismatch_and_duplicates() {
 }
 
 #[test]
-fn s001_a7_and_s004_a6_plain_http_is_refused_when_secure() {
+fn adapter_s001_a7_and_s004_a6_plain_http_is_refused_when_secure() {
     let v = base("http://app.example.test/");
     let (r, k) = reason_of(&cfg(), &v);
     assert_eq!((r, k), ("insecure_transport", DenyKind::ContractViolation));
@@ -378,7 +393,7 @@ fn s001_a7_and_s004_a6_plain_http_is_refused_when_secure() {
     );
     assert_eq!(reason_of(&cfg(), &v).0, "contract_violation");
     // Development mode accepts it.
-    let p = parse(
+    let p = parse_for_tests(
         &insecure_cfg(),
         &hm(&base("http://app.example.test/")),
         "r".into(),
@@ -449,7 +464,7 @@ fn canonical_path_rules_and_agreement() {
 }
 
 #[test]
-fn s001_5_navigation_from_fetch_metadata_then_accept() {
+fn adapter_s001_5_navigation_from_fetch_metadata_then_accept() {
     let nav = |extra: &[(&'static str, &str)]| {
         let mut v = without(base("https://app.example.test/"), "sec-fetch-dest");
         for (k, val) in extra {
@@ -487,7 +502,7 @@ fn s001_5_navigation_from_fetch_metadata_then_accept() {
 }
 
 #[test]
-fn s003_2_handoff_parameter_is_recognized_by_the_adapter() {
+fn adapter_s003_2_handoff_parameter_is_recognized_by_the_adapter() {
     let p = ok(&base(
         "https://app.example.test/admin/x?q=1&%5Fhopae%5Fhandoff=K1%2B&z=2",
     ));
@@ -514,7 +529,7 @@ fn s003_2_handoff_parameter_is_recognized_by_the_adapter() {
 }
 
 #[test]
-fn s004_a1_cookies_are_bounded_and_read_by_name() {
+fn adapter_s004_a1_cookies_are_bounded_and_read_by_name() {
     // The first well-formed pair wins; later pairs are not consulted.
     let other = "v1.CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
     let c = format!("__Host-hopae=bad; __Host-hopae={HANDLE}; __Host-hopae={other}");
@@ -555,7 +570,7 @@ fn s004_a1_cookies_are_bounded_and_read_by_name() {
     // Many repeated pairs stay within the ceiling and are cheap.
     let many = "__Host-hopae=v1.x; ".repeat(200);
     assert!(
-        parse(
+        parse_for_tests(
             &cfg(),
             &hm(&with(base("https://app.example.test/"), "cookie", &many)),
             "r".into()
@@ -645,7 +660,7 @@ async fn body(resp: Response) -> String {
 }
 
 #[test]
-fn s004_1_allow_emits_the_identity_headers() {
+fn adapter_s004_1_allow_emits_the_identity_headers() {
     let resp = r(
         Decision::Allow {
             identity: identity(),
@@ -678,7 +693,7 @@ fn s004_1_allow_emits_the_identity_headers() {
 }
 
 #[test]
-fn s004_2_non_ascii_values_are_percent_encoded() {
+fn adapter_s004_2_non_ascii_values_are_percent_encoded() {
     let mut id = identity();
     id.preferred_username = Some("Alice 김".into());
     id.groups = vec!["admin".into(), "ops team".into(), "a,b".into()];
@@ -727,7 +742,7 @@ fn omitted_when_absent_and_aal2() {
 }
 
 #[test]
-fn s004_8_private_cacheability_carries_the_deadline() {
+fn adapter_s004_8_private_cacheability_carries_the_deadline() {
     let cache = Cacheability::Private {
         max_age: Duration::from_secs(5),
         fresh_until: Timestamp(1_800_000_065_000),
@@ -801,12 +816,13 @@ fn oversized_identity_values_fail_closed() {
 const BIND_ATTRS: &str = "Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600";
 
 #[test]
-fn s001_1_document_login_is_a_302_to_the_portal_with_the_bind_cookie() {
+fn adapter_s001_1_document_login_is_a_302_to_the_portal_with_the_bind_cookie() {
     let d = Decision::Login {
         transaction: Some(Secret::new("T1".into())),
         bind: BindAction::Plant(Secret::new("B1".into())),
         kind: LoginKind::Login,
         clear_handle: false,
+        cause: None,
     };
     let resp = r(d, Navigation::Document);
     assert_eq!(resp.status(), StatusCode::FOUND);
@@ -830,6 +846,7 @@ fn login_keep_refreshes_a_well_formed_bind_and_clear_handle_clears() {
         bind: BindAction::Keep,
         kind: LoginKind::Login,
         clear_handle: clear,
+        cause: None,
     };
     // Nothing presented: nothing set.
     let resp = r(keep(false), Navigation::Document);
@@ -854,6 +871,7 @@ fn step_up_login_goes_to_the_step_up_page() {
         bind: BindAction::Keep,
         kind: LoginKind::StepUp,
         clear_handle: false,
+        cause: None,
     };
     let resp = r(d, Navigation::Document);
     assert_eq!(resp.status(), StatusCode::FOUND);
@@ -865,7 +883,7 @@ fn step_up_login_goes_to_the_step_up_page() {
 }
 
 #[tokio::test]
-async fn s001_4_non_document_login_is_401_json_without_cookies() {
+async fn adapter_s001_4_non_document_login_is_401_json_without_cookies() {
     for (kind, error) in [
         (LoginKind::Login, "login_required"),
         (LoginKind::StepUp, "step_up_required"),
@@ -875,6 +893,7 @@ async fn s001_4_non_document_login_is_401_json_without_cookies() {
             bind: BindAction::Keep,
             kind,
             clear_handle: true,
+            cause: None,
         };
         let resp = r(d, Navigation::Other);
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -902,6 +921,7 @@ fn a_document_login_without_a_transaction_still_fails_closed() {
         bind: BindAction::Keep,
         kind: LoginKind::Login,
         clear_handle: false,
+        cause: None,
     };
     let resp = r(d, Navigation::Document);
     assert!(!resp.status().is_success());
@@ -964,6 +984,7 @@ fn development_mode_drops_secure_and_the_host_prefix_comes_from_config() {
         bind: BindAction::Plant(Secret::new("B1".into())),
         kind: LoginKind::Login,
         clear_handle: true,
+        cause: None,
     };
     let resp = render(d, Navigation::Document, &env(), &c);
     assert_eq!(
@@ -980,7 +1001,7 @@ fn development_mode_drops_secure_and_the_host_prefix_comes_from_config() {
 }
 
 #[tokio::test]
-async fn s004_11_denials_have_the_contract_bodies() {
+async fn adapter_s004_11_denials_have_the_contract_bodies() {
     let deny =
         |reason: Reason, kind: DenyKind, nav: Navigation| r(Decision::Deny { reason, kind }, nav);
 
@@ -1076,121 +1097,6 @@ async fn s004_11_denials_have_the_contract_bodies() {
 }
 
 #[test]
-fn s004_11_only_allow_renders_to_a_2xx() {
-    let url = || url::Url::parse("https://app.example.test/a").unwrap();
-    let tok = || Secret::new("T".into());
-    let mut decisions: Vec<Decision> = vec![
-        Decision::Login {
-            transaction: Some(tok()),
-            bind: BindAction::Plant(tok()),
-            kind: LoginKind::Login,
-            clear_handle: true,
-        },
-        Decision::Login {
-            transaction: Some(tok()),
-            bind: BindAction::Keep,
-            kind: LoginKind::StepUp,
-            clear_handle: false,
-        },
-        Decision::Login {
-            transaction: None,
-            bind: BindAction::Keep,
-            kind: LoginKind::Login,
-            clear_handle: false,
-        },
-        Decision::Handoff {
-            location: url(),
-            handle: tok(),
-            issued_aal: Aal::Two,
-            max_age: Duration::from_secs(1),
-        },
-        Decision::CleanRedirect { location: url() },
-        Decision::Switch { transaction: tok() },
-    ];
-    let kinds = |retry: Duration| {
-        [
-            DenyKind::Forbidden,
-            DenyKind::ForbiddenHtml,
-            DenyKind::RateLimited { retry_after: retry },
-            DenyKind::ContractViolation,
-            DenyKind::Unavailable { retry_after: retry },
-        ]
-    };
-    for reason in reasons::ALL {
-        for kind in kinds(Duration::from_secs(30)) {
-            decisions.push(Decision::Deny {
-                reason: *reason,
-                kind,
-            });
-        }
-    }
-    decisions.push(Decision::Deny {
-        reason: reasons::OK,
-        kind: DenyKind::Forbidden,
-    });
-    for d in decisions {
-        for nav in [Navigation::Document, Navigation::Other] {
-            let d2 = clone_decision(&d);
-            let resp = render(d2, nav, &env(), &cfg());
-            let s = resp.status().as_u16();
-            assert!(
-                matches!(s, 302 | 401 | 403 | 400 | 503),
-                "non-allow rendered {s} for {:?}",
-                decision_label(&d)
-            );
-            assert!(resp.headers().get("x-hangang-auth-terminal").is_none());
-            assert_eq!(h(&resp, "x-hopae-contract"), Some("1"));
-            assert!(h(&resp, "x-hopae-reason").is_some());
-            assert!(h(&resp, "x-forwarded-user").is_none());
-        }
-    }
-    let allow = r(
-        Decision::Allow {
-            identity: identity(),
-            cache: Cacheability::NoStore,
-        },
-        Navigation::Document,
-    );
-    assert_eq!(allow.status(), StatusCode::OK);
-}
-
-fn clone_decision(d: &Decision) -> Decision {
-    match d {
-        Decision::Allow { .. } => unreachable!("allow is rendered separately"),
-        Decision::Login {
-            transaction,
-            bind,
-            kind,
-            clear_handle,
-        } => Decision::Login {
-            transaction: transaction.clone(),
-            bind: match bind {
-                BindAction::Keep => BindAction::Keep,
-                BindAction::Plant(s) => BindAction::Plant(s.clone()),
-            },
-            kind: *kind,
-            clear_handle: *clear_handle,
-        },
-        Decision::Handoff {
-            location,
-            handle,
-            issued_aal,
-            max_age,
-        } => Decision::Handoff {
-            location: location.clone(),
-            handle: handle.clone(),
-            issued_aal: *issued_aal,
-            max_age: *max_age,
-        },
-        Decision::CleanRedirect { location } => Decision::CleanRedirect {
-            location: location.clone(),
-        },
-        Decision::Switch { transaction } => Decision::Switch {
-            transaction: transaction.clone(),
-        },
-        Decision::Deny { reason, kind } => Decision::Deny {
-            reason: *reason,
-            kind: *kind,
-        },
-    }
+fn adapter_s004_11_only_allow_renders_to_a_2xx() {
+    super::walk::assert_only_allow_is_2xx();
 }

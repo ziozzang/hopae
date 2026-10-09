@@ -40,6 +40,9 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
     ),
 ];
 
+/// The schema version this binary migrates to (the last embedded migration).
+pub const LATEST_SCHEMA_VERSION: u32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
+
 /// Bound of the best-effort diagnostic event queue.
 pub const DIAGNOSTIC_QUEUE_CAP: usize = 4096;
 /// Read connections kept for reuse.

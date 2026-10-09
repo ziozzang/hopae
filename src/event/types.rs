@@ -95,6 +95,8 @@ pub enum EventKind {
     IdentityConflict,
     CsrfRejected,
     ConfigLoaded, // required (outbox)
+    /// `hopae providers import --force` (required, `admin.*`).
+    AdminProvidersImport,
     VerifyDenied,
     ProviderError,
     TxnEvicted,
@@ -103,7 +105,7 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 17] = [
+    pub const ALL: [EventKind; 18] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -116,6 +118,7 @@ impl EventKind {
         EventKind::IdentityConflict,
         EventKind::CsrfRejected,
         EventKind::ConfigLoaded,
+        EventKind::AdminProvidersImport,
         EventKind::VerifyDenied,
         EventKind::ProviderError,
         EventKind::TxnEvicted,
@@ -150,6 +153,7 @@ impl EventKind {
             EventKind::IdentityConflict => "identity.conflict",
             EventKind::CsrfRejected => "csrf.rejected",
             EventKind::ConfigLoaded => "config.loaded",
+            EventKind::AdminProvidersImport => "admin.providers_import",
             EventKind::VerifyDenied => "verify.denied",
             EventKind::ProviderError => "provider.error",
             EventKind::TxnEvicted => "txn.evicted",
@@ -219,6 +223,10 @@ pub mod reasons {
         STORE_UNAVAILABLE = "store_unavailable",
         BUDGET_EXCEEDED = "budget_exceeded",
         OVERLOADED = "overloaded",
+        HEADER_TOO_LARGE = "header_too_large",
+        // Only for defects no scenario reason covers; logged at `error` level,
+        // never replaces store_unavailable, budget_exceeded or overloaded.
+        INTERNAL_ERROR = "internal_error",
         RATE_LIMITED = "rate_limited",
         CLOCK_SKEW = "clock_skew",
         LOGIN_REQUIRED = "login_required",
@@ -281,6 +289,8 @@ pub mod reasons {
         FRESH_AUTH = "fresh_auth",
         // Providers
         PROVIDER_DISABLED = "provider_disabled",
+        PROVIDER_MISMATCH = "provider_mismatch",
+        EMAIL_DOMAIN_NOT_ALLOWED = "email_domain_not_allowed",
         PROVIDER_UNAVAILABLE = "provider_unavailable",
         PROVIDER_ERROR = "provider_error",
         PROVIDER_TIMEOUT = "provider_timeout",
@@ -316,12 +326,15 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "aal",
     "app",
     "apps",
+    "bound_ip",
+    "cause",
     "client_request_id",
     "config_digest",
     "count",
     "depth",
     "dropped",
     "dropped_by_kind",
+    "endpoint",
     "error",
     "from_user_id",
     "host",
@@ -331,6 +344,7 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "listeners",
     "method",
     "navigation",
+    "observed_ip",
     "observed_sha256",
     "port",
     "provider",
@@ -496,7 +510,7 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 12);
+        assert_eq!(required, 13);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }

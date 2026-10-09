@@ -19,6 +19,8 @@ struct GateState {
 #[derive(Default)]
 pub struct StoreHooks {
     stall_ms: AtomicU64,
+    /// The diagnostic batch writer sleeps this long before each event (0 = off).
+    diag_stall_ms: AtomicU64,
     gates: Mutex<GateState>,
     gate_cv: Condvar,
     crash: Mutex<Option<String>>,
@@ -37,6 +39,15 @@ impl StoreHooks {
     /// Every store call sleeps this long before executing (0 = off).
     pub fn set_stall(&self, ms: u64) {
         self.stall_ms.store(ms, Ordering::SeqCst);
+    }
+
+    /// Stall only the diagnostic batch writer (S014-5), not the store.
+    pub fn set_diag_stall(&self, ms: u64) {
+        self.diag_stall_ms.store(ms, Ordering::SeqCst);
+    }
+
+    pub fn diag_stall(&self) -> Duration {
+        Duration::from_millis(self.diag_stall_ms.load(Ordering::SeqCst))
     }
 
     pub fn stall(&self) -> Duration {

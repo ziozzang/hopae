@@ -169,6 +169,7 @@ impl Fx {
                 session: row.clone(),
                 portal_handle: handle,
                 portal_handle_digest: digest,
+                consume_txn: None,
                 events,
             })
             .await
@@ -219,6 +220,7 @@ impl Fx {
                 presented_handle: presented,
                 new_handle: handle,
                 now: self.now(),
+                max_recoveries: 3,
             },
             new,
         )
@@ -951,6 +953,7 @@ async fn required_events_and_delivery_rows_commit_with_the_state_change_or_not_a
         session: s.row.clone(),
         portal_handle: f.handle_row(&s.row.session_id, PORTAL_HOST, &handle_value(&f.rng)),
         portal_handle_digest: sha256(b"unused"),
+        consume_txn: None,
         events: vec![f.event(EventKind::SessionCreated)],
     };
     assert!(f.store.create_session(dup).await.is_err());
@@ -962,6 +965,7 @@ async fn required_events_and_delivery_rows_commit_with_the_state_change_or_not_a
             &handle_value(&f.rng),
         ),
         portal_handle_digest: sha256(b"unused"),
+        consume_txn: None,
         events: vec![f.event(EventKind::SessionCreated)],
     };
     dup2.portal_handle_digest = dup2.portal_handle.handle_sha256;
@@ -970,6 +974,102 @@ async fn required_events_and_delivery_rows_commit_with_the_state_change_or_not_a
     assert_eq!(f.count("SELECT COUNT(*) FROM events"), 3);
     assert_eq!(f.count("SELECT COUNT(*) FROM sessions"), 1);
     assert_eq!(f.count("SELECT COUNT(*) FROM event_deliveries"), 2);
+}
+
+#[tokio::test]
+async fn the_login_transaction_is_consumed_in_the_session_creating_call() {
+    // S014-6 b (R-7): one store call creates the session and consumes the
+    // transaction; a transaction that is already consumed creates nothing.
+    let f = fx();
+    let u = f.user(1).await;
+    let txn = random_token(&f.rng, 16);
+    f.store
+        .create_transaction(new_txn(&f, &txn, "192.0.2.1"), vec![])
+        .await
+        .unwrap();
+    let create = |row: SessionRow| {
+        let secret = handle_value(&f.rng);
+        let handle = f.handle_row(&row.session_id, PORTAL_HOST, &secret);
+        let digest = handle.handle_sha256;
+        CreateSession {
+            session: row,
+            portal_handle: handle,
+            portal_handle_digest: digest,
+            consume_txn: Some((txn.digest(), reasons::TXN_CONSUMED)),
+            events: vec![f.event(EventKind::SessionCreated)],
+        }
+    };
+    f.store
+        .create_session(create(f.session_row(&u)))
+        .await
+        .unwrap();
+    let t = f.store.transaction(&txn.digest()).await.unwrap().unwrap();
+    assert!(t.consumed_at.is_some());
+    assert_eq!(t.consumed_reason.as_deref(), Some("txn_consumed"));
+    assert_eq!(f.count("SELECT COUNT(*) FROM sessions"), 1);
+    // A second session for the same transaction: refused, nothing written.
+    let before = f.count("SELECT COUNT(*) FROM events");
+    assert!(matches!(
+        f.store.create_session(create(f.session_row(&u))).await,
+        Err(StoreError::Conflict(_))
+    ));
+    assert_eq!(f.count("SELECT COUNT(*) FROM sessions"), 1);
+    assert_eq!(f.count("SELECT COUNT(*) FROM session_handles"), 1);
+    assert_eq!(f.count("SELECT COUNT(*) FROM events"), before);
+}
+
+#[tokio::test]
+async fn retry_is_single_use() {
+    let f = fx();
+    let txn = random_token(&f.rng, 16);
+    f.store
+        .create_transaction(new_txn(&f, &txn, "192.0.2.1"), vec![])
+        .await
+        .unwrap();
+    assert!(f.store.use_retry(&txn.digest(), f.now()).await.unwrap());
+    assert!(!f.store.use_retry(&txn.digest(), f.now()).await.unwrap());
+    // An unknown transaction is not a first use.
+    assert!(
+        !f.store
+            .use_retry(&sha256(b"nobody"), f.now())
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn append_required_is_one_transaction_with_delivery_rows_and_refuses_stateful_kinds() {
+    let f = fx();
+    f.store
+        .append_required(vec![
+            f.event(EventKind::LoginFailed),
+            f.event(EventKind::HandoffRejected),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(f.count("SELECT COUNT(*) FROM events"), 2);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM event_deliveries WHERE state='pending' AND sink='log'"),
+        2
+    );
+    // Diagnostic kinds have their own door.
+    assert!(
+        f.store
+            .append_required(vec![f.event(EventKind::VerifyDenied)])
+            .await
+            .is_err()
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM events"), 2);
+}
+
+#[tokio::test]
+#[should_panic(expected = "must travel with its state change")]
+async fn append_required_asserts_against_stateful_kinds() {
+    let f = fx();
+    let _ = f
+        .store
+        .append_required(vec![f.event(EventKind::SessionCreated)])
+        .await;
 }
 
 #[tokio::test]

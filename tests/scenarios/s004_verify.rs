@@ -199,6 +199,7 @@ pub(crate) mod fx {
                     session: row.clone(),
                     portal_handle: handle,
                     portal_handle_digest: digest,
+                    consume_txn: None,
                     events: vec![],
                 })
                 .await
@@ -553,7 +554,6 @@ async fn s004_2_non_ascii_percent_encoded() {
 }
 
 #[test]
-#[ignore = "needs W1-B (cookie parsing on the gateway listener)"]
 fn s004_3_other_cookies_ignored() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
@@ -822,6 +822,12 @@ async fn s004_11_no_non_allow_path_is_2xx() {
         Decision::Allow { .. }
     ));
     let _ = (u, s);
+    // The adapter half (R-7): the walk over every decision shape, every reason
+    // code and every deny kind, for both navigation kinds, asserting that only
+    // `Allow` ever renders to a 2xx. Exposed by the `test-hooks` feature; the
+    // same walk runs as a unit test in `src/gateway/hangang/tests.rs`.
+    #[cfg(feature = "test-hooks")]
+    hopae::gateway::hangang::assert_only_allow_is_2xx();
 }
 
 #[tokio::test]
@@ -866,7 +872,6 @@ async fn s004_a2_last_seen_coalesced() {
 }
 
 #[test]
-#[ignore = "needs W1-B (gateway concurrency limit lives in the adapter)"]
 fn s004_a3_concurrency_limit_fails_closed() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(
@@ -918,7 +923,6 @@ async fn s004_a4_handle_not_valid_on_other_host() {
 }
 
 #[test]
-#[ignore = "needs W1-B (duplicate context headers are rejected by the adapter)"]
 fn s004_a5_duplicate_context_headers_rejected() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
@@ -966,7 +970,6 @@ async fn s004_a7_unknown_and_expired_uniform() {
 }
 
 #[test]
-#[ignore = "needs W1-B (caller key check and metrics are the adapter's)"]
 fn s004_a8_caller_key_required() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(

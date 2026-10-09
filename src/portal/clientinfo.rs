@@ -6,8 +6,10 @@
 
 use std::net::IpAddr;
 
-use axum::http::{HeaderMap, HeaderName};
+use axum::http::HeaderMap;
 use ipnet::IpNet;
+
+use crate::gateway::forwarding::{X_FORWARDED_FOR, X_FORWARDED_PROTO};
 
 /// The client as the portal sees it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,20 +29,14 @@ pub fn resolve(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -> Client {
             https: false,
         };
     }
-    // Header names are assembled here so the gateway-boundary lint (wire names
-    // stay under src/gateway) does not flag a standard proxy convention.
-    let chain_name = HeaderName::from_bytes(concat!("x-for", "warded-for").as_bytes());
-    let proto_name = HeaderName::from_bytes(concat!("x-for", "warded-proto").as_bytes());
     let mut chain: Vec<IpAddr> = Vec::new();
-    if let Ok(name) = &chain_name {
-        for v in headers.get_all(name) {
-            let Ok(text) = v.to_str() else { continue };
-            for part in text.split(',').take(64) {
-                match part.trim().parse::<IpAddr>() {
-                    Ok(ip) => chain.push(ip),
-                    // An unparseable hop breaks the chain: nothing to its left can be believed.
-                    Err(_) => chain.clear(),
-                }
+    for v in headers.get_all(&X_FORWARDED_FOR) {
+        let Ok(text) = v.to_str() else { continue };
+        for part in text.split(',').take(64) {
+            match part.trim().parse::<IpAddr>() {
+                Ok(ip) => chain.push(ip),
+                // An unparseable hop breaks the chain: nothing to its left can be believed.
+                Err(_) => chain.clear(),
             }
         }
     }
@@ -51,12 +47,10 @@ pub fn resolve(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -> Client {
         .or_else(|| chain.first())
         .copied()
         .unwrap_or(peer);
-    let https = proto_name.ok().is_some_and(|name| {
-        headers
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case("https"))
-    });
+    let https = headers
+        .get(&X_FORWARDED_PROTO)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("https"));
     Client { ip, https }
 }
 
@@ -84,12 +78,11 @@ mod tests {
     }
 
     fn xff() -> &'static str {
-        // Built so that the boundary lint (gateway wire names stay in src/gateway) does not trip.
-        concat!("x-for", "warded-for")
+        X_FORWARDED_FOR.as_str()
     }
 
     fn xfp() -> &'static str {
-        concat!("x-for", "warded-proto")
+        X_FORWARDED_PROTO.as_str()
     }
 
     #[test]

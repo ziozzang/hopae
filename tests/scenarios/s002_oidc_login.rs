@@ -31,7 +31,7 @@ pub(crate) mod kit {
     use hopae::crypto::{
         Clock, Digest, OsRng, Rng, Secret, TestClock, Timestamp, random_token, sha256,
     };
-    use hopae::event::types::{Event, EventKind};
+    use hopae::event::types::{Event, EventKind, reasons};
     use hopae::identity::linking::LinkingPolicy;
     use hopae::identity::types::NormalizedEmail;
     use hopae::policy::types::{AppId, AppPolicy, ConfigSnapshot, Host, SessionPolicy};
@@ -40,11 +40,14 @@ pub(crate) mod kit {
         ProviderIdentity, ProviderKind,
     };
     use hopae::session::{
-        CallbackOutcome, CodeDirectory, Deps, ProviderLookup, RedeemInput, RedeemResult,
-        RequestCtx, Service, ServiceConfig, StartedLogin,
+        CallbackOutcome, Deps, ProviderLookup, RequestCtx, Service, ServiceConfig,
     };
     use hopae::store::types::*;
     use hopae::store::{Store, StoreResult};
+    use hopae::verify::types::{
+        BindAction, CallerAuth, CanonicalPath, Decision, DenyKind, Handoff, KeySlot, Navigation,
+        Scheme, VerifyContext, VerifyInput, VerifyLimits,
+    };
     use url::Url;
 
     pub const T0: i64 = 1_760_000_000_000;
@@ -56,6 +59,20 @@ pub(crate) mod kit {
 
     pub fn ip(s: &str) -> IpAddr {
         s.parse().unwrap()
+    }
+
+    /// An emitter whose diagnostics go nowhere (the receiver is dropped; the
+    /// drops are counted), for tests that drive the services in process.
+    pub fn test_emitter(clock: Arc<dyn Clock>, rng: Arc<dyn Rng>) -> hopae::event::bus::Emitter {
+        let (bus, _rx) = hopae::event::bus::channel(16);
+        hopae::event::bus::Emitter::new(
+            clock,
+            rng,
+            bus,
+            Arc::new(hopae::event::sampling::Sampler::default()),
+            Arc::new(hopae::event::prune::PruneTrigger::new(1000)),
+            false,
+        )
     }
 
     pub fn host(s: &str) -> Host {
@@ -240,39 +257,44 @@ pub(crate) mod kit {
         }
     }
 
-    /// `Sessions::handoff_code` stand-in: a non-consuming read of a code row
-    /// through the store's utility connection.
-    pub struct SqlCodes(pub Store);
+    /// A created login transaction, as the verify engine answered it.
+    pub struct StartedLogin {
+        pub transaction: Secret,
+        pub bind: BindAction,
+        pub app_id: AppId,
+    }
 
-    #[async_trait]
-    impl CodeDirectory for SqlCodes {
-        async fn handoff_code(&self, d: &Digest) -> StoreResult<Option<HandoffCodeRow>> {
-            let conn = self.0.conn();
-            let mut st = conn
-                .prepare("SELECT session_id, host, return_target, client_ip, bind_sha256, issued_aal, cred_gen, recovery_depth, created_at, expires_at, consumed_at, consumed_reason FROM handoff_codes WHERE code_sha256=?1")
-                .unwrap();
-            let row = st
-                .query_row([d.0.to_vec()], |r| {
-                    let bind: Vec<u8> = r.get(4)?;
-                    Ok(HandoffCodeRow {
-                        code_sha256: *d,
-                        session_id: hopae::session::SessionId::new(r.get::<_, String>(0)?),
-                        host: Host::parse(&r.get::<_, String>(1)?).unwrap(),
-                        return_target: Url::parse(&r.get::<_, String>(2)?).unwrap(),
-                        client_ip: r.get::<_, String>(3)?.parse().unwrap(),
-                        bind_sha256: Digest::from_slice(&bind).unwrap(),
-                        issued_aal: hopae::session::Aal::from_i64(r.get(5)?).unwrap(),
-                        cred_gen: r.get::<_, i64>(6)? as u64,
-                        recovery_depth: r.get::<_, i64>(7)? as u32,
-                        created_at: Timestamp::from_secs(r.get(8)?),
-                        expires_at: Timestamp::from_secs(r.get(9)?),
-                        consumed_at: r.get::<_, Option<i64>>(10)?.map(Timestamp::from_secs),
-                        consumed_reason: r.get(11)?,
-                    })
-                })
-                .ok();
-            Ok(row)
+    impl std::fmt::Debug for StartedLogin {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("StartedLogin")
+                .field("app_id", &self.app_id)
+                .finish_non_exhaustive()
         }
+    }
+
+    /// A redemption through the verify engine (the single owner of redemption,
+    /// recovery and switch, ruling R-1), as the tests read it.
+    #[derive(Debug)]
+    pub enum RedeemResult {
+        Minted {
+            location: Url,
+            handle: Secret,
+            issued_aal: hopae::session::Aal,
+            max_age: Duration,
+        },
+        AlreadyRedeemed {
+            location: Url,
+        },
+        Login(StartedLogin),
+        Switch {
+            transaction: Secret,
+        },
+        Exhausted {
+            depth: u32,
+        },
+        RateLimited {
+            retry_after: Duration,
+        },
     }
 
     #[derive(Clone)]
@@ -308,6 +330,9 @@ pub(crate) mod kit {
         pub store: Store,
         pub clock: Arc<TestClock>,
         pub svc: Service,
+        /// The verify engine over the same store: the only creator of login
+        /// and switch transactions and the only redeemer of codes.
+        pub verify: VerifyContext,
         pub mock: Arc<FakeProvider>,
         pub mock2: Arc<FakeProvider>,
         /// `__Host-hopae_bind` on the application hosts and `__Host-hopae_portal` on the portal.
@@ -408,10 +433,10 @@ pub(crate) mod kit {
                 directory: store.directory(),
                 sessions: store.sessions(),
                 events: store.events(),
-                codes: Arc::new(SqlCodes(store.clone())),
+                emitter: test_emitter(clock.clone(), rng.clone()),
                 clock: clock.clone(),
-                rng,
-                snapshot,
+                rng: rng.clone(),
+                snapshot: snapshot.clone(),
                 providers: Arc::new(Providers(vec![mock.clone(), mock2.clone()])),
                 config: ServiceConfig {
                     portal_host: host(PORTAL),
@@ -426,10 +451,26 @@ pub(crate) mod kit {
                     linking: opts.linking,
                 },
             });
+            let limits = VerifyLimits {
+                max_recoveries: opts.max_recoveries,
+                txn_per_ip_per_minute: opts.txn_per_ip,
+                txn_max_rows: opts.txn_max_rows,
+                handoff_failures_per_minute: opts.failures_per_minute,
+                ..VerifyLimits::default()
+            };
+            let verify = VerifyContext::new(
+                store.directory(),
+                store.sessions(),
+                clock.clone(),
+                rng,
+                snapshot,
+                limits,
+            );
             Kit {
                 store,
                 clock,
                 svc,
+                verify,
                 mock,
                 mock2,
                 b1: random_token(&OsRng, 16),
@@ -463,22 +504,115 @@ pub(crate) mod kit {
             ProviderId::new("mock")
         }
 
-        /// Flow 1: a login transaction for `https://<host><path_query>` from `IP`.
+        /// A verify request as the adapter would hand it to the engine.
+        pub fn verify_input(
+            &self,
+            addr: &str,
+            target: &Url,
+            code: Option<&Secret>,
+            bind: Option<&Secret>,
+            handle: Option<&Secret>,
+        ) -> VerifyInput {
+            let clean = hopae::gateway::recognition::clean_target(target);
+            VerifyInput {
+                canonical_path: CanonicalPath::new(clean.path().to_string()),
+                port: clean.port_or_known_default().unwrap_or(443),
+                proto: if clean.scheme() == "http" {
+                    Scheme::Http
+                } else {
+                    Scheme::Https
+                },
+                host: host(clean.host_str().unwrap_or("")),
+                original_url: clean,
+                client_ip: ip(addr),
+                method: http::Method::GET,
+                route_id: None,
+                cookie_handle: handle.cloned(),
+                bind_cookie: bind.cloned(),
+                user_agent: Some(UA.into()),
+                navigation: Navigation::Document,
+                handoff: code.map_or(Handoff::None, |c| Handoff::Code(c.clone())),
+                contract: 1,
+                caller: CallerAuth::Keyed {
+                    which: KeySlot::Current,
+                },
+                request_id: "req-verify".into(),
+            }
+        }
+
+        /// Flow 1: a login transaction for `https://<host><path_query>` from `IP`
+        /// (the verify engine's unauthenticated `302`).
         pub async fn start(
             &self,
             host_name: &str,
             path_query: &str,
             bind: Option<&Secret>,
         ) -> StartedLogin {
-            self.svc
-                .start_login(
-                    &self.ctx(),
-                    &url(&format!("https://{host_name}{path_query}")),
-                    bind,
-                    0,
-                )
+            match self
+                .decide_login(IP, &url(&format!("https://{host_name}{path_query}")), bind)
                 .await
-                .expect("start_login")
+            {
+                RedeemResult::Login(s) => s,
+                other => panic!("expected a login transaction, got {other:?}"),
+            }
+        }
+
+        async fn decide_login(
+            &self,
+            addr: &str,
+            target: &Url,
+            bind: Option<&Secret>,
+        ) -> RedeemResult {
+            self.decide(self.verify_input(addr, target, None, bind, None))
+                .await
+        }
+
+        pub async fn decide(&self, input: VerifyInput) -> RedeemResult {
+            let app = self
+                .verify
+                .snapshot
+                .load()
+                .app_for_host(&input.host)
+                .map(|a| a.app_id.clone())
+                .unwrap_or_else(|| AppId::new("?"));
+            match hopae::verify::decide(&self.verify, input).await {
+                Decision::Login {
+                    transaction: Some(transaction),
+                    bind,
+                    ..
+                } => RedeemResult::Login(StartedLogin {
+                    transaction,
+                    bind,
+                    app_id: app,
+                }),
+                Decision::Handoff {
+                    location,
+                    handle,
+                    issued_aal,
+                    max_age,
+                } => RedeemResult::Minted {
+                    location,
+                    handle,
+                    issued_aal,
+                    max_age,
+                },
+                Decision::CleanRedirect { location } => RedeemResult::AlreadyRedeemed { location },
+                Decision::Switch { transaction } => RedeemResult::Switch { transaction },
+                Decision::Deny {
+                    reason,
+                    kind: DenyKind::RateLimited { retry_after },
+                } if reason == reasons::RATE_LIMITED => RedeemResult::RateLimited { retry_after },
+                Decision::Deny { reason, .. } if reason == reasons::HANDOFF_RECOVERY_EXHAUSTED => {
+                    RedeemResult::Exhausted {
+                        depth: self.opts.max_recoveries,
+                    }
+                }
+                Decision::Deny { reason, .. } => panic!("denied: {}", reason.0),
+                other => panic!(
+                    "unexpected decision {:?}",
+                    hopae::gateway::hangang::decision_label(&other)
+                ),
+            }
         }
 
         /// Flow 2: the provider redirect for `txn`; returns the issued `state`.
@@ -581,18 +715,8 @@ pub(crate) mod kit {
             bind: Option<&Secret>,
             handle: Option<&Secret>,
         ) -> RedeemResult {
-            self.svc
-                .redeem(RedeemInput {
-                    code: code.clone(),
-                    target: target.clone(),
-                    client_ip: ip(addr),
-                    user_agent: Some(UA.into()),
-                    bind_cookie: bind.cloned(),
-                    handle_cookie: handle.cloned(),
-                    request_id: "req-redeem".into(),
-                })
+            self.decide(self.verify_input(addr, target, Some(code), bind, handle))
                 .await
-                .expect("redeem")
         }
 
         pub fn count(&self, sql: &str) -> i64 {
@@ -1026,7 +1150,13 @@ async fn s002_6_sso_from_portal_handle() {
     let t2 = k.start(OTHER, "/", Some(&b2)).await;
     let entry = k
         .svc
-        .sso_or_chooser(&k.ctx(), &t2.transaction, Some(&first.portal_handle), false)
+        .sso_or_chooser(
+            &k.ctx(),
+            &t2.transaction,
+            Some(&first.portal_handle),
+            None,
+            false,
+        )
         .await
         .unwrap();
     let LoginEntry::Sso {
@@ -1071,14 +1201,20 @@ async fn s002_6_sso_from_portal_handle() {
     // the transaction is consumed: a second visit is refused
     let again = k
         .svc
-        .sso_or_chooser(&k.ctx(), &t2.transaction, Some(&first.portal_handle), false)
+        .sso_or_chooser(
+            &k.ctx(),
+            &t2.transaction,
+            Some(&first.portal_handle),
+            None,
+            false,
+        )
         .await;
     assert_eq!(reason_of(&again.unwrap_err()), "txn_consumed");
     // without a handle the same visit lists providers
     let t3 = k.start(OTHER, "/", Some(&b2)).await;
     let entry = k
         .svc
-        .sso_or_chooser(&k.ctx(), &t3.transaction, None, false)
+        .sso_or_chooser(&k.ctx(), &t3.transaction, None, None, false)
         .await
         .unwrap();
     let LoginEntry::Chooser { providers } = entry else {
@@ -1089,7 +1225,7 @@ async fn s002_6_sso_from_portal_handle() {
     let bogus = hopae::crypto::handle_value(&hopae::crypto::OsRng);
     let entry = k
         .svc
-        .sso_or_chooser(&k.ctx(), &t3.transaction, Some(&bogus), false)
+        .sso_or_chooser(&k.ctx(), &t3.transaction, Some(&bogus), None, false)
         .await
         .unwrap();
     assert!(matches!(entry, LoginEntry::Chooser { .. }));
@@ -1171,6 +1307,22 @@ async fn s002_7_portal_binding_race_recovers() {
     // with P2: a new transaction at depth + 1 for the same target, P2 recorded at its redirect
     let retry = k.svc.retry(&k.ctx(), &retry_ref, Some(&p2)).await.unwrap();
     assert_eq!(retry.location.host_str(), Some("idp.example.test"));
+    // R-4: the retry is single-use per consumed transaction, whatever the cookie.
+    let again = k
+        .svc
+        .retry(&k.ctx(), &retry_ref, Some(&p2))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reason_of(&again),
+        "txn_consumed",
+        "a second POST is refused"
+    );
+    assert_eq!(
+        k.count("SELECT COUNT(*) FROM login_txns WHERE recovery_depth = 1"),
+        1,
+        "no second transaction"
+    );
     let ta3: (String, i64) = k
         .store
         .conn()

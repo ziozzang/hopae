@@ -135,6 +135,25 @@ pub fn strip_handoff(url: &url::Url) -> String {
     format!("{base}?{}", kept.join("&"))
 }
 
+/// `url` without any handoff pair (exact or ambiguous): other pairs keep
+/// their order and bytes, and an emptied query disappears (no trailing `?`).
+/// The adapter hands this to the core as the requested URL (ADR-0013: query
+/// parsing stays out of the core).
+pub fn clean_target(url: &url::Url) -> url::Url {
+    let stripped = strip_handoff(url);
+    match url::Url::parse(&stripped) {
+        Ok(u) => u,
+        // Cannot happen (the input was a URL and only query pairs were
+        // removed); if it ever did, drop the whole query rather than keep a
+        // pair that may carry the code.
+        Err(_) => {
+            let mut u = url.clone();
+            u.set_query(None);
+            u
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +207,37 @@ mod tests {
         assert!(none("a=%ZZ&b=1"), "malformed escapes elsewhere are ignored");
         assert!(none("%ZZ=1"));
         assert!(none("&&"));
+    }
+
+    #[test]
+    fn clean_target_preserves_the_rest_of_the_query() {
+        let c = |u: &str| clean_target(&url::Url::parse(u).unwrap()).to_string();
+        let want = "https://app.example.test/admin/x?q=1&z=2";
+        assert_eq!(
+            c("https://app.example.test/admin/x?q=1&_hopae_handoff=K1&z=2"),
+            want
+        );
+        assert_eq!(
+            c("https://app.example.test/admin/x?q=1&%5Fhopae%5Fhandoff=K1&z=2"),
+            want
+        );
+        assert_eq!(
+            c("https://app.example.test/admin/x?q=1&_hopae_handoff=K1%2B&z=2"),
+            want
+        );
+        assert_eq!(
+            c("https://app.example.test/admin/x?_hopae_handoff=K1"),
+            "https://app.example.test/admin/x"
+        );
+        assert_eq!(
+            c("https://app.example.test/admin/x?a=1&b"),
+            "https://app.example.test/admin/x?a=1&b"
+        );
+        // A near-miss name is not the parameter.
+        assert_eq!(
+            c("https://app.example.test/?_hopae_handoff2=K"),
+            "https://app.example.test/?_hopae_handoff2=K"
+        );
     }
 
     #[test]

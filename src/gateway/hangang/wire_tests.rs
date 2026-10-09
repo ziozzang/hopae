@@ -5,7 +5,9 @@ use std::sync::Mutex;
 
 use super::GatewayConfig;
 use super::VERIFY_PATH;
+use crate::app::CallerKeys;
 use crate::config;
+use crate::crypto::Secret;
 use crate::crypto::{SeededRng, SystemClock};
 use crate::http::gateway::{CounterFn, GatewayState, router};
 use crate::store::{Store, StoreHooks};
@@ -56,8 +58,12 @@ async fn serve(max_concurrent: u32) -> Fixture {
             .unwrap()
             .push(format!("{name}{{{}}}", l.join(",")));
     });
-    let gw = GatewayConfig::from_config(&cfg, |n| (n == "K").then(|| KEY.to_string()));
-    let state = GatewayState::new(gw, ctx, max_concurrent, Some(counters));
+    let gw = GatewayConfig::from_config(&cfg);
+    let callers = Arc::new(
+        CallerKeys::new(Some(Secret::new(KEY.to_string())), None, false)
+            .with_counter(counters.clone()),
+    );
+    let state = GatewayState::new(gw, ctx, callers, max_concurrent, Some(counters), None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, router(state)).await });
@@ -84,11 +90,15 @@ fn verify_request(c: &reqwest::Client, f: &Fixture, key: Option<&str>) -> reqwes
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder().no_proxy().build().unwrap()
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
 }
 
 #[tokio::test]
-async fn s004_a8_wrong_or_missing_key_touches_no_state() {
+async fn adapter_s004_a8_wrong_or_missing_key_touches_no_state() {
     let f = serve(8).await;
     let c = client();
     for key in [None, Some("wrong")] {
@@ -128,12 +138,40 @@ async fn accepted_key_slot_is_counted() {
             .lock()
             .unwrap()
             .iter()
-            .any(|c| c == "hopae_verify_caller_key_total{key=current}")
+            .any(|c| c == "hopae_verify_caller_key_total{slot=current}")
     );
 }
 
 #[tokio::test]
-async fn s004_a3_no_permit_answers_503_overloaded_immediately() {
+async fn the_caller_key_is_checked_before_the_permit() {
+    // R-7: unauthenticated requests never consume (or wait for) a permit, so a
+    // flood without the key cannot starve the gateway of permits; with the
+    // key and no permit left the answer is still `overloaded`.
+    let f = serve(0).await;
+    let c = client();
+    for key in [None, Some("wrong")] {
+        let resp = verify_request(&c, &f, key).send().await.unwrap();
+        assert_eq!(resp.status(), 403);
+        assert_eq!(resp.headers()["x-hopae-reason"], "caller_unauthorized");
+    }
+    let resp = verify_request(&c, &f, Some(KEY)).send().await.unwrap();
+    assert_eq!(resp.status(), 503);
+    assert_eq!(resp.headers()["x-hopae-reason"], "overloaded");
+    let overloaded = f
+        .counts
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|c| c.starts_with("hopae_verify_overloaded_total"))
+        .count();
+    assert_eq!(
+        overloaded, 1,
+        "only the authenticated request counted as overloaded"
+    );
+}
+
+#[tokio::test]
+async fn adapter_s004_a3_no_permit_answers_503_overloaded_immediately() {
     let f = serve(0).await;
     let c = client();
     let resp = verify_request(&c, &f, Some(KEY)).send().await.unwrap();

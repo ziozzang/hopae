@@ -108,7 +108,6 @@ fn wait_for_event(h: &Hopae, kind: &str, reason: &str) -> Option<serde_json::Val
 // ---- main flow -------------------------------------------------------------
 
 #[test]
-#[ignore = "needs W1-A (decide) and W1-D (transactions)"]
 fn s001_1_document_navigation_redirects_to_portal() {
     let (_idp, h) = spawn();
     let r = h.verify(VerifyRequest::document(URL).ip("203.0.113.9").ua("UA1"));
@@ -158,7 +157,6 @@ fn s001_1_document_navigation_redirects_to_portal() {
 }
 
 #[test]
-#[ignore = "needs W1-A (decide), W1-D (transactions) and W1-E (portal)"]
 fn s001_2_portal_renders_chooser_and_sets_txn_cookie() {
     let idp = MockIdp::start("default");
     let (_idp2, h) = {
@@ -194,7 +192,9 @@ fn s001_2_portal_renders_chooser_and_sets_txn_cookie() {
             |r| r.get(0),
         )
         .expect("row");
-    assert_eq!(digest, Some(sha(&p)));
+    // S001-2 (corrected, R-4): the digest is recorded only when the provider
+    // redirect is issued, never at the chooser GET.
+    assert_eq!(digest, None, "not recorded by the chooser page");
     assert_eq!(r.header("cache-control"), Some("no-store"));
     assert_eq!(r.header("x-content-type-options"), Some("nosniff"));
     assert_eq!(r.header("referrer-policy"), Some("no-referrer"));
@@ -203,7 +203,6 @@ fn s001_2_portal_renders_chooser_and_sets_txn_cookie() {
 }
 
 #[test]
-#[ignore = "needs W1-A (decide), W1-D (transactions), W1-C (provider) and W1-E (portal)"]
 fn s001_3_single_provider_redirects_immediately() {
     let (idp, h) = spawn();
     let (txn, _) = start(&h);
@@ -230,7 +229,6 @@ fn s001_3_single_provider_redirects_immediately() {
 // ---- alternative flows -------------------------------------------------------
 
 #[test]
-#[ignore = "needs W1-A (decide)"]
 fn s001_4_non_document_request_gets_401_json() {
     let (_idp, h) = spawn();
     let before = txn_count(&h);
@@ -271,7 +269,7 @@ fn s001_5_accept_header_fallback() {
     .expect("fixture json");
     cfg_json["state_dir"] = json!("/tmp/hopae-s001-5");
     let cfg = hopae::config::parse(&cfg_json.to_string()).expect("configuration");
-    let gw = GatewayConfig::from_config(&cfg, |_| Some("k".to_string()));
+    let gw = GatewayConfig::from_config(&cfg);
 
     let nav = |extra: &[(&str, &str)]| {
         let mut h = HeaderMap::new();
@@ -290,7 +288,11 @@ fn s001_5_accept_header_fallback() {
                 HeaderValue::from_str(v).unwrap(),
             );
         }
-        match parse(&gw, &h, "r".into()) {
+        // The caller key is checked by `authenticate` before `parse`; this test is about navigation.
+        let caller = hopae::verify::types::CallerAuth::Keyed {
+            which: hopae::verify::types::KeySlot::Current,
+        };
+        match parse(&gw, &h, "r".into(), caller) {
             Ok(p) => matches!(p.input.navigation, Navigation::Document),
             Err(_) => panic!("the request must parse"),
         }
@@ -309,7 +311,6 @@ fn s001_5_accept_header_fallback() {
 }
 
 #[test]
-#[ignore = "needs W1-A (decide); the diagnostic event needs W1-F"]
 fn s001_6_unregistered_host_denied() {
     let (_idp, h) = spawn();
     let r = h.verify(VerifyRequest::document("https://unknown.example.test/").ip("203.0.113.9"));
@@ -317,6 +318,9 @@ fn s001_6_unregistered_host_denied() {
     assert_eq!(r.header("x-hopae-reason"), Some("unknown_app"));
     assert!(r.set_cookies().is_empty());
     assert_eq!(txn_count(&h), 0);
+    // `verify.denied` is sampled (S014-2): the held event is written when the
+    // 60 s window closes.
+    h.advance(Duration::from_secs(61));
     let e = wait_for_event(&h, "verify.denied", "unknown_app");
     assert!(e.is_some(), "verify.denied with reason unknown_app");
 }
@@ -324,7 +328,6 @@ fn s001_6_unregistered_host_denied() {
 // ---- abuse cases ---------------------------------------------------------------
 
 #[test]
-#[ignore = "needs W1-A (decide), W1-D (transactions) and W1-E (portal)"]
 fn s001_a1_expired_or_consumed_txn_rejected() {
     let (_idp, h) = spawn();
     // Expired.
@@ -352,7 +355,6 @@ fn s001_a1_expired_or_consumed_txn_rejected() {
 }
 
 #[test]
-#[ignore = "needs W1-A (decide), W1-D (transactions) and W1-E (portal)"]
 fn s001_a2_client_return_target_ignored() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(
@@ -386,7 +388,6 @@ fn s001_a2_client_return_target_ignored() {
 }
 
 #[test]
-#[ignore = "needs W1-A (decide), W1-D (transactions) and W1-E (portal)"]
 fn s001_a3_txn_bound_to_client() {
     let (_idp, h) = spawn();
     // A different client address.
@@ -421,7 +422,6 @@ fn s001_a3_txn_bound_to_client() {
 }
 
 #[test]
-#[ignore = "needs W1-A (decide), W1-D (transactions) and W1-F (eviction events)"]
 fn s001_a4_txn_flood_bounded() {
     let (_idp, h) = spawn();
     // 30 per minute from one address, the 31st is refused.
@@ -446,13 +446,18 @@ fn s001_a4_txn_flood_bounded() {
         assert_eq!(r.status, 302, "{ip}: {r:?}");
     }
     assert!(txn_count(&h) <= 1000, "max_rows bounds the table");
-    let evicted = h.hooks.events(Some("txn.evicted"), None);
+    // Wait for the best-effort diagnostic writer, then read every row (the default page is 100).
+    std::thread::sleep(Duration::from_millis(500));
+    let evicted = h.hooks.events(Some("txn.evicted"), Some(5000));
     assert!(!evicted.is_empty(), "eviction is reported");
     let total: i64 = evicted
         .iter()
         .map(|e| e["attrs"]["count"].as_i64().unwrap_or(0))
         .sum();
     assert!(total >= 1000, "txn.evicted events carry the count: {total}");
+    // "The harness limit" of S001-A4 (R-2): the resident set stays under 200 MiB.
+    let rss = h.rss_kib().expect("read VmRSS of the child");
+    assert!(rss < 200 * 1024, "RSS {rss} KiB exceeds 200 MiB");
 }
 
 #[test]
@@ -484,7 +489,6 @@ fn s001_a5_verify_not_served_on_portal_listener() {
 }
 
 #[test]
-#[ignore = "needs W1-A (decide), W1-D (transactions) and W1-E (portal client address)"]
 fn s001_a6_untrusted_forwarded_for_ignored() {
     // The harness peer is 127.0.0.1; trusting only 10.0.0.0/8 makes it untrusted.
     let (_idp, h) = spawn_with(json!({"trusted_proxies": ["10.0.0.0/8"]}));

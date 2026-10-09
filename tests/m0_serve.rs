@@ -43,7 +43,9 @@ async fn serves_portal_and_gateway_routes_and_shuts_down() {
         // Disjoint routers: nothing else exists on either listener.
         assert_eq!(get(portal, "/_hopae/verify").status, 404);
         assert_eq!(get(gateway, "/healthz").status, 404);
-        assert_eq!(get(portal, "/login").status, 404);
+        // The portal serves `/login`; without a transaction it is a 400, not a 404.
+        assert_eq!(get(portal, "/login").status, 400);
+        assert_eq!(get(gateway, "/login").status, 404);
         assert_eq!(get(gateway, "/").status, 404);
     });
     checks.await.unwrap();
@@ -56,9 +58,15 @@ async fn serves_portal_and_gateway_routes_and_shuts_down() {
 async fn binding_a_taken_port_fails() {
     let dir = tempfile::tempdir().unwrap();
     let (_bound, portal, _g) = start(dir.path()).await;
-    let json = config_json(dir.path()).replacen("127.0.0.1:0", &portal.to_string(), 1);
+    // Another state directory: the second instance must fail on the port, not on the instance lock.
+    let other = tempfile::tempdir().unwrap();
+    let json = config_json(other.path()).replacen("127.0.0.1:0", &portal.to_string(), 1);
     let cfg = hopae::config::parse(&json).unwrap();
-    assert!(hopae::app::bind(&cfg).await.is_err());
+    let err = hopae::app::bind(&cfg).await.err().expect("bind must fail");
+    assert!(
+        format!("{err:#}").contains("binding portal listener"),
+        "{err:#}"
+    );
 }
 
 #[test]

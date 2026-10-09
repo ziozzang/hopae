@@ -5,6 +5,7 @@
 //! session and identity services behind [`ports::PortalServices`]. The routes,
 //! the middleware and the router assembly are in `http::portal`.
 
+pub mod adapter;
 pub mod clientinfo;
 pub mod cookies;
 pub mod handlers;

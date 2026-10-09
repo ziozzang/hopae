@@ -1,6 +1,6 @@
 //! The gateway listener: `GET /_hopae/verify`. Wire details live in
-//! `crate::gateway::hangang`; this module owns the concurrency limit, the
-//! verify budget and the call into the core.
+//! `crate::gateway::hangang`; this module owns the caller-key check, the
+//! concurrency limit, the verify budget and the call into the core.
 
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
@@ -15,9 +15,13 @@ use axum::response::Response;
 use axum::routing::get;
 use tokio::sync::Semaphore;
 
-use crate::event::types::reasons;
+use crate::app::CallerKeys;
+use crate::event::bus::Emitter;
+use crate::event::sampling::Scope;
+use crate::event::types::{Reason, reasons};
 use crate::gateway::hangang::{self, GatewayConfig, RenderEnv};
-use crate::verify::types::{CallerAuth, Decision, DenyKind, KeySlot, Navigation, VerifyContext};
+use crate::telemetry::counters;
+use crate::verify::types::{Decision, DenyKind, Navigation, VerifyContext};
 
 /// Increment a named counter with labels. The default does nothing; the
 /// process wiring installs `telemetry::counters::inc`.
@@ -27,25 +31,33 @@ pub type CounterFn = Arc<dyn Fn(&str, &[(&str, &str)]) + Send + Sync>;
 pub struct GatewayState {
     pub cfg: GatewayConfig,
     pub ctx: VerifyContext,
+    callers: Arc<CallerKeys>,
     limit: Arc<Semaphore>,
     counters: CounterFn,
+    emitter: Option<Emitter>,
     next_id: AtomicU64,
     id_salt: RandomState,
 }
 
 impl GatewayState {
-    /// `max_concurrent` is `limits.gateway_max_concurrent`.
+    /// `max_concurrent` is `limits.gateway_max_concurrent`. `callers` is the
+    /// one caller-key implementation (`app::CallerKeys`); `emitter` receives a
+    /// sampled `verify.denied` for every denial (none in adapter unit tests).
     pub fn new(
         cfg: GatewayConfig,
         ctx: VerifyContext,
+        callers: Arc<CallerKeys>,
         max_concurrent: u32,
         counters: Option<CounterFn>,
+        emitter: Option<Emitter>,
     ) -> Arc<Self> {
         Arc::new(GatewayState {
             cfg,
             ctx,
+            callers,
             limit: Arc::new(Semaphore::new(max_concurrent as usize)),
             counters: counters.unwrap_or_else(|| Arc::new(|_, _| {})),
+            emitter,
             next_id: AtomicU64::new(0),
             id_salt: RandomState::new(),
         })
@@ -64,13 +76,55 @@ impl GatewayState {
     fn count_decision(&self, decision: &Decision) {
         let (name, reason) = hangang::decision_label(decision);
         self.count(
-            "hopae_verify_decisions_total",
+            counters::VERIFY_DECISIONS_TOTAL,
             &[("decision", name), ("reason", reason)],
         );
         if matches!(decision, Decision::Deny { reason: r, .. } if *r == reasons::STORE_UNAVAILABLE)
         {
-            self.count("hopae_store_errors_total", &[]);
+            self.count(counters::STORE_ERRORS_TOTAL, &[]);
         }
+    }
+
+    /// The `verify.denied` reason of a decision, when it is a denial: a
+    /// `Deny`, or a `Login` that refused a presented handle.
+    fn denial(decision: &Decision, cause: Option<Reason>) -> Option<Reason> {
+        match decision {
+            // The primary reason wins: a bad handle that was then rate limited
+            // is still a bad-handle denial.
+            Decision::Deny { reason, .. } => Some(cause.unwrap_or(*reason)),
+            Decision::Login { cause, .. } => *cause,
+            _ => None,
+        }
+    }
+
+    /// Record a denial (counted always, one sampled event per scope and reason).
+    fn denied(
+        &self,
+        decision: &Decision,
+        cause: Option<Reason>,
+        client_ip: Option<std::net::IpAddr>,
+        session: Option<&crate::session::types::SessionId>,
+        app: Option<&crate::policy::types::AppId>,
+        request_id: &str,
+    ) {
+        let (Some(emitter), Some(reason)) = (&self.emitter, Self::denial(decision, cause)) else {
+            return;
+        };
+        let scope = match (session, client_ip) {
+            (Some(s), _) => Scope::Session(s.clone()),
+            (None, Some(ip)) => Scope::Ip(ip),
+            (None, None) => Scope::None,
+        };
+        emitter.verify_denied(scope, reason, request_id, |b| {
+            let b = match client_ip {
+                Some(ip) => b.ip(ip),
+                None => b,
+            };
+            match app {
+                Some(a) => b.app(a),
+                None => b,
+            }
+        });
     }
 }
 
@@ -83,8 +137,24 @@ pub fn router(state: Arc<GatewayState>) -> Router {
 
 async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Response {
     let request_id = st.request_id();
+    // Denials before the forwarded client address is parsed have no client
+    // to attribute them to (the TCP peer is the gateway itself).
+    let peer_ip: Option<std::net::IpAddr> = None;
+
+    // 1. Caller key, before the permit and before any other header is read:
+    //    an unauthenticated request never takes a permit.
+    let caller = match hangang::authenticate(&st.callers, &headers, &request_id) {
+        Ok(c) => c,
+        Err(rej) => {
+            st.count_decision(&rej.decision);
+            st.denied(&rej.decision, None, peer_ip, None, None, &request_id);
+            return hangang::render(rej.decision, Navigation::Other, &rej.env, &st.cfg);
+        }
+    };
+
+    // 2. Bounded concurrency.
     let Ok(_permit) = st.limit.clone().try_acquire_owned() else {
-        st.count("hopae_verify_overloaded_total", &[]);
+        st.count(counters::VERIFY_OVERLOADED_TOTAL, &[]);
         let decision = Decision::Deny {
             reason: reasons::OVERLOADED,
             kind: DenyKind::Unavailable {
@@ -92,6 +162,7 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
             },
         };
         st.count_decision(&decision);
+        st.denied(&decision, None, peer_ip, None, None, &request_id);
         let env = RenderEnv {
             request_id,
             ..RenderEnv::default()
@@ -99,38 +170,41 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
         return hangang::render(decision, Navigation::Other, &env, &st.cfg);
     };
 
-    let parsed = match hangang::parse(&st.cfg, &headers, request_id) {
+    let parsed = match hangang::parse(&st.cfg, &headers, request_id.clone(), caller) {
         Ok(p) => p,
         Err(rej) => {
             if let Some(metric) = rej.metric {
                 st.count(metric, &[]);
             }
             st.count_decision(&rej.decision);
+            st.denied(&rej.decision, None, peer_ip, None, None, &request_id);
             return hangang::render(rej.decision, Navigation::Other, &rej.env, &st.cfg);
         }
     };
     let (input, env) = (parsed.input, parsed.env);
-    if let CallerAuth::Keyed { which } = &input.caller {
-        let key = match which {
-            KeySlot::Current => "current",
-            KeySlot::Next => "next",
-        };
-        st.count("hopae_verify_caller_key_total", &[("key", key)]);
-    }
     let document = matches!(input.navigation, Navigation::Document);
+    let client_ip = input.client_ip;
 
     let ctx = st.ctx.with_budget();
-    let decision =
-        match tokio::time::timeout(ctx.limits.budget, crate::verify::decide(&ctx, input)).await {
-            Ok(d) => d,
-            Err(_) => Decision::Deny {
+    let (decision, cause) = match tokio::time::timeout(
+        ctx.limits.budget,
+        crate::verify::decide_with_cause(&ctx, input),
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(_) => (
+            Decision::Deny {
                 reason: reasons::BUDGET_EXCEEDED,
                 kind: DenyKind::Unavailable {
                     retry_after: Duration::from_secs(1),
                 },
             },
-        };
+            None,
+        ),
+    };
     st.count_decision(&decision);
+    st.denied(&decision, cause, Some(client_ip), None, None, &request_id);
     let nav = if document {
         Navigation::Document
     } else {

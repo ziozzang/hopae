@@ -239,6 +239,23 @@ impl Hooks {
         self.call("POST", "/store/stall", Some(json!({"ms": ms})));
     }
 
+    /// Stall only the diagnostic batch writer, `ms` before each event (S014-5).
+    pub fn stall_diagnostics(&self, ms: u64) {
+        self.call(
+            "POST",
+            "/store/stall",
+            Some(json!({"ms": ms, "target": "diagnostics"})),
+        );
+    }
+
+    pub fn stall_diagnostics_off(&self) {
+        self.call(
+            "POST",
+            "/store/stall",
+            Some(json!({"off": true, "target": "diagnostics"})),
+        );
+    }
+
     pub fn stall_off(&self) {
         self.call("POST", "/store/stall", Some(json!({"off": true})));
     }
@@ -449,7 +466,12 @@ impl Hopae {
     pub fn secret_values(&self) -> Vec<String> {
         self.env
             .iter()
-            .filter(|(k, _)| k.as_str() != "HOPAE_TEST_HOOKS" && k.as_str() != "HOPAE_TEST_SEED")
+            .filter(|(k, _)| {
+                !matches!(
+                    k.as_str(),
+                    "HOPAE_TEST_HOOKS" | "HOPAE_TEST_SEED" | "HOPAE_TEST_DIAG_QUEUE"
+                )
+            })
             .map(|(_, v)| v.clone())
             .collect()
     }
@@ -570,6 +592,17 @@ impl Hopae {
     }
 
     /// Whether the process has exited (for crash-point tests); returns its exit status text.
+    /// The process's resident set in KiB (`VmRSS` of `/proc/<pid>/status`);
+    /// `None` when the process or the file is gone.
+    pub fn rss_kib(&self) -> Option<u64> {
+        let status = std::fs::read_to_string(format!("/proc/{}/status", self.child.id())).ok()?;
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmRSS:"))
+            .and_then(|v| v.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+    }
+
     pub fn exited(&mut self) -> Option<String> {
         self.child.try_wait().ok().flatten().map(|s| s.to_string())
     }

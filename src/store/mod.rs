@@ -22,7 +22,7 @@ use crate::provider::types::ProviderId;
 use crate::session::types::SessionId;
 
 pub use hooks::StoreHooks;
-pub use sqlite::Store;
+pub use sqlite::{LATEST_SCHEMA_VERSION, Store};
 pub use types::*;
 
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -163,6 +163,9 @@ pub trait Sessions: Send + Sync {
         txn_sha256: &Digest,
         binding: TransactionBinding,
     ) -> StoreResult<()>;
+    /// `POST /login/retry` is single-use per consumed transaction: true for
+    /// the first call, false afterwards (`UPDATE … WHERE retry_used_at IS NULL`).
+    async fn use_retry(&self, txn_sha256: &Digest, at: Timestamp) -> StoreResult<bool>;
     async fn record_retry_bind(
         &self,
         txn_sha256: &Digest,
@@ -199,6 +202,12 @@ pub trait Sessions: Send + Sync {
 
 #[async_trait]
 pub trait Events: Send + Sync {
+    /// Required events with no state change to travel with (a `login.failed`
+    /// on a callback that mutates nothing, a `handoff.rejected` for an unknown
+    /// code or a rate limit): one transaction, delivery rows included, never
+    /// dropped or batched. `session.*`, `handle.*`, `identity.*` and
+    /// `session.handoff` must travel with their mutation and are refused.
+    async fn append_required(&self, events: Vec<Event>) -> StoreResult<()>;
     /// Diagnostic kinds only; bounded queue; returns Err(Busy) when the queue is full (the caller counts a drop).
     async fn append_diagnostic(&self, event: Event) -> StoreResult<()>;
     async fn claim_deliveries(

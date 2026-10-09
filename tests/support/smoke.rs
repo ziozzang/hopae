@@ -1,6 +1,6 @@
 //! Harness smoke tests (included by `tests/scenarios.rs` only): spawn Hopae
 //! with `m1-basic` and the mock provider, reach the hooks, move the clock,
-//! and check that the verify stub still answers `503 not_implemented` and that
+//! and check that verify answers with the contract wire form and that
 //! the harness pieces (jar, mock provider, echo upstream) behave as specified.
 
 use std::time::Duration;
@@ -30,8 +30,21 @@ fn spawn_basic_reaches_portal_gateway_and_hooks() {
     h.hooks.advance(Duration::from_secs(90));
     assert_eq!(h.hooks.now_ms(), 1_800_000_090_000);
     assert!(before > 1_600_000_000_000);
-    assert!(h.hooks.events(None, Some(10)).is_empty());
-    assert!(h.hooks.deliveries(Some("log")).is_empty());
+    // Start records exactly one `config.loaded` event (and its delivery); the
+    // document navigation above started one login, nothing else happened.
+    let evs = h.hooks.events(None, Some(10));
+    let loaded = evs.iter().filter(|e| e["kind"] == "config.loaded").count();
+    assert_eq!(loaded, 1, "{evs:?}");
+    assert!(
+        evs.iter()
+            .all(|e| e["kind"] == "config.loaded" || e["kind"] == "login.started"),
+        "{evs:?}"
+    );
+    assert_eq!(
+        h.hooks.deliveries(Some("log")).len(),
+        evs.len(),
+        "one delivery per required event"
+    );
     // Gates and stalls are accepted; a stalled store is visible in the call counters.
     h.hooks.stall(5);
     h.hooks.stall_off();

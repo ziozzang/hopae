@@ -3,6 +3,10 @@
 
 Fails if a gateway-specific header prefix appears anywhere in src/ outside
 src/gateway/. Comments and strings count. Standard library only.
+
+Splitting a forbidden name across literals (for example with `concat!`) defeats
+this lint and is a violation reviewed by hand: shared names such as the
+forwarding headers live in src/gateway/forwarding.rs and are imported.
 """
 import pathlib
 import sys

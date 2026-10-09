@@ -156,6 +156,18 @@ pub trait Provider: Send + Sync {
         now: Timestamp,
     ) -> Result<ProviderIdentity, ProviderError>;
     async fn health(&self) -> ProviderHealth;
+    /// Health after giving a provider that has not completed discovery yet a
+    /// short, bounded chance to (a visitor must not see "temporarily
+    /// unavailable" for the first milliseconds after start). The default is
+    /// just [`Provider::health`].
+    async fn ensure_ready(&self) -> ProviderHealth {
+        self.health().await
+    }
+    /// Origin of the authorization endpoint from the discovery already held
+    /// (never fetched here), for the portal's per-page CSP `form-action`.
+    fn authorization_origin(&self) -> Option<url::Origin> {
+        None
+    }
 }
 
 #[cfg(test)]

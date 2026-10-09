@@ -6,7 +6,7 @@
 //! | --- | --- |
 //! | `GET /counters` | store calls by method, verify decisions, metrics counters |
 //! | `GET /clock`, `POST /clock {"now_ms"}` or `{"advance_ms"}` | read / set / advance the test clock |
-//! | `POST /store/stall {"ms"}` or `{"off":true}` | every store call sleeps first |
+//! | `POST /store/stall {"ms"}` or `{"off":true}` | every store call sleeps first; with `"target":"diagnostics"` only the diagnostic batch writer does |
 //! | `POST /commit-gate {"label","hold"}` | hold / release the labelled transaction before commit |
 //! | `POST /crash-at {"label"}` (`null` disarms) | abort when execution reaches the label |
 //! | `POST /elevate {"session_id"}` | raise a session to AAL2 (gate label `elevate`) |
@@ -139,10 +139,18 @@ async fn stall(State(s): State<Shared>, req: Request) -> Response {
         Ok(b) => b,
         Err(r) => return r,
     };
+    let diagnostics = body.get("target").and_then(Value::as_str) == Some("diagnostics");
+    let set = |ms: u64| {
+        if diagnostics {
+            s.store_hooks.set_diag_stall(ms);
+        } else {
+            s.store_hooks.set_stall(ms);
+        }
+    };
     if body.get("off").and_then(Value::as_bool) == Some(true) {
-        s.store_hooks.set_stall(0);
+        set(0);
     } else if let Some(ms) = body.get("ms").and_then(Value::as_u64) {
-        s.store_hooks.set_stall(ms.min(60_000));
+        set(ms.min(60_000));
     } else {
         return bad("expected ms or off");
     }

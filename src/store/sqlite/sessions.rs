@@ -132,6 +132,18 @@ impl Sessions for Store {
                 "UPDATE users SET last_login_at=?2 WHERE user_id=?1",
                 params![s.user_id.as_str(), s.created_at.secs()],
             )?;
+            // The login transaction is consumed in this same transaction
+            // (S014-6 b): the session exists only if the transaction was
+            // still unconsumed, and a lost race creates nothing.
+            if let Some((txn, why)) = &req.consume_txn {
+                let n = tx.execute(
+                    "UPDATE login_txns SET consumed_at=?2, consumed_reason=?3 WHERE txn_sha256=?1 AND consumed_at IS NULL",
+                    params![blob(txn), s.created_at.secs(), why.0],
+                )?;
+                if n != 1 {
+                    return Err(StoreError::Conflict("transaction already consumed"));
+                }
+            }
             insert_events(&tx, &shared, &req.events)?;
             if let Some(h) = &shared.hooks {
                 h.crash_point("before_login_commit");
@@ -436,6 +448,18 @@ impl Sessions for Store {
         .await
     }
 
+    async fn use_retry(&self, txn_sha256: &Digest, at: Timestamp) -> StoreResult<bool> {
+        let d = *txn_sha256;
+        self.write("use_retry", move |env| {
+            let n = env.conn.execute(
+                "UPDATE login_txns SET retry_used_at=?2 WHERE txn_sha256=?1 AND retry_used_at IS NULL",
+                params![blob(&d), at.secs()],
+            )?;
+            Ok(n == 1)
+        })
+        .await
+    }
+
     async fn record_retry_bind(
         &self,
         txn_sha256: &Digest,
@@ -540,7 +564,7 @@ impl Sessions for Store {
     async fn count_handoff_failures_since(&self, ip: IpAddr, since: Timestamp) -> StoreResult<u32> {
         self.read("count_handoff_failures_since", move |c| {
             let n: i64 = c.query_row(
-                "SELECT COUNT(*) FROM events WHERE kind='handoff.rejected' AND client_ip=?1 AND at >= ?2",
+                "SELECT COUNT(*) FROM events WHERE kind='handoff.rejected' AND client_ip=?1 AND at >= ?2 AND COALESCE(reason, '') != 'rate_limited'",
                 params![ip.to_string(), since.0 as f64 / 1000.0],
                 |r| r.get(0),
             )?;
@@ -609,8 +633,58 @@ fn redeem(
     let shared = env.shared.clone();
     let tx = env.begin()?;
     let now = req.now.secs();
+    let presented = req.presented_handle.as_ref().filter(|v| handle_is_valid(v));
+    let browser_holds_handle = presented.is_some();
+    let max_recoveries = req.max_recoveries;
     let fail = |tx: Transaction<'_>, outcome: RedeemOutcome| -> StoreResult<RedeemOutcome> {
-        insert_events(&tx, &shared, fail_events)?;
+        // The failure events name the classified reason and the session of
+        // the burned code. For a known code they also carry its recovery
+        // depth, and a rejection at the bound (ADR-0014: depth carries on the
+        // first rejection of a code, never on `code_consumed`, and only while
+        // the browser holds no valid handle) is recorded as exhausted, with
+        // the classified reason kept as `cause`.
+        let (why, sid, depth, exhausted) = match &outcome {
+            RedeemOutcome::Rejected { reason, code } => (
+                Some(*reason),
+                code.as_ref().map(|c| c.session_id.clone()),
+                code.as_ref().map(|c| c.recovery_depth),
+                code.as_ref().is_some_and(|c| {
+                    *reason != reasons::CODE_CONSUMED
+                        && !browser_holds_handle
+                        && c.recovery_depth >= max_recoveries
+                }),
+            ),
+            RedeemOutcome::SessionConflict { code } => (
+                Some(reasons::SESSION_CONFLICT),
+                Some(code.session_id.clone()),
+                Some(code.recovery_depth),
+                false,
+            ),
+            _ => (None, None, None, false),
+        };
+        let fail_events: Vec<Event> = fail_events
+            .iter()
+            .cloned()
+            .map(|mut e| {
+                if e.reason.is_none() {
+                    e.reason = why;
+                }
+                if e.session_id.is_none() {
+                    e.session_id = sid.clone();
+                }
+                if let Some(d) = depth {
+                    e.attrs.insert("recovery_depth".into(), d.into());
+                }
+                if exhausted {
+                    if let Some(w) = why {
+                        e.attrs.insert("cause".into(), w.0.into());
+                    }
+                    e.reason = Some(reasons::HANDOFF_RECOVERY_EXHAUSTED);
+                }
+                e
+            })
+            .collect();
+        insert_events(&tx, &shared, &fail_events)?;
         finish(tx, &shared, Some("redeem"))?;
         Ok(outcome)
     };
@@ -625,7 +699,6 @@ fn redeem(
         );
     };
     let session = session_by_id(&tx, &code.session_id)?;
-    let presented = req.presented_handle.as_ref().filter(|v| handle_is_valid(v));
 
     if code.consumed_at.is_some() {
         let same_session_handle = presented
@@ -674,11 +747,12 @@ fn redeem(
         }
         let session =
             session.ok_or_else(|| StoreError::Corrupt("handoff code without session".into()))?;
-        if req.new_handle.session_id != code.session_id || req.new_handle.host != req.host {
+        if req.new_handle.host != req.host {
             return Err(StoreError::Conflict("new handle does not match the code"));
         }
         let issued_aal: Aal = code.issued_aal.min(session.aal);
         let mut handle = req.new_handle.clone();
+        handle.session_id = code.session_id.clone();
         handle.issued_aal = issued_aal;
         if let Some(old) = presented
             && old.session.session_id == code.session_id
@@ -695,7 +769,18 @@ fn redeem(
             "UPDATE sessions SET last_seen_at = MAX(last_seen_at, ?2) WHERE session_id=?1",
             params![code.session_id.as_str(), now],
         )?;
-        insert_events(&tx, &shared, ok_events)?;
+        let ok_events: Vec<Event> = ok_events
+            .iter()
+            .cloned()
+            .map(|mut e| {
+                if e.session_id.is_none() {
+                    e.session_id = Some(code.session_id.clone());
+                    e.user_id = Some(session.user_id.clone());
+                }
+                e
+            })
+            .collect();
+        insert_events(&tx, &shared, &ok_events)?;
         let session = session_by_id(&tx, &code.session_id)?
             .ok_or_else(|| StoreError::Corrupt("session vanished".into()))?;
         finish(tx, &shared, Some("redeem"))?;

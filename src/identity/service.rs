@@ -18,10 +18,6 @@ use crate::session::types::SessionId;
 use crate::store::types::{NewIdentity, NewUser, ProviderRow, User, UserStatus};
 use crate::store::{Directory, StoreError, StoreResult};
 
-/// `identity.email_domain_not_allowed`: the provider's domain allowlist refused the login.
-/// Local until the shared reason table gains it (reported to the orchestrator).
-pub const EMAIL_DOMAIN_NOT_ALLOWED: Reason = Reason("email_domain_not_allowed");
-
 /// An identity waiting for a fresh authentication to the account that owns its
 /// email (purpose `link`, stored in the transaction). No raw claims, tokens or
 /// the other account's details are kept.
@@ -92,6 +88,8 @@ pub struct Service {
     clock: Arc<dyn Clock>,
     rng: Arc<dyn Rng>,
     policy: LinkingPolicy,
+    /// Counts the required events it builds (and tells the prune trigger).
+    emitter: Option<crate::event::bus::Emitter>,
 }
 
 impl Service {
@@ -106,7 +104,14 @@ impl Service {
             clock,
             rng,
             policy,
+            emitter: None,
         }
+    }
+
+    /// The same service counting the required events it builds through `emitter`.
+    pub fn with_emitter(mut self, emitter: crate::event::bus::Emitter) -> Self {
+        self.emitter = Some(emitter);
+        self
     }
 
     pub fn policy(&self) -> LinkingPolicy {
@@ -121,7 +126,7 @@ impl Service {
         provider: &ProviderRow,
     ) -> StoreResult<Resolution> {
         if !domain_allowed(ident.email.as_ref(), &provider.allowed_email_domains) {
-            return Ok(Resolution::Denied(EMAIL_DOMAIN_NOT_ALLOWED));
+            return Ok(Resolution::Denied(reasons::EMAIL_DOMAIN_NOT_ALLOWED));
         }
         if let Some(row) = self
             .directory
@@ -260,15 +265,17 @@ impl Service {
     }
 
     fn event(&self, kind: EventKind, outcome: Outcome, ctx: &EventCtx) -> EventBuilder {
-        let mut b = EventBuilder::new(
-            &*self.clock,
-            &*self.rng,
-            kind,
-            outcome,
-            ctx.request_id.clone(),
-        )
-        .ip(ctx.client_ip)
-        .ua(ctx.user_agent.as_deref());
+        let b = match &self.emitter {
+            Some(e) => e.counted(kind, outcome, ctx.request_id.clone()),
+            None => EventBuilder::new(
+                &*self.clock,
+                &*self.rng,
+                kind,
+                outcome,
+                ctx.request_id.clone(),
+            ),
+        };
+        let mut b = b.ip(ctx.client_ip).ua(ctx.user_agent.as_deref());
         if let Some(app) = &ctx.app_id {
             b = b.app(app);
         }

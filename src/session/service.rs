@@ -25,6 +25,7 @@ use crate::crypto::{
     Clock, Digest, Rng, Secret, ct_eq, handle_value, is_well_formed_bind, is_well_formed_handle,
     random_id, random_token, sha256,
 };
+use crate::event::bus::Emitter;
 use crate::event::types::{Event, EventBuilder, EventKind, Outcome, Reason, reasons};
 use crate::identity::linking::LinkingPolicy;
 use crate::identity::service::{EventCtx, PendingIdentity, Resolution, Service as IdentityService};
@@ -33,7 +34,7 @@ use crate::policy::types::{
     AppPolicy, ConfigSnapshot, Host, IpBinding, OnMismatch, SessionPolicy, UaBinding,
 };
 use crate::provider::types::{CallbackQuery, Provider, ProviderError, ProviderId, ProviderKind};
-use crate::session::handoff::{CodeDirectory, MintRequest};
+use crate::session::handoff::MintRequest;
 use crate::session::types::{Aal, FactorEntry, FactorKind, SessionId};
 use crate::store::types::{
     CreateSession, HandleRow, HandleView, IdentitySnapshot, NewTransaction, SessionRow,
@@ -41,10 +42,6 @@ use crate::store::types::{
 };
 use crate::store::{Directory, Events, Sessions, StoreError};
 
-/// The callback arrived on a path whose provider is not the one the
-/// transaction chose (ADR-0010 mix-up defence). Local until the shared reason
-/// table gains it (reported to the orchestrator).
-pub const PROVIDER_MISMATCH: Reason = Reason("provider_mismatch");
 /// `consumed_reason` of a transaction that completed a login (text column).
 pub(crate) const CONSUMED_COMPLETED: Reason = Reason("completed");
 /// `consumed_reason` of a transaction that ended in single sign-on.
@@ -119,7 +116,7 @@ pub struct Deps {
     pub directory: Arc<dyn Directory>,
     pub sessions: Arc<dyn Sessions>,
     pub events: Arc<dyn Events>,
-    pub codes: Arc<dyn CodeDirectory>,
+    pub emitter: Emitter,
     pub clock: Arc<dyn Clock>,
     pub rng: Arc<dyn Rng>,
     pub snapshot: Arc<ArcSwap<ConfigSnapshot>>,
@@ -183,7 +180,11 @@ pub enum LoginEntry {
         session_id: SessionId,
     },
     /// `portal.sso_confirm_new_host`: ask once before the first handoff to this host.
-    ConfirmNewHost { host: Host },
+    ConfirmNewHost {
+        host: Host,
+        /// Origin of the return target (the page's `form-action`).
+        origin: url::Origin,
+    },
     /// Show the providers (the portal redirects at once when there is exactly one).
     Chooser { providers: Vec<ProviderChoice> },
 }
@@ -230,7 +231,7 @@ pub struct Service {
     pub(crate) directory: Arc<dyn Directory>,
     pub(crate) sessions: Arc<dyn Sessions>,
     pub(crate) events: Arc<dyn Events>,
-    pub(crate) codes: Arc<dyn CodeDirectory>,
+    pub(crate) emitter: Emitter,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) rng: Arc<dyn Rng>,
     pub(crate) snapshot: Arc<ArcSwap<ConfigSnapshot>>,
@@ -254,12 +255,13 @@ impl Service {
             deps.clock.clone(),
             deps.rng.clone(),
             deps.config.linking,
-        );
+        )
+        .with_emitter(deps.emitter.clone());
         Service {
             directory: deps.directory,
             sessions: deps.sessions,
             events: deps.events,
-            codes: deps.codes,
+            emitter: deps.emitter,
             clock: deps.clock,
             rng: deps.rng,
             snapshot: deps.snapshot,
@@ -275,16 +277,14 @@ impl Service {
 
     // ---- shared helpers -------------------------------------------------
 
+    /// A builder for an event of this request. A required kind is counted and
+    /// told to the prune trigger here (the same as `Emitter::required`), because
+    /// it is built to be committed with a state change.
     pub(crate) fn ev(&self, ctx: &RequestCtx, kind: EventKind, outcome: Outcome) -> EventBuilder {
-        EventBuilder::new(
-            &*self.clock,
-            &*self.rng,
-            kind,
-            outcome,
-            ctx.request_id.clone(),
-        )
-        .ip(ctx.client_ip)
-        .ua(ctx.user_agent.as_deref())
+        self.emitter
+            .counted(kind, outcome, ctx.request_id.clone())
+            .ip(ctx.client_ip)
+            .ua(ctx.user_agent.as_deref())
     }
 
     pub(crate) fn event_ctx(&self, ctx: &RequestCtx, app: Option<&TransactionRow>) -> EventCtx {
@@ -297,18 +297,14 @@ impl Service {
         }
     }
 
-    /// A required event with no state change to travel with. The store has no
-    /// standalone append for required kinds (reported to the orchestrator), so
-    /// it goes to the structured log only.
-    pub(crate) fn log_unattached(&self, ev: &Event) {
-        tracing::info!(
-            event = ev.kind.name(),
-            event_id = %ev.event_id,
-            reason = ev.reason.map(|r| r.0),
-            session = ev.session_id.as_ref().map(|s| s.as_str()),
-            provider = ev.provider_id.as_ref().map(|s| s.as_str()),
-            "event not persisted (no state change to carry it)"
-        );
+    /// A required event with no state change to travel with (a `login.failed`
+    /// on a callback that mutates nothing): its own store transaction. A store
+    /// failure here must not change the user-visible refusal, so it is logged.
+    pub(crate) async fn append_unattached(&self, ev: Event) {
+        let name = ev.kind.name();
+        if let Err(e) = self.events.append_required(vec![ev]).await {
+            tracing::warn!(event = name, error = %e, "required event could not be recorded");
+        }
     }
 
     pub(crate) fn ua_digest(&self, ctx: &RequestCtx) -> Option<Digest> {
@@ -336,8 +332,9 @@ impl Service {
         ip_matches(app.binding.ip, txn.client_ip, ctx.client_ip)
     }
 
-    /// Look a live (existing, unconsumed, unexpired) transaction up by its bearer id.
-    pub(crate) async fn load_live_txn(
+    /// Look a live (existing, unconsumed, unexpired) transaction up by its
+    /// bearer id, without recording anything.
+    pub(crate) async fn load_live_txn_quiet(
         &self,
         secret: &Secret,
     ) -> Result<TransactionRow, SessionError> {
@@ -356,8 +353,26 @@ impl Service {
         Ok(txn)
     }
 
+    /// As [`Service::load_live_txn_quiet`], recording `login.failed` for a
+    /// transaction that exists but is expired or consumed (S001-A1). A
+    /// malformed or unknown id records nothing: no row, no state, no event.
+    pub(crate) async fn load_live_txn(
+        &self,
+        ctx: &RequestCtx,
+        secret: &Secret,
+    ) -> Result<TransactionRow, SessionError> {
+        let found = self.load_live_txn_quiet(secret).await;
+        if let Err(SessionError::Refused(reason)) = &found
+            && (*reason == reasons::TXN_CONSUMED || *reason == reasons::TXN_EXPIRED)
+            && let Some(row) = self.sessions.transaction(&secret.digest()).await?
+        {
+            return Err(self.refuse(ctx, Some(&row), None, *reason).await);
+        }
+        found
+    }
+
     /// Refuse without a state change to attach an event to.
-    fn refuse(
+    async fn refuse(
         &self,
         ctx: &RequestCtx,
         txn: Option<&TransactionRow>,
@@ -376,7 +391,7 @@ impl Service {
         if let Some(p) = known.or(txn.and_then(|t| t.provider_id.as_ref())) {
             b = b.provider(p);
         }
-        self.log_unattached(&b.build());
+        self.append_unattached(b.build()).await;
         SessionError::Refused(reason)
     }
 
@@ -408,7 +423,15 @@ impl Service {
         {
             Ok(true) => SessionError::Refused(reason),
             Ok(false) => {
-                self.log_unattached(&event);
+                // Someone else consumed it first; theirs carries the outcome,
+                // this attempt is recorded as the lost race it is.
+                self.append_unattached(
+                    self.ev(ctx, EventKind::LoginFailed, Outcome::Failure)
+                        .app(&txn.app_id)
+                        .reason(reasons::TXN_CONSUMED)
+                        .build(),
+                )
+                .await;
                 SessionError::Refused(reasons::TXN_CONSUMED)
             }
             Err(e) => SessionError::Store(e),
@@ -545,7 +568,7 @@ impl Service {
         let portal_cookie = portal_cookie
             .filter(|c| is_well_formed_bind(c.expose()))
             .ok_or(SessionError::Refused(reasons::PORTAL_BIND_MISMATCH))?;
-        let row = self.load_live_txn(txn).await?;
+        let row = self.load_live_txn(ctx, txn).await?;
         self.begin_provider_for(ctx, &row, provider_id, portal_cookie)
             .await
     }
@@ -561,7 +584,7 @@ impl Service {
             return Err(SessionError::Refused(reasons::INVALID_STATE));
         }
         if !self.txn_ip_ok(row, ctx) {
-            return Err(SessionError::Refused(reasons::TXN_BINDING));
+            return Err(self.refuse_consuming(ctx, row, reasons::TXN_BINDING).await);
         }
         if row.state_sha256.is_some() {
             return Err(SessionError::AlreadyBound);
@@ -617,18 +640,33 @@ impl Service {
         ctx: &RequestCtx,
         txn: &Secret,
         portal_handle: Option<&Secret>,
+        portal_cookie: Option<&Secret>,
         confirmed: bool,
     ) -> Result<LoginEntry, SessionError> {
-        let row = self.load_live_txn(txn).await?;
+        let row = self.load_live_txn(ctx, txn).await?;
         if row.purpose != TxnPurpose::Login {
             return Err(SessionError::Refused(reasons::INVALID_STATE));
         }
         if !self.txn_ip_ok(&row, ctx) {
-            return Err(SessionError::Refused(reasons::TXN_BINDING));
+            return Err(self.refuse_consuming(ctx, &row, reasons::TXN_BINDING).await);
+        }
+        if let Some(recorded) = row.portal_bind_sha256 {
+            // A provider flow already started on this transaction. Its portal
+            // digest is immutable, so a visit (a lure, a back button) never
+            // changes it; a browser holding another portal cookie ends the
+            // transaction for everyone (S001-A3), the same one only learns
+            // the flow is under way.
+            let same = portal_cookie
+                .filter(|c| is_well_formed_bind(c.expose()))
+                .is_some_and(|c| ct_eq(&c.digest().0, &recorded.0));
+            if !same {
+                return Err(self
+                    .refuse_consuming(ctx, &row, reasons::PORTAL_BIND_MISMATCH)
+                    .await);
+            }
+            return Err(SessionError::AlreadyBound);
         }
         if row.state_sha256.is_some() {
-            // A provider flow already started on this transaction; a visit
-            // (a lure, a back button) never changes it.
             return Err(SessionError::AlreadyBound);
         }
         if let Some(view) = self.portal_session(ctx, portal_handle).await? {
@@ -639,7 +677,10 @@ impl Service {
                     .handed_off_before(&view.session.session_id, &host)
                     .await?
             {
-                return Ok(LoginEntry::ConfirmNewHost { host });
+                return Ok(LoginEntry::ConfirmNewHost {
+                    host,
+                    origin: row.return_target.origin(),
+                });
             }
             return self.sso(ctx, &row, &view, &host).await;
         }
@@ -742,30 +783,44 @@ impl Service {
             .as_deref()
             .filter(|s| !s.is_empty() && s.len() <= 512)
         else {
-            return Err(self.refuse(ctx, None, Some(provider_id), reasons::INVALID_STATE));
+            return Err(self
+                .refuse(ctx, None, Some(provider_id), reasons::INVALID_STATE)
+                .await);
         };
         let Some(txn) = self
             .sessions
             .transaction_by_state(&sha256(state.as_bytes()))
             .await?
         else {
-            return Err(self.refuse(ctx, None, Some(provider_id), reasons::INVALID_STATE));
+            return Err(self
+                .refuse(ctx, None, Some(provider_id), reasons::INVALID_STATE)
+                .await);
         };
         if txn.consumed_at.is_some() {
-            return Err(self.refuse(ctx, Some(&txn), Some(provider_id), reasons::TXN_CONSUMED));
+            return Err(self
+                .refuse(ctx, Some(&txn), Some(provider_id), reasons::TXN_CONSUMED)
+                .await);
         }
         if txn.expires_at <= now {
-            return Err(self.refuse(ctx, Some(&txn), Some(provider_id), reasons::TXN_EXPIRED));
+            return Err(self
+                .refuse(ctx, Some(&txn), Some(provider_id), reasons::TXN_EXPIRED)
+                .await);
         }
         if txn.purpose != TxnPurpose::Login {
-            return Err(self.refuse(ctx, Some(&txn), Some(provider_id), reasons::INVALID_STATE));
+            return Err(self
+                .refuse(ctx, Some(&txn), Some(provider_id), reasons::INVALID_STATE)
+                .await);
         }
         let (Some(expected_bind), Some(app_bind)) = (txn.portal_bind_sha256, txn.bind_sha256)
         else {
-            return Err(self.refuse(ctx, Some(&txn), Some(provider_id), reasons::INVALID_STATE));
+            return Err(self
+                .refuse(ctx, Some(&txn), Some(provider_id), reasons::INVALID_STATE)
+                .await);
         };
         if txn.provider_id.as_ref() != Some(provider_id) {
-            return Err(self.refuse_consuming(ctx, &txn, PROVIDER_MISMATCH).await);
+            return Err(self
+                .refuse_consuming(ctx, &txn, reasons::PROVIDER_MISMATCH)
+                .await);
         }
 
         // The portal binding cookie must match the digest recorded when the
@@ -783,30 +838,35 @@ impl Service {
             return Err(self.refuse_consuming(ctx, &txn, reasons::TXN_BINDING).await);
         }
 
-        let provider = self.providers.get(provider_id).ok_or_else(|| {
-            self.refuse(
-                ctx,
-                Some(&txn),
-                Some(provider_id),
-                reasons::PROVIDER_UNAVAILABLE,
-            )
-        })?;
+        let Some(provider) = self.providers.get(provider_id) else {
+            return Err(self
+                .refuse(
+                    ctx,
+                    Some(&txn),
+                    Some(provider_id),
+                    reasons::PROVIDER_UNAVAILABLE,
+                )
+                .await);
+        };
         if !provider.enabled() {
-            return Err(self.refuse(
-                ctx,
-                Some(&txn),
-                Some(provider_id),
-                reasons::PROVIDER_DISABLED,
-            ));
+            return Err(self
+                .refuse(
+                    ctx,
+                    Some(&txn),
+                    Some(provider_id),
+                    reasons::PROVIDER_DISABLED,
+                )
+                .await);
         }
         let redirect_uri = self.redirect_uri(provider_id)?;
         let ident = match provider.complete(&txn, &query, &redirect_uri, now).await {
             Ok(i) => i,
             Err(e) => {
-                self.provider_failed(ctx, &txn, provider_id, &e).await;
                 if transient(&e) {
                     // The user may retry until the transaction expires.
-                    return Err(self.refuse(ctx, Some(&txn), Some(provider_id), e.reason()));
+                    return Err(self
+                        .refuse(ctx, Some(&txn), Some(provider_id), e.reason())
+                        .await);
                 }
                 let _ = self.refuse_consuming(ctx, &txn, e.reason()).await;
                 return Err(SessionError::Provider(e));
@@ -852,37 +912,54 @@ impl Service {
             _ => {}
         }
 
-        // The conditional consume is the arbiter between racing callbacks.
-        if !self
-            .sessions
-            .consume_transaction(&txn.txn_sha256, CONSUMED_COMPLETED, now, vec![])
-            .await?
-        {
-            self.log_unattached(
-                &self
-                    .ev(ctx, EventKind::LoginFailed, Outcome::Failure)
-                    .app(&txn.app_id)
-                    .provider(provider_id)
-                    .reason(reasons::TXN_CONSUMED)
-                    .build(),
-            );
-            return Err(SessionError::Refused(reasons::TXN_CONSUMED));
-        }
+        // The user and identity are created (or found) in their own call,
+        // idempotent on (provider, subject); a crash after it leaves an
+        // orphan user and an unconsumed transaction (S014-6). The transaction
+        // is consumed in the same store call that creates the session, so two
+        // racing callbacks produce one session.
         let resolved = match self.identity.apply(resolution, &row, &ident, &ectx).await {
             Ok(Some(r)) => r,
             Ok(None) => return Err(SessionError::Refused(reasons::INVALID_STATE)),
             Err(StoreError::Conflict(_)) => {
-                return Err(SessionError::Refused(reasons::EMAIL_IN_USE));
+                // A racing callback for the same identity created the user
+                // first. The creation is idempotent on (provider, subject): look
+                // again, and use the user that now exists. Anything else is a
+                // real conflict.
+                match self.identity.resolve(&ident, &row).await? {
+                    r @ Resolution::ExistingUser { .. } => {
+                        match self.identity.apply(r, &row, &ident, &ectx).await {
+                            Ok(Some(r)) => r,
+                            Ok(None) => {
+                                return Err(SessionError::Refused(reasons::INVALID_STATE));
+                            }
+                            Err(StoreError::Conflict(_)) => {
+                                return Err(SessionError::Refused(reasons::EMAIL_IN_USE));
+                            }
+                            Err(e) => return Err(e.into()),
+                        }
+                    }
+                    _ => return Err(SessionError::Refused(reasons::EMAIL_IN_USE)),
+                }
             }
             Err(e) => return Err(e.into()),
         };
         let user = resolved.user;
 
         // A callback that completes while the browser already holds a valid
-        // portal handle for the same user reuses that session.
+        // portal handle for the same user reuses that session; there is no
+        // session to create, so the consume is its own call.
         if let Some(view) = self.portal_session(ctx, portal_handle).await?
             && view.session.user_id == user.user_id
         {
+            if !self
+                .sessions
+                .consume_transaction(&txn.txn_sha256, CONSUMED_COMPLETED, now, vec![])
+                .await?
+            {
+                return Err(self
+                    .refuse(ctx, Some(&txn), Some(provider_id), reasons::TXN_CONSUMED)
+                    .await);
+            }
             let event = self
                 .ev(ctx, EventKind::LoginSucceeded, Outcome::Success)
                 .user(&user.user_id)
@@ -913,9 +990,19 @@ impl Service {
             });
         }
 
-        let (session, issued) = self
+        let (session, issued) = match self
             .create_session(ctx, &txn, provider.kind(), provider_id, &user)
-            .await?;
+            .await
+        {
+            Ok(v) => v,
+            Err(SessionError::Store(StoreError::Conflict(_))) => {
+                // Lost the race: the winner created the session.
+                return Err(self
+                    .refuse(ctx, Some(&txn), Some(provider_id), reasons::TXN_CONSUMED)
+                    .await);
+            }
+            Err(e) => return Err(e),
+        };
         let minted = self
             .mint_handoff(MintRequest {
                 session_id: session.session_id.clone(),
@@ -979,23 +1066,6 @@ impl Service {
             retry_allowed: txn.recovery_depth < self.cfg.max_recoveries,
             depth: txn.recovery_depth,
         })
-    }
-
-    async fn provider_failed(
-        &self,
-        ctx: &RequestCtx,
-        txn: &TransactionRow,
-        provider_id: &ProviderId,
-        e: &ProviderError,
-    ) {
-        let ev = self
-            .ev(ctx, EventKind::ProviderError, Outcome::Failure)
-            .app(&txn.app_id)
-            .provider(provider_id)
-            .reason(e.reason())
-            .build();
-        // Best effort: a full diagnostic queue drops the event.
-        let _ = self.events.append_diagnostic(ev).await;
     }
 
     async fn link_required(
@@ -1123,6 +1193,7 @@ impl Service {
                 session: session.clone(),
                 portal_handle,
                 portal_handle_digest: digest,
+                consume_txn: Some((txn.txn_sha256, CONSUMED_COMPLETED)),
                 events,
             })
             .await?;
@@ -1138,8 +1209,14 @@ impl Service {
     // ---- logout ---------------------------------------------------------
 
     /// `POST /logout` (scope this): terminate the session the portal handle
-    /// names. Idempotent and uniform: without a live handle nothing changes
+    /// names. Idempotent and uniform: without a usable handle nothing changes
     /// and nothing is recorded. The CSRF and `Origin` checks are the portal's.
+    ///
+    /// The user asks to leave, which grants nothing, so a handle whose only
+    /// defect is idle or absolute expiry (handle or session) still terminates
+    /// its session (R-7). A revoked handle, a terminated session or a disabled
+    /// user behave as "no session" (S006-4). A binding mismatch applies the
+    /// application's mismatch consequence and reports no session.
     pub async fn logout(
         &self,
         ctx: &RequestCtx,
@@ -1155,8 +1232,15 @@ impl Service {
         else {
             return Ok(LogoutOutcome::NoSession);
         };
-        if view.handle.revoked_at.is_some() || view.session.terminated_at.is_some() {
-            return Ok(LogoutOutcome::NoSession);
+        let snap = self.snapshot.load_full();
+        match self.evaluate_handle(&view, &snap.default_app, ctx) {
+            HandleState::Usable | HandleState::Expired => {}
+            HandleState::Dead => return Ok(LogoutOutcome::NoSession),
+            HandleState::Mismatch(reason) => {
+                self.apply_mismatch(ctx, &view, &snap.default_app, reason)
+                    .await?;
+                return Ok(LogoutOutcome::NoSession);
+            }
         }
         let event = self
             .ev(ctx, EventKind::SessionTerminated, Outcome::Info)

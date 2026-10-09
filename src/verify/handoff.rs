@@ -15,37 +15,13 @@ use crate::policy::types::AppPolicy;
 use crate::session::types::SessionId;
 use crate::store::types::{HandleRow, NewTransaction, RedeemOutcome, RedeemRequest, TxnPurpose};
 
-/// The reserved query parameter (ADR-0004).
-pub const HANDOFF_PARAM: &str = "_hopae_handoff";
-
-/// One query pair is the handoff parameter when its percent-decoded name
-/// (with `+` as a space) is exactly the reserved name.
-fn is_handoff_pair(pair: &str) -> bool {
-    let name = pair.split_once('=').map_or(pair, |(n, _)| n);
-    let spaced = name.replace('+', " ");
-    percent_encoding::percent_decode_str(&spaced).decode_utf8_lossy() == HANDOFF_PARAM
-}
-
-/// The URL without any handoff pair: other pairs keep their order and their
-/// bytes, and an emptied query disappears (no trailing `?`).
-pub fn clean_target(url: &Url) -> Url {
-    let Some(query) = url.query() else {
-        return url.clone();
-    };
-    let kept: Vec<&str> = query.split('&').filter(|p| !is_handoff_pair(p)).collect();
-    let mut out = url.clone();
-    if kept.iter().all(|p| p.is_empty()) {
-        out.set_query(None);
-    } else {
-        out.set_query(Some(&kept.join("&")));
-    }
-    out
-}
-
-/// Redeem `code` for the browser behind this request.
+/// Redeem `code` for the browser behind this request. `target` is the
+/// requested URL as the adapter delivers it: the handoff pair is already
+/// removed (the engine never looks at the query, ADR-0013), so it is also the
+/// clean URL the browser is sent back to.
 pub(super) async fn redeem(cx: &Cx<'_>, app: &AppPolicy, target: &Url, code: &Secret) -> Flow {
     let (ctx, input) = (cx.ctx, cx.input);
-    let clean = clean_target(target);
+    let clean = target.clone();
 
     let window = Duration::from_secs(60);
     let failures = ctx
@@ -53,7 +29,20 @@ pub(super) async fn redeem(cx: &Cx<'_>, app: &AppPolicy, target: &Url, code: &Se
         .count_handoff_failures_since(input.client_ip, cx.now.sub(window))
         .await
         .map_err(|e| cx.store_err(e))?;
-    if failures >= engine::HANDOFF_FAILURES_PER_MINUTE {
+    if failures >= ctx.limits.handoff_failures_per_minute {
+        // Recorded (required, its own transaction: no state changes). The
+        // failure count ignores `rate_limited` rows, so being blocked does
+        // not extend the block.
+        if let Some(events) = &ctx.events {
+            let ev = cx
+                .event(EventKind::HandoffRejected, Outcome::Failure, app)
+                .attr("host", input.host.as_str())
+                .reason(reasons::RATE_LIMITED)
+                .build();
+            if let Err(e) = events.append_required(vec![ev]).await {
+                tracing::warn!(error = %e, "handoff.rejected (rate limited) could not be recorded");
+            }
+        }
         return Err(cx.deny(
             reasons::RATE_LIMITED,
             DenyKind::RateLimited {
@@ -84,6 +73,7 @@ pub(super) async fn redeem(cx: &Cx<'_>, app: &AppPolicy, target: &Url, code: &Se
     let ok = cx
         .event(EventKind::SessionHandoff, Outcome::Success, app)
         .attr("host", input.host.as_str())
+        .attr("sso", false)
         .build();
     let fail = cx
         .event(EventKind::HandoffRejected, Outcome::Failure, app)
@@ -98,6 +88,7 @@ pub(super) async fn redeem(cx: &Cx<'_>, app: &AppPolicy, target: &Url, code: &Se
         presented_handle: presented.clone(),
         new_handle,
         now: cx.now,
+        max_recoveries: ctx.limits.max_recoveries,
     };
     let outcome = ctx
         .sessions
@@ -120,7 +111,7 @@ pub(super) async fn redeem(cx: &Cx<'_>, app: &AppPolicy, target: &Url, code: &Se
             let row = NewTransaction {
                 txn_sha256: txn.digest(),
                 created_at: cx.now,
-                expires_at: cx.now.add(engine::TXN_TTL),
+                expires_at: cx.now.add(ctx.limits.txn_lifetime),
                 app_id: app.app_id.clone(),
                 return_target: clean,
                 bind_sha256: Some(bind_digest),
@@ -149,12 +140,16 @@ pub(super) async fn redeem(cx: &Cx<'_>, app: &AppPolicy, target: &Url, code: &Se
             Err(cx.deny(reasons::HANDOFF_RECOVERY_EXHAUSTED, DenyKind::ForbiddenHtml))
         }
         RedeemOutcome::Rejected { reason, code } => {
-            // First-use race between tabs: the bind cookie differs and the
-            // browser holds no valid handle. Recover through the portal, at
-            // depth + 1, until the configured bound (depth is read only from
-            // the burned code's row, never from the client).
-            let race = reason == reasons::BIND_MISMATCH && presented.is_none();
-            let depth = match (race, &code) {
+            // ADR-0014: every rejection of a known code while the browser
+            // holds no valid handle recovers through the portal at the burned
+            // code's depth + 1, until the configured bound (depth is read
+            // only from the burned code's row, never from the client). A code
+            // that was already consumed (`code_consumed`) is treated like an
+            // unknown one: depth 0, bounded by the per-IP failure cap, so a
+            // burned code cannot act as a reusable exhaustion token.
+            let first_rejection = reason != reasons::CODE_CONSUMED;
+            let carry = presented.is_none() && first_rejection;
+            let depth = match (carry, &code) {
                 (true, Some(c)) => {
                     if c.recovery_depth >= ctx.limits.max_recoveries {
                         return Err(
@@ -165,7 +160,7 @@ pub(super) async fn redeem(cx: &Cx<'_>, app: &AppPolicy, target: &Url, code: &Se
                 }
                 _ => 0,
             };
-            engine::login(cx, app, &clean, false, depth).await
+            engine::login(cx, app, &clean, None, depth).await
         }
     }
 }
@@ -326,6 +321,7 @@ mod tests {
                     session: row.clone(),
                     portal_handle: h,
                     portal_handle_digest: digest,
+                    consume_txn: None,
                     events: vec![],
                 })
                 .await
@@ -377,7 +373,8 @@ mod tests {
         }
 
         fn input(&self, url: &str, code: Option<&Secret>, bind: Option<&Secret>) -> VerifyInput {
-            let u = Url::parse(url).unwrap();
+            // As the adapter hands it over: every handoff pair removed.
+            let u = crate::gateway::recognition::clean_target(&Url::parse(url).unwrap());
             VerifyInput {
                 canonical_path: CanonicalPath::new(u.path().to_string()),
                 port: 443,
@@ -441,39 +438,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn clean_target_preserves_the_rest_of_the_query() {
-        let c = |u: &str| clean_target(&Url::parse(u).unwrap()).to_string();
-        let want = "https://app.example.test/admin/x?q=1&z=2";
-        assert_eq!(
-            c("https://app.example.test/admin/x?q=1&_hopae_handoff=K1&z=2"),
-            want
-        );
-        assert_eq!(
-            c("https://app.example.test/admin/x?q=1&%5Fhopae%5Fhandoff=K1&z=2"),
-            want
-        );
-        assert_eq!(
-            c("https://app.example.test/admin/x?q=1&_hopae_handoff=K1%2B&z=2"),
-            want
-        );
-        assert_eq!(
-            c("https://app.example.test/admin/x?_hopae_handoff=K1"),
-            "https://app.example.test/admin/x"
-        );
-        assert_eq!(
-            c("https://app.example.test/admin/x?a=1&b"),
-            "https://app.example.test/admin/x?a=1&b"
-        );
-        // A near-miss name is not the parameter.
-        assert_eq!(
-            c("https://app.example.test/?_hopae_handoff2=K"),
-            "https://app.example.test/?_hopae_handoff2=K"
-        );
-    }
-
     #[tokio::test]
-    #[ignore = "needs W0 request R1 (store completes the new handle's session from the code row)"]
     async fn valid_code_mints_a_handle_and_redirects_to_the_clean_url() {
         let t = t();
         let u = t.user(1).await;
@@ -613,7 +578,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "needs W0 request R1 (the store fills the classified reason into the failure events)"]
     async fn failure_events_carry_the_classified_reason() {
         let t = t();
         let (a, b) = (t.user(1).await, t.user(2).await);
@@ -704,6 +668,142 @@ mod tests {
             _ => panic!("expected the exhausted page"),
         }
         assert_eq!(t.count("SELECT COUNT(*) FROM login_txns"), txns);
+    }
+
+    fn depth_of(t: &T, d: &Decision) -> i64 {
+        let Decision::Login {
+            transaction: Some(txn),
+            ..
+        } = d
+        else {
+            panic!("expected a login transaction")
+        };
+        t.count(&format!(
+            "SELECT recovery_depth FROM login_txns WHERE txn_sha256 = x'{}'",
+            txn.digest().to_hex()
+        ))
+    }
+
+    #[tokio::test]
+    async fn every_first_rejection_of_a_known_code_carries_depth() {
+        // ADR-0014: the burned code's depth + 1, whatever the reason.
+        let t = t();
+        let u = t.user(1).await;
+        let (s, _) = t.session(&u).await;
+        let bind = random_token(&*t.rng, 16);
+
+        // code_path_mismatch, depth 1 -> 2
+        let code = t.code(&s, &bind, 1).await;
+        let d = t
+            .run(t.input(
+                "https://app.example.test/other",
+                Some(&code.secret),
+                Some(&bind),
+            ))
+            .await;
+        assert_eq!(depth_of(&t, &d), 2);
+
+        // code_expired, depth 2 -> 3
+        let code = t.code(&s, &bind, 2).await;
+        t.clock.advance(Duration::from_secs(61));
+        let d = t.run(t.input(URL, Some(&code.secret), Some(&bind))).await;
+        assert_eq!(depth_of(&t, &d), 3);
+
+        // code_ip_mismatch, depth 0 -> 1 (the right bind, another client address)
+        let code = t.code(&s, &bind, 0).await;
+        let mut i = t.input(URL, Some(&code.secret), Some(&bind));
+        i.client_ip = ip("198.51.100.4");
+        let d = t.run(i).await;
+        assert_eq!(depth_of(&t, &d), 1);
+        let ev = t.events(EventKind::HandoffRejected).await;
+        assert!(
+            ev.iter()
+                .any(|e| e.reason == Some(reasons::CODE_IP_MISMATCH)
+                    && e.attrs.get("recovery_depth").and_then(|v| v.as_i64()) == Some(0)),
+            "{ev:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_consumed_code_restarts_at_depth_zero_and_is_never_an_exhaustion_token() {
+        // ADR-0014 decision 2: depth carries only on a code's first rejection.
+        let t = t();
+        let u = t.user(1).await;
+        let (s, _) = t.session(&u).await;
+        let minted_for = random_token(&*t.rng, 16);
+        let presented = random_token(&*t.rng, 16);
+        // Drive one code to the bound: its first rejection is at depth 3 = max.
+        let code = t.code(&s, &minted_for, 3).await;
+        let d = t
+            .run(t.input(URL, Some(&code.secret), Some(&presented)))
+            .await;
+        assert!(
+            matches!(
+                d,
+                Decision::Deny {
+                    reason: reasons::HANDOFF_RECOVERY_EXHAUSTED,
+                    ..
+                }
+            ),
+            "the first rejection at the bound is the exhausted page"
+        );
+        // The same burned code handed to another browser: depth 0, a normal login.
+        let other = random_token(&*t.rng, 16);
+        let d = t.run(t.input(URL, Some(&code.secret), Some(&other))).await;
+        assert!(is_login(&d), "a replayed consumed code is not exhaustion");
+        assert_eq!(depth_of(&t, &d), 0);
+        let ev = t.events(EventKind::HandoffRejected).await;
+        assert!(
+            ev.iter().any(|e| e.reason == Some(reasons::CODE_CONSUMED)),
+            "{ev:?}"
+        );
+        assert!(
+            ev.iter()
+                .any(|e| e.reason == Some(reasons::HANDOFF_RECOVERY_EXHAUSTED)
+                    && e.attrs.get("cause").and_then(|c| c.as_str()) == Some("bind_mismatch")
+                    && e.attrs.get("recovery_depth").and_then(|c| c.as_i64()) == Some(3)),
+            "{ev:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_redemption_is_recorded_without_extending_the_block() {
+        let t = t();
+        let (bus, _rx) = crate::event::bus::channel(8);
+        let emitter = crate::event::bus::Emitter::new(
+            t.clock.clone(),
+            t.rng.clone(),
+            bus,
+            Arc::new(crate::event::sampling::Sampler::default()),
+            Arc::new(crate::event::prune::PruneTrigger::new(1000)),
+            false,
+        );
+        let ctx = t.ctx.clone().with_events(emitter, t.store.events());
+        let bind = random_token(&*t.rng, 16);
+        for _ in 0..10 {
+            let junk = random_token(&*t.rng, 32);
+            let d = crate::verify::decide(&ctx, t.input(URL, Some(&junk), Some(&bind))).await;
+            assert!(is_login(&d));
+        }
+        for _ in 0..3 {
+            let junk = random_token(&*t.rng, 32);
+            let d = crate::verify::decide(&ctx, t.input(URL, Some(&junk), Some(&bind))).await;
+            assert_eq!(deny_reason(&d), reasons::RATE_LIMITED);
+        }
+        let ev = t.events(EventKind::HandoffRejected).await;
+        assert_eq!(
+            ev.iter()
+                .filter(|e| e.reason == Some(reasons::RATE_LIMITED))
+                .count(),
+            3,
+            "each refusal is recorded (required, its own transaction)"
+        );
+        // Being blocked does not extend the block: after the window slides
+        // past the ten real failures, the next attempt is processed again.
+        t.clock.advance(Duration::from_secs(61));
+        let junk = random_token(&*t.rng, 32);
+        let d = crate::verify::decide(&ctx, t.input(URL, Some(&junk), Some(&bind))).await;
+        assert!(is_login(&d));
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
-//! Login transactions: creation (Flow 1), per-IP caps and eviction, and the
-//! portal retry after a first-use cookie race (ADR-0004).
+//! Login transactions on the portal side: eviction room and the single-use
+//! portal retry after a first-use cookie race (ADR-0004). The unauthenticated
+//! `302` and its transaction belong to the verify engine (ruling R-1).
 
 use url::Url;
 
@@ -7,35 +8,8 @@ use crate::crypto::{Digest, Secret, ct_eq, is_well_formed_bind, random_token};
 use crate::event::types::{EventKind, Outcome, reasons};
 use crate::policy::types::AppId;
 use crate::provider::types::ProviderId;
-use crate::session::service::{
-    COUNTER_WINDOW, RequestCtx, Service, SessionError, TXN_LIFETIME, host_of,
-};
+use crate::session::service::{COUNTER_WINDOW, RequestCtx, Service, SessionError, TXN_LIFETIME};
 use crate::store::types::{NewTransaction, TransactionRow, TxnPurpose};
-use crate::verify::types::BindAction;
-
-/// A created login transaction. `transaction` is the bearer id for
-/// `/login?txn=`; `bind` says whether the response plants the application
-/// host's binding cookie or keeps the one the browser presented.
-pub struct StartedLogin {
-    pub transaction: Secret,
-    pub bind: BindAction,
-    pub app_id: AppId,
-}
-
-impl std::fmt::Debug for StartedLogin {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StartedLogin")
-            .field("app_id", &self.app_id)
-            .field(
-                "bind",
-                &match self.bind {
-                    BindAction::Keep => "keep",
-                    BindAction::Plant(_) => "plant",
-                },
-            )
-            .finish_non_exhaustive()
-    }
-}
 
 #[derive(Debug)]
 pub struct RetryOutcome {
@@ -43,100 +17,9 @@ pub struct RetryOutcome {
     pub location: Url,
 }
 
-/// The reserved handoff parameter (ADR-0004).
-pub const HANDOFF_PARAM: &str = "_hopae_handoff";
+pub use crate::gateway::recognition::HANDOFF_PARAM;
 
 impl Service {
-    /// Create the transaction that starts a login for `return_target`
-    /// (Flow 1, document navigations only; the caller creates nothing for a
-    /// `401`). The target is re-validated here against the return-origin
-    /// allowlist, so a caller bug cannot create an open redirect.
-    ///
-    /// `presented_bind` is the application host's binding cookie as received:
-    /// a well-formed value is kept (and its `Max-Age` refreshed by the
-    /// caller), anything else is replaced by a fresh one. `recovery_depth` is
-    /// 0 for a fresh login and is only ever taken from a burned code's row.
-    pub async fn start_login(
-        &self,
-        ctx: &RequestCtx,
-        return_target: &Url,
-        presented_bind: Option<&Secret>,
-        recovery_depth: u32,
-    ) -> Result<StartedLogin, SessionError> {
-        let now = self.clock.now();
-        let snap = self.snapshot.load_full();
-        let host = self.validate_target(return_target)?;
-        let app = snap
-            .app_for_host(&host)
-            .ok_or(SessionError::Refused(reasons::UNKNOWN_APP))?;
-        if !app.enabled {
-            return Err(SessionError::Refused(reasons::APP_DISABLED));
-        }
-        let port = return_target.port_or_known_default().unwrap_or(0);
-        if !snap.return_origin_allowed(&host, port) {
-            return Err(SessionError::Refused(reasons::PORT_NOT_ALLOWED));
-        }
-
-        // Per-IP cap, then room for one more row.
-        let recent = self
-            .sessions
-            .count_transactions_since(ctx.client_ip, now.sub(COUNTER_WINDOW))
-            .await?;
-        if recent >= self.cfg.txn_per_ip_per_minute {
-            return Err(SessionError::RateLimited {
-                retry_after: COUNTER_WINDOW,
-            });
-        }
-        self.make_room(ctx, &app.app_id).await?;
-
-        let (bind, action) = match presented_bind.filter(|b| is_well_formed_bind(b.expose())) {
-            Some(b) => (b.digest(), BindAction::Keep),
-            None => {
-                let fresh = random_token(&*self.rng, 16);
-                (fresh.digest(), BindAction::Plant(fresh))
-            }
-        };
-        let txn = random_token(&*self.rng, 16);
-        let mut started = self
-            .ev(ctx, EventKind::LoginStarted, Outcome::Info)
-            .app(&app.app_id)
-            .attr("host", host.as_str());
-        if recovery_depth > 0 {
-            started = started.attr("recovery_depth", recovery_depth);
-        }
-        self.sessions
-            .create_transaction(
-                NewTransaction {
-                    txn_sha256: txn.digest(),
-                    created_at: now,
-                    expires_at: now.add(TXN_LIFETIME),
-                    app_id: app.app_id.clone(),
-                    return_target: return_target.clone(),
-                    bind_sha256: Some(bind),
-                    portal_bind_sha256: None,
-                    retry_bind_sha256: None,
-                    client_ip: ctx.client_ip,
-                    ua_sha256: self.ua_digest(ctx),
-                    provider_id: None,
-                    state_sha256: None,
-                    nonce: None,
-                    pkce_verifier: None,
-                    portal_session_id: None,
-                    purpose: TxnPurpose::Login,
-                    conflicting_handle_sha256: None,
-                    pending_identity: None,
-                    recovery_depth,
-                },
-                vec![started.build()],
-            )
-            .await?;
-        Ok(StartedLogin {
-            transaction: txn,
-            bind: action,
-            app_id: app.app_id.clone(),
-        })
-    }
-
     /// `txn.max_rows`: evict so that one more row fits (dead rows first,
     /// then the oldest), and report the eviction as a diagnostic.
     pub(crate) async fn make_room(
@@ -149,38 +32,43 @@ impl Service {
             .evict_transactions(self.cfg.txn_max_rows.saturating_sub(1), self.clock.now())
             .await?;
         if evicted > 0 {
-            let ev = self
-                .ev(ctx, EventKind::TxnEvicted, Outcome::Info)
-                .app(app)
-                .reason(reasons::TXN_EVICTED)
-                .attr("count", evicted)
-                .build();
-            let _ = self.events.append_diagnostic(ev).await;
+            self.emitter
+                .diagnostic(EventKind::TxnEvicted, Outcome::Info, &ctx.request_id, |b| {
+                    b.app(app)
+                        .reason(reasons::TXN_EVICTED)
+                        .attr("count", evicted)
+                });
         }
         Ok(())
     }
 
-    /// Shape checks of ADR-0004 "Return target" that do not need the snapshot.
-    fn validate_target(&self, url: &Url) -> Result<crate::policy::types::Host, SessionError> {
-        let refuse = |r| Err(SessionError::Refused(r));
-        match url.scheme() {
-            "https" => {}
-            "http" if !self.cfg.secure => {}
-            _ => return refuse(reasons::SCHEME),
-        }
-        if !url.username().is_empty() || url.password().is_some() {
-            return refuse(reasons::USERINFO);
-        }
-        if url.fragment().is_some() {
-            return refuse(reasons::FRAGMENT);
-        }
-        if url.as_str().len() > 2048 {
-            return refuse(reasons::TOO_LONG);
-        }
-        if url.query_pairs().any(|(k, _)| k == HANDOFF_PARAM) {
-            return refuse(reasons::HANDOFF_PARAMETER_NOT_ALLOWED);
-        }
-        host_of(url)
+    /// `POST /login/retry` addressed by the callback's `state`, which is how
+    /// the interrupted page names the consumed transaction.
+    pub async fn retry_by_state(
+        &self,
+        ctx: &RequestCtx,
+        state: &str,
+        portal_cookie: Option<&Secret>,
+    ) -> Result<RetryOutcome, SessionError> {
+        let found = self
+            .sessions
+            .transaction_by_state(&crate::crypto::sha256(state.as_bytes()))
+            .await?
+            .ok_or(SessionError::Refused(reasons::TXN_EXPIRED))?;
+        self.retry(ctx, &found.txn_sha256, portal_cookie).await
+    }
+
+    /// The origin of the transaction's provider flow, for the interrupted
+    /// page's `form-action` (from the provider registry, never request input).
+    pub async fn retry_form_origin(&self, state: &str) -> Option<url::Origin> {
+        let txn = self
+            .sessions
+            .transaction_by_state(&crate::crypto::sha256(state.as_bytes()))
+            .await
+            .ok()??;
+        self.providers
+            .get(txn.provider_id.as_ref()?)?
+            .authorization_origin()
     }
 
     /// `POST /login/retry`: after a callback consumed a transaction with
@@ -222,6 +110,11 @@ impl Service {
         }
         if old.recovery_depth >= self.cfg.max_recoveries {
             return Err(SessionError::Refused(reasons::HANDOFF_RECOVERY_EXHAUSTED));
+        }
+        // Single use per consumed transaction (R-4): the first POST wins, a
+        // replay is refused whatever its cookie and token.
+        if !self.sessions.use_retry(retry_ref, now).await? {
+            return Err(SessionError::Refused(reasons::TXN_CONSUMED));
         }
         let provider: ProviderId = old
             .provider_id

@@ -54,6 +54,7 @@
 | `limits.gateway_max_concurrent`, `limits.portal_max_concurrent` | M1 | `64`, `256` | 리스너별 동시 처리 요청 상한. 초과분은 즉시 `503`(게이트웨이) 또는 `503`(포털)으로 답합니다([ADR-0003](../adr/0003-http-stack-axum-on-hyper.md)) |
 | `log.verify_allow`, `log.accept_client_request_id` | M1 | `false`, `false` | 허용된 verify를 개별적으로 로그에 남길지, 클라이언트가 보낸 `x-request-id`를(잘라서) `attrs.client_request_id`에 기록할지([ADR-0009](../adr/0009-event-model.md)) |
 | `sessions.retention_days` | M1 | `30` | 종료된 세션과 그 핸들을 세션 보존 스윕이 삭제하는 기준 경과 일수([ADR-0007](../adr/0007-context-binding-policy.md)) |
+| `gateway.admin_url` | M1(선택) | 없음 | 게이트웨이 관리 API의 기본 URL(`http(s)`, 자격 증명 없음). `gateway.readonly_token_env`와 함께 쓰면 `hopae --check`가 라우트 목록을 물어 라우트가 없는 애플리케이션 호스트를 경고합니다([ADR-0012](../adr/0012-service-registration-and-gateway-config-ownership.md)의 0단계). `run`은 사용하지 않습니다 |
 | `gateway.readonly_token_env` | M1(선택) | 없음 | `hopae --check`에서만 사용하는 읽기 전용 게이트웨이 자격 증명. 라우트가 없는 애플리케이션 호스트를 경고합니다([ADR-0012](../adr/0012-service-registration-and-gateway-config-ownership.md)의 0단계). 전체 불일치 보고는 M2입니다 |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, 없음, 없음 | 로컬 캐시와 Redis 버스([ADR-0006](../adr/0006-verify-caching-and-invalidation.md)) |
 | `store.kind = postgres`, `store.url_env` | M2 | — | 공유 기본 저장소([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |

@@ -3,5 +3,6 @@
 //! `hangang` implements contract v1; a generic forward-auth adapter is later.
 
 pub mod canonical;
+pub mod forwarding;
 pub mod hangang;
 pub mod recognition;

@@ -13,7 +13,7 @@ use std::time::Duration;
 use hopae::crypto::{OsRng, Secret, handle_value, random_token};
 use hopae::event::types::{EventKind, reasons};
 use hopae::policy::types::Host;
-use hopae::session::{Aal, LoginEntry, RedeemResult, SessionError, SwitchChoice, SwitchOutcome};
+use hopae::session::{Aal, LoginEntry, SessionError, SwitchChoice, SwitchOutcome};
 use hopae::verify::types::BindAction;
 use url::Url;
 
@@ -33,7 +33,7 @@ fn minted(r: RedeemResult) -> (Url, Secret, Aal, Duration) {
     }
 }
 
-fn login_started(r: RedeemResult) -> hopae::session::StartedLogin {
+fn login_started(r: RedeemResult) -> StartedLogin {
     match r {
         RedeemResult::Login(s) => s,
         other => panic!("expected Login, got {other:?}"),
@@ -136,19 +136,39 @@ async fn s003_2_other_query_parameters_preserved() {
             "no reordering, no double '?', no re-encoding"
         );
     }
-    // a target that already carries the reserved parameter, literally or by encoded alias, is refused
-    for bad in ["/x?_hopae_handoff=K", "/x?a=1&%5Fhopae%5Fhandoff=K"] {
-        let e = k
-            .svc
-            .start_login(
-                &k.ctx(),
-                &url(&format!("https://{APP}{bad}")),
-                Some(&k.b1),
-                0,
-            )
+    // The adapter owns query parsing (ADR-0013, R-1): a URL that carries the
+    // reserved parameter, literally or by encoded alias, reaches the engine
+    // with the pair removed and the code extracted, so a transaction can never
+    // be created for a target that holds the parameter.
+    use hopae::gateway::recognition::{clean_target, find_handoff};
+    use hopae::verify::types::Handoff;
+    for (raw, want) in [
+        ("/x?_hopae_handoff=K", "/x"),
+        ("/x?a=1&%5Fhopae%5Fhandoff=K", "/x?a=1"),
+        ("/x?q=1&_hopae_handoff=K1%2B&z=2", "/x?q=1&z=2"),
+    ] {
+        let u = url(&format!("https://{APP}{raw}"));
+        assert!(
+            matches!(find_handoff(u.query().unwrap()), Handoff::Code(_)),
+            "{raw}"
+        );
+        assert_eq!(
+            clean_target(&u).as_str(),
+            format!("https://{APP}{want}"),
+            "{raw}"
+        );
+        let started = k.start(APP, want, Some(&k.b1)).await;
+        let row = k
+            .store
+            .sessions()
+            .transaction(&started.transaction.digest())
             .await
-            .unwrap_err();
-        assert_eq!(e.reason().0, "handoff_parameter_not_allowed", "{bad}");
+            .unwrap()
+            .unwrap();
+        assert!(
+            !row.return_target.as_str().contains("hopae_handoff"),
+            "{raw}"
+        );
     }
 }
 
@@ -203,7 +223,13 @@ async fn s003_4_second_domain_via_sso() {
     let t2 = k.start(OTHER, "/", Some(&b2)).await;
     let LoginEntry::Sso { location, .. } = k
         .svc
-        .sso_or_chooser(&k.ctx(), &t2.transaction, Some(&l.portal_handle), false)
+        .sso_or_chooser(
+            &k.ctx(),
+            &t2.transaction,
+            Some(&l.portal_handle),
+            None,
+            false,
+        )
         .await
         .unwrap()
     else {
@@ -246,10 +272,19 @@ async fn s003_4_second_domain_via_sso() {
     let t2 = k.start(OTHER, "/", Some(&b2)).await;
     let first = k
         .svc
-        .sso_or_chooser(&k.ctx(), &t2.transaction, Some(&l.portal_handle), false)
+        .sso_or_chooser(
+            &k.ctx(),
+            &t2.transaction,
+            Some(&l.portal_handle),
+            None,
+            false,
+        )
         .await
         .unwrap();
-    let LoginEntry::ConfirmNewHost { host: confirm_host } = first else {
+    let LoginEntry::ConfirmNewHost {
+        host: confirm_host, ..
+    } = first
+    else {
         panic!("expected ConfirmNewHost, got {first:?}")
     };
     assert_eq!(confirm_host.as_str(), OTHER);
@@ -260,7 +295,13 @@ async fn s003_4_second_domain_via_sso() {
     );
     let second = k
         .svc
-        .sso_or_chooser(&k.ctx(), &t2.transaction, Some(&l.portal_handle), true)
+        .sso_or_chooser(
+            &k.ctx(),
+            &t2.transaction,
+            Some(&l.portal_handle),
+            None,
+            true,
+        )
         .await
         .unwrap();
     assert!(matches!(second, LoginEntry::Sso { .. }));
@@ -268,7 +309,13 @@ async fn s003_4_second_domain_via_sso() {
     let t3 = k.start(APP, "/again", Some(&k.b1)).await;
     let again = k
         .svc
-        .sso_or_chooser(&k.ctx(), &t3.transaction, Some(&l.portal_handle), false)
+        .sso_or_chooser(
+            &k.ctx(),
+            &t3.transaction,
+            Some(&l.portal_handle),
+            None,
+            false,
+        )
         .await
         .unwrap();
     assert!(matches!(again, LoginEntry::Sso { .. }), "{again:?}");
@@ -455,6 +502,7 @@ async fn s003_9_first_use_tab_race_recovers() {
                 &k.ctx(),
                 &started.transaction,
                 Some(&a.portal_handle),
+                None,
                 false,
             )
             .await
@@ -525,6 +573,7 @@ async fn recovery_depth_chain() {
                 &k.ctx(),
                 &started.transaction,
                 Some(&l.portal_handle),
+                None,
                 false,
             )
             .await
@@ -740,7 +789,6 @@ async fn s003_a4_code_guessing_bounded() {
 }
 
 #[tokio::test]
-#[ignore = "needs W1-E (portal listener)"]
 async fn s003_a6_portal_ignores_handoff_param() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);
@@ -757,34 +805,28 @@ async fn s003_a6_portal_ignores_handoff_param() {
 async fn s003_a7_plain_http_target_refused() {
     let k = Kit::new().await;
     let l = k.login().await;
-    // a transaction cannot be started for a plain-http target while cookies are Secure
-    let e = k
-        .svc
-        .start_login(
-            &k.ctx(),
-            &url(&format!("http://{APP}/admin/x")),
-            Some(&k.b1),
-            0,
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(e.reason().0, "scheme");
-    // redemption over plain http is refused before the code is touched
+    // a transaction cannot be started, and a code cannot be redeemed, over
+    // plain http while cookies are Secure: the engine refuses before it
+    // touches the code (S003-A7: `insecure_transport`).
     let insecure = url(&format!("http://{APP}/admin/x?a=1"));
-    let e = k
-        .svc
-        .redeem(hopae::session::RedeemInput {
-            code: l.code.clone(),
-            target: insecure,
-            client_ip: ip(IP),
-            user_agent: None,
-            bind_cookie: Some(k.b1.clone()),
-            handle_cookie: None,
-            request_id: "r".into(),
-        })
-        .await
-        .unwrap_err();
-    assert_eq!(e.reason().0, "insecure_transport");
+    for code in [None, Some(&l.code)] {
+        let d = hopae::verify::decide(
+            &k.verify,
+            k.verify_input(IP, &insecure, code, Some(&k.b1), None),
+        )
+        .await;
+        match d {
+            hopae::verify::types::Decision::Deny { reason, .. } => {
+                assert_eq!(reason.0, "insecure_transport")
+            }
+            _ => panic!("expected insecure_transport"),
+        }
+    }
+    assert_eq!(
+        k.count("SELECT COUNT(*) FROM login_txns WHERE purpose='login'"),
+        1,
+        "only the kit's own login"
+    );
     assert_eq!(
         k.count("SELECT COUNT(*) FROM handoff_codes WHERE consumed_at IS NOT NULL"),
         0,
@@ -804,7 +846,10 @@ async fn s003_a8_expired_code_uniform_response() {
         k.redeem(&random_token(&OsRng, 32), &l.target, Some(&k.b1), None)
             .await,
     );
-    // identical in everything the browser sees: the bind is kept, the transaction is for the same target at depth 0
+    // identical in everything the browser sees: the bind is kept and the
+    // transaction is for the same target. Only the internal depth differs
+    // (ADR-0014): the expired code is a known code on its first rejection, so
+    // its depth carries (0 + 1); the unknown code starts at depth 0.
     assert!(matches!(expired.bind, BindAction::Keep) && matches!(unknown.bind, BindAction::Keep));
     assert_eq!(expired.app_id, unknown.app_id);
     let depth = |t: &Secret| {
@@ -815,7 +860,7 @@ async fn s003_a8_expired_code_uniform_response() {
     };
     assert_eq!(
         (depth(&expired.transaction), depth(&unknown.transaction)),
-        (0, 0)
+        (1, 0)
     );
     // the distinction exists only in the events
     assert_eq!(
@@ -1044,7 +1089,13 @@ async fn s003_a10_other_users_handle_requires_explicit_switch() {
     let t2 = k.start(APP, "/admin/x?a=1", Some(&k.b1)).await;
     let LoginEntry::Sso { location, .. } = k
         .svc
-        .sso_or_chooser(&k.ctx(), &t2.transaction, Some(&l.portal_handle), false)
+        .sso_or_chooser(
+            &k.ctx(),
+            &t2.transaction,
+            Some(&l.portal_handle),
+            None,
+            false,
+        )
         .await
         .unwrap()
     else {
@@ -1080,7 +1131,7 @@ async fn sso_to_other(k: &Kit, bx: &Secret, portal: &Secret) -> (Secret, Url) {
     let ctx = k.ctx();
     let LoginEntry::Sso { location, .. } = k
         .svc
-        .sso_or_chooser(&ctx, &t.transaction, Some(portal), false)
+        .sso_or_chooser(&ctx, &t.transaction, Some(portal), None, false)
         .await
         .unwrap()
     else {
@@ -1161,7 +1212,6 @@ async fn s003_a11_pre_elevation_code_never_elevated() {
 }
 
 #[tokio::test]
-#[ignore = "needs W1-A and W1-B (verify engine and adapter): ambiguity is decided before redemption"]
 async fn s003_a12_ambiguous_parameter_refused() {
     let idp = MockIdp::start("default");
     let h = Hopae::spawn(Fixture::new("m1-basic"), &idp, &[]);

@@ -29,6 +29,7 @@ use crate::crypto::Secret;
 use crate::http::csrf::{self, Purpose};
 use crate::http::security;
 use crate::provider::types::{CallbackQuery, ProviderHealth, ProviderId};
+use url::Origin;
 
 /// Longest accepted query string.
 const MAX_QUERY_BYTES: usize = 16 * 1024;
@@ -109,11 +110,27 @@ fn add_cookie(r: &mut Response, set_cookie: &str) {
 }
 
 fn render_page<T: Template>(rq: &Rq, page: T, cookies: &[String]) -> Response {
+    render_page_status(rq, StatusCode::OK, page, cookies, &[])
+}
+
+/// A page with an explicit status and the extra `form-action` origins its
+/// form needs (the browser enforces `form-action` on the redirect after the POST).
+fn render_page_status<T: Template>(
+    rq: &Rq,
+    status: StatusCode,
+    page: T,
+    cookies: &[String],
+    form_origins: &[Origin],
+) -> Response {
     match page.render() {
         Ok(body) => {
-            let mut r = html_response(StatusCode::OK, body);
+            let mut r = html_response(status, body);
             for c in cookies {
                 add_cookie(&mut r, c);
+            }
+            if !form_origins.is_empty() {
+                r.extensions_mut()
+                    .insert(security::FormActionOrigins(form_origins.to_vec()));
             }
             r
         }
@@ -329,11 +346,15 @@ pub(crate) async fn login_get(State(st): State<PortalState>, req: Request) -> Re
         .login_visit(&rq.ctx, &Secret::new(txn.clone()), &cookies)
         .await
     {
-        LoginVisit::Chooser { providers } => {
+        LoginVisit::Chooser {
+            providers,
+            form_origins,
+        } => {
             let views: Vec<ChoiceView> = providers.iter().map(ChoiceView::from).collect();
             let csrf = token_for(&st, bind.expose(), Purpose::Login);
-            render_page(
+            render_page_status(
                 &rq,
+                StatusCode::OK,
                 pages::Chooser {
                     t: rq.t(),
                     request_id: rq.rid(),
@@ -342,13 +363,15 @@ pub(crate) async fn login_get(State(st): State<PortalState>, req: Request) -> Re
                     providers: &views,
                 },
                 &planted,
+                &form_origins,
             )
         }
         LoginVisit::Redirect(r) => redirect_response(&st, &rq, &r, &planted),
-        LoginVisit::ConfirmNewHost { host } => {
+        LoginVisit::ConfirmNewHost { host, form_origin } => {
             let csrf = token_for(&st, bind.expose(), Purpose::Continue);
-            render_page(
+            render_page_status(
                 &rq,
+                StatusCode::OK,
                 pages::Continue {
                     t: rq.t(),
                     request_id: rq.rid(),
@@ -357,6 +380,7 @@ pub(crate) async fn login_get(State(st): State<PortalState>, req: Request) -> Re
                     host: &host,
                 },
                 &planted,
+                &[form_origin],
             )
         }
         LoginVisit::Failed(f) => fail_response(&rq, f),
@@ -530,14 +554,20 @@ pub(crate) async fn callback_get(
             },
             &[],
         ),
-        CallbackOutcome::RetryOffer { can_retry: true } => {
+        CallbackOutcome::RetryOffer {
+            can_retry: true,
+            form_origin,
+        } => {
             // The token is bound to the cookie the browser presented: the
             // replacement the retry must match. Nothing is planted here.
+            // The interrupted page is a 400 (S002-7, S002-A5), with the form.
             match (&rq.presented.bind, state) {
                 (Some(bind), Some(state)) => {
                     let csrf = token_for(&st, bind.expose(), Purpose::Retry);
-                    render_page(
+                    let origins: Vec<Origin> = form_origin.into_iter().collect();
+                    render_page_status(
                         &rq,
+                        StatusCode::BAD_REQUEST,
                         pages::Retry {
                             t: rq.t(),
                             request_id: rq.rid(),
@@ -545,18 +575,21 @@ pub(crate) async fn callback_get(
                             state: &state,
                         },
                         &[],
+                        &origins,
                     )
                 }
                 _ => bad(),
             }
         }
-        CallbackOutcome::RetryOffer { can_retry: false } => {
+        CallbackOutcome::RetryOffer {
+            can_retry: false, ..
+        } => {
             let page = pages::RetryExhausted {
                 t: rq.t(),
                 request_id: rq.rid(),
             };
             match page.render() {
-                Ok(body) => html_response(StatusCode::FORBIDDEN, body),
+                Ok(body) => html_response(StatusCode::BAD_REQUEST, body),
                 Err(_) => error_response(rq.t(), rq.rid(), ErrorPage::Unavailable),
             }
         }
@@ -589,8 +622,9 @@ pub(crate) async fn switch_get(State(st): State<PortalState>, req: Request) -> R
     {
         Ok(v) => {
             let csrf = token_for(&st, bind.expose(), Purpose::Switch);
-            render_page(
+            render_page_status(
                 &rq,
+                StatusCode::OK,
                 pages::Switch {
                     t: rq.t(),
                     request_id: rq.rid(),
@@ -601,6 +635,7 @@ pub(crate) async fn switch_get(State(st): State<PortalState>, req: Request) -> R
                     incoming_account: &v.incoming_account,
                 },
                 &[portal_cookie_header(&st, &bind)],
+                std::slice::from_ref(&v.form_origin),
             )
         }
         Err(f) => fail_response(&rq, f),

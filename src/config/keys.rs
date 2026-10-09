@@ -71,6 +71,7 @@ pub(super) const ROOT: Node = Obj(&[
             ("allow_unauthenticated_caller", Leaf),
             ("verify_budget_ms", Leaf),
             ("readonly_token_env", Leaf),
+            ("admin_url", Leaf),
         ]),
     ),
     (

@@ -85,6 +85,16 @@ impl Registry {
     }
 }
 
+impl crate::session::service::ProviderLookup for Registry {
+    fn get(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
+        Registry::get(self, id)
+    }
+
+    fn enabled_sorted(&self) -> Vec<Arc<dyn Provider>> {
+        Registry::enabled_sorted(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -29,6 +29,8 @@ pub struct SwitchView {
     pub current: Option<AccountSummary>,
     /// The account the portal session belongs to.
     pub incoming: AccountSummary,
+    /// Origin of the return target (the confirmation page's `form-action`).
+    pub origin: url::Origin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +74,7 @@ impl Service {
             host,
             current,
             incoming: summary(&incoming),
+            origin: row.return_target.origin(),
         })
     }
 
@@ -172,7 +175,7 @@ impl Service {
         if !is_well_formed_bind(txn.expose()) {
             return Err(SessionError::Refused(reasons::TXN_EXPIRED));
         }
-        let row = self.load_live_txn(txn).await?;
+        let row = self.load_live_txn_quiet(txn).await?;
         if row.purpose != TxnPurpose::Switch {
             return Err(SessionError::Refused(reasons::INVALID_STATE));
         }

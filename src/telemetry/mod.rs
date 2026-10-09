@@ -1,4 +1,7 @@
-//! Telemetry: tracing setup (M0); metrics arrive in M7.
+//! Telemetry: tracing setup (M0) and the counters module (M1). Prometheus
+//! exposition arrives in M7.
+
+pub mod counters;
 
 use tracing_subscriber::EnvFilter;
 

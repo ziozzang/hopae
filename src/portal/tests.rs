@@ -71,6 +71,11 @@ impl Fake {
                         available: false,
                     },
                 ],
+                form_origins: vec![
+                    url::Url::parse("https://accounts.idp.example.test/o/auth")
+                        .unwrap()
+                        .origin(),
+                ],
             }),
             begin: Mutex::new(Ok(redirect(PROVIDER_URL))),
             callback: Mutex::new(CallbackOutcome::Redirect(redirect(
@@ -82,6 +87,9 @@ impl Fake {
                 host: "app.example.test".into(),
                 current_account: "v@example.test".into(),
                 incoming_account: "a@example.test".into(),
+                form_origin: url::Url::parse("https://app.example.test/x")
+                    .unwrap()
+                    .origin(),
             })),
             switch_confirm: Mutex::new(Ok(redirect("https://app.example.test/"))),
             logout: Mutex::new(Ok(true)),
@@ -394,11 +402,21 @@ fn assert_security_headers(r: &Resp, what: &str) {
     assert_eq!(r.h("x-content-type-options"), Some("nosniff"), "{what}");
     assert_eq!(r.h("referrer-policy"), Some("no-referrer"), "{what}");
     assert_eq!(r.h("x-frame-options"), Some("DENY"), "{what}");
-    assert_eq!(
-        r.h("content-security-policy"),
-        Some("default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'"),
-        "{what}"
-    );
+    // Every page keeps the base policy; only the chooser widens `form-action`
+    // (with the provider origins, R-5), checked in `form_action_is_per_page`.
+    let csp = r.h("content-security-policy").unwrap_or("");
+    if what == "login 200" {
+        assert!(
+            csp.starts_with("default-src 'none'; style-src 'self'; form-action 'self' https://")
+                && csp.ends_with("; frame-ancestors 'none'"),
+            "{what}: {csp}"
+        );
+    } else {
+        assert_eq!(
+            csp, "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'",
+            "{what}"
+        );
+    }
     assert!(r.h("x-request-id").is_some_and(|v| !v.is_empty()), "{what}");
 }
 
@@ -523,6 +541,27 @@ async fn concurrency_cap_answers_503_immediately() {
     // Capacity returns afterwards.
     *e.fake.delay.lock().unwrap() = None;
     assert_eq!(e.get("/login?txn=T1", None).await.status, 200);
+}
+
+#[tokio::test]
+async fn form_action_is_per_page() {
+    let e = env().await;
+    // The chooser lists the providers' authorization origins (R-5): the browser
+    // enforces form-action on the redirect that follows the POST.
+    let r = e.get("/login?txn=T1", None).await;
+    assert_eq!(
+        r.h("content-security-policy"),
+        Some(
+            "default-src 'none'; style-src 'self'; form-action 'self' https://accounts.idp.example.test; frame-ancestors 'none'"
+        )
+    );
+    // Every other page keeps the base policy.
+    let r = e.get("/logout", None).await;
+    assert_eq!(
+        r.h("content-security-policy"),
+        Some("default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'")
+    );
+    assert_eq!(r.h("x-frame-options"), Some("DENY"));
 }
 
 #[tokio::test]
@@ -766,9 +805,19 @@ async fn confirm_new_host_renders_a_bound_form() {
     let e = env().await;
     *e.fake.visit.lock().unwrap() = LoginVisit::ConfirmNewHost {
         host: "other.example.org".into(),
+        form_origin: url::Url::parse("https://other.example.org/x")
+            .unwrap()
+            .origin(),
     };
     let r = e.get("/login?txn=T2", Some(&portal_cookie(BIND))).await;
     assert_eq!(r.status, 200);
+    // R-5: the form redirects to the return target, so only that origin is added.
+    assert_eq!(
+        r.h("content-security-policy"),
+        Some(
+            "default-src 'none'; style-src 'self'; form-action 'self' https://other.example.org; frame-ancestors 'none'"
+        )
+    );
     assert!(r.body.contains("other.example.org"));
     assert!(r.body.contains("action=\"/login/continue\""));
     let t = hidden(&r.body, "csrf");
@@ -1137,14 +1186,29 @@ async fn link_notice_names_the_provider_but_no_email() {
 #[tokio::test]
 async fn retry_offer_page_and_post_retry() {
     let e = env().await;
-    *e.fake.callback.lock().unwrap() = CallbackOutcome::RetryOffer { can_retry: true };
+    *e.fake.callback.lock().unwrap() = CallbackOutcome::RetryOffer {
+        can_retry: true,
+        form_origin: Some(
+            url::Url::parse("https://accounts.idp.example.test/o/auth")
+                .unwrap()
+                .origin(),
+        ),
+    };
     let r = e
         .get(
             "/callback/mock?code=ACA&state=SA",
             Some(&portal_cookie(BIND2)),
         )
         .await;
-    assert_eq!(r.status, 200);
+    // R-4: the interrupted page is a 400 that carries the retry form.
+    assert_eq!(r.status, 400);
+    // R-5: the retry form redirects to that provider only.
+    assert_eq!(
+        r.h("content-security-policy"),
+        Some(
+            "default-src 'none'; style-src 'self'; form-action 'self' https://accounts.idp.example.test; frame-ancestors 'none'"
+        )
+    );
     assert!(r.body.contains("action=\"/login/retry\""));
     assert_eq!(hidden(&r.body, "state"), "SA");
     // The token is bound to the cookie the browser presented (the replacement), not a planted one.
@@ -1214,14 +1278,18 @@ async fn retry_offer_page_and_post_retry() {
 #[tokio::test]
 async fn exhausted_recoveries_offer_no_retry() {
     let e = env().await;
-    *e.fake.callback.lock().unwrap() = CallbackOutcome::RetryOffer { can_retry: false };
+    *e.fake.callback.lock().unwrap() = CallbackOutcome::RetryOffer {
+        can_retry: false,
+        form_origin: None,
+    };
     let r = e
         .get(
             "/callback/mock?code=ACA&state=SA",
             Some(&portal_cookie(BIND2)),
         )
         .await;
-    assert_eq!(r.status, 403);
+    // Same status as the interrupted page (R-4), without the form.
+    assert_eq!(r.status, 400);
     assert!(!r.body.contains("/login/retry"));
     assert!(!r.body.contains("<form"));
 }

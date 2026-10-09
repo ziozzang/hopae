@@ -27,5 +27,17 @@ pub mod return_target {
 /// request's budget (`ctx.deadline`, else now + `limits.budget`) is enforced
 /// here and exhaustion answers `Deny{Unavailable, budget_exceeded}`.
 pub async fn decide(ctx: &VerifyContext, input: VerifyInput) -> Decision {
+    engine::run(ctx, input).await.0
+}
+
+/// As [`decide`], also returning why a presented handle was refused, when one
+/// was (`unknown_handle`, `idle`, ...). A request that is answered with a
+/// login redirect or, after that, with a rate-limit denial is recorded under
+/// this reason (`verify.denied`, ADR-0009), so a flood of the same bad handle
+/// is one counted series whatever the status each answer takes.
+pub async fn decide_with_cause(
+    ctx: &VerifyContext,
+    input: VerifyInput,
+) -> (Decision, Option<crate::event::types::Reason>) {
     engine::run(ctx, input).await
 }

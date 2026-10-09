@@ -204,7 +204,6 @@ async fn s010_7_portal_handle_follows_default_policy() {
 }
 
 #[tokio::test]
-#[ignore = "needs W0 request R1 (redeem completes the new handle's session from the code row)"]
 async fn s010_8_cookie_max_age_mirrors_handle_absolute() {
     let l = life().await;
     l.f.at(H);
