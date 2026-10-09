@@ -1,6 +1,6 @@
 # S005 — Return targets are validated and never taken from the client
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: security
 - Milestone: M1

@@ -1,6 +1,6 @@
 # S002 — Login with an OIDC provider creates a session
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: providers
 - Milestone: M1

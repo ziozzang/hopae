@@ -1,6 +1,6 @@
 # S012 — Provider failure modes
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: providers
 - Milestone: M1

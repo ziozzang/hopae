@@ -1,6 +1,6 @@
 # S013 — Configuration preflight and startup
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: lifecycle
 - Milestone: M1

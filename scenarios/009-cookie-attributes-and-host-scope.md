@@ -1,6 +1,6 @@
 # S009 — Cookie attributes and host scope
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: security
 - Milestone: M1

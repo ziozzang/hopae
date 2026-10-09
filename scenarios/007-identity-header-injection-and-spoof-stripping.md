@@ -1,6 +1,6 @@
 # S007 — Identity headers reach the upstream only from Hopae; client copies are stripped
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: security
 - Milestone: M1

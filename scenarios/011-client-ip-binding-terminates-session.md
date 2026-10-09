@@ -1,6 +1,6 @@
 # S011 — Client-IP binding terminates the session on mismatch
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: sessions
 - Milestone: M1
@@ -60,12 +60,6 @@ used from elsewhere.
 - Given: transaction started from `203.0.113.9` for `app`.
 - When: `GET /login?txn=T1` from `198.51.100.7`.
 - Then: `400` expired-link page; `reason=txn_binding` (see 001-A3).
-
-### S011-7 Invalidation is published on termination (M2)
-
-- Given: Redis configured.
-- When: S011-2.
-- Then: one `session` invalidation message.
 
 ## Abuse cases
 
@@ -132,7 +126,6 @@ used from elsewhere.
 | S011-4 | `s011_4_off_mode_ignores_ip` | `tests/scenarios/s011_ip_binding.rs` | integration | planned |
 | S011-5 | `s011_5_ua_binding_when_enabled` | `tests/scenarios/s011_ip_binding.rs` | integration | planned |
 | S011-6 | `s011_6_txn_inherits_policy` | `tests/scenarios/s011_ip_binding.rs` | integration | planned |
-| S011-7 | `s011_7_invalidation_published` | `tests/scenarios/s011_ip_binding.rs` | integration | planned (M2) |
 | S011-A1 | `s011_a1_stolen_cookie_from_other_network` | `tests/scenarios/s011_ip_binding.rs` | integration | planned |
 | S011-A2 | `s011_a2_ip_forms_normalized` | `tests/scenarios/s011_ip_binding.rs` | unit | planned |
 | S011-A3 | `s011_a3_concurrent_requests_two_ips` | `tests/scenarios/s011_ip_binding.rs` | integration | planned |
@@ -149,6 +142,7 @@ used from elsewhere.
 ## Open questions
 
 - Under `terminate_session`, an attacker with a stolen cookie can log the victim out (S011-A4). Is that acceptable as the default, or should the default be `drop_handle` with re-authentication?
+- The invalidation message published on termination (ADR-0006) is exercised by M2 scenarios in the 100–199 range.
 
 ## 한국어 요약
 

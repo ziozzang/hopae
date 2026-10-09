@@ -1,6 +1,6 @@
 # S001 — Unauthenticated request on a protected host is sent to the portal
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: core
 - Milestone: M1

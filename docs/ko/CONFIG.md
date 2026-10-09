@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=1 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=2 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -51,9 +51,12 @@
 | `portal.sso_confirm_new_host` | M1 | `false` | 세션을 어떤 호스트로 처음 핸드오프하기 전에 한 번 클릭하는 확인([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)) |
 | `events.retention_days`, `events.max_rows`, `events.prune_every`, `events.max_pending_per_sink`, `events.delivery_terminal_retention_days` | M1 | `90`, `1000000`, `1000`, `10000`, `7` | 이벤트 보존과 전달 상한([ADR-0009](../adr/0009-event-model.md)) |
 | `trusted_proxies` | M1 | `["127.0.0.1/32"]` | 포털 리스너가 `x-forwarded-for`/`x-forwarded-proto`를 신뢰하는 피어 |
+| `limits.gateway_max_concurrent`, `limits.portal_max_concurrent` | M1 | `64`, `256` | 리스너별 동시 처리 요청 상한. 초과분은 즉시 `503`(게이트웨이) 또는 `503`(포털)으로 답합니다([ADR-0003](../adr/0003-http-stack-axum-on-hyper.md)) |
+| `log.verify_allow`, `log.accept_client_request_id` | M1 | `false`, `false` | 허용된 verify를 개별적으로 로그에 남길지, 클라이언트가 보낸 `x-request-id`를(잘라서) `attrs.client_request_id`에 기록할지([ADR-0009](../adr/0009-event-model.md)) |
+| `sessions.retention_days` | M1 | `30` | 종료된 세션과 그 핸들을 세션 보존 스윕이 삭제하는 기준 경과 일수([ADR-0007](../adr/0007-context-binding-policy.md)) |
+| `gateway.readonly_token_env` | M1(선택) | 없음 | `hopae --check`에서만 사용하는 읽기 전용 게이트웨이 자격 증명. 라우트가 없는 애플리케이션 호스트를 경고합니다([ADR-0012](../adr/0012-service-registration-and-gateway-config-ownership.md)의 0단계). 전체 불일치 보고는 M2입니다 |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, 없음, 없음 | 로컬 캐시와 Redis 버스([ADR-0006](../adr/0006-verify-caching-and-invalidation.md)) |
 | `store.kind = postgres`, `store.url_env` | M2 | — | 공유 기본 저장소([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
-| `gateway.readonly_token_env` | M2 | 없음 | 불일치 보고를 위한 읽기 전용 게이트웨이 자격 증명([ADR-0012](../adr/0012-service-registration-and-gateway-config-ownership.md)) |
 
 ## 동작
 

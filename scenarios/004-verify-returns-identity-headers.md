@@ -1,6 +1,6 @@
 # S004 — Verify returns identity headers for a valid session and fails closed otherwise
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: core
 - Milestone: M1
@@ -119,7 +119,7 @@ contract answers a status the gateway treats as denial.
 
 ### S004-A3 Concurrency limit fails closed and recovers
 
-- Given: `listen.gateway.max_concurrent = 64`; the store is slowed to 200 ms per read.
+- Given: `limits.gateway_max_concurrent = 64`; the store is slowed to 200 ms per read.
 - When: 200 concurrent verify calls.
 - Then: at most 64 in flight; the rest answer `503 overloaded` immediately with `retry-after`; after the store recovers, calls answer `200`; metric `hopae_verify_overloaded_total`.
 
@@ -192,7 +192,7 @@ contract answers a status the gateway treats as denial.
 ## Open questions
 
 - Should `x-hopae-session` be emitted to upstreams at all (threat model residual risk)?
-- Is `max_concurrent = 64` per listener a sane default for a single-core container?
+- Is `limits.gateway_max_concurrent = 64` a sane default for a single-core container?
 
 ## 한국어 요약
 

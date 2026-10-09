@@ -1,6 +1,6 @@
 # S003 — Cross-host handoff plants a host-only cookie on the application host
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: sessions
 - Milestone: M1

@@ -1,6 +1,6 @@
 # S006 — Logout ends access on every host
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: sessions
 - Milestone: M1
@@ -48,21 +48,9 @@ cross-site request cannot log a user out.
 
 ## Alternative flows
 
-### S006-5 Logout everywhere terminates all sessions of the user (M2 surface, M1 semantics)
+### S006-5 Application-host sign-out of a different account through the switch page
 
-- Given: user `u_1` has sessions `s_1` and `s_2` (another browser).
-- When: `POST /logout` with `scope=all`.
-- Then: both sessions terminated with `reason=logout_all`; one `session.terminated` event per session; the other browser's next verify is denied.
-
-### S006-6 Invalidation message is published (M2)
-
-- Given: Redis configured.
-- When: S006-2.
-- Then: one message `{"v":1,"kind":"session","id":"s_1","gen":<cred_gen after termination>,…}` on `hopae:<ns>:invalidate`.
-
-### S006-7 Application-host sign-out of a different account through the switch page
-
-- Given: the application holds user V's handle `Hy` while the portal session now belongs to user A (V's portal handle expired and A signed in); a handoff for A reached `session_conflict` and produced the switch transaction `Ts` (scenario 003-A10).
+- Given: the application holds user V's handle `Hy` while the portal session now belongs to user A (V's portal handle expired and A signed in); a handoff for A reached `session_conflict` and produced the switch transaction `Ts` (scenario 003-A10); fixture `tests/fixtures/m1-two-domains.json`.
 - When: `POST /switch` with `choice=switch`, the CSRF token and the portal binding cookie.
 - Then: `Hy` is revoked with `reason=switch` (event `handle.revoked`, session of V otherwise untouched); a fresh code for A is minted and the browser is redirected to the clean target; the next verify on that host is `200` as A. With `choice=keep`: nothing is revoked and the next verify is `200` as V. Without the CSRF token or from a cross-site `Origin`: `403`, nothing revoked.
 
@@ -123,9 +111,7 @@ cross-site request cannot log a user out.
 | S006-2 | `s006_2_confirmed_logout_terminates_session` | `tests/scenarios/s006_logout.rs` | integration | planned |
 | S006-3 | `s006_3_next_request_denied_cookie_cleared` | `tests/scenarios/s006_logout.rs` | integration | planned |
 | S006-4 | `s006_4_logout_without_session` | `tests/scenarios/s006_logout.rs` | integration | planned |
-| S006-5 | `s006_5_logout_everywhere` | `tests/scenarios/s006_logout.rs` | integration | planned |
-| S006-6 | `s006_6_invalidation_published` | `tests/scenarios/s006_logout.rs` | integration | planned (M2) |
-| S006-7 | `s006_7_switch_page_signs_out_other_account` | `tests/scenarios/s006_logout.rs` | integration | planned |
+| S006-5 | `s006_5_switch_page_signs_out_other_account` | `tests/scenarios/s006_logout.rs` | integration | planned |
 | S006-A1 | `s006_a1_replayed_logout_harmless` | `tests/scenarios/s006_logout.rs` | integration | planned |
 | S006-A2 | `s006_a2_csrf_mismatch_rejected` | `tests/scenarios/s006_logout.rs` | integration | planned |
 | S006-A3 | `s006_a3_logout_racing_handoff` | `tests/scenarios/s006_logout.rs` | integration | planned |
@@ -141,7 +127,7 @@ cross-site request cannot log a user out.
 ## Open questions
 
 - Should applications get a documented link target (`https://auth.example.test/logout`) and an optional `?app=<id>` to show which application the user came from (display only)?
-- Is S006-5 (`scope=all`) in M1 or M2? The semantics are M1; the form control may be M2.
+- Logout everywhere (`scope=all`, one `session.terminated` per session, reason `logout_all`) and the invalidation message on termination are specified in ADR-0004/ADR-0006 and are exercised by M2 scenarios in the 100–199 range, not here.
 
 ## 한국어 요약
 

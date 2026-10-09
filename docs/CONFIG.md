@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -52,9 +52,12 @@ the milestone shown. Until then `hopae --check` rejects them as unknown.
 | `portal.sso_confirm_new_host` | M1 | `false` | One-click confirmation before the first handoff of a session to a host ([ADR-0004](adr/0004-session-model-and-cross-domain-handoff.md)) |
 | `events.retention_days`, `events.max_rows`, `events.prune_every`, `events.max_pending_per_sink`, `events.delivery_terminal_retention_days` | M1 | `90`, `1000000`, `1000`, `10000`, `7` | Event retention and delivery bounds ([ADR-0009](adr/0009-event-model.md)) |
 | `trusted_proxies` | M1 | `["127.0.0.1/32"]` | Peers whose `x-forwarded-for`/`x-forwarded-proto` the portal listener trusts |
+| `limits.gateway_max_concurrent`, `limits.portal_max_concurrent` | M1 | `64`, `256` | In-flight request caps per listener; excess answers `503` (gateway) or `503` (portal) immediately ([ADR-0003](adr/0003-http-stack-axum-on-hyper.md)) |
+| `log.verify_allow`, `log.accept_client_request_id` | M1 | `false`, `false` | Log every allowed verify individually; record a client-supplied `x-request-id` (truncated) in `attrs.client_request_id` ([ADR-0009](adr/0009-event-model.md)) |
+| `sessions.retention_days` | M1 | `30` | Age after which terminated sessions and their handles are deleted by the session-retention sweep ([ADR-0007](adr/0007-context-binding-policy.md)) |
+| `gateway.readonly_token_env` | M1 (optional) | none | Read-only gateway credential used only by `hopae --check` to warn about application hosts without a route (phase 0 of [ADR-0012](adr/0012-service-registration-and-gateway-config-ownership.md)); the full drift report is M2 |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, none, none | Local cache and Redis bus ([ADR-0006](adr/0006-verify-caching-and-invalidation.md)) |
 | `store.kind = postgres`, `store.url_env` | M2 | — | Shared primary store ([ADR-0002](adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
-| `gateway.readonly_token_env` | M2 | none | Read-only gateway credential for the drift report ([ADR-0012](adr/0012-service-registration-and-gateway-config-ownership.md)) |
 
 ## Behavior
 

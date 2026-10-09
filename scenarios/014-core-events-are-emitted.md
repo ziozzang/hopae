@@ -1,6 +1,6 @@
 # S014 — Core flows emit events with the fixed schema
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: core
 - Milestone: M1

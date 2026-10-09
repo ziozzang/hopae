@@ -1,6 +1,6 @@
 # S010 — Session idle and absolute lifetimes
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: sessions
 - Milestone: M1

@@ -1,6 +1,6 @@
 # S008 — Path-scoped protection through gateway routes
 
-<!-- scenario-status: draft -->
+<!-- scenario-status: approved -->
 
 - Area: core
 - Milestone: M1
