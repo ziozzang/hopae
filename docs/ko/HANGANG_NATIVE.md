@@ -83,3 +83,7 @@ freshness·인증 강도·CSRF를 검사하며 역할·트랜잭션 actor fence�
 handle·페이지 조회를 검증하며 개인정보·영속 nonce·위험 파일도 검사합니다.
 광범위한 자동 적용 전에는 환경별 네트워크 제한·프로바이더/grant 설정·전체 부하와 복구 검증이
 추가로 필요합니다.
+
+네이티브 릴리즈는 Linux amd64/arm64 정적 빌드와 macOS Intel/Apple Silicon을 검증하며
+검토된 콘솔 패키지를 포함합니다. Hopae의 서명된 supervised 자동 updater는 현재 구현되지 않았으며
+릴리즈 패키지가 그 기능을 의미하지 않습니다.
