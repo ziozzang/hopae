@@ -1,6 +1,6 @@
 // Trusted native-style Hangang console package; credentials stay in the host broker.
 export async function mount(host) {
-  const root=host.root, ko=()=>host.locale()==='ko';
+  const root=host.root, ko=()=>host.locale()==='ko', unified=host.authentication==='hangang';
   let paused=false, disposed=false, busy=false, canWrite=false, view='status', cursor=null, next=null, history=[];
   const label=(en,kr)=>ko()?kr:en;
   const node=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(tag==='button')e.className='button button-secondary';if(cls)e.className=cls;return e;};
@@ -17,6 +17,8 @@ export async function mount(host) {
   previous.onclick=()=>{if(!busy&&history.length){cursor=history.pop();load();}};
   more.onclick=()=>{if(!busy&&next){history.push(cursor);cursor=next;load();}};pager.append(previous,more);pager.hidden=true;previous.disabled=true;more.disabled=true;
   const sessionActions=node('div',undefined,'hopae-toolbar');sessionActions.append(login,logout);
+  sessionActions.hidden=unified;
+  if(unified)notice.textContent=label("Managed with your Hangang administrator session.","Hangang 관리자 세션으로 관리합니다.");
   root.replaceChildren(tabs,notice,sessionActions,error,content,pager);
   const show=(v)=>v==null?'—':typeof v==='object'?JSON.stringify(v):String(v);
   async function mutate(path,id){

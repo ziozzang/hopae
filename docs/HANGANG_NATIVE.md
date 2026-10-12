@@ -1,12 +1,13 @@
 # Native Hangang verification and delegated console
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [한국어](ko/HANGANG_NATIVE.md) · [Documentation](README.md)
 
 Provider-independent integration now includes a native verification listener and
 an operator-installed console package. Providers, OIDC state/code exchange,
-credentials, identity/session decisions and administration remain in Hopae.
+credentials, identity/session decisions and native administration remain in Hopae.
+The optional unified console mode delegates console authority to Hangang.
 Hangang owns the console shell and request enforcement; no Lua is required for
 native login/logout entry handling.
 
@@ -112,3 +113,37 @@ full end-to-end load evidence and recovery checks before broad automatic rollout
 Native release qualification covers static Linux amd64/arm64 and macOS Intel/Apple Silicon. Release artifacts include the reviewed console package. Hopae currently has no signed supervised auto-updater; release packaging does not imply that capability.
 
 SQLite jobs bound lock retries against an absolute monotonic deadline. OS sleep overshoot cannot accumulate into extra retries; handlers and default busy state are restored after bounded jobs, including panic unwinding.
+
+## Unified console authority (explicit opt-in)
+
+Configure `admin.hangang_delegation.authority: "hangang"` and the host binding's
+`delegation_authority: "hangang"`; omit the binding's `delegation_cookie` and any
+`sessions_file`. This mode follows Hangang's enabled administrator session and
+role instead of requiring a second Hopae administrator login. The pinned package
+uses host authentication metadata to hide its separate login/logout controls.
+Default `native` mode and standalone Hopae routes keep existing native grants.
+Unified mode follows Hangang assurance policy rather than imposing the native
+Hopae administrator grant/AAL/freshness policy on local Hangang logins. Its `me`
+response marks Hangang authority and does not invent native login time or AAL.
+
+The signed assertion must explicitly contain `authority: "hangang"`; native
+assertions cannot be interpreted as unified authority. The broker rechecks the
+Hangang account before dispatch/disclosure. Hopae accepts only loopback, dedicated
+HMAC-key authentication, exact allowed method/path/body, durable single-use nonce,
+and a proof younger than five seconds. The store transaction verifies the proof
+and synthetic actor/session binding again, including current key availability.
+An external actor is represented by a stable issuer-derived synthetic user ID and
+per-request synthetic session ID; audit also records the actual Hangang actor
+ID/name and issuer. These IDs create no Hopae user/session/grant rows. Self-target
+checks refer to that issuer identity; external administrators can manage Hopae
+identities without pretending to be a native Hopae user. Changes already accepted
+by another authority cannot provide atomic cross-system revocation.
+
+Hangang's optional `--hopae-sso` broker adds an SSO button beneath ID/PW. Hopae
+keeps Google/OIDC credentials and login flows. Stable Hopae IDs are explicitly
+mapped to existing enabled Hangang accounts; Hangang applies their current role.
+Every SSO request verifies the native Hopae cookie and client binding. Browser
+bearers are opaque and cannot authenticate directly at the parent admin API;
+private parent leases last five seconds and are reused for at most one second.
+No account/grant is automatically created. See Hangang's `CONSOLE_PLUGINS.md` for
+configuration, callback/CSRF checks and restart/logout behavior.

@@ -148,6 +148,7 @@ pub struct Listeners {
 /// An authenticated administrator, as authentication hands it to a handler.
 #[derive(Clone)]
 pub struct Principal {
+    pub authority: Option<delegation::Proof>,
     pub user_id: UserId,
     pub session_id: SessionId,
     pub handle_sha256: Digest,

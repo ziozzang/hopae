@@ -229,24 +229,31 @@ async fn gate(
         .get(header::USER_AGENT)
         .map(|v| crate::policy::binding::normalize_user_agent(v.as_bytes()));
     info.user_agent = user_agent.clone();
-    let principal = match scoped(
-        &st,
-        auth::authenticate(
+    let principal = if let Some(p) = req.extensions().get::<crate::admin::Principal>().cloned() {
+        if !p.authority.as_ref().is_some_and(|v| v.valid()) {
+            return api::json_error(StatusCode::FORBIDDEN, "delegation_rejected");
+        }
+        p
+    } else {
+        match scoped(
             &st,
-            &client,
-            req.headers(),
-            &path,
-            req.method(),
-            user_agent,
-            &rid,
-        ),
-    )
-    .await
-    {
-        Ok(p) => p,
-        Err(refused) => {
-            count(&st, "none", auth::code_of(&refused.denial));
-            return scoped(&st, auth::respond(&st, &info, &refused)).await;
+            auth::authenticate(
+                &st,
+                &client,
+                req.headers(),
+                &path,
+                req.method(),
+                user_agent,
+                &rid,
+            ),
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(refused) => {
+                count(&st, "none", auth::code_of(&refused.denial));
+                return scoped(&st, auth::respond(&st, &info, &refused)).await;
+            }
         }
     };
     let delegated_actor = req

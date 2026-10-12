@@ -21,9 +21,60 @@ use std::{
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Explicit opt-in: Hangang is the console authority, not the native grant table.
+    #[serde(default)]
+    pub authority: Authority,
     pub key_env: String,
     #[serde(default)]
     pub sessions_file: Option<std::path::PathBuf>,
+}
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Authority {
+    #[default]
+    Native,
+    Hangang,
+}
+
+/// Only verified middleware can construct this proof; the write fence revalidates it.
+#[derive(Clone)]
+pub struct Proof {
+    encoded: String,
+    signature: String,
+    key_env: String,
+}
+impl std::fmt::Debug for Proof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HangangAuthorityProof")
+            .finish_non_exhaustive()
+    }
+}
+impl Proof {
+    fn verified(&self) -> Option<wire::Assertion> {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+        let key = std::env::var(&self.key_env).ok()?;
+        if !(32..=4096).contains(&key.len()) {
+            return None;
+        }
+        let a = wire::verify(&self.encoded, &self.signature, key.as_bytes(), now)?;
+        (a.authority.as_deref() == Some("hangang") && now >= a.timestamp && now - a.timestamp < 5)
+            .then_some(a)
+    }
+    pub fn valid(&self) -> bool {
+        self.verified().is_some()
+    }
+    pub fn valid_for(&self, actor: &crate::store::Actor) -> bool {
+        self.verified().is_some_and(|a| {
+            actor.user_id.as_str()
+                == format!(
+                    "u_{}",
+                    &wire::digest(format!("hangang:{}", a.actor_id).as_bytes()).to_uppercase()
+                        [..26]
+                )
+                && actor.session_id.as_str() == format!("s_{}", &a.nonce.to_uppercase()[..26])
+                && actor.handle_sha256 == crate::crypto::Secret::new(a.nonce).digest()
+        })
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Actor {
@@ -190,9 +241,26 @@ pub async fn middleware(
     {
         return denied();
     }
-    let (handle, expected_user_id, client_ip, user_agent) = if let Some(path) =
-        &config.sessions_file
+    let unified = config.authority == Authority::Hangang;
+    if (unified && assertion.authority.as_deref() != Some("hangang"))
+        || (!unified && assertion.authority.is_some())
     {
+        return denied();
+    }
+    let proof = unified.then(|| Proof {
+        encoded: one(&req, "x-hopae-delegation").unwrap().into(),
+        signature: one(&req, "x-hopae-delegation-mac").unwrap().into(),
+        key_env: config.key_env.clone(),
+    });
+    if proof.as_ref().is_some_and(|p| !p.valid()) {
+        return denied();
+    }
+    let (handle, expected_user_id, client_ip, user_agent) = if unified {
+        let Ok(ip) = assertion.client_ip.parse::<IpAddr>() else {
+            return denied();
+        };
+        (String::new(), None, ip, assertion.user_agent.clone())
+    } else if let Some(path) = &config.sessions_file {
         let Some(rows) = mappings(path) else {
             return denied();
         };
@@ -225,7 +293,7 @@ pub async fn middleware(
         };
         (handle.to_owned(), None, ip, assertion.user_agent.clone())
     };
-    if !crate::crypto::is_well_formed_handle(&handle) {
+    if !unified && !crate::crypto::is_well_formed_handle(&handle) {
         return denied();
     }
     let original_path = req.uri().path().to_owned();
@@ -362,6 +430,28 @@ pub async fn middleware(
             return denied();
         };
         h.insert(header::USER_AGENT, v);
+    }
+    if let Some(proof) = proof {
+        let user = format!(
+            "u_{}",
+            &wire::digest(format!("hangang:{}", assertion.actor_id).as_bytes()).to_uppercase()
+                [..26]
+        );
+        let session = format!("s_{}", &assertion.nonce.to_uppercase()[..26]);
+        req.extensions_mut().insert(super::Principal {
+            authority: Some(proof),
+            user_id: crate::identity::types::UserId::new(user),
+            session_id: crate::session::types::SessionId::new(session),
+            handle_sha256: crate::crypto::Secret::new(assertion.nonce.clone()).digest(),
+            handle_value: crate::crypto::Secret::new(assertion.nonce.clone()),
+            role: crate::store::AdminRole::Admin,
+            email: None,
+            display_name: Some(assertion.actor_name.clone()),
+            auth_time: crate::crypto::Timestamp::from_secs(assertion.timestamp as i64),
+            auth_time_source: crate::store::AuthTimeSource::HopaeCompletion,
+            aal: crate::session::types::Aal::One,
+            provider_id: crate::provider::types::ProviderId::new("hangang"),
+        });
     }
     req.extensions_mut().insert(Actor {
         id: assertion.actor_id,

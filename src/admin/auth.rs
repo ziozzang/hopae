@@ -423,6 +423,7 @@ pub async fn authenticate(
         .await
         .map_err(unavailable)?;
     Ok(Principal {
+        authority: None,
         user_id: identity.user_id.clone(),
         session_id: identity.session_id.clone(),
         handle_sha256: digest,

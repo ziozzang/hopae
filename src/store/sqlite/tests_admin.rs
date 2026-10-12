@@ -326,6 +326,7 @@ struct Console {
 
 fn base_policy(now: Timestamp) -> ActorPolicy {
     ActorPolicy {
+        authority: None,
         console_host: host(CONSOLE),
         session: SessionPolicy {
             idle: Duration::from_secs(24 * 3600),
