@@ -1,10 +1,11 @@
 # Hangang 네이티브 검증과 콘솔 위임
 
-<!-- translation-status: source=../HANGANG_NATIVE.md source-rev=1 status=current -->
+<!-- translation-status: source=../HANGANG_NATIVE.md source-rev=2 status=current -->
 
 [English](../HANGANG_NATIVE.md) · [문서](README.md)
 
-프로바이더와 OIDC 상태/코드 교환·비밀값·사용자·세션·관리 권한은 Hopae에 유지합니다.
+프로바이더와 OIDC 상태/코드 교환·비밀값·사용자·세션·네이티브 관리 권한은 Hopae에 유지합니다.
+선택적인 통합 모드에서는 콘솔 권한을 Hangang에 위임합니다.
 Hangang에는 콘솔 shell과 요청 집행, 프로바이더와 독립된 전송/결과 처리를 연결합니다.
 네이티브 로그인·로그아웃 진입에는 Lua가 필요하지 않습니다.
 
@@ -90,3 +91,31 @@ handle·페이지 조회를 검증하며 개인정보·영속 nonce·위험 파�
 
 SQLite 잠금 재시도는 절대 monotonic 기한으로 제한하며 OS sleep 초과가 추가 재시도로
 누적되지 않게 합니다. panic을 포함한 작업 종료 뒤 handler와 기본 busy 상태를 복구합니다.
+
+## 통합 콘솔 권한 (명시적 선택)
+
+Hopae의 `admin.hangang_delegation.authority: "hangang"`과 host binding의
+`delegation_authority: "hangang"`을 맞추고 `delegation_cookie`·`sessions_file`은
+제거합니다. 이 모드는 추가 Hopae 관리자 로그인 대신 Hangang의 활성 관리자
+세션·역할을 따릅니다. 검토된 패키지는 host 인증 메타데이터에 따라 별도 로그인·
+로그아웃을 숨깁니다. 기본 `native` 모드와 독립 Hopae 경로는 기존 grant를 유지합니다.
+통합 모드는 Hangang 인증 정책을 따르며 로컬 Hangang 로그인에 Hopae 네이티브
+grant/AAL/freshness 정책을 추가로 적용하지 않습니다. `me`는 Hangang 권한임을
+표시하고 네이티브 로그인 시각/AAL을 임의로 만들지 않습니다.
+
+서명 요청에는 `authority: "hangang"`이 명시되어야 합니다. native 요청을 통합 권한으로
+재해석하지 않습니다. host는 dispatch·응답 공개 전 Hangang 계정을 다시 검증합니다.
+Hopae는 루프백 peer·전용 HMAC 키·정확한 허용 method/path/body·영속 일회성 nonce·
+5초 미만의 proof만 허용합니다. 변경 트랜잭션은 키와 proof·외부 actor/session 바인딩을
+다시 검사합니다. 외부 actor는 issuer 기반 합성 user ID와 요청별 합성 session ID로
+표현하고 실제 Hangang ID/이름/issuer도 감사에 기록합니다. Hopae 사용자/세션/grant
+행은 생성하지 않습니다. self-target 검사는 외부 issuer ID를 기준으로 하며 Hopae
+사용자로 위장하지 않습니다. 서로 다른 권한 주체가 이미 수락한 변경의 원자적 회수는
+보장할 수 없습니다.
+
+Hangang의 선택적인 `--hopae-sso`는 ID/PW 아래에 SSO 버튼을 추가합니다. Google/OIDC
+비밀값·로그인은 Hopae가 유지합니다. 불변 Hopae ID를 기존 활성 Hangang 계정에
+명시적으로 연결하며 Hangang의 현재 역할을 적용합니다. 요청마다 Hopae 쿠키·클라이언트
+바인딩을 확인하고, 불투명 browser bearer의 parent API 직접 인증을 거부합니다.
+private parent lease는 5초, 재사용은 최대 1초입니다. 계정/grant를 자동 생성하지 않습니다.
+구성·콜백/CSRF·재시작·로그아웃 동작은 Hangang `CONSOLE_PLUGINS.md`를 참고합니다.

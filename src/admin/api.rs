@@ -87,6 +87,7 @@ pub fn actor_policy(st: &AdminState, p: &Principal) -> ActorPolicy {
     // provider the file does not list keeps its stored capability.
     let capability = snap.reauth_capability(&p.provider_id);
     ActorPolicy {
+        authority: p.authority.clone(),
         console_host: st.cfg.host.clone(),
         session: st.cfg.session,
         handle: st.cfg.policy.session,

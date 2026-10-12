@@ -16,14 +16,29 @@ fn signed(
     id: i64,
     nonce: u128,
 ) -> crate::support::Response {
+    signed_authority(h, path, body, name, id, nonce, None, 0)
+}
+#[allow(clippy::too_many_arguments)]
+fn signed_authority(
+    h: &Hopae,
+    path: &str,
+    body: &str,
+    name: &str,
+    id: i64,
+    nonce: u128,
+    authority: Option<&str>,
+    age: u64,
+) -> crate::support::Response {
     let method = if body.is_empty() { "GET" } else { "POST" };
     let assertion = Assertion {
+        authority: authority.map(str::to_owned),
         actor_id: id,
         actor_name: name.into(),
         timestamp: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs(),
+            .as_secs()
+            .saturating_sub(age),
         nonce: format!("{nonce:032x}"),
         method: method.into(),
         path: path.into(),
@@ -137,6 +152,7 @@ fn browser_handle_requires_both_signed_actor_and_native_hopae_grant() {
     kit::grant(&h, &actor.user_id, "admin");
     let make = |handle: &str, body: &str, nonce: u128| {
         let assertion = Assertion {
+            authority: None,
             actor_id: 7,
             actor_name: "operator".into(),
             timestamp: SystemTime::now()
@@ -167,4 +183,95 @@ fn browser_handle_requires_both_signed_actor_and_native_hopae_grant() {
     );
     kit::revoke(&h, &actor.user_id);
     assert_eq!(make(&actor.handle, r#"{"limit":1}"#, 104).status, 403);
+}
+
+#[test]
+fn explicit_hangang_authority_needs_no_second_login_but_requires_scoped_live_signature() {
+    let idp = MockIdp::start("auth_time_present");
+    let h = Hopae::spawn(
+        Fixture::with(
+            "m4-admin",
+            json!({"admin":{"hangang_delegation":{"key_env":"HOPAE_TEST_DELEGATION_KEY","authority":"hangang"}}}),
+        ),
+        &idp,
+        &[("HOPAE_TEST_DELEGATION_KEY", KEY)],
+    );
+    let target = kit::login_on(
+        &h,
+        &idp,
+        kit::APP_HOST,
+        "/",
+        "target",
+        "target@example.test",
+        "Target",
+        kit::UA_IP,
+    );
+    assert_eq!(
+        signed(&h, "/v1/users", "", "operator", 7, 400).status,
+        403,
+        "native assertion must not cross authority modes"
+    );
+    let me = signed_authority(&h, "/v1/me", "", "operator", 7, 401, Some("hangang"), 0);
+    assert_eq!(me.status, 200);
+    assert!(me.body.contains("hangang"));
+    assert_eq!(
+        signed_authority(
+            &h,
+            "/v1/users/query",
+            r#"{"limit":1}"#,
+            "operator",
+            7,
+            402,
+            Some("hangang"),
+            0
+        )
+        .status,
+        200
+    );
+    assert_eq!(
+        signed_authority(&h, "/v1/users", "", "operator", 7, 403, Some("hangang"), 5).status,
+        403,
+        "expired delegation must fail closed"
+    );
+    let body = json!({"id":target.user_id}).to_string();
+    assert_eq!(
+        signed_authority(
+            &h,
+            "/v1/users/disable",
+            &body,
+            "operator",
+            7,
+            404,
+            Some("hangang"),
+            0
+        )
+        .status,
+        200
+    );
+    assert_eq!(
+        signed_authority(
+            &h,
+            "/v1/users/disable",
+            &body,
+            "operator",
+            7,
+            404,
+            Some("hangang"),
+            0
+        )
+        .status,
+        403,
+        "replay must be refused"
+    );
+    let events = signed_authority(&h, "/v1/events", "", "operator", 7, 405, Some("hangang"), 0);
+    assert_eq!(events.status, 200);
+    assert!(events.body.contains("7:operator"));
+    let unsigned = send(
+        h.admin.unwrap(),
+        RawReq::new("GET", "/v1/users", &h.console_host()),
+    );
+    assert_eq!(
+        unsigned.status, 404,
+        "native listener must not become public"
+    );
 }

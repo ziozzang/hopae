@@ -13,14 +13,15 @@ pub async fn get(State(_st): State<Arc<AdminState>>, ctx: Ctx) -> Response {
     api::json(
         StatusCode::OK,
         &serde_json::json!({
+            "authority": if p.authority.is_some() {"hangang"} else {"hopae"},
             "user_id": p.user_id.as_str(),
             "email": p.email.as_ref().map(|e| e.as_str()),
             "display_name": p.display_name,
             "role": p.role.as_str(),
             "session_id": p.session_id.as_str(),
-            "auth_time": p.auth_time.secs(),
-            "auth_time_source": p.auth_time_source.as_str(),
-            "aal": p.aal.as_i64(),
+            "auth_time": if p.authority.is_none() {Some(p.auth_time.secs())} else {None},
+            "auth_time_source": if p.authority.is_some() {"hangang_assertion"} else {p.auth_time_source.as_str()},
+            "aal": if p.authority.is_none() {Some(p.aal.as_i64())} else {None},
         }),
     )
 }

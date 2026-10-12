@@ -149,6 +149,13 @@ fn secs_i64(d: Duration) -> i64 {
 /// The actor fence, pinned SQL (ADR-0016, P2-02): no row means the actor is no
 /// longer a live administrator under the policy in force now.
 fn fence(conn: &Connection, shared: &Shared, actor: &Actor, p: &ActorPolicy) -> StoreResult<()> {
+    if let Some(proof) = &p.authority {
+        return if proof.valid_for(actor) {
+            Ok(())
+        } else {
+            Err(StoreError::Conflict("actor_revoked"))
+        };
+    }
     let now = shared.clock.now().secs();
     let hit: Option<i64> = conn
         .query_row(

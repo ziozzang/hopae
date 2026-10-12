@@ -574,6 +574,7 @@ pub struct Actor {
 /// `now` records the reading the caller used.
 #[derive(Clone, Debug)]
 pub struct ActorPolicy {
+    pub authority: Option<crate::admin::delegation::Proof>,
     pub console_host: Host,
     /// Session-wide idle and absolute.
     pub session: crate::policy::types::SessionPolicy,

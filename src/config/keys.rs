@@ -67,7 +67,11 @@ const ADMIN_USER: Node = Obj(&[
 const ADMIN: Node = Obj(&[
     (
         "hangang_delegation",
-        Obj(&[("key_env", Leaf), ("sessions_file", Leaf)]),
+        Obj(&[
+            ("key_env", Leaf),
+            ("sessions_file", Leaf),
+            ("authority", Leaf),
+        ]),
     ),
     ("public_url", Leaf),
     ("session", Obj(&[("idle", Leaf), ("absolute", Leaf)])),

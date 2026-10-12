@@ -1030,6 +1030,8 @@ impl Config {
         }
         if let Some(delegation) = &a.hangang_delegation
             && (a.public_url.is_none()
+                || (delegation.authority == crate::admin::delegation::Authority::Hangang
+                    && delegation.sessions_file.is_some())
                 || delegation.key_env.is_empty()
                 || delegation.key_env.len() > 128
                 || !delegation
