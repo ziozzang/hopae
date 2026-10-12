@@ -29,3 +29,5 @@ pub fn gateway_router(state: std::sync::Arc<gateway::GatewayState>) -> Router {
 async fn healthz() -> (StatusCode, &'static str) {
     (StatusCode::OK, "ok\n")
 }
+
+pub mod native_gateway;

@@ -276,6 +276,10 @@ impl Services {
             config_digest: config_digest(&self.config),
             listeners: self.listeners.get().cloned().unwrap_or_default(),
             peer_warned: std::sync::Mutex::new(std::collections::HashMap::new()),
+            delegation: self.config.admin.hangang_delegation.clone(),
+            delegation_replay: crate::admin::delegation::Replay::new(
+                self.config.state_dir.join("delegation-nonces.sqlite3"),
+            ),
         }))
     }
 }
@@ -406,6 +410,7 @@ struct EventWiring {
 
 /// Bound listeners and the open store; call [`Bound::run`] to serve.
 pub struct Bound {
+    native_gateway: Option<(TcpListener, SocketAddr)>,
     portal: TcpListener,
     gateway: TcpListener,
     /// The admin listener, bound after the portal and before the gateway.
@@ -664,11 +669,22 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         .await
         .context("binding gateway listener")?;
     let gateway_addr = gateway.local_addr()?;
+    let native_gateway = match &cfg.listen.native_gateway {
+        Some(value) => {
+            let listener = TcpListener::bind(value)
+                .await
+                .context("binding native gateway")?;
+            let address = listener.local_addr()?;
+            Some((listener, address))
+        }
+        None => None,
+    };
     // Once set, never changed: the status page shows what is actually bound.
     let _ = services.listeners.set(crate::admin::Listeners {
         portal: portal_addr.to_string(),
         gateway: gateway_addr.to_string(),
         admin: admin.as_ref().map(|a| a.1.to_string()).unwrap_or_default(),
+        native_gateway: native_gateway.as_ref().map(|a| a.1.to_string()),
     });
     match &admin {
         Some((_, a)) => tracing::info!(
@@ -677,6 +693,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         None => tracing::info!("listeners bound: portal {portal_addr}, gateway {gateway_addr}"),
     }
     Ok(Bound {
+        native_gateway,
         portal,
         gateway,
         admin,
@@ -702,6 +719,9 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
 pub const DRAIN: Duration = Duration::from_secs(5);
 
 impl Bound {
+    pub fn native_gateway_addr(&self) -> Option<SocketAddr> {
+        self.native_gateway.as_ref().map(|v| v.1)
+    }
     pub fn portal_addr(&self) -> SocketAddr {
         self.portal_addr
     }
@@ -824,6 +844,18 @@ impl Bound {
         let wait = |mut rx: watch::Receiver<bool>| async move {
             let _ = rx.wait_for(|stop| *stop).await;
         };
+        let native_router = routers.gateway.clone();
+        let native_keys = self.services.caller_keys.clone();
+        let native_stop = stop_rx.clone();
+        let native = async {
+            match self.native_gateway {
+                Some((listener, _)) => {
+                    http::native_gateway::serve(listener, native_router, native_keys, native_stop)
+                        .await
+                }
+                None => Ok(()),
+            }
+        };
         // Connect info: the portal's trusted-proxy rule needs the TCP peer.
         let portal = axum::serve(
             self.portal,
@@ -867,7 +899,7 @@ impl Bound {
         let hooks = async { Ok::<(), std::io::Error>(()) };
 
         self.services.readiness.set(true);
-        let servers = async { tokio::join!(portal, gateway, admin, hooks) };
+        let servers = async { tokio::join!(portal, gateway, admin, hooks, native) };
         tokio::pin!(servers);
         // Serve until the stop signal, then give in-flight requests DRAIN to finish.
         let mut stopped = stop_rx.clone();
@@ -904,11 +936,12 @@ impl Bound {
         .await;
         tracing::info!("shutdown complete");
 
-        if let Some((p, g, a, h)) = served {
+        if let Some((p, g, a, h, n)) = served {
             p.context("portal listener")?;
             g.context("gateway listener")?;
             a.context("admin listener")?;
             h.context("test hooks listener")?;
+            n.context("native gateway listener")?;
         }
         Ok(())
     }

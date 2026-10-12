@@ -1,0 +1,58 @@
+{
+  "id": "hopae",
+  "name": "Hopae",
+  "version": "0.1.0",
+  "api_version": 1,
+  "entry": "index.js",
+  "assets": {
+    "index.js": "efdd77ebe958cab1705e5766f68705e238ad651846bbfd3d274bd44fb9f5e7ef",
+    "style.css": "6a064d4c80460f8d8c273c4407d69328a26305b020790b0c1b12b42bb25771c7"
+  },
+  "routes": [
+    {
+      "path": "status",
+      "method": "GET",
+      "mutation": false
+    },
+    {
+      "path": "me",
+      "method": "GET",
+      "mutation": false
+    },
+    {
+      "path": "users/query",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "sessions/query",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "events/query",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "users/disable",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "users/enable",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "users/sessions-terminate",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "sessions/terminate",
+      "method": "POST",
+      "mutation": true
+    }
+  ]
+}

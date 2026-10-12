@@ -1,6 +1,6 @@
 # Documentation
 
-<!-- doc-rev: 5 -->
+<!-- doc-rev: 6 -->
 
 [한국어 목차](ko/README.md)
 
@@ -29,3 +29,5 @@ translations of their English sources and are updated in the same change. The
 
 Further reference pages (providers, sessions, management) are added as
 milestones land. The [roadmap](ROADMAP.md) describes the intended shape.
+
+- [Native Hangang integration](HANGANG_NATIVE.md) — HOP1 verification and delegated console.

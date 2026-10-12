@@ -1,6 +1,6 @@
 # 문서
 
-<!-- translation-status: source=../README.md source-rev=5 status=current -->
+<!-- translation-status: source=../README.md source-rev=6 status=current -->
 
 [English](../README.md)
 
@@ -29,3 +29,5 @@
 
 그 밖의 참조 문서(제공자, 세션, 관리)는 마일스톤이 완료될 때마다
 추가됩니다. [로드맵](ROADMAP.md)이 의도한 형태를 설명합니다.
+
+- [Hangang 네이티브 통합](HANGANG_NATIVE.md) — HOP1 검증과 콘솔 위임.

@@ -236,7 +236,10 @@ pub fn report_with(cfg: &Config, stored: &[crate::store::types::ProviderRow]) ->
         "gateway route auth fragment (register it on every protected route; the key is the variable name, never a value):"
     );
     let names = cfg.cookie_names();
-    let fragment = gateway_facts::route_auth_fragment(&verify_url, timeout);
+    let mut fragment = gateway_facts::route_auth_fragment(&verify_url, timeout);
+    if let Some(native) = &cfg.listen.native_gateway {
+        fragment["native"] = serde_json::json!({"address":native,"pool_size":32});
+    }
     let _ = writeln!(
         out,
         "{}",

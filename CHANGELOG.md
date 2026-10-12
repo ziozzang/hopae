@@ -10,6 +10,9 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- HOP1 authenticated persistent loopback verification and native Hangang pool support, retaining the same provider/session engine.
+- Trusted Hopae console package with paginated users/sessions/events/status and management actions; signed scoped Hangang actor delegation preserves native handles, grants, assurance, CSRF, fences and audit.
+
 - Milestone M1 (vertical slice; version 0.1.0 is not cut yet): Google OIDC sign-in (authorization code with PKCE, discovery and JWKS caching, ID-token validation), server-side sessions in SQLite with per-host handles, browser-bound cross-domain handoff with depth-bounded recovery, per-application timers and IP/User-Agent binding, logout, and explicit account linking by verified email.
 - Hangang forward-authentication adapter: `/_hopae/verify` per gateway contract v1 with caller-key authentication (current and next key for rotation), fail-closed decisions, identity headers, a verify budget (`gateway.verify_budget_ms`), concurrency caps (`limits.*`) and a login portal with English and Korean pages.
 - Command line: `hopae run` (alias `serve`), `hopae --check` (and `--strict`) with the route fragment and redirect URIs to register and an optional read-only drift query (`gateway.admin_url`, `gateway.readonly_token_env`), `hopae providers import [--force <id>]`; exit status `2` for configuration and instance errors, `1` for runtime failures.
