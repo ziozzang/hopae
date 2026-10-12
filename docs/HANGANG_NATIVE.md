@@ -110,3 +110,5 @@ Deployments still need their own network restrictions, provider/grant configurat
 full end-to-end load evidence and recovery checks before broad automatic rollout.
 
 Native release qualification covers static Linux amd64/arm64 and macOS Intel/Apple Silicon. Release artifacts include the reviewed console package. Hopae currently has no signed supervised auto-updater; release packaging does not imply that capability.
+
+SQLite jobs bound lock retries against an absolute monotonic deadline. OS sleep overshoot cannot accumulate into extra retries; handlers and default busy state are restored after bounded jobs, including panic unwinding.

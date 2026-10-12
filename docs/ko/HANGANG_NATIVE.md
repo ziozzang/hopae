@@ -87,3 +87,6 @@ handle·페이지 조회를 검증하며 개인정보·영속 nonce·위험 파�
 네이티브 릴리즈는 Linux amd64/arm64 정적 빌드와 macOS Intel/Apple Silicon을 검증하며
 검토된 콘솔 패키지를 포함합니다. Hopae의 서명된 supervised 자동 updater는 현재 구현되지 않았으며
 릴리즈 패키지가 그 기능을 의미하지 않습니다.
+
+SQLite 잠금 재시도는 절대 monotonic 기한으로 제한하며 OS sleep 초과가 추가 재시도로
+누적되지 않게 합니다. panic을 포함한 작업 종료 뒤 handler와 기본 busy 상태를 복구합니다.

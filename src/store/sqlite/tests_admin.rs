@@ -3232,3 +3232,22 @@ fn a_bounded_job_on_a_plain_connection_is_refused_late_and_leaves_the_connection
         .unwrap();
     assert_eq!(n, 2_000_000, "no stale progress handler interrupts it");
 }
+
+#[test]
+fn a_panicking_bounded_job_restores_sqlite_busy_state() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _: crate::store::StoreResult<()> = crate::store::sqlite::with_job_deadline(
+            &conn,
+            Some(Instant::now() + Duration::from_millis(100)),
+            |_, _| panic!("fixture job panic"),
+        );
+    }));
+    assert!(result.is_err());
+    let timeout: i64 = conn
+        .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+        .unwrap();
+    assert_eq!(timeout, 5000);
+    conn.execute_batch("CREATE TABLE recovery(id INTEGER)")
+        .unwrap();
+}

@@ -830,6 +830,27 @@ impl Check {
     }
 }
 
+thread_local! {
+    // Every connection job runs entirely on one dedicated/blocking thread.
+    // rusqlite's safe busy-handler API accepts a function pointer, not a capture.
+    static BUSY_DEADLINE: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+fn deadline_busy(_attempt: i32) -> bool {
+    BUSY_DEADLINE.with(|slot| {
+        let Some(deadline) = slot.get() else {
+            return false;
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(2)));
+        // Sleep may overshoot under OS scheduling/coalescing. Never accumulate
+        // only requested milliseconds as SQLite's default callback does.
+        Instant::now() < deadline
+    })
+}
+
 /// Install the deadline on `conn` for one job: refuse before the first
 /// statement when it has passed, bound the busy timeout, install the progress
 /// handler. Always paired with [`disarm`].
@@ -852,7 +873,8 @@ fn arm(
     if remaining.is_zero() {
         return Err(StoreError::Unavailable("deadline".into()));
     }
-    conn.busy_timeout(remaining.min(DEFAULT_BUSY))?;
+    BUSY_DEADLINE.with(|slot| slot.set(Some(d.min(Instant::now() + DEFAULT_BUSY))));
+    conn.busy_handler(Some(deadline_busy))?;
     let slow = hooks.clone();
     conn.progress_handler(
         1000,
@@ -875,6 +897,7 @@ fn arm(
 
 /// Undo [`arm`]: the connection is reused only without a handler and with the default busy timeout.
 fn disarm(conn: &Connection, armed: bool) {
+    BUSY_DEADLINE.with(|slot| slot.set(None));
     if armed {
         conn.progress_handler(0, None::<fn() -> bool>);
     }
@@ -909,9 +932,14 @@ pub fn with_job_deadline<T>(
     f: impl FnOnce(&Connection, &Check) -> StoreResult<T>,
 ) -> StoreResult<T> {
     let check = arm(conn, deadline, &None)?;
-    let out = f(conn, &check).map_err(|e| map_interrupt(e, &check));
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        f(conn, &check).map_err(|e| map_interrupt(e, &check))
+    }));
     disarm(conn, deadline.is_some());
-    out
+    match out {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
 }
 
 fn open_reader(path: &Path) -> StoreResult<Connection> {

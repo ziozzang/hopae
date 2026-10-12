@@ -1059,23 +1059,26 @@ fn s004_a3_concurrency_limit_fails_closed() {
     let h = Hopae::spawn(
         Fixture::with(
             "m1-basic",
-            serde_json::json!({"limits": {"gateway_max_concurrent": 64}}),
+            serde_json::json!({"limits": {"gateway_max_concurrent": 64},"gateway":{"verify_budget_ms":2000}}),
         ),
         &idp,
         &[],
     );
-    // A request now spends one stalled store call (the capped insert) where it
-    // used to spend two (the count, then the insert): double the stall keeps
-    // each permit held as long as before.
-    h.hooks.stall(400);
+    // Start the burst only once all clients exist; hold admitted work long enough
+    // to measure saturation rather than thread-creation or scheduler stagger.
+    h.hooks.stall(1000);
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(201));
     let h = std::sync::Arc::new(h);
     let mut threads = vec![];
     for _ in 0..200 {
         let h = h.clone();
+        let barrier = barrier.clone();
         threads.push(std::thread::spawn(move || {
+            barrier.wait();
             h.verify(VerifyRequest::document("https://app.example.test/admin/x"))
         }));
     }
+    barrier.wait();
     let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
     let overloaded = results
         .iter()
