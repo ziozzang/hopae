@@ -41,6 +41,8 @@ mod scenarios {
     mod s014_events;
     #[path = "s015_app_host_entry_points.rs"]
     mod s015_app_host_entry_points;
+    #[path = "s016_native.rs"]
+    mod s016_native;
     #[path = "s300_admin_access.rs"]
     mod s300_admin_access;
     #[path = "s301_admin_users.rs"]
@@ -53,4 +55,6 @@ mod scenarios {
     mod s304_admin_status;
     #[path = "s305_admin_grants.rs"]
     mod s305_admin_grants;
+    #[path = "s306_delegation.rs"]
+    mod s306_delegation;
 }

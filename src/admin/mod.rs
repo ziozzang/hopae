@@ -24,6 +24,8 @@ pub mod api;
 pub mod auth;
 pub mod csrf;
 pub mod cursor;
+pub mod delegation;
+pub mod delegation_wire;
 pub mod events;
 pub mod me;
 pub mod pages;
@@ -130,6 +132,8 @@ pub struct AdminState {
     pub listeners: Listeners,
     /// When each untrusted peer was last warned about (one line per minute).
     pub peer_warned: Mutex<HashMap<IpAddr, Timestamp>>,
+    pub delegation: Option<delegation::Config>,
+    pub delegation_replay: delegation::Replay,
 }
 
 /// The bound listener addresses (`portal`, `gateway`, `admin`).
@@ -138,6 +142,7 @@ pub struct Listeners {
     pub portal: String,
     pub gateway: String,
     pub admin: String,
+    pub native_gateway: Option<String>,
 }
 
 /// An authenticated administrator, as authentication hands it to a handler.
@@ -208,6 +213,7 @@ pub struct ReqInfo {
 /// extractor of every console handler behind authentication.
 #[derive(Clone, Debug)]
 pub struct Ctx {
+    pub delegated_actor: Option<delegation::Actor>,
     pub principal: Principal,
     pub req: ReqInfo,
 }

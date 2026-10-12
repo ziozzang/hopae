@@ -73,6 +73,9 @@ pub struct Listen {
     pub portal: String,
     #[serde(default = "default_gateway_addr")]
     pub gateway: String,
+    /// Authenticated persistent verification; loopback only.
+    #[serde(default)]
+    pub native_gateway: Option<String>,
     /// Admin listener; `127.0.0.1:8702` when `admin.public_url` is set.
     #[serde(default)]
     pub admin: Option<String>,
@@ -83,6 +86,7 @@ impl Default for Listen {
         Self {
             portal: default_portal_addr(),
             gateway: default_gateway_addr(),
+            native_gateway: None,
             admin: None,
         }
     }
@@ -114,6 +118,8 @@ pub enum AdminRoleCfg {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdminCfg {
+    #[serde(default)]
+    pub hangang_delegation: Option<crate::admin::delegation::Config>,
     /// Externally visible origin of the console; enables the listener.
     #[serde(default)]
     pub public_url: Option<String>,
@@ -755,6 +761,29 @@ impl Config {
         {
             errs.push("listen.portal and listen.gateway must differ".to_string());
         }
+        if let Some(value) = &self.listen.native_gateway {
+            match value.parse::<SocketAddr>() {
+                Ok(address) if address.ip().is_loopback() => {
+                    if address.port() != 0
+                        && (Some(address) == portal
+                            || Some(address) == gateway
+                            || self
+                                .listen
+                                .admin
+                                .as_ref()
+                                .and_then(|a| a.parse::<SocketAddr>().ok())
+                                == Some(address))
+                    {
+                        errs.push("listen.native_gateway must have a distinct address".into());
+                    }
+                    if self.gateway.allow_unauthenticated_caller {
+                        errs.push("native gateway requires authenticated callers".into());
+                    }
+                }
+                _ => errs
+                    .push("listen.native_gateway must be a literal loopback socket address".into()),
+            }
+        }
         if let Some(a) = &self.listen.admin {
             match a.parse::<SocketAddr>() {
                 Err(_) => errs.push(
@@ -998,6 +1027,21 @@ impl Config {
             && !(100..=30_000).contains(&ms)
         {
             errs.push("admin.query_budget_ms must be between 100 and 30000".to_string());
+        }
+        if let Some(delegation) = &a.hangang_delegation
+            && (a.public_url.is_none()
+                || delegation.key_env.is_empty()
+                || delegation.key_env.len() > 128
+                || !delegation
+                    .key_env
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                || delegation
+                    .sessions_file
+                    .as_ref()
+                    .is_some_and(|p| !p.is_absolute()))
+        {
+            errs.push("admin.hangang_delegation requires an admin origin, key_env and absolute sessions_file".into());
         }
         for (i, e) in a.users.iter().enumerate() {
             let at = format!("admin.users[{i}]");

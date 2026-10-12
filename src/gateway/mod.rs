@@ -6,3 +6,5 @@ pub mod canonical;
 pub mod forwarding;
 pub mod hangang;
 pub mod recognition;
+
+pub mod native_codec;

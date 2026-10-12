@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=15 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=16 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -262,3 +262,10 @@ HOPAE_GATEWAY_KEY=<redacted> hopae --check --config examples/hopae.example.json
 ```
 
 관련 페이지: [운영](OPERATIONS.md), [아키텍처](ARCHITECTURE.md), [게이트웨이 계약](GATEWAY_CONTRACT.md), 시나리오 013(사전 점검과 시작).
+
+## 네이티브 콘솔과 전송 통합
+
+listen.native_gateway는 인증된 loopback HOP1 검증을 선택적으로 활성화합니다.
+admin.hangang_delegation은 key_env와 선택적인 절대 경로 private sessions_file로
+서명된 host 콘솔 위임을 활성화합니다. 한도·브라우저/연결 세션·grant는
+[네이티브 통합](HANGANG_NATIVE.md)을 참고하세요.

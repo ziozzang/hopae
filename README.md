@@ -1,6 +1,6 @@
 # Hopae
 
-<!-- doc-rev: 3 -->
+<!-- doc-rev: 4 -->
 
 [Documentation](docs/README.md) · [Roadmap](docs/ROADMAP.md) · [Release notes](CHANGELOG.md) · [한국어](README.ko.md)
 
@@ -104,3 +104,5 @@ updated in the same change.
 ## License
 
 [MIT](LICENSE) © 2026 Jioh Jung
+
+[Native Hangang integration](docs/HANGANG_NATIVE.md) adds bounded persistent verification and trusted console menus while retaining Hopae provider/session authority.

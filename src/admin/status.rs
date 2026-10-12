@@ -284,11 +284,14 @@ pub async fn collect(st: &AdminState) -> Result<StatusData, StoreError> {
             failed: *failed,
         });
     }
-    let listeners = json!({
+    let mut listeners = json!({
         "portal": st.listeners.portal,
         "gateway": st.listeners.gateway,
         "admin": st.listeners.admin,
     });
+    if let Some(native) = &st.listeners.native_gateway {
+        listeners["native_gateway"] = json!(native);
+    }
     let version = env!("CARGO_PKG_VERSION");
     let json = json!({
         "apps": apps_json,

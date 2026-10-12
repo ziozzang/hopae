@@ -76,6 +76,10 @@ pub fn router(state: Arc<AdminState>) -> Router {
     // `allow` header of a `405` outside every layer applied to its routes.
     Router::new()
         .fallback_service(routes)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::admin::delegation::middleware,
+        ))
         .layer(middleware::from_fn_with_state(state, outer))
 }
 
@@ -245,8 +249,20 @@ async fn gate(
             return scoped(&st, auth::respond(&st, &info, &refused)).await;
         }
     };
+    let delegated_actor = req
+        .extensions()
+        .get::<crate::admin::delegation::Actor>()
+        .cloned();
+    if delegated_actor.as_ref().is_some_and(|a| {
+        a.expected_user_id
+            .as_ref()
+            .is_some_and(|id| id != principal.user_id.as_str())
+    }) {
+        return api::json_error(StatusCode::FORBIDDEN, "delegation_rejected");
+    }
     let role = principal.role.as_str();
     let ctx = Ctx {
+        delegated_actor,
         principal,
         req: info,
     };

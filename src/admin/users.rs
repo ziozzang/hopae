@@ -256,9 +256,17 @@ pub mod common {
         kind: EventKind,
         outcome: Outcome,
     ) -> EventBuilder {
-        plain_event(st, c, kind, outcome)
+        let event = plain_event(st, c, kind, outcome)
             .attr("actor", c.principal.user_id.as_str())
-            .attr("actor_session", c.principal.session_id.as_str())
+            .attr("actor_session", c.principal.session_id.as_str());
+        if let Some(actor) = &c.delegated_actor {
+            event
+                .attr("delegated_issuer", "hangang")
+                .attr("delegated_actor", format!("{}:{}", actor.id, actor.name))
+                .attr("delegated_operation", actor.nonce.as_str())
+        } else {
+            event
+        }
     }
 
     /// An event builder with the request id, application and client address.

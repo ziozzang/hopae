@@ -1,6 +1,6 @@
 # Hopae
 
-<!-- translation-status: source=README.md source-rev=3 status=current -->
+<!-- translation-status: source=README.md source-rev=4 status=current -->
 
 [문서 목차](docs/ko/README.md) · [로드맵](docs/ko/ROADMAP.md) · [릴리스 노트](CHANGELOG.md) · [English](README.md)
 
@@ -100,3 +100,5 @@ target/release/hopae run     --config deploy/hopae.example.json
 ## 라이선스
 
 [MIT](LICENSE) © 2026 Jioh Jung
+
+[Hangang 네이티브 통합](docs/ko/HANGANG_NATIVE.md)은 프로바이더·세션 권한을 유지하며 제한된 지속 검증 연결과 관리 메뉴를 제공합니다.

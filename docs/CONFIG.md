@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 15 -->
+<!-- doc-rev: 16 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -269,3 +269,10 @@ HOPAE_GATEWAY_KEY=<redacted> hopae --check --config examples/hopae.example.json
 ```
 
 Related pages: [operations](OPERATIONS.md), [architecture](ARCHITECTURE.md), [gateway contract](GATEWAY_CONTRACT.md), scenario 013 (preflight and startup).
+
+## Native console and transport integration
+
+`listen.native_gateway` optionally enables authenticated loopback HOP1 verification.
+`admin.hangang_delegation` optionally enables signed host-console delegation with
+`key_env` and an optional absolute private `sessions_file`. See
+[Native integration](HANGANG_NATIVE.md) for bounds, browser/paired sessions and grants.

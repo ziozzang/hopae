@@ -65,6 +65,10 @@ const ADMIN_USER: Node = Obj(&[
 ]);
 
 const ADMIN: Node = Obj(&[
+    (
+        "hangang_delegation",
+        Obj(&[("key_env", Leaf), ("sessions_file", Leaf)]),
+    ),
     ("public_url", Leaf),
     ("session", Obj(&[("idle", Leaf), ("absolute", Leaf)])),
     (
@@ -87,7 +91,12 @@ const ADMIN: Node = Obj(&[
 pub(super) const ROOT: Node = Obj(&[
     (
         "listen",
-        Obj(&[("portal", Leaf), ("gateway", Leaf), ("admin", Leaf)]),
+        Obj(&[
+            ("portal", Leaf),
+            ("gateway", Leaf),
+            ("admin", Leaf),
+            ("native_gateway", Leaf),
+        ]),
     ),
     ("state_dir", Leaf),
     ("store", Obj(&[("kind", Leaf), ("path", Leaf)])),

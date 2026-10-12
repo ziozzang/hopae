@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "hopae"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -781,6 +781,7 @@ dependencies = [
  "http",
  "ipnet",
  "jsonwebtoken",
+ "libc",
  "percent-encoding",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
@@ -794,6 +795,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "unicode-normalization",
