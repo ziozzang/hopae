@@ -1,6 +1,6 @@
 # Hopae
 
-<!-- translation-status: source=README.md source-rev=4 status=current -->
+<!-- translation-status: source=README.md source-rev=5 status=current -->
 
 [문서 목차](docs/ko/README.md) · [로드맵](docs/ko/ROADMAP.md) · [릴리스 노트](CHANGELOG.md) · [English](README.md)
 
@@ -102,3 +102,12 @@ target/release/hopae run     --config deploy/hopae.example.json
 [MIT](LICENSE) © 2026 Jioh Jung
 
 [Hangang 네이티브 통합](docs/ko/HANGANG_NATIVE.md)은 프로바이더·세션 권한을 유지하며 제한된 지속 검증 연결과 관리 메뉴를 제공합니다.
+
+## 서비스 권한 소유권
+
+[품계(Pumgye)](https://github.com/ziozzang/pumgye)가 서비스별 역할·권한·정보등급과
+사용자/네트워크 배정을 소유합니다. 호패의 네이티브 검증은 신원과 인증 수준을
+제공하고, Hangang에 내장된 품계 게이트가 수문장 네트워크 근거와 결합해 집행합니다.
+인증 성공만으로 서비스 권한을 부여하지 않습니다. 미배정 사용자는 guest이며
+auth-proxy가 보호 요청을 거부합니다. 프로바이더·사용자·세션은 계속 호패 소유이고,
+네이티브 콘솔 관리 권한은 서비스 접근 권한과 구분합니다.
