@@ -107,3 +107,47 @@ pub async fn verify(
         at,
     })
 }
+
+/// Enrollment confirmation after native session authorization and transport admission.
+pub async fn confirm_authorized(
+    store: &dyn Factors,
+    keys: &Keyring,
+    clock: &dyn Clock,
+    enrollment: &str,
+    actor: crate::store::FactorActor,
+    code: &Secret,
+    events: Vec<Event>,
+) -> Result<Consumption, Error> {
+    let user = actor.user().clone();
+    let row = store
+        .totp_enrollment(enrollment, &user)
+        .await
+        .map_err(Error::Store)?
+        .ok_or(Error::Refused)?;
+    if row.active {
+        return Err(Error::Refused);
+    }
+    let key = keys.for_envelope(&row.envelope).ok_or(Error::Refused)?;
+    let seed = key
+        .open(&row.envelope, user.as_str(), enrollment)
+        .map_err(|_| Error::Refused)?;
+    let at = clock.now();
+    let counter = Parameters::default()
+        .matching_counter(&seed, at, code, row.last_counter)
+        .ok_or(Error::Refused)?;
+    if !store
+        .activate_totp_authorized(enrollment, actor, row.revision, counter, events)
+        .await
+        .map_err(Error::Store)?
+    {
+        return Err(Error::Refused);
+    }
+    Ok(Consumption {
+        purpose: Purpose::ConfirmEnrollment,
+        user,
+        enrollment: enrollment.into(),
+        revision: row.revision + 1,
+        counter,
+        at,
+    })
+}

@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=18 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=19 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -383,3 +383,28 @@ active 요인 등 12개 변경을 검사합니다. 쓰기 경계 검증이며 �
 발급·전송 검증은 아닙니다. HTTPS·CSRF/Origin·시도 제한·요청 감사 연결,
 확인·해제 검사·키 폐기 배포·challenge와 세션 원자 완료의 HTTP·서비스
 통합은 남아 있습니다. 등록 route·MFA 세션 승격은 활성화하지 않았습니다.
+
+## 소유자 검사 확인·해제와 세션 회수
+
+권한 확인 등록 완료는 pending owner의 코드·정확한 유지 키를 검증하고 최근
+세션 쓰기 검사 아래 활성화합니다. 권한 확인 해제는 같은 검사와 예상 등록
+revision을 요구합니다. Active 요인 해제는 session·handle AAL 2와 최근
+TOTP/WebAuthn 기록도 필요합니다. AAL 숫자만 있거나 복구 기록만으로는
+부족하며 트랜잭션 안에서 기록·현재 AAL을 조회 시점 세션과 대조합니다.
+
+신뢰한 운영자 회수를 포함해 active 요인을 회수하면 같은 트랜잭션에서
+owner의 모든 live 세션을 종료하고 자격 세대를 올리며 handle·미소비 handoff
+code를 회수합니다. 요인 상태·필수 감사도 함께 저장합니다. Pending 취소는
+세션을 종료하지 않습니다. 종료 사유는 `factor_revoked`이며 active 해제 후에는
+보수적으로 새 로그인을 요구합니다.
+
+실제 저장소 회귀는 합성 session·factor 기록으로 조회 후 회수, 소유 요인 없는
+AAL 거부, 권한 해제·session·handle·code 종료를 확인합니다. 강제 감사 실패는
+요인 해제·세션·code 종료를 함께 롤백합니다. 네이티브 MFA 발급·브라우저
+검증은 아닙니다. HTTPS·CSRF/Origin·등록 challenge binding·복구·UI·해제 전송,
+OTP challenge·세션 승격 원자 처리·키 폐기 검사·Hangang 열린 stream 회수는
+미완성입니다. 이번 변경으로 요인 HTTP route를 활성화하지 않습니다.
+
+추가 네이티브 서비스 fixture는 실제 RFC 기반 OTP를 확인합니다. 잘못된 코드는
+pending을 유지하고 올바른 코드는 owner 검사 아래 확인되며 반복 확인은 거부합니다.
+Actor는 내부 fixture에서 구성하므로 브라우저 세션 발급·운영 MFA 검증은 아닙니다.

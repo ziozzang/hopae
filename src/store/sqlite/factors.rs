@@ -10,6 +10,37 @@ use rusqlite::{OptionalExtension, params};
 
 #[async_trait]
 impl Factors for Store {
+    async fn activate_totp_authorized(
+        &self,
+        id: &str,
+        actor: crate::store::FactorActor,
+        revision: u64,
+        counter: u64,
+        events: Vec<Event>,
+    ) -> StoreResult<bool> {
+        let user = actor.user().clone();
+        self.mutate_totp(
+            id,
+            &user,
+            revision,
+            Some(counter),
+            ("activate", Some(actor)),
+            events,
+        )
+        .await
+    }
+    async fn revoke_totp_authorized(
+        &self,
+        id: &str,
+        actor: crate::store::FactorActor,
+        revision: u64,
+        events: Vec<Event>,
+    ) -> StoreResult<bool> {
+        let user = actor.user().clone();
+        self.mutate_totp(id, &user, revision, None, ("revoke", Some(actor)), events)
+            .await
+    }
+
     async fn totp_enrollment(
         &self,
         id: &str,
@@ -60,8 +91,15 @@ impl Factors for Store {
         counter: u64,
         events: Vec<Event>,
     ) -> StoreResult<bool> {
-        self.mutate_totp(id, user, revision, Some(counter), "activate", events)
-            .await
+        self.mutate_totp(
+            id,
+            user,
+            revision,
+            Some(counter),
+            ("activate", None),
+            events,
+        )
+        .await
     }
     async fn consume_totp_counter(
         &self,
@@ -71,7 +109,7 @@ impl Factors for Store {
         counter: u64,
         events: Vec<Event>,
     ) -> StoreResult<bool> {
-        self.mutate_totp(id, user, revision, Some(counter), "consume", events)
+        self.mutate_totp(id, user, revision, Some(counter), ("consume", None), events)
             .await
     }
     async fn revoke_totp(
@@ -81,7 +119,7 @@ impl Factors for Store {
         revision: u64,
         events: Vec<Event>,
     ) -> StoreResult<bool> {
-        self.mutate_totp(id, user, revision, None, "revoke", events)
+        self.mutate_totp(id, user, revision, None, ("revoke", None), events)
             .await
     }
 }
@@ -132,9 +170,10 @@ impl Store {
         user: &UserId,
         revision: u64,
         counter: Option<u64>,
-        operation: &'static str,
+        authorization: (&'static str, Option<crate::store::FactorActor>),
         events: Vec<Event>,
     ) -> StoreResult<bool> {
+        let (operation, actor) = authorization;
         let (id, user) = (id.to_owned(), user.clone());
         let revision = i64::try_from(revision)
             .map_err(|_| StoreError::Conflict("invalid enrollment revision"))?;
@@ -144,6 +183,17 @@ impl Store {
             .map_err(|_| StoreError::Conflict("invalid OTP counter"))?;
         self.write("mutate_totp",move |env| {
             let shared=env.shared.clone();let now=shared.clock.now().secs();let tx=env.begin()?;
+            let was_active = operation=="revoke" && tx.query_row("SELECT EXISTS(SELECT 1 FROM totp_enrollments WHERE enrollment_id=?1 AND user_id=?2 AND state='active')",params![id,user.as_str()],|row|row.get::<_,bool>(0))?;
+            if let Some(actor)=&actor {
+                require_actor(&tx,&shared,user.as_str(),actor)?;
+                if operation=="revoke" {
+                    let active:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM totp_enrollments WHERE enrollment_id=?1 AND user_id=?2 AND state='active')",params![id,user.as_str()],|row|row.get(0))?;
+                    let recent_mfa=actor.view.session.factors.iter().any(|factor| matches!(factor.kind,crate::session::types::FactorKind::Totp|crate::session::types::FactorKind::Webauthn) && factor.at<=shared.clock.now() && shared.clock.now().since(factor.at)<=std::time::Duration::from_secs(300));
+                    if active && (actor.view.session.aal < crate::session::types::Aal::Two || actor.view.handle.issued_aal < crate::session::types::Aal::Two || !recent_mfa) {
+                        return Err(StoreError::Conflict("active factor removal requires step-up"));
+                    }
+                }
+            }
             let sql=match operation {
                 "activate" => "UPDATE totp_enrollments SET state='active',revision=revision+1,last_counter=?4,pending_expires_at=NULL,updated_at=?5 WHERE enrollment_id=?1 AND user_id=?2 AND revision=?3 AND state='pending' AND pending_expires_at>?5 AND EXISTS(SELECT 1 FROM users WHERE user_id=?2 AND status='active')",
                 "consume" => "UPDATE totp_enrollments SET last_counter=?4,updated_at=?5 WHERE enrollment_id=?1 AND user_id=?2 AND revision=?3 AND state='active' AND last_counter<?4 AND EXISTS(SELECT 1 FROM users WHERE user_id=?2 AND status='active')",
@@ -151,6 +201,15 @@ impl Store {
                 _ => return Err(StoreError::Conflict("invalid factor operation")),
             };
             if tx.execute(sql,params![id,user.as_str(),revision,counter,now])?!=1 { return Ok(false); }
+            if was_active {
+                let sessions:Vec<String>=tx.prepare("SELECT session_id FROM sessions WHERE user_id=?1 AND terminated_at IS NULL ORDER BY session_id")?.query_map([user.as_str()],|row|row.get(0))?.collect::<Result<_,_>>()?;
+                for id in sessions {
+                    let session=crate::session::types::SessionId::new(id);
+                    let event=EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::SessionTerminated,Outcome::Success,"r_totp_store")
+                        .user(&user).session(&session).reason(crate::event::types::reasons::FACTOR_REVOKED).build();
+                    super::sessions::terminate_in(&tx,&shared,&session,crate::event::types::reasons::FACTOR_REVOKED,crate::crypto::Timestamp::from_secs(now),&[event])?;
+                }
+            }
             let kind=match operation { "activate"=>EventKind::FactorEnrollmentActivated,"consume"=>EventKind::FactorTotpConsumed,_=>EventKind::FactorEnrollmentRevoked };
             insert_events(&tx,&shared,&[factor_event(&shared,&user,&id,kind)])?;
             insert_events(&tx,&shared,&events)?;commit(tx,&shared,None)?;Ok(true)
@@ -185,8 +244,8 @@ fn require_actor(
     }
     let view = &actor.view;
     let live:bool=tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sessions s JOIN session_handles h ON h.session_id=s.session_id JOIN users u ON u.user_id=s.user_id JOIN providers p ON p.provider_id=s.provider_id WHERE s.session_id=?1 AND s.user_id=?2 AND h.handle_sha256=?3 AND h.host=?4 AND s.cred_gen=?5 AND s.auth_time=?6 AND s.authz_version_at_auth=u.authz_version AND u.status='active' AND s.terminated_at IS NULL AND h.revoked_at IS NULL AND p.enabled=1 AND p.deleted_at IS NULL AND s.aal>=1 AND h.issued_aal>=1 AND s.absolute_expires_at>?7 AND h.absolute_expires_at>?7 AND s.last_seen_at>?8 AND h.last_seen_at>?9 AND s.auth_time>=?10 AND s.auth_time<=?7)",
-        params![view.session.session_id.as_str(),user,&view.handle.handle_sha256.0[..],view.handle.host.as_str(),view.session.cred_gen as i64,view.session.auth_time.secs(),now.secs(),now.secs().saturating_sub(actor.session_idle.as_secs() as i64),now.secs().saturating_sub(actor.handle_idle.as_secs() as i64),now.secs().saturating_sub(300)],|r|r.get(0),
+        "SELECT EXISTS(SELECT 1 FROM sessions s JOIN session_handles h ON h.session_id=s.session_id JOIN users u ON u.user_id=s.user_id JOIN providers p ON p.provider_id=s.provider_id WHERE s.session_id=?1 AND s.user_id=?2 AND h.handle_sha256=?3 AND h.host=?4 AND s.cred_gen=?5 AND s.auth_time=?6 AND s.authz_version_at_auth=u.authz_version AND u.status='active' AND s.terminated_at IS NULL AND h.revoked_at IS NULL AND p.enabled=1 AND p.deleted_at IS NULL AND s.aal>=?11 AND h.issued_aal>=?12 AND s.absolute_expires_at>?7 AND h.absolute_expires_at>?7 AND s.last_seen_at>?8 AND h.last_seen_at>?9 AND s.auth_time>=?10 AND s.auth_time<=?7 AND s.factors=?13)",
+        params![view.session.session_id.as_str(),user,&view.handle.handle_sha256.0[..],view.handle.host.as_str(),view.session.cred_gen as i64,view.session.auth_time.secs(),now.secs(),now.secs().saturating_sub(actor.session_idle.as_secs() as i64),now.secs().saturating_sub(actor.handle_idle.as_secs() as i64),now.secs().saturating_sub(300),view.session.aal.as_i64().max(1),view.handle.issued_aal.as_i64().max(1),super::rows::json_str(&view.session.factors)?],|r|r.get(0),
     )?;
     if !live {
         return Err(StoreError::Conflict("factor authorization revoked"));

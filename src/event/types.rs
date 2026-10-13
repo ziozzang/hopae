@@ -366,6 +366,7 @@ pub mod reasons {
         REAUTH_AUTH_TIME_MISSING = "reauth_auth_time_missing",
         INVALID_AUTH_TIME = "invalid_auth_time",
         REAUTH = "reauth",
+        FACTOR_REVOKED = "factor_revoked",
         INVALID_CURSOR = "invalid_cursor",
         INVALID_FILTER = "invalid_filter",
         INVALID_ID = "invalid_id",

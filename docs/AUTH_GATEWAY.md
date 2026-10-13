@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 18 -->
+<!-- doc-rev: 19 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -430,3 +430,31 @@ The test covers the write fence, not browser actor issuance or transport. HTTPS,
 CSRF/Origin, bounded admission, request/audit correlation, confirmation/removal fencing,
 key-retirement publication and atomic challenge/session completion still need their
 HTTP/service integration. No enrollment route or MFA session elevation is enabled.
+
+## Owner-fenced confirmation, removal and session revocation
+
+Authorized confirmation verifies the pending owner's code and exact retained key,
+then activates under the same recent-session write fence. Authorized removal checks
+that fence and the expected enrollment revision. Removing an active factor also
+requires AAL 2 on session/handle and a recent TOTP/WebAuthn factor record; an AAL
+number alone or recovery-only metadata does not meet this guard. Factor records and
+current AAL are rechecked against the captured session inside the transaction.
+
+Revoking an active factor, including trusted operator revocation, now terminates all
+live owner sessions, bumps their credential generations, revokes handles and consumes
+outstanding handoff codes in the same transaction as factor state and required audit.
+Pending cancellation does not terminate sessions. Session endings use `factor_revoked`.
+The conservative all-session policy requires fresh login after active-factor removal.
+
+A real-store regression uses synthetic session/factor metadata to check post-read
+revocation, AAL-without-possession refusal, authorized removal and session/handle/code
+termination. Forced audit insertion failure rolls back factor removal and session/code
+termination together. This is not native MFA issuance or browser qualification. HTTPS,
+CSRF/Origin, enrollment challenge binding, recovery/UI, removal transport, atomic OTP
+challenge/session elevation, key-retirement fencing and Hangang open-stream revocation
+remain unfinished. No factor HTTP route is enabled by this change.
+
+An additional native-service fixture verifies an actual RFC-derived OTP: wrong code
+leaves pending state unchanged, the correct code confirms under the owner fence, and
+repeated confirmation is refused. The fixture constructs the actor internally; it
+still does not qualify browser session issuance or deployed MFA.

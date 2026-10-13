@@ -2833,3 +2833,263 @@ async fn factor_actor_fences_registration_after_session_or_authority_revocation(
         );
     }
 }
+
+#[tokio::test]
+async fn authorized_totp_confirmation_refuses_revoked_actor_and_active_removal_needs_mfa() {
+    use crate::store::Factors;
+    let f = fx();
+    let user = f.user(1).await;
+    let session = f.session(&user, vec![]).await;
+    let _outstanding = f.code(&session).await;
+    f.store.conn().execute("INSERT INTO providers(provider_id,kind,display_name,enabled,managed_by,created_at,updated_at)VALUES('mock','oidc','Owned',1,'api',0,0)",[]).unwrap();
+    let keys = test_totp_keyring();
+    let seed = crate::factor::totp::Seed::from_bytes(&[9; 20]).unwrap();
+    let envelope = keys
+        .active()
+        .seal(&seed, user.user_id.as_str(), "confirm", &f.rng)
+        .unwrap();
+    f.store
+        .create_totp_pending("confirm".into(), user.user_id.clone(), envelope, vec![])
+        .await
+        .unwrap();
+    let actor = |view| FactorActor {
+        view,
+        authorized_at: f.now(),
+        session_idle: Duration::from_secs(300),
+        handle_idle: Duration::from_secs(300),
+    };
+    let view = f
+        .store
+        .lookup_handle(&session.portal_digest, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    f.store
+        .conn()
+        .execute("UPDATE sessions SET cred_gen=cred_gen+1", [])
+        .unwrap();
+    assert!(
+        f.store
+            .activate_totp_authorized("confirm", actor(view), 1, 10, vec![])
+            .await
+            .is_err()
+    );
+    assert!(
+        !f.store
+            .totp_enrollment("confirm", &user.user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .active
+    );
+    let view = f
+        .store
+        .lookup_handle(&session.portal_digest, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        f.store
+            .activate_totp_authorized("confirm", actor(view), 1, 10, vec![])
+            .await
+            .unwrap()
+    );
+    let view = f
+        .store
+        .lookup_handle(&session.portal_digest, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        f.store
+            .revoke_totp_authorized("confirm", actor(view), 2, vec![])
+            .await
+            .is_err()
+    );
+    f.store
+        .conn()
+        .execute("UPDATE sessions SET aal=2", [])
+        .unwrap();
+    f.store
+        .conn()
+        .execute("UPDATE session_handles SET issued_aal=2", [])
+        .unwrap();
+    let view = f
+        .store
+        .lookup_handle(&session.portal_digest, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        f.store
+            .revoke_totp_authorized("confirm", actor(view), 2, vec![])
+            .await
+            .is_err(),
+        "AAL without recent possession proof"
+    );
+    let factors = vec![FactorEntry {
+        kind: FactorKind::Totp,
+        provider: None,
+        at: f.now(),
+    }];
+    f.store
+        .conn()
+        .execute(
+            "UPDATE sessions SET factors=?1",
+            [serde_json::to_string(&factors).unwrap()],
+        )
+        .unwrap();
+    let view = f
+        .store
+        .lookup_handle(&session.portal_digest, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    let duplicate = f
+        .store
+        .query(EventQuery {
+            kind: Some(EventKind::FactorEnrollmentPrepared),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(
+        f.store
+            .revoke_totp_authorized("confirm", actor(view.clone()), 2, vec![duplicate])
+            .await
+            .is_err()
+    );
+    assert!(
+        f.store
+            .totp_enrollment("confirm", &user.user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .active
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM sessions WHERE terminated_at IS NULL"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM handoff_codes WHERE consumed_at IS NULL"),
+        1
+    );
+    assert!(
+        f.store
+            .revoke_totp_authorized("confirm", actor(view), 2, vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        f.store
+            .totp_enrollment("confirm", &user.user_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM sessions WHERE terminated_at IS NULL"),
+        0
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM session_handles WHERE revoked_at IS NULL"),
+        0
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM sessions WHERE terminated_reason='factor_revoked'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM handoff_codes WHERE consumed_at IS NULL"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn native_authorized_confirmation_verifies_real_code_before_activation() {
+    use crate::store::Factors;
+    let f = fx();
+    f.clock.set(Timestamp(59_000));
+    let user = f.user(1).await;
+    let session = f.session(&user, vec![]).await;
+    f.store.conn().execute("INSERT INTO providers(provider_id,kind,display_name,enabled,managed_by,created_at,updated_at)VALUES('mock','oidc','Owned',1,'api',0,0)",[]).unwrap();
+    let keys = test_totp_keyring();
+    let seed = crate::factor::totp::Seed::from_bytes(b"12345678901234567890").unwrap();
+    let envelope = keys
+        .active()
+        .seal(&seed, user.user_id.as_str(), "real-confirm", &f.rng)
+        .unwrap();
+    f.store
+        .create_totp_pending(
+            "real-confirm".into(),
+            user.user_id.clone(),
+            envelope,
+            vec![],
+        )
+        .await
+        .unwrap();
+    let view = f
+        .store
+        .lookup_handle(&session.portal_digest, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    let actor = || FactorActor {
+        view: view.clone(),
+        authorized_at: f.now(),
+        session_idle: Duration::from_secs(300),
+        handle_idle: Duration::from_secs(300),
+    };
+    let bad = Secret::new("000000".into());
+    assert!(
+        crate::factor::service::confirm_authorized(
+            &f.store,
+            &keys,
+            f.clock.as_ref(),
+            "real-confirm",
+            actor(),
+            &bad,
+            vec![]
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        !f.store
+            .totp_enrollment("real-confirm", &user.user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .active
+    );
+    let good = Secret::new("287082".into());
+    let receipt = crate::factor::service::confirm_authorized(
+        &f.store,
+        &keys,
+        f.clock.as_ref(),
+        "real-confirm",
+        actor(),
+        &good,
+        vec![],
+    )
+    .await
+    .unwrap();
+    assert_eq!(receipt.counter(), 1);
+    assert_eq!(receipt.revision(), 2);
+    assert!(
+        crate::factor::service::confirm_authorized(
+            &f.store,
+            &keys,
+            f.clock.as_ref(),
+            "real-confirm",
+            actor(),
+            &good,
+            vec![]
+        )
+        .await
+        .is_err()
+    );
+}

@@ -471,6 +471,22 @@ pub trait Events: Send + Sync {
 /// Owner storage primitives; callers still validate recent authentication/challenges.
 #[async_trait]
 pub trait Factors: Send + Sync {
+    async fn activate_totp_authorized(
+        &self,
+        id: &str,
+        actor: FactorActor,
+        revision: u64,
+        counter: u64,
+        events: Vec<Event>,
+    ) -> StoreResult<bool>;
+    async fn revoke_totp_authorized(
+        &self,
+        id: &str,
+        actor: FactorActor,
+        revision: u64,
+        events: Vec<Event>,
+    ) -> StoreResult<bool>;
+
     async fn create_totp_pending_authorized(
         &self,
         id: String,
