@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 11 -->
+<!-- doc-rev: 12 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -229,3 +229,15 @@ scenario cases and the existing OIDC callback/disable-race checks. The explicitl
 ignored LDAP fixture and 40 scenario cases remain separate qualification work.
 An obsolete successful-upgrade assertion was updated to the current schema version;
 malformed v3 databases still retain version 3 and are refused before migration.
+
+## Direct transaction binding storage
+
+TransactionBinding now preserves optional nonce and PKCE values rather than storing
+empty OAuth placeholders. A direct login challenge can retain its single-use digest,
+provider and immutable portal binding while storing NULL in the OAuth-only columns.
+Existing redirect authentication preserves its actual nonce/verifier values.
+A storage test verifies absent OAuth fields and rejects browser-binding replacement.
+Library and OIDC callback regressions pass. This is storage preparation; the portal
+still needs explicit direct challenge creation, CSRF validation and password completion
+before LDAP activation. No new operational schema upgrade is needed for these already
+nullable columns, and no LDAP login endpoint is enabled by this change.

@@ -339,8 +339,8 @@ pub struct NewTransaction {
 pub struct TransactionBinding {
     pub provider_id: ProviderId,
     pub state_sha256: Digest,
-    pub nonce: String,
-    pub pkce_verifier: Secret,
+    pub nonce: Option<String>,
+    pub pkce_verifier: Option<Secret>,
     pub portal_bind_sha256: Digest,
 }
 

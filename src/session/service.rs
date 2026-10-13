@@ -790,10 +790,8 @@ impl Service {
         let binding = TransactionBinding {
             provider_id: provider_id.clone(),
             state_sha256: auth.state.digest(),
-            nonce: auth.nonce.unwrap_or_default(),
-            pkce_verifier: auth
-                .pkce_verifier
-                .unwrap_or_else(|| Secret::new(String::new())),
+            nonce: auth.nonce,
+            pkce_verifier: auth.pkce_verifier,
             portal_bind_sha256: portal_cookie.digest(),
         };
         match self

@@ -1479,6 +1479,51 @@ async fn logout_ticket_binding_is_recorded_once() {
 }
 
 #[tokio::test]
+async fn direct_transaction_binding_keeps_oauth_fields_absent_and_binding_immutable() {
+    let f = fx();
+    let token = random_token(&f.rng, 16);
+    let challenge = random_token(&f.rng, 16);
+    f.store
+        .create_transaction(new_txn(&f, &token, "192.0.2.1"), vec![])
+        .await
+        .unwrap();
+    let binding = TransactionBinding {
+        provider_id: ProviderId::new("owned-directory"),
+        state_sha256: challenge.digest(),
+        nonce: None,
+        pkce_verifier: None,
+        portal_bind_sha256: sha256(b"owned-browser"),
+    };
+    f.store
+        .bind_transaction(&token.digest(), binding.clone())
+        .await
+        .unwrap();
+    let row = f
+        .store
+        .transaction_by_state(&challenge.digest())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.nonce.is_none() && row.pkce_verifier.is_none());
+    assert_eq!(row.portal_bind_sha256, Some(binding.portal_bind_sha256));
+    let changed = TransactionBinding {
+        portal_bind_sha256: sha256(b"different-browser"),
+        ..binding
+    };
+    assert!(matches!(
+        f.store.bind_transaction(&token.digest(), changed).await,
+        Err(StoreError::Conflict(_))
+    ));
+    let row = f
+        .store
+        .transaction_by_state(&challenge.digest())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.portal_bind_sha256, Some(sha256(b"owned-browser")));
+}
+
+#[tokio::test]
 async fn transaction_lifecycle_bind_once_consume_once() {
     let f = fx();
     let secret = random_token(&f.rng, 16);
@@ -1512,8 +1557,8 @@ async fn transaction_lifecycle_bind_once_consume_once() {
     let binding = TransactionBinding {
         provider_id: ProviderId::new("mock"),
         state_sha256: state.digest(),
-        nonce: "n-1".into(),
-        pkce_verifier: Secret::new("verifier".into()),
+        nonce: Some("n-1".into()),
+        pkce_verifier: Some(Secret::new("verifier".into())),
         portal_bind_sha256: sha256(b"portal"),
     };
     f.store
@@ -1600,8 +1645,8 @@ async fn transaction_lifecycle_bind_once_consume_once() {
     let b = TransactionBinding {
         provider_id: ProviderId::new("mock"),
         state_sha256: sha256(b"s2"),
-        nonce: "n".into(),
-        pkce_verifier: Secret::new("v".into()),
+        nonce: Some("n".into()),
+        pkce_verifier: Some(Secret::new("v".into())),
         portal_bind_sha256: sha256(b"p"),
     };
     assert!(matches!(

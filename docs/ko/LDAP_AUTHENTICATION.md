@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=11 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=12 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -196,3 +196,13 @@ portal route가 필요하며 이 분리만으로 LDAP 로그인 endpoint가 생�
 기존 OIDC callback/비활성 경쟁 검사를 포함합니다. 명시적 ignored LDAP fixture와
 시나리오 40건은 별도 검증 범위입니다. 정상 업그레이드의 오래된 버전 기대값은 현재
 스키마로 바꾸었고 손상된 v3 DB는 이전 전에 거부하며 버전 3을 유지합니다.
+
+## 직접 인증 transaction 바인딩 저장
+
+TransactionBinding은 빈 OAuth placeholder 대신 선택적인 nonce·PKCE 값을 유지합니다.
+직접 로그인 challenge는 일회 digest·provider·불변 portal 바인딩을 유지하면서 OAuth
+전용 열에 NULL을 저장할 수 있습니다. 기존 redirect 인증은 실제 nonce/verifier를
+유지합니다. 저장 테스트로 OAuth 필드 부재와 브라우저 바인딩 교체 거부를 확인하고
+라이브러리·OIDC callback 회귀 검사도 통과했습니다. 저장 준비 단계이며 LDAP 활성화
+전 portal의 직접 challenge 생성·CSRF·비밀번호 완료 경로가 필요합니다. 이미 nullable인
+열이라 추가 운영 스키마 이전은 없고 이 변경이 LDAP 로그인 endpoint를 켜지는 않습니다.

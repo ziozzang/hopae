@@ -579,7 +579,7 @@ impl Sessions for Store {
                     b.provider_id.as_str(),
                     blob(&b.state_sha256),
                     b.nonce,
-                    b.pkce_verifier.expose(),
+                    b.pkce_verifier.as_ref().map(|value|value.expose()),
                     blob(&b.portal_bind_sha256),
                 ],
             )?;
