@@ -1,11 +1,11 @@
 # Service authentication gateway
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
-The first runtime connector authenticates service API keys with optional IP
-conditions. It is opt-in through `authentication_gateway`; existing OIDC/session
+Runtime connectors authenticate local service API keys or relay a Bearer credential
+to a fixed external verifier, with optional IP conditions. It is opt-in through `authentication_gateway`; existing OIDC/session
 routes keep their behavior when this configuration is absent. The same caller
 key, bounded concurrency and forwarded-request validation apply before API
 credentials are read, over both HTTP and HOP1.
@@ -56,8 +56,40 @@ Pumgye-outage fail-closed. Guard is outside this fixture; it is not a full-stack
 throughput measurement. Operational rollout and full credential lifecycle,
 including existing-stream credential revocation, remain separate work.
 
-LDAP, local human passwords, remote API relay/introspection, Any/All composition
+LDAP, local human passwords, standard introspection adapters, Any/All composition
 with actual connector relationships, upstream credential translation, full
-credential lifecycle and full-stack 100k QPS qualification remain open. Existing
-OIDC circuits protect provider network calls; this in-memory API-key connector
-has no remote backend to circuit-break.
+credential lifecycle and full-stack 100k QPS qualification remain open. Existing OIDC circuits protect provider network calls; external verifier relays
+also use scoped circuits, while the in-memory API-key connector has no remote
+backend to circuit-break.
+
+## External API verifier relay
+
+A profile may configure `api_relay` instead of `api_keys` (the two are mutually
+exclusive). Set a fixed `url`, trusted `issuer` namespace, optional
+`verifier_key_env` and `timeout_ms` (1–1000, default 100). HTTPS is required
+except explicitly enabled loopback fixtures. Private destinations require
+`allow_private_endpoints:true`; redirects, URL credentials/queries/fragments
+and environment proxies are refused, and public DNS answers are vetted at
+connection time. The configured issuer/realm defines identity; the response
+cannot choose another issuer or claim human assurance.
+
+The connector POSTs JSON `{service_id, client_ip}` and sends the original
+credential as a sensitive Bearer Authorization header. The optional verifier
+credential uses the sensitive `x-hopae-verifier-key` header. The URL never
+comes from a request. The verifier returns JSON with only `active`, `subject`,
+`service_id` and `expires_at` fields. Active responses require an exact service
+match, a bounded subject and an absolute Unix millisecond expiry after receipt
+within five seconds. Evidence lasts at most one second; network time is included
+in expiry validation. False assurance/extra fields, wrong audiences and expired
+responses are refused. Replies use the existing service namespace and AAL 0,
+then Pumgye independently enforces permissions.
+
+Each connector allows at most 64 exchanges and shares persistent HTTP
+connections. Requests have the configured total deadline and a 64 KiB response
+cap. Credential denials remain 401; backend/contract errors, saturation and
+timeouts become 503 without session fallback. Three consecutive backend or
+semantic failures open a process-local circuit for 30 seconds, with a single
+recovery probe; cancellation releases its probe. Ordinary credential denial
+does not trip the circuit. No result cache, upstream credential exchange,
+persisted quarantine, management publication or RFC 7662 field adapter is
+implemented by this first verifier contract.

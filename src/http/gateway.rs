@@ -185,17 +185,26 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
         let fallback = matches!(presented, Ok(None))
             && runtime.session_fallback(input.host.as_str(), input.port);
         if !fallback {
-            let evidence = presented.ok().and_then(|token| {
-                runtime
-                    .authenticate(
+            let result = match presented {
+                Ok(token) => tokio::time::timeout(
+                    st.ctx.limits.budget,
+                    runtime.authenticate_async(
                         input.host.as_str(),
                         input.port,
                         token,
                         input.client_ip,
                         st.ctx.clock.now().0.max(0) as u64,
-                    )
-                    .ok()
-            });
+                    ),
+                )
+                .await
+                .unwrap_or(Err(crate::auth_gateway::runtime::Error::Unavailable)),
+                Err(_) => Err(crate::auth_gateway::runtime::Error::Invalid),
+            };
+            let unavailable = matches!(
+                result,
+                Err(crate::auth_gateway::runtime::Error::Unavailable)
+            );
+            let evidence = result.ok();
             st.count(
                 "hopae_authentication_gateway_total",
                 &[(
@@ -207,6 +216,9 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
                     },
                 )],
             );
+            if unavailable {
+                return hangang::service_identity::unavailable(&request_id);
+            }
             return hangang::service_identity::response(evidence.as_ref(), &request_id);
         }
     }
