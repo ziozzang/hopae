@@ -90,7 +90,7 @@ pub(super) fn consume_session_codes(
     Ok(())
 }
 
-fn require_provider_configuration(
+pub(super) fn require_provider_configuration(
     tx: &Transaction<'_>,
     id: &str,
     expected: Option<&(crate::provider::types::ProviderKind, serde_json::Value)>,
@@ -453,6 +453,7 @@ impl Sessions for Store {
         &self,
         id: &SessionId,
         provider: &ProviderId,
+        configuration: Option<(crate::provider::types::ProviderKind, serde_json::Value)>,
         auth_time: Timestamp,
         source: AuthTimeSource,
         factor: FactorEntry,
@@ -466,6 +467,7 @@ impl Sessions for Store {
         let job = self.reauthenticate_session_impl(
             id,
             provider,
+            configuration,
             auth_time,
             source,
             factor,

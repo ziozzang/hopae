@@ -313,6 +313,7 @@ pub trait Sessions: Send + Sync {
         &self,
         id: &SessionId,
         provider: &ProviderId,
+        configuration: Option<(crate::provider::types::ProviderKind, serde_json::Value)>,
         auth_time: Timestamp,
         source: AuthTimeSource,
         factor: crate::session::types::FactorEntry,

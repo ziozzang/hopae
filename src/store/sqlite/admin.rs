@@ -596,6 +596,7 @@ impl Store {
         &self,
         id: &SessionId,
         provider: &ProviderId,
+        configuration: Option<(crate::provider::types::ProviderKind, serde_json::Value)>,
         auth_time: Timestamp,
         source: AuthTimeSource,
         factor: FactorEntry,
@@ -619,6 +620,8 @@ impl Store {
             if session.provider_id != provider {
                 return Err(StoreError::Conflict("provider_mismatch"));
             }
+            super::require_provider_live(&tx, provider.as_str())?;
+            super::sessions::require_provider_configuration(&tx, provider.as_str(), configuration.as_ref())?;
             let now = shared.clock.now();
             check.now()?;
             let consumed = tx.execute(

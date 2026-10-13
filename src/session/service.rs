@@ -1658,7 +1658,7 @@ impl Service {
                     &txn,
                     app_bind,
                     &view,
-                    provider_id,
+                    (provider_id, &row),
                     (auth_time, auth_source),
                 )
                 .await?;
@@ -1778,7 +1778,7 @@ impl Service {
         txn: &TransactionRow,
         app_bind: Digest,
         view: &HandleView,
-        provider_id: &ProviderId,
+        (provider_id, provider_row): (&ProviderId, &crate::store::types::ProviderRow),
         (auth_time, source): (crate::crypto::Timestamp, AuthTimeSource),
     ) -> Result<(Url, IssuedHandle), SessionError> {
         let now = self.clock.now();
@@ -1830,6 +1830,11 @@ impl Service {
             .reauthenticate_session(
                 &session.session_id,
                 provider_id,
+                matches!(
+                    provider_row.kind,
+                    ProviderKind::Ldap | ProviderKind::Password
+                )
+                .then(|| (provider_row.kind, provider_row.config.clone())),
                 auth_time,
                 source,
                 factor,

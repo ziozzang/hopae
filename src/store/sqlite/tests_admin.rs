@@ -1135,6 +1135,7 @@ async fn reauthentication_is_atomic_rotates_handles_and_checks_the_provider() {
         .reauthenticate_session(
             &s.row.session_id,
             &ProviderId::new("other"),
+            None,
             at,
             AuthTimeSource::ProviderClaim,
             factor.clone(),
@@ -1158,10 +1159,55 @@ async fn reauthentication_is_atomic_rotates_handles_and_checks_the_provider() {
         0
     );
 
+    f.store.conn().execute(
+        "INSERT INTO providers(provider_id,kind,display_name,enabled,managed_by,config,created_at,updated_at) VALUES('mock','oidc','Mock',1,'api','{}',0,0)", [],
+    ).unwrap();
+    for expected in [
+        (
+            crate::provider::types::ProviderKind::Ldap,
+            serde_json::json!({}),
+        ),
+        (
+            crate::provider::types::ProviderKind::Oidc,
+            serde_json::json!({"stale":true}),
+        ),
+    ] {
+        let result = f
+            .store
+            .reauthenticate_session(
+                &s.row.session_id,
+                &ProviderId::new("mock"),
+                Some(expected),
+                at,
+                AuthTimeSource::ProviderClaim,
+                factor.clone(),
+                new_handle.clone(),
+                (txn_secret.digest(), reasons::REAUTH),
+                long(),
+                vec![f.ev(EventKind::LoginSucceeded)],
+                &|_| f.ev(EventKind::HandleRevoked),
+            )
+            .await;
+        assert!(matches!(result, Err(StoreError::ProviderDisabled)));
+        let unchanged = f.store.session(&s.row.session_id).await.unwrap().unwrap();
+        assert_eq!(unchanged.cred_gen, s.row.cred_gen);
+        assert_eq!(unchanged.auth_time, s.row.auth_time);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM session_handles WHERE revoked_at IS NOT NULL"),
+            0
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM login_txns WHERE consumed_at IS NOT NULL"),
+            0
+        );
+        assert_eq!(f.count_kind("login.succeeded"), 0);
+    }
+
     f.store
         .reauthenticate_session(
             &s.row.session_id,
             &ProviderId::new("mock"),
+            None,
             at,
             AuthTimeSource::ProviderClaim,
             factor,
@@ -1226,6 +1272,7 @@ async fn reauthentication_is_atomic_rotates_handles_and_checks_the_provider() {
         .reauthenticate_session(
             &s.row.session_id,
             &ProviderId::new("mock"),
+            None,
             at,
             AuthTimeSource::ProviderClaim,
             FactorEntry {

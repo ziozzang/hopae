@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 24 -->
+<!-- doc-rev: 25 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -404,3 +404,25 @@ configuration before consuming the login challenge or recording events. A store 
 checks that refusal preserves the unconsumed challenge and audit state, then permits
 matching configuration. Reauthentication still needs equivalent fencing before its
 handle rotation; the production activation gate remains closed.
+
+## Reauthentication write fence
+
+Direct-provider reauthentication carries the verified kind/configuration into the
+same write transaction that consumes the login challenge, rotates handles and increments
+credential generation. The transaction checks provider liveness and expected configuration
+before those mutations. Store regressions reject both a changed kind and stale configuration
+without changing authentication time, generation, handles, challenge or success audit.
+The existing successful rotation test remains in place.
+
+New-session creation, existing-session reuse and reauthentication now share transactional
+configuration fencing. Identity creation is still a separate transaction. This comparison
+does not detect same-reference secret/CA content rotations or an ABA configuration change;
+persistent epochs and LDAP response bounds/browser/revocation qualification remain open.
+
+Validation: all-target gates pass with `RUST_TEST_THREADS=1` (423 library,
+15 other integration and 366 scenario cases; 1 owned LDAP and 40 scenarios ignored).
+Earlier parallel runs each failed one pre-existing load-sensitive test: SQLite query
+interruption instrumentation and the 200-request overload burst. Both passed alone;
+the complete serial run passed, preserving concurrency inside each scenario.
+This is not evidence that parallel test stability or full-stack performance is solved.
+The existing allowed dependency warning remains.
