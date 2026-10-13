@@ -1,6 +1,6 @@
 # Documentation
 
-<!-- doc-rev: 8 -->
+<!-- doc-rev: 9 -->
 
 [한국어 목차](ko/README.md)
 
@@ -35,3 +35,5 @@ milestones land. The [roadmap](ROADMAP.md) describes the intended shape.
 - [Authentication profile publication](AUTH_PROFILE_PUBLICATION.md) — proposed durable ownership and snapshot publication contract.
 
 - [LDAP authentication](LDAP_AUTHENTICATION.md) — proposed direct-credential provider and lifecycle contract.
+
+- [Second-factor extensions](SECOND_FACTOR_EXTENSIONS.md) — native OTP and external API/Lua boundaries.

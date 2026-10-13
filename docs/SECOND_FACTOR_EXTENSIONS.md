@@ -1,0 +1,123 @@
+# Second-factor extensions
+
+<!-- doc-rev: 1 -->
+
+[Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
+
+## Implementation status
+
+Native TOTP enrollment and confirmation exist, including encrypted seeds,
+owner authorization and durable counter fencing. The profile uses six digits,
+SHA-1 and a 30-second period. Manual setup is available; QR provisioning,
+recovery and atomic sign-in step-up remain unfinished. Enrollment does not
+raise a session's assurance. Google/OIDC login is separate from an authenticator
+application generating a TOTP code.
+
+`src/factor/external.rs` validates an external factor response against a trusted
+challenge context. It is a parsing boundary, not an enabled connector, a
+signature verifier or a replay store. No external factor HTTP route or Lua
+factor runtime is enabled by this module. Existing external service API verifier
+relays in [Authentication gateway](AUTH_GATEWAY.md) continue to issue service
+identity at AAL 0; they cannot count as human second-factor evidence.
+
+## Native authority and extension boundary
+
+Hopae owns challenge creation, identity binding, credential generations,
+provider/configuration revisions, admission, expiry and final session issuance.
+A connector can verify one configured factor. It cannot choose a user, service,
+role, permission, AAL, response header or redirect destination. Pumgye owns
+service access policy; Sumunjang network evidence can constrain authentication
+but an IP allowlist alone is not a second factor.
+
+Supported extension targets are native TOTP, future WebAuthn and external
+verification APIs (push, organization MFA or other approved factors). The same
+lifecycle must support enrollment, confirmation, challenge, verification,
+revocation, recovery and circuit breaking. These targets are implementation
+requirements, not a statement that all are currently available.
+
+## External API contract
+
+A configured HTTPS verifier receives only the server-owned challenge ID,
+opaque user/session, exact service/factor, configuration revision and credential
+generation, plus the response required by that factor. Endpoint, trusted CA,
+authentication credential references and timeouts are administrator-owned.
+Browser input cannot select a URL, issuer, header or secret reference. Disable
+redirects and environment proxies; apply the existing relay destination and
+DNS validation controls. Keep a dedicated bounded connection pool and circuit
+per verifier/configuration revision. Neither OTP values nor authorization
+credentials enter logs, traces, audit attributes or analytics exports.
+
+The response has exactly these fields:
+
+```json
+{"active":true,"challenge":"c_test","user":"u_test","session":"s_test","service":"orders","factor":"partner-push","configuration_revision":7,"credential_generation":3,"proof_id":"proof_once","expires_at":4000}
+```
+
+Times are absolute Unix milliseconds; the example is not a live request.
+Validation requires exact context matches, a nonzero configuration revision,
+bounded identifiers, no duplicate/unknown fields and an 8 KiB maximum body.
+Expiry must be after receipt, within the challenge lifetime and no later than
+five seconds after exchange start. A separate monotonic elapsed duration also
+must not exceed five seconds, including transport time. A clock rollback,
+malformed response, wrong context or claimed assurance is an unavailable/error
+result, not successful evidence. A context-valid `active:false` is rejection.
+Network transport still needs to enforce its own total deadline and body limit
+before buffering. Five seconds is an evidence bound, not a recommended timeout;
+fast verifier profiles should use materially shorter deadlines.
+
+The private, nonserializable `Evidence` value has no session authority. The
+caller must authenticate the verifier transport and use the server's durable
+challenge context. Parsing a browser-supplied JSON response is never sufficient.
+Final commit must recheck the current context and enforce unique proof consumption
+scoped to verifier authority/configuration, including replay across processes.
+The validator does not implement those durable controls.
+
+## Atomic completion and failures
+
+One owner transaction must consume the pending challenge and TOTP counter or
+external proof, check enrollment/provider/configuration/user revisions and
+credential generation, append factor evidence, raise assurance under native
+policy, advance credential generation, revoke old handles and outstanding
+handoff codes, and create a replacement portal handle and audience-bound
+handoff. An audit/outbox failure rolls back all state changes. A pre-elevation
+handle never inherits assurance. Binding to the existing portal browser and
+validated application return target is mandatory; arbitrary return URLs are
+refused. Concurrent proof/counter use has exactly one winner.
+
+Use process-wide and identity/challenge admission limits before provider calls.
+Timeouts, malformed responses, overload and open circuits fail closed without
+trying a weaker provider. Valid credential rejection is distinct from provider
+failure. Recovery must be explicit, audited and rate limited, and cannot turn
+an outage into an authentication bypass. Do not cache OTP decisions. Any future
+external evidence cache is bounded by proof/challenge lifetime and policy
+revision and must preserve single-use semantics.
+
+## Lua extension design
+
+Lua may orchestrate allowlisted connector calls and return a typed factor
+outcome. It does not receive a database/session writer, environment lookup,
+arbitrary filesystem/network access or raw upstream credential namespace.
+Host functions supply only approved verifier references and bounded input.
+Use instruction, memory, concurrency and total-time budgets; script errors,
+exhaustion and cancellation deny completion. Scripts cannot mint `Evidence`,
+set AAL or bypass native commit checks. Publish validated scripts as immutable,
+revisioned snapshots and fence an in-flight challenge against policy changes.
+An extension's factor independence and permitted assurance contribution are
+native configuration, not a script assertion.
+
+## Required qualification before activation
+
+- Actual browser login to a protected service, step-up, elevated handoff and
+  rejection of every previous handle/code.
+- Concurrent OTP/proof use, enrollment revocation, user/provider disablement,
+  configuration change and audit rollback during completion.
+- Owned HTTPS verifier fixtures for accepted/rejected evidence, replay,
+  cross-user/service challenges, malformed bodies, redirects, timeouts,
+  overload, circuit recovery and cancellation.
+- Lua budget escape attempts and forbidden host capabilities, plus publication
+  races; recovery and key retention/rotation tests.
+- Hangang console navigation and clear registration/step-up status without
+  forwarding OTP seeds through the console delegation broker.
+
+See [ADR-0008](adr/0008-second-factor-extension-point.md) for handle rotation
+and [Authentication gateway](AUTH_GATEWAY.md) for existing relay behavior.

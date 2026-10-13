@@ -1,6 +1,6 @@
 # 문서
 
-<!-- translation-status: source=../README.md source-rev=8 status=current -->
+<!-- translation-status: source=../README.md source-rev=9 status=current -->
 
 [English](../README.md)
 
@@ -35,3 +35,5 @@
 - [인증 프로필 게시](AUTH_PROFILE_PUBLICATION.md) — 영속 소유권과 스냅샷 게시 제안 계약.
 
 - [LDAP 인증](LDAP_AUTHENTICATION.md) — 직접 자격 검증 provider와 수명주기 제안 계약.
+
+- [2차 인증 확장](SECOND_FACTOR_EXTENSIONS.md) — 네이티브 OTP와 외부 API·Lua 경계.
