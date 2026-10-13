@@ -1728,7 +1728,7 @@ impl Service {
             .create_session(
                 ctx,
                 &txn,
-                kind,
+                (kind, &row),
                 provider_id,
                 &user,
                 (auth_time, auth_source),
@@ -1989,7 +1989,7 @@ impl Service {
         &self,
         ctx: &RequestCtx,
         txn: &TransactionRow,
-        kind: ProviderKind,
+        (kind, provider_row): (ProviderKind, &crate::store::types::ProviderRow),
         provider_id: &ProviderId,
         user: &User,
         (auth_time, auth_source): (crate::crypto::Timestamp, AuthTimeSource),
@@ -2061,6 +2061,8 @@ impl Service {
         ];
         self.sessions
             .create_session(CreateSession {
+                provider_configuration: matches!(kind, ProviderKind::Ldap | ProviderKind::Password)
+                    .then(|| (provider_row.kind, provider_row.config.clone())),
                 session: session.clone(),
                 portal_handle,
                 portal_handle_digest: digest,

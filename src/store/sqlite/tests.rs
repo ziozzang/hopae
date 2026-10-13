@@ -172,6 +172,7 @@ impl Fx {
         let digest = handle.handle_sha256;
         self.store
             .create_session(CreateSession {
+                provider_configuration: None,
                 session: row.clone(),
                 portal_handle: handle,
                 portal_handle_digest: digest,
@@ -959,6 +960,7 @@ async fn required_events_and_delivery_rows_commit_with_the_state_change_or_not_a
 
     // A failing state change (duplicate session id) takes its events with it.
     let dup = CreateSession {
+        provider_configuration: None,
         session: s.row.clone(),
         portal_handle: f.handle_row(&s.row.session_id, PORTAL_HOST, &handle_value(&f.rng)),
         portal_handle_digest: sha256(b"unused"),
@@ -967,6 +969,7 @@ async fn required_events_and_delivery_rows_commit_with_the_state_change_or_not_a
     };
     assert!(f.store.create_session(dup).await.is_err());
     let mut dup2 = CreateSession {
+        provider_configuration: None,
         session: f.session_row(&u),
         portal_handle: f.handle_row(
             &SessionId::new("s_other"),
@@ -1001,6 +1004,7 @@ async fn the_login_transaction_is_consumed_in_the_session_creating_call() {
         let handle = f.handle_row(&row.session_id, PORTAL_HOST, &secret);
         let digest = handle.handle_sha256;
         CreateSession {
+            provider_configuration: None,
             session: row,
             portal_handle: handle,
             portal_handle_digest: digest,
@@ -2173,4 +2177,41 @@ fn schema_has_the_documented_tables_and_indexes() {
     }
     let cascade: i64 = c.query_row("SELECT COUNT(*) FROM pragma_foreign_key_list('event_deliveries') WHERE on_delete='CASCADE'", [], |r| r.get(0)).unwrap();
     assert_eq!(cascade, 1);
+}
+
+#[tokio::test]
+async fn direct_session_configuration_fence_rolls_back_every_write() {
+    let f = fx();
+    let u = f.user(1).await;
+    let mut row = f.session_row(&u);
+    row.provider_id = ProviderId::new("directory");
+    f.store.conn().execute(
+        "INSERT INTO providers(provider_id,kind,display_name,enabled,managed_by,config,created_at,updated_at) VALUES('directory','ldap','Directory',1,'api','{}',0,0)",
+        [],
+    ).unwrap();
+    let secret = handle_value(&f.rng);
+    let handle = f.handle_row(&row.session_id, PORTAL_HOST, &secret);
+    let before_events = f.count("SELECT COUNT(*) FROM events");
+    let make = |expected| CreateSession {
+        provider_configuration: Some((crate::provider::types::ProviderKind::Ldap, expected)),
+        session: row.clone(),
+        portal_handle: handle.clone(),
+        portal_handle_digest: handle.handle_sha256,
+        consume_txn: None,
+        events: vec![f.event(EventKind::SessionCreated)],
+    };
+    assert!(matches!(
+        f.store
+            .create_session(make(serde_json::json!({"old":true})))
+            .await,
+        Err(StoreError::ProviderDisabled)
+    ));
+    assert_eq!(f.count("SELECT COUNT(*) FROM sessions"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM session_handles"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM events"), before_events);
+    f.store
+        .create_session(make(serde_json::json!({})))
+        .await
+        .unwrap();
+    assert_eq!(f.count("SELECT COUNT(*) FROM sessions"), 1);
 }

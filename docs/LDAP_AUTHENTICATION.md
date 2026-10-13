@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 22 -->
+<!-- doc-rev: 23 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -382,3 +382,16 @@ password from reaching the connector. Owned LDAPS and StartTLS tests verify conn
 configuration matching; focused tests and strict Clippy pass. This does not fingerprint
 CA file contents or resolved secret values, fence the final database commit against a
 concurrent configuration change, or qualify LDAP production activation.
+
+## New-session write fence
+
+Direct LDAP/password completion now carries the verified provider kind and database
+configuration into session creation. The SQLite write transaction requires an existing,
+enabled, non-tombstoned provider with the same kind and parsed JSON configuration
+before inserting a session, handle or login event. A store regression verifies refusal
+with no writes on stale configuration and successful creation for matching state.
+
+This closes the last-read race for new-session creation. Identity resolution remains
+a separate transaction; configuration fencing of session reuse and reauthentication,
+actual secret/CA rotations and hard BER frame limits remain outstanding. LDAP remains
+unavailable through production configuration pending those activation requirements.

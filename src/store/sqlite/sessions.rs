@@ -112,6 +112,23 @@ impl Sessions for Store {
             let s = &req.session;
             let tx = env.begin()?;
             require_provider_live(&tx, s.provider_id.as_str())?;
+            if let Some((expected_kind, expected_config)) = &req.provider_configuration {
+                use rusqlite::OptionalExtension;
+                let current: Option<(String, String)> = tx.query_row(
+                    "SELECT kind, config FROM providers WHERE provider_id=?1 AND enabled=1 AND deleted_at IS NULL",
+                    [s.provider_id.as_str()],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                ).optional()?;
+                let matches = current.is_some_and(|(kind, config)| {
+                    kind == expected_kind.as_str()
+                        && serde_json::from_str::<serde_json::Value>(&config)
+                            .is_ok_and(|config| config == *expected_config)
+                });
+                if !matches {
+                    return Err(StoreError::ProviderDisabled);
+                }
+            }
+
             tx.execute(
                 "INSERT INTO sessions (session_id, user_id, provider_id, auth_time, factors, aal, authz_version, cred_gen, snapshot, bound_ip, bound_ua_sha256, created_at, last_seen_at, absolute_expires_at, terminated_at, terminated_reason, authz_version_at_auth, auth_time_source, bound_ua_prefix) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL,?15,?16,?17)",
                 params![

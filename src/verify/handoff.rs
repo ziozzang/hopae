@@ -336,6 +336,7 @@ mod tests {
             self.store
                 .sessions()
                 .create_session(CreateSession {
+                    provider_configuration: None,
                     session: row.clone(),
                     portal_handle: h,
                     portal_handle_digest: digest,

@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=22 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=23 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -331,3 +331,16 @@ bind 비밀 참조, 디렉터리 속성, timeout이 일치해야 합니다. 인�
 집중 테스트와 엄격한 Clippy가 통과했습니다. CA 파일 내용이나 해석된 비밀값의
 fingerprint, 동시 설정 변경에 대한 최종 DB commit fencing, LDAP 운영 활성화
 검증은 아직 포함하지 않습니다.
+
+## 새 세션 생성의 쓰기 트랜잭션 검사
+
+LDAP·비밀번호 직접 인증 완료는 확인한 provider 종류와 DB 설정을 세션 생성에
+전달합니다. SQLite 쓰기 트랜잭션은 세션·핸들·로그인 이벤트를 넣기 전에
+provider가 존재하고 활성 상태이며 삭제되지 않았는지, 종류와 파싱한 JSON 설정이
+일치하는지 확인합니다. 저장소 회귀 테스트는 오래된 설정에서 쓰기가 전혀 발생하지
+않고 일치한 설정에서 생성됨을 확인합니다.
+
+새 세션 생성의 마지막 조회 이후 경합을 차단합니다. 신원 해석은 여전히 별도
+트랜잭션입니다. 기존 세션 재사용·재인증 설정 검사, 실제 비밀·CA 교체,
+BER 프레임 크기 상한은 남아 있습니다. 이러한 활성화 조건을 완료하기 전까지
+운영 설정에서 LDAP 활성화는 계속 제한합니다.

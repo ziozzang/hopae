@@ -204,6 +204,7 @@ pub(crate) mod fx {
             self.store
                 .sessions()
                 .create_session(CreateSession {
+                    provider_configuration: None,
                     session: row.clone(),
                     portal_handle: handle,
                     portal_handle_digest: digest,
