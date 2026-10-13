@@ -1251,26 +1251,28 @@ pub(crate) async fn stepup_get(State(st): State<PortalState>, req: Request) -> R
         handle: rq.presented.handle.clone(),
         bind: Some(bind.clone()),
     };
-    let enrollment_required = match st
+    let entry = match st
         .services
         .stepup_visit(&rq.ctx, &cookies, &Secret::new(transaction.clone()))
         .await
     {
-        Ok(ready) => !ready,
+        Ok(entry) => entry,
         Err(f) => return fail_response(&rq, f),
     };
     let binding = stepup_csrf_binding(&rq, &transaction).expect("validated portal cookies");
     let csrf = token_for(&st, &binding, Purpose::TotpStepUp);
-    render_page(
+    render_page_status(
         &rq,
+        StatusCode::OK,
         pages::StepUpPage {
-            enrollment_required,
+            enrollment_required: !entry.enrolled,
             t: rq.t(),
             request_id: rq.rid(),
             transaction: &transaction,
             csrf: &csrf,
         },
         &[portal_cookie_header(&st, &bind)],
+        &[entry.form_origin],
     )
 }
 pub(crate) async fn stepup_post(State(st): State<PortalState>, req: Request) -> Response {

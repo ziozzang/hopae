@@ -205,13 +205,13 @@ impl PortalServices for Adapter {
         ctx: &RequestCtx,
         cookies: &Cookies,
         transaction: &Secret,
-    ) -> Result<bool, Failure> {
+    ) -> Result<StepUpEntry, Failure> {
         if !ctx.https {
             return Err(Self::totp_refusal());
         }
         let deps = self.totp.as_ref().ok_or_else(Self::totp_refusal)?;
         let portal = cookies.bind.as_ref().ok_or_else(Self::totp_refusal)?;
-        let (actor, _, generation) = self
+        let (actor, row, generation) = self
             .svc
             .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
             .await
@@ -222,7 +222,10 @@ impl PortalServices for Adapter {
             .await
             .map_err(Self::factor_store_error)?
         {
-            return Ok(false);
+            return Ok(StepUpEntry {
+                enrolled: false,
+                form_origin: row.return_target.origin(),
+            });
         }
         deps.store
             .bind_totp_stepup(crate::store::BindTotpStepUp {
@@ -233,7 +236,10 @@ impl PortalServices for Adapter {
             })
             .await
             .map_err(Self::factor_store_error)?;
-        Ok(true)
+        Ok(StepUpEntry {
+            enrolled: true,
+            form_origin: row.return_target.origin(),
+        })
     }
     async fn stepup_complete(
         &self,

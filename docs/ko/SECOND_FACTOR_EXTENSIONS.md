@@ -1,6 +1,6 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=5 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=6 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
@@ -233,3 +233,16 @@ Chromium·모바일 앱 검증은 아닙니다. 소유자 테스트는 설정 �
 계정·분산 시도 제한, 키 수명주기, Hangang 메뉴 및 내부 MFA 배포는 남습니다.
 이전 브라우저 연결 미구현 기록은 과거 소스 단계이며 내부 배포
 `owner-v5-d876909`는 유지합니다.
+
+## 브라우저 이동 CSP 검증
+
+실제 Chromium 후보 테스트에서 소유자 트랜잭션이 성공해도
+`form-action 'self'`가 OTP POST 후 다른 origin의 핸드오프를 막는 것을
+발견했습니다. 단계 상승 서비스가 현재 설정으로 검증한 복귀 대상 origin만
+반환하고, 기존 페이지별 CSP helper가 GET 폼에 정확히 그 origin을 추가합니다.
+와일드카드·요청 입력 목적지는 허용하지 않습니다. HTTP fixture가 정확한
+origin 허용을 검사합니다. `tools/qualify_browser_totp.py`는 비공개 소유자 상태
+복사본·자체 1차 인증 세션 fixture를 가진 독립 loopback 후보에서 실제
+브라우저의 폼 Origin·쿠키 교체·CSP 이동·핸드오프를 검증합니다. 실제 Google
+사용자 인증이나 TLS ingress 검증은 아니며 CDP가 HTTPS 브라우저 origin을
+후보 HTTP 리스너로 전달합니다. 네이티브 mTLS는 별도로 검증합니다.

@@ -189,7 +189,7 @@ pub trait PortalServices: Send + Sync + 'static {
         _ctx: &RequestCtx,
         _cookies: &Cookies,
         _transaction: &Secret,
-    ) -> Result<bool, Failure> {
+    ) -> Result<StepUpEntry, Failure> {
         Err(Failure {
             kind: FailKind::Forbidden,
             reason: crate::event::types::reasons::INVALID_STATE,
@@ -376,4 +376,10 @@ pub trait PortalServices: Send + Sync + 'static {
 pub struct TotpPrepared {
     pub enrollment: String,
     pub material: crate::factor::enrollment::Provisioning,
+}
+
+/// The form can redirect only to this server-validated application origin.
+pub struct StepUpEntry {
+    pub enrolled: bool,
+    pub form_origin: Origin,
 }

@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 5 -->
+<!-- doc-rev: 6 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -263,3 +263,17 @@ without proof consumption. Recovery, cancel/removal UI, QR/mobile qualification,
 account/distributed admission, key lifecycle, Hangang navigation and internal
 MFA deployment still remain. Earlier notes about missing browser wiring describe
 prior source stages; the deployed `owner-v5-d876909` image is unchanged.
+
+## Browser redirect CSP qualification
+
+An actual Chromium candidate test found that `form-action 'self'` blocked the
+post-OTP cross-origin handoff even after the owner transaction succeeded. The
+step-up service now returns only the current-configuration-validated target
+origin; the GET form's existing per-page CSP helper adds exactly that origin.
+No wildcard or request-selected destination is allowed. The HTTP fixture checks
+the exact origin allowance. `tools/qualify_browser_totp.py` exercises the real
+browser's form Origin, cookie updates, CSP redirect and handoff on an isolated
+loopback candidate with a private owner-state copy and an owned first-factor
+session fixture. It does not authenticate a real Google user or measure TLS
+ingress behavior: CDP forwards the HTTPS browser origins to the candidate HTTP
+listeners, while native mTLS is qualified separately.

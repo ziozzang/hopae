@@ -1358,6 +1358,9 @@ fn owned_oidc_portal_totp_enrollment_then_bound_stepup_rotates_credentials_and_h
     assert_eq!(client.get(&format!("/login?txn={challenge}")).status, 400);
     let stepup = client.get(&format!("/stepup?txn={challenge}"));
     assert_eq!(stepup.status, 200);
+    let csp = stepup.header("content-security-policy").unwrap();
+    assert!(csp.contains("form-action 'self' https://app.example.test;"));
+    assert!(!csp.contains("form-action *"));
     assert_eq!(stepup.header("cache-control"), Some("no-store"));
     assert_eq!(
         client
