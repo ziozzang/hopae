@@ -2542,3 +2542,40 @@ async fn native_totp_verification_activates_once_and_consumes_concurrent_code_on
     );
     assert_ne!(a.is_ok(), b.is_ok());
 }
+
+#[tokio::test]
+async fn totp_prepare_returns_secret_only_after_pending_commit() {
+    use crate::factor::enrollment::{Request, prepare};
+    use crate::store::Factors;
+    let f = fx();
+    let user = f.user(1).await;
+    let key = crate::factor::seed_cipher::Key::new("key-1".into(), [7; 32]).unwrap();
+    let request = || Request {
+        id: "prepared",
+        user: &user.user_id,
+        issuer: "Hangang",
+        account: "Alice",
+    };
+    let provisioning = prepare(&f.store, &key, &f.rng, request(), vec![])
+        .await
+        .unwrap();
+    assert!(provisioning.expose_uri().starts_with("otpauth://totp/"));
+    let row = f
+        .store
+        .totp_enrollment("prepared", &user.user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!row.active);
+    assert_eq!(row.last_counter, None);
+    assert!(
+        key.open(&row.envelope, user.user_id.as_str(), "prepared")
+            .is_ok()
+    );
+    assert!(
+        prepare(&f.store, &key, &f.rng, request(), vec![])
+            .await
+            .is_err()
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM totp_enrollments"), 1);
+}

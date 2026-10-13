@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=11 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=12 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -262,3 +262,22 @@ SSO 진입·로그아웃·익명·Origin 격리·네이티브 mTLS 회귀가 통
 사용자 SSO 로그인·디렉터리 회수·업스트림 자격 변환·요인 challenge와 세션의 원자 처리,
 분산 follower·membership·전체 스택 처리량·공개 다중 플랫폼 릴리즈도 남아 있습니다.
 내부 서비스·콘솔 도그푸딩을 지속하며 전체 제로트러스트 목표는 active입니다.
+
+## 등록 준비 소스 상태
+
+`src/factor/enrollment.rs`는 기존 CSPRNG로 새 20-byte seed를 만들고
+SHA1·6자리·30초의 Google Authenticator 형식 `otpauth` URI를 구성합니다.
+Owner·등록 binding으로 암호화하고 pending 저장에 성공한 뒤에만 provisioning
+자료를 반환합니다. Issuer·account label은 길이를 제한하고 colon·control을
+거부하며 percent-encode합니다. Prefix·query issuer가 일치하고 Base32 padding은
+생략합니다. URI wrapper는 직렬화·clone하지 않고 소유 메모리를 지우며 Debug를
+가립니다. 명시적 노출은 향후 인증된 등록 응답용이며 기존 저장 seed에서
+provisioning 자료를 다시 복구하는 API는 없습니다.
+
+집중 테스트 3건은 URI 필드·encoding·잘못된 label·실제 pending commit 후
+반환을 확인합니다. 중복 준비는 기존 row를 교체하거나 URI를 다시 반환하지 않고
+거부합니다. 브라우저의 한 번 표시를 보장한 것은 아닙니다. 최근 인증·CSRF/Origin,
+no-store·referrer·CSP 응답 제한, QR·확인·복구·해제 UI·시도 제한·keyring 로딩,
+challenge와 세션 원자 처리는 남아 있습니다. 등록 route는 활성화하지 않았습니다.
+과거 원본 [Google key URI format](https://github.com/google/google-authenticator/wiki/Key-Uri-Format)을
+encoding 참고로 사용하며 현재 실제 앱 scan은 아직 검증하지 않았습니다.

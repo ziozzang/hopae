@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 11 -->
+<!-- doc-rev: 12 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -298,3 +298,23 @@ unfinished. A real external human SSO login, directory revocation, upstream cred
 translation, factor challenge/session atomicity, distributed followers/membership,
 full-stack throughput and public multi-platform releases remain open. Internal
 service/console dogfooding continues; the complete zero-trust gateway goal is active.
+
+## Enrollment preparation source status
+
+`src/factor/enrollment.rs` generates a fresh 20-byte seed with the existing CSPRNG,
+constructs a Google Authenticator-style `otpauth` URI for SHA1/six digits/30 seconds,
+encrypts it with owner/enrollment binding and commits pending state before returning
+provisioning material. Issuer/account labels are bounded, reject colons/controls and
+are percent-encoded; issuer prefix and query issuer match. Base32 omits padding.
+The URI wrapper is non-serializable, non-cloneable, zeroizing and Debug-redacted;
+explicit exposure is for the future authenticated enrollment response only. There
+is no API for recovering provisioning material from an existing stored seed.
+
+Three focused tests check URI fields/encoding, invalid labels and real-store pending
+commit before disclosure; duplicate preparation fails without replacing the existing
+row or returning another URI. This does not guarantee one-time browser display:
+recent authentication, CSRF/Origin, no-store/referrer/CSP response controls, QR rendering,
+confirmation/recovery/removal UI, admission, keyring loading and challenge/session
+atomicity remain required. No registration route is enabled. The historical upstream
+[Google key URI format](https://github.com/google/google-authenticator/wiki/Key-Uri-Format)
+is the encoding reference; a current real-app scan has not been qualified.
