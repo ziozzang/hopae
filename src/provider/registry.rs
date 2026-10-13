@@ -189,6 +189,9 @@ impl crate::session::service::ProviderLookup for Registry {
     ) -> Option<Arc<dyn super::credentials::CredentialProvider>> {
         Registry::credential(self, id)
     }
+    fn enabled_credentials(&self) -> Vec<Arc<dyn super::credentials::CredentialProvider>> {
+        Registry::enabled_credentials(self)
+    }
     fn get(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
         Registry::get(self, id)
     }

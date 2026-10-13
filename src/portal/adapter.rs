@@ -68,6 +68,9 @@ impl Adapter {
     }
 
     async fn available(&self, id: &ProviderId) -> bool {
+        if let Some(provider) = self.registry.credential(id) {
+            return provider.enabled();
+        }
         match self.registry.get(id) {
             Some(p) => p.enabled() && p.ensure_ready().await == ProviderHealth::Ok,
             None => false,
@@ -183,6 +186,7 @@ impl PortalServices for Adapter {
                 // response by the handler).
                 if let [only] = choices.as_slice()
                     && only.available
+                    && self.registry.credential(&only.id).is_none()
                 {
                     return match self
                         .svc

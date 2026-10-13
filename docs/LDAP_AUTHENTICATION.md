@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 19 -->
+<!-- doc-rev: 20 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -344,3 +344,19 @@ and single-provider redirect handling, and configuration activation remains gate
 This is source integration, not an internal LDAP deployment or complete real-directory
 browser qualification. Distributed/account admission and connector epoch fencing
 also remain required.
+
+## Mixed-provider chooser integration
+
+Session ProviderLookup now exposes enabled credential providers separately. Normal
+and reauthentication chooser construction merges them with redirect providers,
+checks live directory rows and kind, preserves stored display names/order and avoids
+duplicate IDs. A direct-provider reauthentication offers its own live provider only.
+The portal adapter treats a configured direct connector as available for form dispatch
+and excludes it from the single-provider OAuth auto-redirect shortcut. Selection
+therefore uses the bound password form instead of trying an OAuth authorization URL.
+
+The real-store direct-provider scenario verifies its chooser entry and display name.
+Library tests (419), OIDC scenarios (36) and strict Clippy passed. Configuration still
+refuses LDAP activation pending real browser/directory qualification, connector epoch
+fencing, hard directory response bounds and revocation work. This chooser integration
+has not been deployed to the internal environment yet.

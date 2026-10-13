@@ -143,6 +143,11 @@ pub trait ProviderLookup: Send + Sync {
     ) -> Option<Arc<dyn crate::provider::credentials::CredentialProvider>> {
         None
     }
+    fn enabled_credentials(
+        &self,
+    ) -> Vec<Arc<dyn crate::provider::credentials::CredentialProvider>> {
+        vec![]
+    }
     /// Enabled providers in chooser order.
     fn enabled_sorted(&self) -> Vec<Arc<dyn Provider>>;
 }
@@ -975,6 +980,53 @@ impl Service {
     /// `GET /login?txn=`: single sign-on when the browser holds a valid portal
     /// handle (ADR-0004), otherwise the provider chooser. `confirmed` is set
     /// by `POST /login/continue` after the optional new-host confirmation.
+    async fn provider_choices(&self) -> Result<Vec<ProviderChoice>, SessionError> {
+        let mut choices: Vec<_> = self
+            .providers
+            .enabled_sorted()
+            .into_iter()
+            .map(|provider| ProviderChoice {
+                provider_id: provider.id().clone(),
+                display_name: provider.display_name().to_owned(),
+            })
+            .collect();
+        let credentials = self.providers.enabled_credentials();
+        if !credentials.is_empty() {
+            let rows = self.directory.providers().await?;
+            for provider in credentials {
+                let kind = match provider.kind() {
+                    crate::provider::credentials::CredentialKind::Ldap => ProviderKind::Ldap,
+                    crate::provider::credentials::CredentialKind::LocalPassword => {
+                        ProviderKind::Password
+                    }
+                };
+                if let Some(row) = rows.iter().find(|row| {
+                    row.provider_id == *provider.id()
+                        && row.kind == kind
+                        && row.enabled
+                        && row.deleted_at.is_none()
+                }) && !choices
+                    .iter()
+                    .any(|choice| choice.provider_id == row.provider_id)
+                {
+                    choices.push(ProviderChoice {
+                        provider_id: row.provider_id.clone(),
+                        display_name: row.display_name.clone(),
+                    });
+                }
+            }
+            choices.sort_by_key(|choice| {
+                (
+                    rows.iter()
+                        .find(|row| row.provider_id == choice.provider_id)
+                        .map_or(i32::MAX, |row| row.sort_order),
+                    choice.provider_id.clone(),
+                )
+            });
+        }
+        Ok(choices)
+    }
+
     pub async fn sso_or_chooser(
         &self,
         ctx: &RequestCtx,
@@ -1027,15 +1079,7 @@ impl Service {
             }
             return self.sso(ctx, &row, &view, &host).await;
         }
-        let providers: Vec<ProviderChoice> = self
-            .providers
-            .enabled_sorted()
-            .into_iter()
-            .map(|p| ProviderChoice {
-                provider_id: p.id().clone(),
-                display_name: p.display_name().to_string(),
-            })
-            .collect();
+        let providers = self.provider_choices().await?;
         if providers.is_empty() {
             return Err(SessionError::NoProviders);
         }
@@ -1048,20 +1092,23 @@ impl Service {
         let Some(session) = self.reauth_session(row).await? else {
             // No live session to reauthenticate: an ordinary sign-in whose
             // callback still demands the freshness evidence.
-            let providers: Vec<ProviderChoice> = self
-                .providers
-                .enabled_sorted()
-                .into_iter()
-                .map(|p| ProviderChoice {
-                    provider_id: p.id().clone(),
-                    display_name: p.display_name().to_string(),
-                })
-                .collect();
+            let providers = self.provider_choices().await?;
             if providers.is_empty() {
                 return Err(SessionError::NoProviders);
             }
             return Ok(LoginEntry::Chooser { providers });
         };
+        if self.providers.credential(&session.provider_id).is_some() {
+            let choices = self.provider_choices().await?;
+            if let Some(choice) = choices
+                .into_iter()
+                .find(|choice| choice.provider_id == session.provider_id)
+            {
+                return Ok(LoginEntry::Chooser {
+                    providers: vec![choice],
+                });
+            }
+        }
         let own = self.providers.get(&session.provider_id);
         let usable = match &own {
             Some(p) => p.enabled() && self.provider_row_live(&session.provider_id).await?,

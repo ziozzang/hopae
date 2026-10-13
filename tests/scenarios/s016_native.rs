@@ -689,6 +689,9 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         fn enabled_sorted(&self) -> Vec<Arc<dyn Provider>> {
             vec![]
         }
+        fn enabled_credentials(&self) -> Vec<Arc<dyn CredentialProvider>> {
+            vec![self.provider.clone()]
+        }
         fn credential(&self, id: &ProviderId) -> Option<Arc<dyn CredentialProvider>> {
             (id == &self.provider.id).then(|| self.provider.clone() as Arc<dyn CredentialProvider>)
         }
@@ -760,6 +763,17 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         client_request_id: None,
     };
     let id = ProviderId::new("directory");
+    let hopae::session::service::LoginEntry::Chooser { providers } = service
+        .sso_or_chooser(&ctx, &token, None, Some(&cookie), false)
+        .await
+        .unwrap()
+    else {
+        panic!("direct provider was missing from chooser")
+    };
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].provider_id, id);
+    assert_eq!(providers[0].display_name, "Owned");
+
     assert!(
         service
             .begin_password(&ctx, &token, &id, None)

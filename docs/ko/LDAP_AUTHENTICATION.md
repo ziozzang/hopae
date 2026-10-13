@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=19 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=20 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -296,3 +296,17 @@ portal 62건과 Clippy가 통과했습니다.
 작업은 남아 있으며 설정 활성화 제한도 유지합니다. 소스 연결이며 내부 LDAP 배포나
 실제 디렉토리 브라우저 전체 검증은 아닙니다. 분산/계정 시도 제한과 커넥터 epoch
 fence도 필요합니다.
+
+## 혼합 provider 선택기 연결
+
+Session ProviderLookup에 활성 credential provider 목록을 추가했습니다. 일반/재인증
+선택기는 redirect provider와 이를 합치고 살아 있는 디렉토리 행·종류를 확인하며 저장된
+표시명·순서와 ID 중복 방지를 유지합니다. 직접 provider 재인증은 자신의 살아 있는
+provider만 제공합니다. portal adapter는 설정된 직접 커넥터를 form dispatch 대상으로
+처리하고 단일 provider의 OAuth 자동 redirect에서는 제외합니다. 선택 시 OAuth URL
+대신 바인딩된 비밀번호 form을 사용합니다.
+
+실제 store 직접 provider 시나리오에서 선택 항목과 표시명을 확인했습니다. 라이브러리
+419건·OIDC 36건과 엄격한 Clippy가 통과했습니다. 실제 브라우저/디렉토리 검증·커넥터
+epoch fence·디렉토리 응답의 엄격한 크기 제한·회수 작업 전에는 LDAP 설정 활성화를
+제한합니다. 이번 선택기 연결은 내부 운영에 아직 배포하지 않았습니다.
