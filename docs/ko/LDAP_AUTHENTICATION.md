@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=25 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=26 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -372,3 +372,17 @@ BER 프레임 크기 상한은 남아 있습니다. 이러한 활성화 조건�
 실패했습니다. 둘 다 단독 통과했고, 각 시나리오 내부 동시성을 유지한 전체 순차
 실행도 통과했습니다. 병렬 테스트 안정성이나 전체 스택 성능을 해결했다는 증거는
 아닙니다. 기존 허용된 의존성 경고도 유지됩니다.
+
+## LDAP wire 프레임 상한
+
+호패는 외부 BER 프레임을 파싱 전에 검사하는 패치를 포함한 ldap3 0.12.1을
+로컬 vendor로 고정합니다. 명시 길이를 갖는 LDAP sequence는 헤더를 포함해
+64 KiB로 제한합니다. 선언 길이가 초과되면 헤더 도착 시 lber 파싱이나 본문
+대기 전에 거부합니다. 무한 길이·잘못된 외부 tag도 거부하며 허용된 분할 프레임과
+여러 프레임의 합쳐진 수신은 유지합니다. 출처·원본 라이선스·유지 절차는
+[vendor/ldap3/HOPAE_PATCH.md](../../vendor/ldap3/HOPAE_PATCH.md)에 있습니다.
+
+wire 테스트 2건과 패치된 라이브러리를 사용한 소유 LDAPS·StartTLS 인증이
+통과했습니다. 제한 대상은 개별 wire 프레임이며 파서 재귀, 연결 전체 메모리,
+모든 비정상 중첩 BER이나 결과 총량을 보장하지 않습니다. 중첩 파서 강화와
+악성 TLS peer의 실제 검증을 운영 활성화 전에 완료해야 합니다.

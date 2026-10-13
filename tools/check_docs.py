@@ -283,7 +283,9 @@ def classify(p):
 
 
 def check_docs(tree, f):
-    mds = [p for p in tree.paths if p.endswith(".md") and p != "TODO.md"]
+    # Preserve upstream documentation verbatim; Hopae patch notes remain checked.
+    upstream_docs = {"vendor/ldap3/README.md", "vendor/ldap3/CHANGELOG.md", "vendor/ldap3/LDAP-primer.md"}
+    mds = [p for p in tree.paths if p.endswith(".md") and p != "TODO.md" and p not in upstream_docs]
     content = {p: tree.read(p) for p in mds}
     kind = {p: classify(p) for p in mds}
 

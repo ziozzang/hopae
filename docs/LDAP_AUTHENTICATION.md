@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 25 -->
+<!-- doc-rev: 26 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -426,3 +426,18 @@ interruption instrumentation and the 200-request overload burst. Both passed alo
 the complete serial run passed, preserving concurrency inside each scenario.
 This is not evidence that parallel test stability or full-stack performance is solved.
 The existing allowed dependency warning remains.
+
+## Bounded LDAP wire frames
+
+Hopae pins a locally vendored ldap3 0.12.1 with a pre-parser outer BER frame
+check. Definite-length LDAP sequences are capped at 64 KiB including the header.
+An oversized declared length is refused as soon as its header arrives, before
+lber parsing or waiting for the body. Indefinite lengths and invalid outer tags
+are refused. Fragmented allowed frames and multiple coalesced frames are retained.
+Patch provenance, upstream licenses and maintenance instructions are in
+[vendor/ldap3/HOPAE_PATCH.md](../vendor/ldap3/HOPAE_PATCH.md).
+
+Two focused wire tests and owned LDAPS/StartTLS authentication pass with the patched
+library. The cap bounds each wire frame, not parser recursion, total connection memory,
+all malformed nested BER, or aggregate results. Nested-parser hardening and actual
+malicious TLS peer qualification remain necessary before production activation.

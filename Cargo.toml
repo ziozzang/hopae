@@ -71,3 +71,7 @@ strip = true
 # provider is minutes-slow unoptimized, seconds-fast optimized.
 [profile.dev.package."*"]
 opt-level = 2
+
+# Local response-frame hardening; provenance and maintenance in vendor/ldap3/HOPAE_PATCH.md.
+[patch.crates-io]
+ldap3 = { path = "vendor/ldap3" }

@@ -744,6 +744,15 @@ fn s303_a7_query_reaching_deadline_is_interrupted_inside_store() {
         "{:?}",
         t.elapsed()
     );
+    // The HTTP deadline can answer before the blocking SQLite job reports its
+    // interruption counter. Require the actual interruption within a bounded
+    // observation window, independently of the response latency assertion.
+    let observed_until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    while k.metric("hopae_store_interrupts_total") <= before
+        && std::time::Instant::now() < observed_until
+    {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     assert!(
         k.metric("hopae_store_interrupts_total") > before,
         "interrupted inside SQLite"
