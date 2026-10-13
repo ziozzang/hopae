@@ -123,6 +123,124 @@ mod tests {
         receipt_keys::Key,
     };
     use super::*;
+    fn fixture(db: &mut Connection) -> (Authority, Checked) {
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .unwrap();
+        let mut owner = Authority::load(db, 0).unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        owner
+            .publish(
+                db,
+                0,
+                &[Key {
+                    issuer_ref: "owned".into(),
+                    purpose: Purpose::Authentication,
+                    epoch: 1,
+                    public_key: signer.verifying_key().to_bytes(),
+                }],
+                "operator",
+                &|_| Ok(()),
+            )
+            .unwrap();
+        let context = Context {
+            issuer_ref: "owned",
+            key_epoch: 1,
+            identity_authority_epoch: "identity-1",
+            identity: Identity {
+                subject_ref: "user",
+                kind: PrincipalKind::Human,
+                aal: 1,
+                revision: 1,
+                credential_generation: 1,
+            },
+            service: "orders",
+            audience: "orders-api",
+            request_sha256: [4; 32],
+        };
+        let bytes = receipt::sign(
+            &signer,
+            &Claims {
+                purpose: Purpose::Authentication,
+                issued_ms: 100,
+                expires_ms: 1000,
+                binding: receipt_binding::digest(&context, None).unwrap(),
+                nonce: [8; 32],
+            },
+        )
+        .unwrap();
+        let checked = owner
+            .verifier()
+            .verify(&context, None, &bytes, 101)
+            .unwrap();
+        (owner, checked)
+    }
+    #[test]
+    fn independent_connections_admit_exactly_one_concurrent_consumer() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut db = Connection::open(file.path()).unwrap();
+        let (_owner, checked) = fixture(&mut db);
+        let barrier = std::sync::Barrier::new(8);
+        let successes = std::thread::scope(|scope| {
+            let mut threads = Vec::new();
+            for _ in 0..8 {
+                let path = file.path();
+                let checked = &checked;
+                let barrier = &barrier;
+                threads.push(scope.spawn(move || {
+                    let mut connection = Connection::open(path).unwrap();
+                    connection
+                        .busy_timeout(std::time::Duration::from_secs(2))
+                        .unwrap();
+                    barrier.wait();
+                    consume(&mut connection, checked, &|| 101, &|_| Ok(()), |tx| {
+                        let count = value(tx, "issued-fixture")?
+                            .unwrap_or_else(|| "0".into())
+                            .parse::<u64>()
+                            .map_err(|_| Refused)?;
+                        put(tx, "issued-fixture", &(count + 1).to_string())
+                    })
+                    .is_ok()
+                }));
+            }
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .filter(|success| *success)
+                .count()
+        });
+        assert_eq!(successes, 1);
+        assert_eq!(value(&db, "issued-fixture").unwrap().unwrap(), "1");
+        drop(db);
+        let mut restarted = Connection::open(file.path()).unwrap();
+        assert!(consume(&mut restarted, &checked, &|| 102, &|_| Ok(()), |_| Ok(())).is_err());
+    }
+    #[test]
+    fn final_authorization_failure_rolls_back_nonce_and_owner_work() {
+        let mut db = Connection::open_in_memory().unwrap();
+        let (_owner, checked) = fixture(&mut db);
+        let checks = std::cell::Cell::new(0);
+        assert!(
+            consume(
+                &mut db,
+                &checked,
+                &|| 101,
+                &|_| {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == 2 {
+                        Err(Refused)
+                    } else {
+                        Ok(())
+                    }
+                },
+                |tx| put(tx, "issued-fixture", "must-rollback")
+            )
+            .is_err()
+        );
+        assert_eq!(checks.get(), 2);
+        assert!(value(&db, "issued-fixture").unwrap().is_none());
+        assert!(value(&db, COUNT).unwrap().is_none());
+        consume(&mut db, &checked, &|| 101, &|_| Ok(()), |_| Ok(())).unwrap();
+    }
     #[test]
     fn single_use_operation_failure_expiry_and_publication_are_atomic() {
         let mut db = Connection::open_in_memory().unwrap();

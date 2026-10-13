@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 29 -->
+<!-- doc-rev: 30 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -601,3 +601,5 @@ lifecycle/mobile/UI/fleet qualification. The internal image remains unchanged.
 Unreleased `receipt_replay::consume` takes an opaque checked receipt, trusted native clock and authorization fence. One SQLite immediate transaction rechecks durable registry revision, validity and persisted clock watermark, admits the authority/purpose/nonce hash once, runs caller DB work and repeats authorization/expiry checks before commit. Failure rolls back work and consumption. Final time includes monotonic operation duration. Callbacks must defer irreversible network output and credential exposure until after successful commit.
 
 Nonce IDs and ordered expiry indexes use owner meta state. Cleanup removes at most 128 expired pairs per call; no full ledger scan occurs once its counter exists. An active-entry cap of one million fails closed. Index inconsistency refuses consumption. The clock floor prevents reuse after cleanup and clock rollback, but whole-DB restore requires an external epoch/minimum fence. Twelve receipt tests include duplicate use, operation rollback, expiry during work, cleanup/clock rollback and stale registry rejection. This helper is not activated in production, does not issue credentials and does not prove full-stack throughput.
+
+Receipt concurrency qualification now includes eight independent SQLite connections synchronized before consumption. Exactly one caller commits, an independently incremented owner-work counter is one, and reopening the database still refuses the same checked receipt. A final authorization failure rolls back nonce and owner work and permits a later authorized retry. Fourteen receipt tests pass. This verifies single-use transaction behavior, not multi-node membership, credential endpoint activation or 10k/100k-QPS throughput.

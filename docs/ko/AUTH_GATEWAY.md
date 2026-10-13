@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=29 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=30 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -529,3 +529,5 @@ keyring 설정·결합 챌린지와 CSRF·영속 설정 세대 검사·원자 �
 미릴리스 `receipt_replay::consume`은 불투명한 검증 receipt, 신뢰된 네이티브 시계와 권한 fence를 받습니다. SQLite immediate transaction에서 DB registry revision·유효기간·저장된 clock watermark를 재검사하고 authority/용도/nonce hash를 한 번 소비한 뒤 호출자 DB 작업과 마지막 권한/만료 검사를 함께 commit합니다. 실패하면 작업·소비를 취소하고 마지막 시각에는 monotonic 작업 시간을 포함합니다. callback은 취소 불가능한 네트워크 출력·자격 노출을 성공한 commit 이후로 미뤄야 합니다.
 
 소유자 meta의 nonce ID·정렬된 만료 인덱스를 사용해 호출마다 최대 128개 만료 쌍을 정리하며 counter 생성 후 전체 ledger를 scan하지 않습니다. 활성 100만 개 한계·인덱스 불일치는 거부합니다. clock floor는 정리 후 시계 역행 재사용을 막지만 DB 전체 복원에는 외부 epoch/최소 버전 fence가 필요합니다. receipt 테스트 12건은 중복 소비·작업 취소·작업 중 만료·정리/시계 역행·오래된 registry를 포함합니다. 운영에 활성화하거나 자격을 발급하지 않으며 전체 스택 성능 검증이 아닙니다.
+
+receipt 동시성 검증은 독립 SQLite 연결 8개를 소비 전에 동기화해 정확히 한 호출만 commit하고 별도로 증가한 소유자 작업 counter도 1이며 DB 재연결 후 같은 receipt를 거부하는 것을 확인합니다. 마지막 권한 검사가 실패하면 nonce·작업을 취소하고 이후 허용된 재시도는 성공합니다. receipt 테스트 14건이 통과했으며 단일 소비 transaction 검증이지 다중 node membership·자격 endpoint 활성화·10k/100k 처리량 검증은 아닙니다.
