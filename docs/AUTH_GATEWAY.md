@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 28 -->
+<!-- doc-rev: 29 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -597,3 +597,7 @@ elevated handoff. Owned OIDC/HTTP-process qualification covers protected access
 and old-credential refusal. Earlier implementation notes describe prior stages.
 This does not enable external MFA API/Lua connectors or replace recovery/key
 lifecycle/mobile/UI/fleet qualification. The internal image remains unchanged.
+
+Unreleased `receipt_replay::consume` takes an opaque checked receipt, trusted native clock and authorization fence. One SQLite immediate transaction rechecks durable registry revision, validity and persisted clock watermark, admits the authority/purpose/nonce hash once, runs caller DB work and repeats authorization/expiry checks before commit. Failure rolls back work and consumption. Final time includes monotonic operation duration. Callbacks must defer irreversible network output and credential exposure until after successful commit.
+
+Nonce IDs and ordered expiry indexes use owner meta state. Cleanup removes at most 128 expired pairs per call; no full ledger scan occurs once its counter exists. An active-entry cap of one million fails closed. Index inconsistency refuses consumption. The clock floor prevents reuse after cleanup and clock rollback, but whole-DB restore requires an external epoch/minimum fence. Twelve receipt tests include duplicate use, operation rollback, expiry during work, cleanup/clock rollback and stale registry rejection. This helper is not activated in production, does not issue credentials and does not prove full-stack throughput.

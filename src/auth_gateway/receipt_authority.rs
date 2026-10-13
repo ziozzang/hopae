@@ -19,8 +19,12 @@ pub struct Verifier {
 pub struct Checked {
     registry: Arc<Registry>,
     receipt: VerifiedReceipt,
+    replay_key: [u8; 32],
 }
 impl Checked {
+    pub(crate) fn replay_key(&self) -> &[u8; 32] {
+        &self.replay_key
+    }
     pub fn revision(&self) -> u64 {
         self.registry.revision()
     }
@@ -68,7 +72,18 @@ impl Verifier {
     ) -> Result<Checked, Refused> {
         let registry = self.snapshot.load_full().ok_or(Refused)?;
         let receipt = registry.verify(context, permit, bytes, now)?;
-        Ok(Checked { registry, receipt })
+        use sha2::{Digest as _, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(b"hangang-zerotrust:receipt-consumption:v1\0");
+        hash.update((context.issuer_ref.len() as u32).to_be_bytes());
+        hash.update(context.issuer_ref.as_bytes());
+        hash.update([receipt.claims().purpose as u8]);
+        hash.update(receipt.claims().nonce);
+        Ok(Checked {
+            registry,
+            receipt,
+            replay_key: hash.finalize().into(),
+        })
     }
     /// Advisory local-current check, not a transactional issuance fence.
     pub fn is_current(&self, checked: &Checked) -> bool {

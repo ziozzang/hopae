@@ -9,6 +9,7 @@ pub mod receipt_authority;
 pub mod receipt_binding;
 pub mod receipt_key_store;
 pub mod receipt_keys;
+pub mod receipt_replay;
 pub mod relay;
 pub mod request_binding;
 pub mod runtime;
