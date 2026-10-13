@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=10 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=11 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -242,3 +242,23 @@ Rust helper는 기존 `migration-candidate.db`만 허용하고 Python은 입력 
 마이그레이션하지 않습니다. 후보·백업에는 비공개 신원·세션 자료가 있으므로
 비공개로 보관합니다. 내부 반영 전 후보 이미지·전체 부팅 회귀 검증과
 마이그레이션을 고려한 롤백이 아직 필요합니다.
+
+## 내부 owner-v5 배포와 도그푸딩 — 2026-10-13
+
+소스 `d876909`의 정적 Linux-musl 바이너리를
+`hopae:0.0.2-owner-v5-d876909` 이미지로 구성했습니다. 별도 loopback 후보가
+실제 소유 상태의 일관성 비공개 복사본으로 schema v5 부팅에 성공했습니다.
+HTTP·지속 연결 mTLS HOP1은 기존 서비스 key를 승인하고 누락·잘못된 key를 거부했습니다.
+
+운영 반영은 이전 인스턴스를 정지하고 일관된 schema-v3 백업을 만든 뒤,
+이미지 선택만 변경해 재시작했습니다. Schema v5·health를 확인하고 실제 Hangang
+HTTPS 서비스 권한·거부·자격 소비, 호패·수문장·품계 통합 메뉴·매트릭스,
+SSO 진입·로그아웃·익명·Origin 격리·네이티브 mTLS 회귀가 통과했습니다.
+설정·기존 provider 선택은 유지했습니다. 이전 스키마 비공개 백업과
+마이그레이션 롤백을 보관하며 공개 증거에 자격·신원·세션 row를 포함하지 않습니다.
+
+최신 내부 primitive·API profile 서킷 연속성의 배포이며 LDAP 로그인이나 OTP
+등록·step-up 활성화는 아닙니다. 운영 설정·UI는 아직 미완성입니다. 실제 외부
+사용자 SSO 로그인·디렉터리 회수·업스트림 자격 변환·요인 challenge와 세션의 원자 처리,
+분산 follower·membership·전체 스택 처리량·공개 다중 플랫폼 릴리즈도 남아 있습니다.
+내부 서비스·콘솔 도그푸딩을 지속하며 전체 제로트러스트 목표는 active입니다.

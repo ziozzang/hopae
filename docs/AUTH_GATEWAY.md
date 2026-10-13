@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 10 -->
+<!-- doc-rev: 11 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -276,3 +276,25 @@ The Rust helper accepts only an existing `migration-candidate.db`; the Python ru
 never migrates its input. The candidate and backups contain private identity/session
 material and must remain private. Operational rollout still needs a candidate image,
 full boot/regression checks and migration-aware rollback before internal activation.
+
+## Internal owner-v5 deployment and dogfooding — 2026-10-13
+
+The static Linux-musl binary from source `d876909` was packaged as
+`hopae:0.0.2-owner-v5-d876909`. A parallel loopback-only candidate booted against a
+consistent private copy of the actual owner state at schema v5. HTTP and persistent
+mTLS HOP1 accepted the existing service key and refused missing/invalid credentials.
+
+Operational deployment stopped the prior instance, took a consistent schema-v3 backup,
+changed only the image selection and restarted the instance. Schema v5 and health
+were verified. Actual Hangang HTTPS service rights/denial/credential consumption,
+unified Hopae/Sumunjang/Pumgye menus and matrix, SSO entry, logout, anonymous/origin
+isolation and native mTLS regressions passed. Configuration and existing provider
+selection remained unchanged. Private prior-schema backups and migration-aware rollback
+are retained; public evidence contains no credentials or identity/session rows.
+
+This deploys the latest source primitives and API-profile circuit continuity, not
+active LDAP login or OTP enrollment/step-up. Their production configuration/UI remain
+unfinished. A real external human SSO login, directory revocation, upstream credential
+translation, factor challenge/session atomicity, distributed followers/membership,
+full-stack throughput and public multi-platform releases remain open. Internal
+service/console dogfooding continues; the complete zero-trust gateway goal is active.
