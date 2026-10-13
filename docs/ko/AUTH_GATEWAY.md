@@ -539,3 +539,11 @@ receipt 동시성 검증은 독립 SQLite 연결 8개를 소비 전에 동기화
 미릴리스 `projection_admission`은 네이티브 키 registry로 두 receipt를 검증하고 신원 authority epoch·subject/종류/AAL·신원 revision/자격 generation·서비스·대상·정확한 요청 digest의 일치를 검사합니다. permit은 서명이 포함된 전체 인증 receipt의 SHA-256과 결합해야 합니다. issuer/key 선택은 용도별이며 다른 신원·요청의 정상 서명 permit도 승인되지 않습니다. 문맥은 검증된 네이티브 소유자에서 가져와야 하며 호출자가 제공한 분류 자체를 인증하지 않습니다.
 
 필드가 비공개이고 Clone 불가능한 승인 객체는 두 nonce와 관련 DB 작업을 하나의 소유자 transaction에서 소비하며 DB registry·시각·마지막 권한 검사를 재사용합니다. 두 번째 nonce가 이미 소비됐거나 어느 receipt든 만료되면 전체 작업을 취소합니다. 독립 SQLite 연결 8개에서 정확히 한 증명 쌍만 승인되는 것을 포함해 새 공격 시나리오 테스트 4건과 인증 gateway 테스트 총 44건 및 fmt/clippy/경계 검사가 통과했습니다. 자격 endpoint·signer 서비스·운영 변환 경로는 아직 활성화하지 않았습니다. 실시간 신원/정책/네트워크/plan 검사는 호출자 guard의 책임이며 자격 노출은 commit 성공 이후여야 합니다.
+
+## 네이티브 자격 변환 소스 코어
+
+미릴리스 `projection::Projector`는 서비스/대상별로 중복 없는 참조 전용 plan 최대 128개를 컴파일합니다. 자원·행위·최소 AAL과 `identity_header` 또는 `bearer_reference`를 고정하며 임의 헤더·URL·인라인 비밀값은 허용하지 않습니다. 서명 검증된 승인 문맥에 자원/행위·plan 버전·두 receipt의 공통 유효 구간을 보존하고 plan 불일치는 자격 조회·nonce 소비 전에 거부합니다.
+
+첫 실시간 소유자 검사 후 증명 쌍 소비 transaction 안에서 변환을 실행합니다. 네이티브 동기 resolver는 설정된 참조만 받으며 제한된 로컬 vault 접근을 사용해야 합니다. 길이가 제한된 RFC 6750 토큰 문법으로 헤더 주입을 막고 임시·반환 문자열은 drop 시 zeroize합니다. 마지막 권한/만료/registry 검사가 실패하면 출력 폐기와 두 nonce rollback을 수행합니다. 출력은 Clone·Debug·직렬화가 불가능하며 네이티브 서비스·대상·요청 digest·시각이 일치해야 sensitive HTTP 헤더로 변환됩니다. 헤더는 `x-hopae-subject` 또는 `authorization`으로 고정합니다. 권한 판정 전 일반 auth-proxy 응답 헤더 경로에는 이 값을 넣으면 안 됩니다.
+
+새 테스트 5건은 마지막 권한 회수·resolver 장애/잘못된 토큰·오래된 plan/AAL/자원/행위·출력 대상/요청/시각 검사·제한된 참조 전용 설정을 확인합니다. 인증 gateway 테스트 49건과 fmt/clippy/경계 검사가 통과했습니다. 소스 코어 단계이며 관리자 게시/원자 활성화·발급 audit/outbox·네이티브 signer/endpoint 연결·Hangang 최종 집행/stream 회수·JWT/HMAC/mTLS 모드·분산/전체 스택 성능 검증은 남아 있습니다. 운영 설정과 이미지는 유지합니다.

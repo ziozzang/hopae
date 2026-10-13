@@ -21,6 +21,7 @@ pub struct Input<'a> {
 pub struct Admission {
     authentication: Checked,
     permission: Checked,
+    pub(crate) scope: super::projection::Scope,
 }
 pub fn verify(verifier: &Verifier, input: Input<'_>, now: u64) -> Result<Admission, Refused> {
     let a = input.authentication_context;
@@ -45,6 +46,26 @@ pub fn verify(verifier: &Verifier, input: Input<'_>, now: u64) -> Result<Admissi
         return Err(Refused);
     }
     Ok(Admission {
+        scope: super::projection::Scope {
+            service: a.service.to_owned(),
+            audience: a.audience.to_owned(),
+            subject: a.identity.subject_ref.to_owned(),
+            resource: input.permit.resource.to_owned(),
+            action: input.permit.action.to_owned(),
+            aal: a.identity.aal,
+            request_sha256: a.request_sha256,
+            plan_revision: input.permit.plan_revision,
+            issued_ms: authentication
+                .receipt()
+                .claims()
+                .issued_ms
+                .max(permission.receipt().claims().issued_ms),
+            expires_ms: authentication
+                .receipt()
+                .claims()
+                .expires_ms
+                .min(permission.receipt().claims().expires_ms),
+        },
         authentication,
         permission,
     })
@@ -418,5 +439,236 @@ mod tests {
             .unwrap(),
             "1"
         );
+    }
+    fn projector(
+        revision: u64,
+        minimum_aal: u8,
+        credential: super::super::projection::Credential,
+    ) -> super::super::projection::Projector {
+        use super::super::projection::{Configuration, Plan, Projector};
+        Projector::compile(Configuration {
+            revision,
+            plans: vec![Plan {
+                service: "orders".into(),
+                audience: "orders-api".into(),
+                resource: "orders".into(),
+                action: "read".into(),
+                minimum_aal,
+                credential,
+            }],
+        })
+        .unwrap()
+    }
+    #[test]
+    fn projection_resolves_only_after_admission_and_rolls_back_late_revocation() {
+        use super::super::projection::Credential;
+        let mut f = Fixture::new();
+        let projector = projector(
+            1,
+            2,
+            Credential::BearerReference {
+                secret_ref: "owned-token".into(),
+            },
+        );
+        let calls = std::cell::Cell::new(0);
+        let resolve = |reference: &str| {
+            assert_eq!(reference, "owned-token");
+            calls.set(calls.get() + 1);
+            Ok(zeroize::Zeroizing::new("owned-example-token".to_owned()))
+        };
+        assert!(
+            projector
+                .project(
+                    f.admission().unwrap(),
+                    &mut f.db,
+                    &|| 102,
+                    &|_| Err(Refused),
+                    &resolve
+                )
+                .is_err()
+        );
+        assert_eq!(calls.get(), 0);
+        assert_eq!(f.nonce_count(), 0);
+        let guards = std::cell::Cell::new(0);
+        assert!(
+            projector
+                .project(
+                    f.admission().unwrap(),
+                    &mut f.db,
+                    &|| 102,
+                    &|_| {
+                        guards.set(guards.get() + 1);
+                        if guards.get() == 2 {
+                            Err(Refused)
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    &resolve
+                )
+                .is_err()
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(f.nonce_count(), 0);
+        let output = projector
+            .project(
+                f.admission().unwrap(),
+                &mut f.db,
+                &|| 102,
+                &|_| Ok(()),
+                &resolve,
+            )
+            .unwrap();
+        let (name, value) = output
+            .into_header("orders", "orders-api", &[4; 32], 103)
+            .unwrap();
+        assert_eq!(name, http::header::AUTHORIZATION);
+        assert_eq!(value.to_str().unwrap(), "Bearer owned-example-token");
+        assert!(value.is_sensitive());
+        assert!(!format!("{value:?}").contains("owned-example-token"));
+        assert_eq!(f.nonce_count(), 2);
+        assert!(
+            projector
+                .project(
+                    f.admission().unwrap(),
+                    &mut f.db,
+                    &|| 103,
+                    &|_| Ok(()),
+                    &resolve
+                )
+                .is_err()
+        );
+        assert_eq!(calls.get(), 2);
+    }
+    #[test]
+    fn native_plan_revision_assurance_and_permission_scope_precede_secret_resolution() {
+        use super::super::projection::Credential;
+        for mismatch in 0..4 {
+            let mut f = Fixture::new();
+            if mismatch >= 2 {
+                if mismatch == 2 {
+                    f.permit.resource = "billing";
+                } else {
+                    f.permit.action = "write";
+                }
+                f.permission = Fixture::sign_permission(
+                    &f.permission_signer,
+                    &f.permission_context,
+                    &f.permit,
+                );
+            }
+            let projector = projector(
+                if mismatch == 0 { 2 } else { 1 },
+                if mismatch == 1 { 3 } else { 2 },
+                Credential::BearerReference {
+                    secret_ref: "owned-token".into(),
+                },
+            );
+            assert!(
+                projector
+                    .project(
+                        f.admission().unwrap(),
+                        &mut f.db,
+                        &|| 102,
+                        &|_| Ok(()),
+                        &|_| panic!("mismatched plan resolved a credential")
+                    )
+                    .is_err()
+            );
+            assert_eq!(f.nonce_count(), 0);
+        }
+    }
+    #[test]
+    fn projection_output_is_bound_and_identity_headers_need_no_secret_capability() {
+        use super::super::projection::Credential;
+        for mismatch in 0..6 {
+            let mut f = Fixture::new();
+            let output = projector(1, 2, Credential::IdentityHeader)
+                .project(
+                    f.admission().unwrap(),
+                    &mut f.db,
+                    &|| 102,
+                    &|_| Ok(()),
+                    &|_| panic!("identity projection requested a secret"),
+                )
+                .unwrap();
+            let result = output.into_header(
+                if mismatch == 0 { "billing" } else { "orders" },
+                if mismatch == 1 {
+                    "billing-api"
+                } else {
+                    "orders-api"
+                },
+                &if mismatch == 2 { [5; 32] } else { [4; 32] },
+                match mismatch {
+                    3 => 900,
+                    4 => 100,
+                    _ => 103,
+                },
+            );
+            if mismatch < 5 {
+                assert!(result.is_err());
+            } else {
+                let (name, value) = result.unwrap();
+                assert_eq!(name, "x-hopae-subject");
+                assert_eq!(value.to_str().unwrap(), "owned-user");
+            }
+        }
+    }
+    #[test]
+    fn malformed_or_unavailable_bearer_reference_leaves_receipts_reusable() {
+        use super::super::projection::Credential;
+        for token in [
+            "",
+            "=",
+            "bad\r\nInjected: true",
+            "bad token",
+            "bad=middle",
+            "nonascii-é",
+        ] {
+            let mut f = Fixture::new();
+            let projector = projector(
+                1,
+                2,
+                Credential::BearerReference {
+                    secret_ref: "owned-token".into(),
+                },
+            );
+            assert!(
+                projector
+                    .project(
+                        f.admission().unwrap(),
+                        &mut f.db,
+                        &|| 102,
+                        &|_| Ok(()),
+                        &|_| Ok(zeroize::Zeroizing::new(token.to_owned()))
+                    )
+                    .is_err()
+            );
+            assert_eq!(f.nonce_count(), 0);
+            assert!(
+                projector
+                    .project(
+                        f.admission().unwrap(),
+                        &mut f.db,
+                        &|| 102,
+                        &|_| Ok(()),
+                        &|_| Err(Refused)
+                    )
+                    .is_err()
+            );
+            assert_eq!(f.nonce_count(), 0);
+            assert!(
+                projector
+                    .project(
+                        f.admission().unwrap(),
+                        &mut f.db,
+                        &|| 102,
+                        &|_| Ok(()),
+                        &|_| Ok(zeroize::Zeroizing::new("valid-example==".to_owned()))
+                    )
+                    .is_ok()
+            );
+        }
     }
 }

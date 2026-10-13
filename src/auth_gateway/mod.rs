@@ -3,6 +3,7 @@
 pub mod authority;
 pub mod breaker;
 pub mod lua;
+pub mod projection;
 pub mod projection_admission;
 pub mod publication;
 pub mod receipt;
