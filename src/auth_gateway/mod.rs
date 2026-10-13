@@ -5,6 +5,7 @@ pub mod breaker;
 pub mod lua;
 pub mod projection;
 pub mod projection_admission;
+pub mod projection_authority;
 pub mod publication;
 pub mod receipt;
 pub mod receipt_authority;

@@ -547,3 +547,13 @@ receipt 동시성 검증은 독립 SQLite 연결 8개를 소비 전에 동기화
 첫 실시간 소유자 검사 후 증명 쌍 소비 transaction 안에서 변환을 실행합니다. 네이티브 동기 resolver는 설정된 참조만 받으며 제한된 로컬 vault 접근을 사용해야 합니다. 길이가 제한된 RFC 6750 토큰 문법으로 헤더 주입을 막고 임시·반환 문자열은 drop 시 zeroize합니다. 마지막 권한/만료/registry 검사가 실패하면 출력 폐기와 두 nonce rollback을 수행합니다. 출력은 Clone·Debug·직렬화가 불가능하며 네이티브 서비스·대상·요청 digest·시각이 일치해야 sensitive HTTP 헤더로 변환됩니다. 헤더는 `x-hopae-subject` 또는 `authorization`으로 고정합니다. 권한 판정 전 일반 auth-proxy 응답 헤더 경로에는 이 값을 넣으면 안 됩니다.
 
 새 테스트 5건은 마지막 권한 회수·resolver 장애/잘못된 토큰·오래된 plan/AAL/자원/행위·출력 대상/요청/시각 검사·제한된 참조 전용 설정을 확인합니다. 인증 gateway 테스트 49건과 fmt/clippy/경계 검사가 통과했습니다. 소스 코어 단계이며 관리자 게시/원자 활성화·발급 audit/outbox·네이티브 signer/endpoint 연결·Hangang 최종 집행/stream 회수·JWT/HMAC/mTLS 모드·분산/전체 스택 성능 검증은 남아 있습니다. 운영 설정과 이미지는 유지합니다.
+
+## 영속 자격 변환 plan 소유자
+
+미릴리스 `projection_authority`는 참조 전용 plan의 revision CAS·문서 digest·영속 비활성 tombstone·참조 전용 게시 audit을 하나의 immediate transaction에 저장합니다. 인증된 관리자 guard를 쓰기 전과 commit 전에 실행하며 마지막 문서 byte 검사로 guard 내부 변경도 거부합니다. 원하는 설정 버전은 다음 소유자 버전과 같아야 합니다. 제한된 로딩에서 설정/digest·외부 최소 버전을 검증하고 저장된 비활성화를 시작 설정으로 덮어쓰지 않습니다.
+
+단독 소유자는 컴파일된 Arc를 commit 전에 준비하고 성공 직후 실패 가능한 작업 없이 설치합니다. 공유 ArcSwap reader는 불변 projector에서 서비스/대상을 조회합니다. 증명 쌍 승인 시 작업 전후에 cached SQLite statement로 현재 DB 문서 byte를 빌려 정확히 비교하며 요청 경로에서 JSON decode·plan 재컴파일·임시 문서 할당을 하지 않습니다. 따라서 DB 교체/비활성화 뒤 예전 snapshot을 보유한 요청도 commit/install 구간을 포함해 자격을 조회하지 못합니다. 여전히 DB를 사용하는 승인 단계이며 10k/100k 처리량·분산 membership 검증은 아닙니다.
+
+테스트 5건은 재시작/비활성화/최소 버전·오래된 별도 게시자·관리자/audit 실패 시 DB와 메모리 유지·손상/버전 불일치·이전 reader 거부와 재활성화 후 새 서명 permit·마지막 guard의 plan 변경과 nonce 전체 rollback을 확인합니다. 애플리케이션 시작·위임 관리자 endpoint/UI·발급 audit/outbox 연결은 남아 있으며 운영 상태는 유지합니다.
+
+이 소스 갱신의 인증 gateway 테스트 총 54건과 fmt/clippy/경계 검사가 통과했습니다.

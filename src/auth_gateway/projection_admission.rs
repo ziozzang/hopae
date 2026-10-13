@@ -671,4 +671,159 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn durable_plan_removal_blocks_retained_reader_and_reenable_requires_new_permit() {
+        use super::super::projection::{Configuration, Credential, Plan};
+        use super::super::projection_authority::Authority as PlanAuthority;
+        let mut f = Fixture::new();
+        let mut owner = PlanAuthority::load(&f.db, 0).unwrap();
+        let configuration = |revision| Configuration {
+            revision,
+            plans: vec![Plan {
+                service: "orders".into(),
+                audience: "orders-api".into(),
+                resource: "orders".into(),
+                action: "read".into(),
+                minimum_aal: 2,
+                credential: Credential::BearerReference {
+                    secret_ref: "owned-token".into(),
+                },
+            }],
+        };
+        owner
+            .publish(
+                &mut f.db,
+                0,
+                Some(configuration(1)),
+                "operator",
+                &|_| Ok(()),
+            )
+            .unwrap();
+        let reader = owner.reader();
+        let retained = reader.load_full();
+        owner
+            .publish(&mut f.db, 1, None, "operator", &|_| Ok(()))
+            .unwrap();
+        assert!(
+            retained
+                .project(
+                    f.admission().unwrap(),
+                    &mut f.db,
+                    &|| 102,
+                    &|_| Ok(()),
+                    &|_| panic!("retired snapshot resolved a secret")
+                )
+                .is_err()
+        );
+        assert_eq!(f.nonce_count(), 0);
+        assert!(
+            reader
+                .load()
+                .project(
+                    f.admission().unwrap(),
+                    &mut f.db,
+                    &|| 102,
+                    &|_| Ok(()),
+                    &|_| panic!("disabled snapshot resolved a secret")
+                )
+                .is_err()
+        );
+        owner
+            .publish(
+                &mut f.db,
+                2,
+                Some(configuration(3)),
+                "operator",
+                &|_| Ok(()),
+            )
+            .unwrap();
+        assert!(
+            reader
+                .load()
+                .project(
+                    f.admission().unwrap(),
+                    &mut f.db,
+                    &|| 102,
+                    &|_| Ok(()),
+                    &|_| panic!("old permit resolved a secret")
+                )
+                .is_err()
+        );
+        assert_eq!(f.nonce_count(), 0);
+        f.permit.plan_revision = 3;
+        f.permission =
+            Fixture::sign_permission(&f.permission_signer, &f.permission_context, &f.permit);
+        let restarted = PlanAuthority::load(&f.db, 3).unwrap();
+        let output = restarted
+            .reader()
+            .load()
+            .project(
+                f.admission().unwrap(),
+                &mut f.db,
+                &|| 102,
+                &|_| Ok(()),
+                &|_| Ok(zeroize::Zeroizing::new("owned-example-token".into())),
+            )
+            .unwrap();
+        assert!(
+            output
+                .into_header("orders", "orders-api", &[4; 32], 103)
+                .is_ok()
+        );
+        assert_eq!(f.nonce_count(), 2);
+    }
+    #[test]
+    fn plan_change_inside_final_guard_cannot_release_projected_secret() {
+        use super::super::projection::{Configuration, Credential, Plan};
+        use super::super::projection_authority::Authority as PlanAuthority;
+        let mut f = Fixture::new();
+        let mut owner = PlanAuthority::load(&f.db, 0).unwrap();
+        owner
+            .publish(
+                &mut f.db,
+                0,
+                Some(Configuration {
+                    revision: 1,
+                    plans: vec![Plan {
+                        service: "orders".into(),
+                        audience: "orders-api".into(),
+                        resource: "orders".into(),
+                        action: "read".into(),
+                        minimum_aal: 2,
+                        credential: Credential::BearerReference {
+                            secret_ref: "owned-token".into(),
+                        },
+                    }],
+                }),
+                "operator",
+                &|_| Ok(()),
+            )
+            .unwrap();
+        let reader = owner.reader();
+        let calls = std::cell::Cell::new(0);
+        assert!(reader.load().project(f.admission().unwrap(), &mut f.db, &|| 102, &|db| {
+            calls.set(calls.get()+1);
+            if calls.get() == 2 {
+                db.execute("UPDATE meta SET value=json_set(value,'$.configuration.plans[0].resource','billing') WHERE key='projection_plan_authority_v1'", []).map_err(|_| Refused)?;
+            }
+            Ok(())
+        }, &|_| Ok(zeroize::Zeroizing::new("owned-example-token".into()))).is_err());
+        assert_eq!(f.nonce_count(), 0);
+        let document = super::super::projection_authority::read(&f.db)
+            .unwrap()
+            .unwrap();
+        assert_eq!(document.configuration.unwrap().plans[0].resource, "orders");
+        assert!(
+            reader
+                .load()
+                .project(
+                    f.admission().unwrap(),
+                    &mut f.db,
+                    &|| 102,
+                    &|_| Ok(()),
+                    &|_| Ok(zeroize::Zeroizing::new("owned-example-token".into()))
+                )
+                .is_ok()
+        );
+    }
 }
