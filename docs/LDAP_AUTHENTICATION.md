@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 15 -->
+<!-- doc-rev: 16 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -283,3 +283,14 @@ credential connector or creating another session. Existing invalid-credential re
 success, replay and provider-disable cases remain in the same scenario. Clippy passes.
 This verifies the service binding boundary; HTTP CSRF and password-form integration
 remain separate work before operational activation.
+
+## Password form template preparation
+
+The portal PasswordForm template is now available in English and Korean. It uses
+POST to the provider password path with hidden challenge and CSRF fields, labeled
+username/current-password inputs and generic refusal text. The model has no field
+for a password value, so a retry cannot prefill or echo it. Provider labels are
+HTML-escaped under the existing script-free template policy. Rendering tests cover
+both locales, labels, POST binding and absence of a password value attribute.
+This template is not yet connected to a HTTP route or provider chooser; CSRF,
+throttling, credential submission and operational LDAP activation remain pending.

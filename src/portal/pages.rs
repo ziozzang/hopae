@@ -103,6 +103,19 @@ pub struct Chooser<'a> {
     pub providers: &'a [ChoiceView],
 }
 
+/// No field can carry a password value back into the rendered page.
+#[derive(Template)]
+#[template(path = "password.html")]
+pub struct PasswordForm<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub provider_id: &'a str,
+    pub provider_name: &'a str,
+    pub csrf: &'a str,
+    pub challenge: &'a str,
+    pub rejected: bool,
+}
+
 #[derive(Template)]
 #[template(path = "retry.html")]
 pub struct Retry<'a> {
@@ -210,6 +223,45 @@ mod tests {
     use super::super::i18n::{Lang, strings};
     use super::*;
 
+    #[test]
+    fn password_form_posts_bound_challenge_and_escapes_labels_without_prefilling_secret() {
+        for lang in [Lang::En, Lang::Ko] {
+            let t = strings(lang);
+            let page = PasswordForm {
+                t,
+                request_id: "owned",
+                provider_id: "directory",
+                provider_name: "<script>owned</script>",
+                csrf: "owned-csrf",
+                challenge: "owned-challenge",
+                rejected: true,
+            }
+            .render()
+            .unwrap();
+            assert!(
+                page.contains("method=\"post\"")
+                    && page.contains("action=\"/login/directory/password\"")
+            );
+            assert!(page.contains("name=\"csrf\"") && page.contains("name=\"challenge\""));
+            assert!(!page.contains("<script>owned</script>"));
+            let password = page
+                .lines()
+                .find(|line| line.contains("id=\"password\"") && line.contains("<input"))
+                .unwrap();
+            assert!(!password.contains("value="));
+            assert!(password.contains("type=\"password\""));
+            for key in [
+                "password.title",
+                "password.provider",
+                "password.rejected",
+                "password.username",
+                "password.password",
+                "password.submit",
+            ] {
+                assert!(t.has(key));
+            }
+        }
+    }
     #[test]
     fn every_error_page_has_text_in_both_languages() {
         for lang in [Lang::En, Lang::Ko] {

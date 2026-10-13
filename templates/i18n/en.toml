@@ -232,3 +232,10 @@
 "admin.events.col_ua" = "User agent"
 "admin.events.col_attrs" = "Details"
 "admin.users.readonly" = "Read-only access: this page offers no actions."
+
+"password.title" = "Sign in with your account"
+"password.provider" = "Account provider: {provider}"
+"password.rejected" = "Sign-in could not be completed. Check your credentials and try again."
+"password.username" = "Username"
+"password.password" = "Password"
+"password.submit" = "Sign in"

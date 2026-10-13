@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=15 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=16 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -243,3 +243,13 @@ form/CSRF/throttling 연결·설정 커넥터 epoch fence·원격 LDAP 회수·�
 잘못된 자격 재시도·성공·replay·provider 비활성 사례도 같은 시나리오에서 유지합니다.
 Clippy가 통과했습니다. 서비스 바인딩 경계 검증이며 HTTP CSRF·비밀번호 form 연결은
 운영 활성화 전에 별도로 필요합니다.
+
+## 비밀번호 form 템플릿 준비
+
+영어·한국어 portal PasswordForm 템플릿을 추가했습니다. provider 비밀번호 경로에
+POST로 challenge·CSRF hidden 필드와 라벨이 있는 username/current-password 입력,
+일반 거부 문구를 사용합니다. 모델에 비밀번호 값 필드가 없으므로 재시도에 값을 다시
+채우거나 노출하지 않습니다. 기존 script 없는 템플릿 정책 아래 provider 표시명을
+HTML escape합니다. 두 언어·라벨·POST 바인딩·password value 속성 부재를 검사합니다.
+HTTP route나 provider 선택기에 아직 연결하지 않았고 CSRF·throttling·자격 제출·
+운영 LDAP 활성화는 남았습니다.

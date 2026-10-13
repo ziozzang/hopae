@@ -231,3 +231,10 @@
 "admin.events.col_ua" = "사용자 에이전트"
 "admin.events.col_attrs" = "세부 정보"
 "admin.users.readonly" = "읽기 전용 권한입니다. 이 페이지에서 실행할 수 있는 작업이 없습니다."
+
+"password.title" = "계정으로 로그인"
+"password.provider" = "계정 제공자: {provider}"
+"password.rejected" = "로그인을 완료하지 못했습니다. 자격 정보를 확인하고 다시 시도하세요."
+"password.username" = "사용자 이름"
+"password.password" = "비밀번호"
+"password.submit" = "로그인"
