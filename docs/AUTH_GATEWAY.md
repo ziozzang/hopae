@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -159,3 +159,22 @@ service step-up and Hangang console/stream propagation. Internal dogfooding is r
 Algorithm references: [RFC 6238](https://www.rfc-editor.org/rfc/rfc6238),
 [RFC 4226](https://www.rfc-editor.org/rfc/rfc4226). Protocol parameters and lifecycle
 above are proposed Hopae choices; the RFCs do not define this enrollment/API design.
+
+## TOTP arithmetic source status
+
+`src/factor/totp.rs` implements HMAC-SHA-1/256/512 dynamic truncation, six/eight
+ASCII digits, fixed 30-second steps and at most one adjacent step on either side.
+Seeds are bounded to 20–128 bytes, redact Debug and zeroize their owned bytes on drop.
+Expected OTP and HMAC buffers are zeroized; submitted values use the existing Secret
+wrapper. All window candidates are compared with constant-time byte equality.
+Negative time and malformed codes are refused. The result is only a matching counter,
+filtered against a caller-supplied last-accepted watermark; it carries no user binding,
+factor provenance or assurance and cannot create a session by itself.
+
+Two focused tests cover all 18 RFC 6238 Appendix B vectors, large timestamps,
+leading zeros, six-digit defaults, malformed input, bounded window and watermark
+refusal including rollback. Actual authenticator enrollment is not qualified.
+No enrollment endpoint, seed encryption at rest, recovery, durable concurrent replay
+CAS, MFA session/console integration or external factor/Lua adapter is implemented
+by this arithmetic change. Those lifecycle requirements remain mandatory before
+claiming TOTP authentication support.

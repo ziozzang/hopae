@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=4 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=5 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -135,3 +135,20 @@ revision CAS·감사·롤백을 요구합니다. 세션 발급·임의 DB 쓰기
 알고리즘 참고: [RFC 6238](https://www.rfc-editor.org/rfc/rfc6238),
 [RFC 4226](https://www.rfc-editor.org/rfc/rfc4226). 위 프로토콜 설정·수명주기는 호패의
 설계 제안이며 RFC가 등록·외부 API 설계를 정의하는 것은 아닙니다.
+
+## TOTP 계산 소스 상태
+
+`src/factor/totp.rs`에 HMAC-SHA-1/256/512 dynamic truncation, 6·8자리 ASCII
+숫자, 고정 30초 step과 양쪽 최대 한 step 검사를 구현했습니다. Seed는 20–128
+byte로 제한하고 Debug를 가리며 소유 byte를 drop 시 지웁니다. 예상 OTP·HMAC
+버퍼도 지우며 제출값은 기존 Secret wrapper를 사용합니다. 시간창 후보는 모두
+constant-time byte 비교를 수행합니다. 음수 시간·비정상 코드를 거부합니다.
+결과는 호출자가 준 마지막 승인 watermark보다 큰 일치 counter일 뿐이며,
+user binding·요인 출처·보증 수준이 없고 단독으로 세션을 만들 수 없습니다.
+
+집중 테스트 2건이 RFC 6238 Appendix B의 18개 vector, 큰 timestamp,
+앞자리 0, 6자리 기본값, 잘못된 입력, 제한 시간창, 시계 역행을 포함한 watermark
+거부를 검증합니다. 실제 authenticator 등록은 아직 검증하지 않았습니다.
+등록 endpoint·저장 seed 암호화·복구·영속 동시 재사용 CAS·MFA 세션·관리자 통합,
+외부 요인·Lua adapter는 이번 계산 변경에 포함되지 않습니다. 이 수명주기 요구를
+완료해야 TOTP 인증 지원을 달성한 것으로 판단합니다.

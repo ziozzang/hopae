@@ -1,1 +1,2 @@
-//! `Factor` trait for second factors: TOTP, WebAuthn, recovery codes (M5). Empty in M0.
+//! Second-factor primitives. Enrollment, durable replay fencing and session integration remain separate.
+pub mod totp;
