@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=5 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=6 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -120,3 +120,18 @@ unavailable ExtendedResponse를 보낸 뒤 후속 bind 없이 연결이 닫히�
 거부 시 평문 인증으로 우회하지 않습니다. 인증서·잘못된 사용자·circuit 검사를 두
 설정에서 실행합니다. portal registry의 LDAP 활성화나 세션 회수·고부하 성능을
 증명하는 검사는 아닙니다.
+
+## 불변 subject 인코딩
+
+subject_encoding의 기본 text와 binary_hex를 지원합니다. subject에는 소문자
+attribute namespace와 인코딩 접두사를 포함합니다. 예시는 `t:entryuuid:<value>`
+또는 `b:objectguid:<raw-byte-hex>`입니다. GUID endian 재해석 없이 원래 byte를
+인코딩합니다. 텍스트/바이너리 값과 다른 attribute 이름이 충돌하지 않습니다.
+대소문자 구분 없이 attribute 발생 한 번·값 하나를 요구합니다. 텍스트는 제어 문자
+없이 128byte, 바이너리는 64byte까지이며 누락·모호함·과대 값은 차단합니다.
+ldap3의 텍스트 map에 노출된 유효한 UTF-8도 binary 인코딩은 원래 byte를 유지합니다.
+
+unit test로 모호함·인코딩 격리를 검증하고 실제 소유한 OpenLDAP의 UTF-8이 아닌
+바이너리 attribute를 TLS 두 방식에서 정확한 인코딩으로 확인했습니다. Active
+Directory 호환성이나 사용자 수명주기 검증은 아닙니다. 이번 prototype subject
+형식 변경 전에 운영 LDAP 신원은 없었습니다.

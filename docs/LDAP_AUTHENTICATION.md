@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 5 -->
+<!-- doc-rev: 6 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -141,3 +141,19 @@ and verifies connection closure without a subsequent bind. Rejection cannot fall
 back to cleartext authentication. Certificate and invalid-user/circuit tests run
 for both configured modes. These tests do not activate LDAP in the portal registry
 or establish session revocation and high-load performance guarantees.
+
+## Immutable subject encoding
+
+The connector supports explicit subject_encoding values text (default) and
+binary_hex. Subjects include a lowercased attribute namespace and encoding prefix:
+`t:entryuuid:<value>` or `b:objectguid:<raw-byte-hex>`. Binary bytes are encoded
+without GUID endianness reinterpretation. Text/binary values and different attribute
+names cannot collide. Require one case-insensitive attribute occurrence and one
+value. Text is bounded to 128 bytes with no controls; binary to 64 bytes. Missing,
+ambiguous and excessive values fail closed. Binary encoding preserves original
+bytes even when ldap3 exposes valid UTF-8 data through its text attribute map.
+
+Unit tests verify ambiguity and encoding isolation. Real owned OpenLDAP returns a
+non-UTF-8 binary attribute and its exact encoding is checked over both TLS modes.
+This does not certify Active Directory compatibility or user lifecycle. No operational
+LDAP identities existed before this prototype subject format change.
