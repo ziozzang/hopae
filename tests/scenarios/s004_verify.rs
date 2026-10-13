@@ -707,7 +707,17 @@ async fn s004_8_cacheability_declared_safely() {
     };
     let f = Fx::with("m1-basic", with_rule);
     let (_u, _s, h1) = precondition(&f).await;
-    let (_, cache) = allow(f.decide(f.req(APP_URL).cookie(&h1)).await);
+    assert!(matches!(
+        f.decide(f.req(APP_URL).cookie(&h1)).await,
+        Decision::Deny {
+            reason: hopae::event::types::reasons::STEP_UP_REQUIRED,
+            ..
+        }
+    ));
+    let (_, cache) = allow(
+        f.decide(f.req("https://app.example.test/public").cookie(&h1))
+            .await,
+    );
     assert!(matches!(cache, Cacheability::NoStore));
 
     // Sixty seconds is refused by the configuration.
@@ -1483,5 +1493,141 @@ mod gateway_layer {
         // The right key (the gateway's own static header) is processed as S004-1.
         let ok = b.get(APP_HOST, "/admin/x");
         assert_eq!(ok.status, 200);
+    }
+}
+
+#[tokio::test]
+async fn stepup_requires_actual_second_factor_freshness_and_fixed_handle_level() {
+    use fx::*;
+    use hopae::event::types::reasons;
+    use hopae::session::types::{Aal, FactorEntry, FactorKind};
+    use hopae::verify::{Decision, LoginKind};
+    for (name, session_aal, handle_aal, kind, age, allowed) in [
+        ("initial", Aal::One, Aal::One, None, 0, false),
+        ("number_only", Aal::Two, Aal::Two, None, 0, false),
+        (
+            "oidc_only",
+            Aal::Two,
+            Aal::Two,
+            Some(FactorKind::Oidc),
+            0,
+            false,
+        ),
+        (
+            "fresh_totp_old_primary",
+            Aal::Two,
+            Aal::Two,
+            Some(FactorKind::Totp),
+            0,
+            true,
+        ),
+        (
+            "old_totp",
+            Aal::Two,
+            Aal::Two,
+            Some(FactorKind::Totp),
+            301,
+            false,
+        ),
+        (
+            "future_totp",
+            Aal::Two,
+            Aal::Two,
+            Some(FactorKind::Totp),
+            -1,
+            false,
+        ),
+        (
+            "old_handle",
+            Aal::Two,
+            Aal::One,
+            Some(FactorKind::Totp),
+            0,
+            false,
+        ),
+        (
+            "low_session",
+            Aal::One,
+            Aal::Two,
+            Some(FactorKind::Totp),
+            0,
+            false,
+        ),
+    ] {
+        let f = Fx::with("m1-basic", |v| {
+            v["apps"][0]["step_up"] =
+                serde_json::json!([{"path_prefix":"/admin","require":{"aal":2,"max_age":300}}]);
+        });
+        let user = f.user("stepup@example.test", None, None).await;
+        let session = f
+            .session_with(&user, |s| {
+                s.aal = session_aal;
+                if name == "fresh_totp_old_primary" {
+                    s.auth_time = hopae::crypto::Timestamp(T0 - 3_600_000);
+                }
+                if let Some(kind) = kind {
+                    s.factors.push(FactorEntry {
+                        kind,
+                        provider: None,
+                        at: hopae::crypto::Timestamp(T0 - age * 1000),
+                    });
+                }
+            })
+            .await;
+        let handle = f
+            .handle_with(&session, "app.example.test", |h| h.issued_aal = handle_aal)
+            .await;
+        for path in ["/admin/x", "/ADMIN/x", "/%61dmin/x"] {
+            let url = format!("https://app.example.test{path}");
+            let mut document_input = f.req(&url).cookie(&handle).build();
+            document_input.canonical_path =
+                hopae::gateway::canonical::canonical_path(path).unwrap();
+            let document = hopae::verify::decide(&f.ctx, document_input).await;
+            if allowed {
+                assert!(matches!(document, Decision::Allow { .. }), "{name} {path}");
+            } else {
+                assert!(
+                    matches!(
+                        document,
+                        Decision::Deny {
+                            reason: reasons::STEP_UP_REQUIRED,
+                            ..
+                        }
+                    ),
+                    "{name} {path}"
+                );
+            }
+            let mut api_input = f.req(&url).cookie(&handle).other().build();
+            api_input.canonical_path = hopae::gateway::canonical::canonical_path(path).unwrap();
+            let api = hopae::verify::decide(&f.ctx, api_input).await;
+            if allowed {
+                assert!(matches!(api, Decision::Allow { .. }), "{name}");
+            } else {
+                assert!(
+                    matches!(
+                        api,
+                        Decision::Login {
+                            kind: LoginKind::StepUp,
+                            clear_handle: false,
+                            ..
+                        }
+                    ),
+                    "{name}"
+                );
+            }
+        }
+        assert!(
+            matches!(
+                f.decide(f.req("https://app.example.test/public").cookie(&handle))
+                    .await,
+                Decision::Allow { .. }
+            ),
+            "{name}"
+        );
+        assert_eq!(
+            f.txn_rows(),
+            0,
+            "no unsupported browser challenge for {name}"
+        );
     }
 }

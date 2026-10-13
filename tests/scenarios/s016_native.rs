@@ -506,6 +506,72 @@ async fn service_api_credential_http_native_parity_and_no_human_assurance() {
             .iter()
             .any(|(name, value)| name == "x-hopae-aal" && value == b"1")
     );
+    let original = fx.snapshot.load_full();
+    let mut changed = (*original).clone();
+    changed.apps[0]
+        .step_up
+        .push(hopae::policy::types::StepUpRule {
+            path_prefix: Some("/mfa".into()),
+            aal: hopae::session::Aal::Two,
+            max_age: None,
+        });
+    fx.snapshot.store(Arc::new(changed));
+    for (id, path, expected) in [
+        (20, "/mfa/x", 403),
+        (21, "/MFA/x", 403),
+        (22, "/%6dfa/x", 403),
+        (23, "/private", 200),
+    ] {
+        let mut headers = context(path);
+        headers.push((
+            "authorization".into(),
+            format!("Bearer {credential}").into_bytes(),
+        ));
+        let mut request = Request::builder()
+            .uri("/_hopae/verify")
+            .body(Body::empty())
+            .unwrap();
+        for (name, value) in &headers {
+            request.headers_mut().append(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_bytes(value).unwrap(),
+            );
+        }
+        request
+            .headers_mut()
+            .insert("x-hopae-gateway-key", "native-test-key".parse().unwrap());
+        let http = router.clone().oneshot(request).await.unwrap();
+        let (_, payload) =
+            exchange(&mut socket, id, &wire::encode_request(&headers).unwrap()).await;
+        let native = wire::decode_reply(&payload).unwrap();
+        assert_eq!(http.status().as_u16(), expected, "{path}");
+        assert_eq!(native.status, expected, "{path}");
+        if expected == 403 {
+            assert!(http.headers().get("x-hopae-principal-kind").is_none());
+            assert!(
+                native
+                    .headers
+                    .iter()
+                    .all(|(name, _)| name != "x-hopae-principal-kind")
+            );
+        }
+    }
+    let mut disabled = (*original).clone();
+    disabled.apps[0].enabled = false;
+    fx.snapshot.store(Arc::new(disabled));
+    let mut disabled_headers = context("/private");
+    disabled_headers.push((
+        "authorization".into(),
+        format!("Bearer {credential}").into_bytes(),
+    ));
+    let (_, payload) = exchange(
+        &mut socket,
+        24,
+        &wire::encode_request(&disabled_headers).unwrap(),
+    )
+    .await;
+    assert_eq!(wire::decode_reply(&payload).unwrap().status, 403);
+    fx.snapshot.store(original);
     authority
         .publish(
             &mut db,
@@ -520,7 +586,7 @@ async fn service_api_credential_http_native_parity_and_no_human_assurance() {
         "authorization".into(),
         format!("Bearer {credential}").into_bytes(),
     ));
-    let (_, payload) = exchange(&mut socket, 4, &wire::encode_request(&headers).unwrap()).await;
+    let (_, payload) = exchange(&mut socket, 25, &wire::encode_request(&headers).unwrap()).await;
     assert_eq!(
         wire::decode_reply(&payload).unwrap().status,
         401,

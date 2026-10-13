@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 3 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -157,3 +157,33 @@ command does not independently decide application permissions. Structural
 provider configuration equality is not a monotonic publication epoch or a
 fingerprint of environment secret/CA contents. No runtime route is enabled by
 this primitive, and the internally deployed image remains unchanged.
+
+## Request assurance enforcement
+
+Session verification now applies every matching canonical-path rule before
+issuing identity. AAL 2 requires both the session and issued handle to have the
+level and an actual TOTP/WebAuthn/recovery factor record. `max_age` measures that
+factor's latest satisfaction time, not the primary authentication time. Missing,
+expired or future factor timestamps and old level-1 handles cannot pass. AAL 1
+freshness rules use primary authentication time. Nonmatching paths retain
+ordinary authentication behavior; any configured rule still disables caching.
+
+While browser challenge creation/completion remains unfinished, an unmet rule
+returns a document 403 or API/session 401 `step_up_required`; no unsupported
+redirect, handle clearing or incomplete challenge is issued. These denials must
+be replaced with the bound browser step-up flow before claiming complete MFA.
+
+Service API credentials remain AAL 0. After authentication, the shared HTTP/HOP1
+pipeline checks the current application snapshot: a matching human assurance
+rule or disabled/unknown application is refused without service identity headers.
+A valid API key cannot bypass a human assurance rule or use a human session as
+fallback after refusal. Pumgye independently enforces service permissions.
+Tests cover canonical/uppercase prefixes, absent/number-only/OIDC-only evidence,
+old/future OTP, old issued handles, fresh OTP with old primary authentication,
+nonmatching paths, and HTTP/native service denial after snapshot changes.
+
+The native admin listener maps assurance refusal to its existing
+`aal_insufficient` response, metric and required audit event, rather than
+misreporting a missing login. Prefix matching compares ASCII bytes without
+allocating lowercase strings on each request; existing UTF-8 and segment
+semantics are preserved. This is not a full-stack throughput qualification.

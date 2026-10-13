@@ -1,12 +1,11 @@
-//! Step-up rules (ADR-0008). Parsed and validated in M1; enforcement is M5.
-//! The one effect in M1 is cacheability: a non-empty rule list makes every
-//! decision path-dependent, so the engine answers `no-store` (ADR-0006).
+//! Step-up evidence and freshness requirements (ADR-0008).
+//! AAL 2 needs an issued level and an actual second-factor record.
 
 use std::time::Duration;
 
 use crate::crypto::Timestamp;
 use crate::policy::types::StepUpRule;
-use crate::session::types::Aal;
+use crate::session::types::{Aal, FactorEntry, FactorKind};
 
 /// True when the rule list makes the decision depend on the path.
 pub fn forces_no_store(rules: &[StepUpRule]) -> bool {
@@ -21,13 +20,15 @@ pub fn rule_matches(rule: &StepUpRule, canonical_path: &str) -> bool {
         Some(prefix) => {
             // ASCII-case-insensitive (TM-39): an upstream that folds case
             // serves `/ADMIN/x` as `/admin/x`, so the rule must too.
-            let p = prefix.trim_end_matches('/').to_ascii_lowercase();
-            let path = canonical_path.to_ascii_lowercase();
-            path == p
-                || path
-                    .strip_prefix(p.as_str())
-                    .is_some_and(|rest| rest.starts_with('/'))
-                || p.is_empty()
+            let prefix = prefix.trim_end_matches('/').as_bytes();
+            let path = canonical_path.as_bytes();
+            // Byte-wise ASCII comparison preserves UTF-8 equality without
+            // allocating lowercase copies for every rule on every request.
+            prefix.is_empty()
+                || (path
+                    .get(..prefix.len())
+                    .is_some_and(|segment| segment.eq_ignore_ascii_case(prefix))
+                    && path.get(prefix.len()).is_none_or(|next| *next == b'/'))
         }
     }
 }
@@ -38,18 +39,39 @@ pub enum StepUpVerdict {
     Required { aal: Aal, max_age: Option<Duration> },
 }
 
-/// What the rules ask of a request. Not called by the M1 engine (no
-/// enforcement); exposed for the M5 work and exercised by unit tests.
+/// Evaluate every matching rule. A second-factor freshness bound uses the
+/// latest actual factor satisfaction, never the primary login timestamp.
 pub fn evaluate(
     rules: &[StepUpRule],
     canonical_path: &str,
     handle_aal: Aal,
     auth_time: Timestamp,
+    factors: &[FactorEntry],
     now: Timestamp,
 ) -> StepUpVerdict {
     for rule in rules.iter().filter(|r| rule_matches(r, canonical_path)) {
-        let too_old = rule.max_age.is_some_and(|m| now.since(auth_time) > m);
-        if handle_aal < rule.aal || too_old {
+        let satisfied_at = if rule.aal == Aal::Two {
+            let second_factors = factors.iter().filter(|f| {
+                matches!(
+                    f.kind,
+                    FactorKind::Totp | FactorKind::Webauthn | FactorKind::Recovery
+                )
+            });
+            let mut latest = None;
+            for factor in second_factors {
+                if factor.at > now {
+                    latest = None;
+                    break;
+                }
+                latest = Some(latest.map_or(factor.at, |at: Timestamp| at.max(factor.at)));
+            }
+            latest
+        } else {
+            (auth_time <= now).then_some(auth_time)
+        };
+        let insufficient_evidence =
+            satisfied_at.is_none_or(|at| rule.max_age.is_some_and(|m| now.since(at) > m));
+        if handle_aal < rule.aal || insufficient_evidence {
             return StepUpVerdict::Required {
                 aal: rule.aal,
                 max_age: rule.max_age,
@@ -101,21 +123,26 @@ mod tests {
         let rules = [rule(Some("/admin"), Aal::Two, Some(600))];
         let t0 = Timestamp(1_000_000);
         let now = t0.add(Duration::from_secs(60));
+        let factors = [FactorEntry {
+            kind: FactorKind::Totp,
+            provider: None,
+            at: t0,
+        }];
         assert_eq!(
-            evaluate(&rules, "/public", Aal::One, t0, now),
+            evaluate(&rules, "/public", Aal::One, t0, &factors, now),
             StepUpVerdict::NotRequired
         );
         assert!(matches!(
-            evaluate(&rules, "/admin/x", Aal::One, t0, now),
+            evaluate(&rules, "/admin/x", Aal::One, t0, &factors, now),
             StepUpVerdict::Required { aal: Aal::Two, .. }
         ));
         assert_eq!(
-            evaluate(&rules, "/admin/x", Aal::Two, t0, now),
+            evaluate(&rules, "/admin/x", Aal::Two, t0, &factors, now),
             StepUpVerdict::NotRequired
         );
         let later = t0.add(Duration::from_secs(601));
         assert!(matches!(
-            evaluate(&rules, "/admin/x", Aal::Two, t0, later),
+            evaluate(&rules, "/admin/x", Aal::Two, t0, &factors, later),
             StepUpVerdict::Required { .. }
         ));
         assert!(forces_no_store(&rules));

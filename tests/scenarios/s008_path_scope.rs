@@ -448,7 +448,7 @@ mod gateway_layer {
         let Some(s) = scoped("s008_a5") else {
             return;
         };
-        // Unit half: the canonical path and the step-up rule (enforcement is M5).
+        // Unit half: the canonical path and the enforced step-up rule.
         let canon = hopae::gateway::canonical::canonical_path("/%61dmin/x").expect("canonical");
         assert_eq!(canon.as_str(), "/admin/x");
         let rule = hopae::policy::types::StepUpRule {
@@ -463,6 +463,7 @@ mod gateway_layer {
                 canon.as_str(),
                 hopae::session::Aal::One,
                 hopae::crypto::Timestamp(0),
+                &[],
                 hopae::crypto::Timestamp(1000),
             ),
             hopae::policy::step_up::StepUpVerdict::Required { .. }

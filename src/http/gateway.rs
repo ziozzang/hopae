@@ -255,6 +255,42 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
             if unavailable {
                 return hangang::service_identity::unavailable(&request_id);
             }
+            if evidence.is_some() {
+                let policy = st.ctx.snapshot.load_full();
+                let refused = match crate::policy::apps::resolve(&policy, &input.host) {
+                    Err(reason) => Some(reason),
+                    Ok(app)
+                        if app.step_up.iter().any(|rule| {
+                            crate::policy::step_up::rule_matches(
+                                rule,
+                                input.canonical_path.as_str(),
+                            )
+                        }) =>
+                    {
+                        Some(reasons::STEP_UP_REQUIRED)
+                    }
+                    Ok(_) => None,
+                };
+                // A service proof has AAL 0 and cannot satisfy any human
+                // assurance rule. Evaluate after the remote exchange against
+                // the current application snapshot, over HTTP and HOP1 alike.
+                if let Some(reason) = refused {
+                    let decision = Decision::Deny {
+                        reason,
+                        kind: DenyKind::Forbidden,
+                    };
+                    st.count_decision(&decision);
+                    st.denied(
+                        &decision,
+                        None,
+                        Some(input.client_ip),
+                        None,
+                        None,
+                        &request_id,
+                    );
+                    return hangang::render(decision, input.navigation, &env, &st.cfg);
+                }
+            }
             return hangang::service_identity::response(evidence.as_ref(), &request_id);
         }
     }

@@ -337,17 +337,19 @@ pub async fn authenticate(
     let identity = match &decision {
         Decision::Allow { identity, .. } => identity,
         Decision::Login { kind, cause: c, .. } => {
-            // A freshness refusal is `auth_too_old`; the listener never maps a
-            // reauthentication to `login_required`. Every kind that is not an
-            // ordinary or step-up login is one (the engine's `Reauth`).
+            // Preserve the native reason when assurance or freshness fails.
+            // Neither refusal is a missing first-factor login.
             let reauth = !matches!(kind, LoginKind::Login | LoginKind::StepUp);
-            let denial = if reauth {
+            let stepup = matches!(kind, LoginKind::StepUp);
+            let denial = if stepup {
+                Denial::AalInsufficient
+            } else if reauth {
                 Denial::AuthTooOld
             } else {
                 Denial::LoginRequired
             };
             deny(denial.clone());
-            if c.is_none() && !reauth {
+            if c.is_none() && !reauth && !stepup {
                 // No handle at all: still a counted, sampled refusal.
                 denials::record_refusal(
                     st.emitter.as_ref(),
@@ -359,9 +361,15 @@ pub async fn authenticate(
                 );
             }
             let mut r = refused(denial);
-            if reauth {
+            if reauth || stepup {
                 r.requester = requester_of(st, handle.as_deref()).await;
             }
+            return Err(r);
+        }
+        Decision::Deny { reason, .. } if *reason == reasons::STEP_UP_REQUIRED => {
+            deny(Denial::AalInsufficient);
+            let mut r = refused(Denial::AalInsufficient);
+            r.requester = requester_of(st, handle.as_deref()).await;
             return Err(r);
         }
         Decision::Deny {

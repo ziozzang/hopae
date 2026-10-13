@@ -259,6 +259,31 @@ async fn flow(cx: &Cx<'_>) -> Flow {
     match authenticate(cx, app).await? {
         Authn::Refused(cause) => login(cx, app, &target, cause, 0).await,
         Authn::Allowed(authed) => {
+            if matches!(
+                step_up::evaluate(
+                    &app.step_up,
+                    cx.input.canonical_path.as_str(),
+                    authed.view.handle.issued_aal.min(authed.view.session.aal),
+                    authed.view.session.auth_time,
+                    &authed.view.session.factors,
+                    cx.now,
+                ),
+                step_up::StepUpVerdict::Required { .. }
+            ) {
+                // Until the browser challenge/bootstrap is connected, do not
+                // authorize a document or redirect it to an unavailable endpoint.
+                return Ok(if cx.document() {
+                    cx.deny(reasons::STEP_UP_REQUIRED, DenyKind::ForbiddenHtml)
+                } else {
+                    Decision::Login {
+                        transaction: None,
+                        bind: BindAction::Keep,
+                        kind: LoginKind::StepUp,
+                        clear_handle: false,
+                        cause: Some(reasons::STEP_UP_REQUIRED),
+                    }
+                });
+            }
             // The console's freshness rule, after the step-up rules (ADR-0016
             // decision 15): one predicate at every verify.
             if let Some(n) = app.max_auth_age {
@@ -487,8 +512,7 @@ fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed) -> Decision {
         snapshot,
         expires_at,
     } = authed;
-    // Application policy is `enabled` (checked with the host); step-up rules
-    // are parsed but not enforced in M1: they only make the answer path-dependent.
+    // Enabled host and step-up evidence were checked before reaching this grant.
     let path_dependent = step_up::forces_no_store(&app.step_up);
 
     touch(cx, app, &view);

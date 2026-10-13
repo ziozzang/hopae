@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 19 -->
+<!-- doc-rev: 20 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -127,7 +127,7 @@ for. A host not listed is denied (`unknown_app`).
 | `apps[].on_authz_change` | `refresh`, `terminate` | `refresh` | What happens to live sessions when authorization data changes. |
 | `apps[].verify_cache_seconds` | integer | `0` | Staleness bound the gateway may cache an allow for; at most `30`. `hopae --check` prints the value per application and **warns when it is `false`**: `sec-fetch-site: same-origin` proves only that a document of the application's own origin started the navigation, so a navigation gadget in the application (a page that assigns a URL from its own query to `location`, such as `/continue?next=/_hopae/logout`) can end a user's session without a click. Keep `true` unless that is accepted. |
 | `apps[].logout_confirm` | boolean | `true` (inherited from the `default` application when it sets it) | `true`: `/_hopae/logout` on the application host redirects to the portal's confirmation page. `false`: a document navigation with `sec-fetch-site: same-origin` that presents a valid handle ends the session at once and is redirected to the portal's signed-out page; every other request still goes through the confirmation. After either, the portal shows a "Sign in again" link instead of redirecting to the protected target ([ADR-0015](adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md), [gateway contract](GATEWAY_CONTRACT.md#application-host-entry-points)). Reported by `--check`. |
-| `apps[].step_up[]` | array of `{path_prefix, require: {aal, max_age}}` | none | Step-up rules. In M1 they are parsed and validated (`aal` is 1 or 2, `path_prefix` starts with `/`, `max_age` is positive seconds) and force `no-store`; enforcement arrives in M5. |
+| `apps[].step_up[]` | array of `{path_prefix, require: {aal, max_age}}` | none | Enforced session assurance rules (`aal` is 1 or 2, `path_prefix` starts with `/`, `max_age` is positive seconds). AAL 2 requires actual second-factor evidence; freshness uses its satisfaction time. Rules force `no-store`. An AAL 0 service credential cannot satisfy a matching rule. Browser step-up completion is not enabled yet. |
 
 #### Providers
 
@@ -227,7 +227,7 @@ the milestone shown. Until then `hopae --check` rejects them as unknown.
 - JSON only; comments are not allowed.
 - Before 1.0 a minor release may rename or remove a key; each such change is listed in the CHANGELOG under `Changed` with a migration note.
 - No reload before M6.
-- `apps[].step_up` is parsed but not enforced before M5. `admin.require_aal = 2` therefore refuses every console request.
+- `apps[].step_up` is enforced. Unmet session rules return `step_up_required`: document navigation is refused with 403 until browser completion is wired, and API/session requests return 401 without clearing the handle. Native OTP completion exists as a service/storage primitive. `admin.require_aal = 2` requires actual second-factor evidence; enrollment alone does not provide it.
 - Provider settings `preset`, `userinfo`, `id_token_typ`, `reauth` and `reauth_prompt` cannot be set from the file (see Providers).
 - `apps[].max_auth_age` is not a key: only the implicit console application has a freshness bound, `admin.max_auth_age`.
 

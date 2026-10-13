@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=19 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=20 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -124,7 +124,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `apps[].on_authz_change` | `refresh`, `terminate` | `refresh` | 인가 데이터가 바뀔 때 살아 있는 세션에 일어나는 일. |
 | `apps[].verify_cache_seconds` | 정수 | `0` | 게이트웨이가 허용을 캐시할 수 있는 최대 시간. 최대 `30`. `hopae --check`는 애플리케이션마다 값을 출력하고 **`false`이면 경고합니다**: `sec-fetch-site: same-origin`은 애플리케이션 자신의 출처 문서가 탐색을 시작했음을 증명할 뿐이므로, 애플리케이션 안의 탐색 가젯(자신의 쿼리에서 가져온 URL을 `location`에 대입하는 페이지, 예: `/continue?next=/_hopae/logout`)이 클릭 없이 사용자의 세션을 끝낼 수 있습니다. 이를 받아들이는 경우가 아니면 `true`를 유지하십시오. |
 | `apps[].logout_confirm` | 불리언 | `true`(`default` 애플리케이션이 설정했다면 그 값을 상속) | `true`: 애플리케이션 호스트의 `/_hopae/logout`은 포털의 확인 페이지로 리디렉션합니다. `false`: 유효한 핸들을 제시한 `sec-fetch-site: same-origin` 문서 탐색은 즉시 세션을 끝내고 포털의 로그아웃 완료 페이지로 리디렉션되며, 그 밖의 모든 요청은 여전히 확인을 거칩니다. 어느 쪽이든 포털은 보호된 대상으로 리디렉션하는 대신 "다시 로그인" 링크를 표시합니다([ADR-0015](../adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md), [게이트웨이 계약](GATEWAY_CONTRACT.md#애플리케이션-호스트-진입점)). `--check`가 보고합니다. |
-| `apps[].step_up[]` | `{path_prefix, require: {aal, max_age}}` 배열 | 없음 | 스텝업 규칙. M1에서는 파싱과 검증만 하고(`aal`은 1 또는 2, `path_prefix`는 `/`로 시작, `max_age`는 양의 초) `no-store`를 강제합니다. 강제 적용은 M5에서 도착합니다. |
+| `apps[].step_up[]` | `{path_prefix, require: {aal, max_age}}` 배열 | 없음 | 실제 적용되는 세션 인증등급 규칙입니다(`aal`은 1 또는 2, `path_prefix`는 `/`로 시작, `max_age`는 양의 초). AAL 2는 실제 2차 인증 근거가 필요하며 근거 확인 시각으로 신선도를 검사합니다. `no-store`를 강제합니다. AAL 0 서비스 자격은 일치하는 규칙을 충족할 수 없습니다. 브라우저 단계 상승 완료는 아직 활성화되지 않았습니다. |
 
 #### 제공자
 
@@ -220,7 +220,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 - JSON만 지원하며 주석은 허용하지 않습니다.
 - 1.0 이전에는 마이너 릴리스에서 키의 이름이 바뀌거나 삭제될 수 있습니다. 그런 변경은 각각 CHANGELOG의 `Changed` 아래에 이전 안내와 함께 기록합니다.
 - M6 이전에는 다시 로드가 없습니다.
-- `apps[].step_up`은 파싱만 하며 M5 이전에는 강제하지 않습니다. 따라서 `admin.require_aal = 2`는 모든 콘솔 요청을 거부합니다.
+- `apps[].step_up`을 실제 적용합니다. 미충족 세션 규칙은 `step_up_required`로 처리합니다. 브라우저 완료 연결 전 문서 탐색은 403, API·세션 요청은 핸들을 지우지 않고 401을 반환합니다. 네이티브 OTP 완료는 서비스·저장소 primitive로 구현되어 있습니다. `admin.require_aal = 2`는 실제 2차 인증 근거가 필요하며 등록만으로 충족되지 않습니다.
 - 제공자 설정 `preset`, `userinfo`, `id_token_typ`, `reauth`, `reauth_prompt`는 파일로 지정할 수 없습니다(제공자 절 참고).
 - `apps[].max_auth_age`는 키가 아닙니다. 신선도 한도를 가진 것은 암묵적 콘솔 애플리케이션뿐이며 그 한도는 `admin.max_auth_age`입니다.
 
