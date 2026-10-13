@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=24 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=25 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -322,4 +322,20 @@ verifier 자격·CA 내용·클라이언트는 상태 생성·마이그레이션
 이 설정은 verifier authority와 네이티브 연결 registry를 게시합니다. 설정된 외부 요소는 네이티브 step-up chooser에 표시됩니다. TOTP keyring이나
 비어 있지 않은 외부 registry가 문서 단계 상승을 활성화하며 API 요청은 높은 인증등급
 근거가 없으면 계속 거부합니다. 외부 요소도 네이티브 HTTPS·CSRF·브라우저 바인딩 폼과
-원자적 소유자 완료를 사용합니다. Lua·외부 등록·복구는 아직 미구현입니다.
+원자적 소유자 완료를 사용합니다.
+
+선택적인 `eligibility_lua` 텍스트 스크립트는 네이티브 소유자 문맥으로 factor 사용을
+제한합니다. 미릴리스 소스 기능이며 태그 0.0.3의 artifact·배포에는 포함되지 않습니다.
+예를 들어 `return context.service == 'orders'`는 해당 서비스에서만
+검증을 진행합니다. 환경에는 서버 소유 식별자인 `context.service`, `context.connector`,
+`context.subject`만 있으며 브라우저 주장을 사용하지 않습니다. 표준 라이브러리·자격·
+네트워크·파일·session 쓰기·권한·인증등급 지정은 제공하지 않으며 스크립트에 비밀을 넣지
+않습니다. boolean만 받으며 false는 API 호출 전에 거부하고 오류·제한 초과도 거부합니다.
+true도 인증된 HTTPS proof 검증과 네이티브 소유자의 원자적 완료를 거쳐야 합니다.
+
+소스 16 KiB, Lua heap 256 KiB, 최대 20,100개 명령(100개마다 hook), VM 준비를 포함한
+5ms 및 기존 커넥터별 동시 호출 64개 제한을 적용합니다. 실행마다 새 VM을 사용하고 시작
+시 문법·텍스트 전용 모드를 검사합니다. 소스는 불변 verifier binding에 포함되어 변경하려면
+설정 revision을 높여야 하며 기존 publication 경로로 관련 factor session을 회수합니다.
+스크립트가 없으면 직렬화한 binding은 유지합니다. 현재는 사용 조건 실행이며 범용 Lua
+커넥터 조합·자격 변환·복구는 구현해야 합니다.

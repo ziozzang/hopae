@@ -4527,6 +4527,7 @@ async fn external_snapshot_single_publication_fences_stale_batch_and_invalid_epo
         timeout_ms: 100,
         allow_private_endpoints: false,
         ca: None,
+        eligibility_lua: None,
     }];
     let registry = crate::factor::external_registry::Registry::compile(
         &configs,

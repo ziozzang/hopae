@@ -1821,6 +1821,18 @@ mod tests {
             with(&serde_json::json!({"external_verifiers":[verifier.clone()]}).to_string())
                 .unwrap();
         assert_eq!(config.external_verifiers.len(), 1);
+        let mut scripted = verifier.clone();
+        scripted["eligibility_lua"] = serde_json::json!("return context.service == 'orders'");
+        assert!(
+            with(&serde_json::json!({"external_verifiers":[scripted.clone()]}).to_string()).is_ok()
+        );
+        scripted["eligibility_lua"] = serde_json::json!("return (");
+        assert!(with(&serde_json::json!({"external_verifiers":[scripted]}).to_string()).is_err());
+        assert!(
+            !serde_json::to_string(&config.external_verifiers[0])
+                .unwrap()
+                .contains("eligibility_lua")
+        );
         let raw = "not-a-valid-verifier-secret";
         let errors = check_env(&config, |_| Some(raw.into()));
         assert!(errors.iter().any(|e| e.contains("external_verifiers")));

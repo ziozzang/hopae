@@ -55,6 +55,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-normalization = "0.1"
 url = "2"
 ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
+mlua = { version = "0.12.2", default-features = false, features = ["lua54", "vendored"] }
 
 [features]
 # Loopback-only test control surface (clock, stall, commit gate, crash points,

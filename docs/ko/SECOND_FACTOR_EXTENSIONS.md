@@ -1,10 +1,17 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=15 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=16 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
 ## 구현 상태
+
+미릴리스 소스는 외부 factor 사용 조건에 Lua 5.4를 내장합니다.
+[설정](../CONFIG.md#external-verifier-startup-configuration)을 참고하세요. 격리된
+boolean gate는 인증 근거를 만들거나 HTTPS 검증·소유자의 원자적 완료를 대체하지
+못합니다. 소스·heap·명령 수·시간을 제한하며 스크립트는 버전 authority binding에
+포함됩니다. 범용 커넥터 조합·1차 인증 연결·자격 변환은 후속입니다. 태그 0.0.3의
+artifact와 내부 배포에는 이 새 gate가 포함되지 않습니다.
 
 네이티브 TOTP 등록과 확인, 시드 암호화, 소유자 인가 및 영속 카운터 제어가
 구현되어 있습니다. 6자리, SHA-1, 30초 주기를 사용합니다. 수동 등록은
@@ -21,7 +28,8 @@
 
 네이티브 `external_transport`와 `external_service`가 HTTPS 인증 receipt와 schema v6
 소유자의 원자적 완료를 제공합니다. root 설정은 시작 시 verifier를 컴파일·게시합니다. 외부 portal 폼은
-구현되었으며 Lua 런타임은 아직 활성화하지 않았습니다. 아래 기록은 단계별 구현 상태이며 최신 소유자 구현 절이
+구현되었고 미릴리스 Lua 사용 조건도 구현했습니다. 범용 Lua factor 조합은 아직
+제공하지 않습니다. 아래 기록은 단계별 구현 상태이며 최신 소유자 구현 절이
 영속 외부 완료가 없다는 과거 문구를 대체합니다.
 
 ## 네이티브 권한과 확장 경계

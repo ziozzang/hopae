@@ -131,6 +131,7 @@ pub(super) const ROOT: Node = Obj(&[
             ("timeout_ms", Leaf),
             ("allow_private_endpoints", Leaf),
             ("ca", Leaf),
+            ("eligibility_lua", Leaf),
         ])),
     ),
     (

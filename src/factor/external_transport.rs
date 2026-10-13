@@ -23,10 +23,16 @@ pub struct Config {
     pub allow_private_endpoints: bool,
     #[serde(default)]
     pub ca: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligibility_lua: Option<String>,
 }
 
 impl Config {
     pub fn validate(&self) -> Result<()> {
+        if let Some(source) = &self.eligibility_lua {
+            crate::auth_gateway::lua::Policy::compile(source)
+                .map_err(|_| anyhow::anyhow!("invalid external factor eligibility script"))?;
+        }
         let url = url::Url::parse(&self.url)?;
         ensure!(
             url.scheme() == "https"
@@ -109,6 +115,7 @@ pub struct Connector {
     fetcher: Fetcher,
     capacity: tokio::sync::Semaphore,
     circuit: Arc<Circuit>,
+    eligibility: Option<crate::auth_gateway::lua::Policy>,
 }
 
 impl Connector {
@@ -167,6 +174,12 @@ impl Connector {
             fetcher,
             capacity: tokio::sync::Semaphore::new(64),
             circuit: Circuit::new(3, 30_000).expect("constant circuit bounds"),
+            eligibility: config
+                .eligibility_lua
+                .as_deref()
+                .map(crate::auth_gateway::lua::Policy::compile)
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("invalid external factor eligibility script"))?,
         })
     }
 
@@ -215,6 +228,17 @@ impl Connector {
             .capacity
             .try_acquire()
             .map_err(|_| Error::Unavailable)?;
+        if let Some(policy) = &self.eligibility {
+            match policy.permits(crate::auth_gateway::lua::Context {
+                service: expected.service,
+                connector: expected.factor,
+                subject: expected.user,
+            }) {
+                Ok(true) => {}
+                Ok(false) => return Ok(Verification::Rejected),
+                Err(_) => return Err(Error::Unavailable),
+            }
+        }
         let lease = self.circuit.admit().ok_or(Error::Unavailable)?;
         let started = std::time::Instant::now();
         let result = tokio::time::timeout(self.timeout, async {
@@ -552,6 +576,7 @@ pub(crate) mod tests {
                 timeout_ms: 500,
                 allow_private_endpoints: true,
                 ca: Some(self.directory.path().join("ca.pem")),
+                eligibility_lua: None,
             }
         }
         pub(crate) fn connector(&self) -> Connector {
@@ -580,6 +605,47 @@ pub(crate) mod tests {
             .verify(&expected(), &Secret::new(action.to_owned()), &SystemClock)
             .await
     }
+    #[tokio::test]
+    async fn lua_eligibility_cannot_replace_native_verification() {
+        let fixture = Fixture::new().await;
+        for source in [
+            "return false",
+            "while true do end",
+            "return 'true'",
+            "return os.getenv('SECRET')",
+        ] {
+            let mut config = fixture.config();
+            config.eligibility_lua = Some(source.into());
+            let connector = Connector::compile(&config, &|_| Some("a".repeat(32))).unwrap();
+            let result = call(&connector, "accept").await;
+            if source == "return false" {
+                assert!(matches!(result, Ok(Verification::Rejected)));
+            } else {
+                assert_eq!(result.unwrap_err(), Error::Unavailable);
+            }
+            assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        }
+        let mut config = fixture.config();
+        config.eligibility_lua = Some("return context.service == 'orders'".into());
+        let connector = Connector::compile(&config, &|_| {
+            Some("owned-factor-verifier-key-at-least-thirty-two".into())
+        })
+        .unwrap();
+        assert!(matches!(
+            call(&connector, "reject").await,
+            Ok(Verification::Rejected)
+        ));
+        assert_eq!(
+            call(&connector, "role").await.unwrap_err(),
+            Error::Unavailable
+        );
+        assert!(matches!(
+            call(&connector, "accept").await,
+            Ok(Verification::Verified(_))
+        ));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 3);
+    }
+
     #[tokio::test]
     async fn owned_https_binds_evidence_pools_connections_and_denial_is_healthy() {
         let fixture = Fixture::new().await;
@@ -762,6 +828,7 @@ pub(crate) mod tests {
             timeout_ms: 100,
             allow_private_endpoints: false,
             ca: None,
+            eligibility_lua: None,
         };
         let first = Connector::compile(&base, &|_| Some("a".repeat(32))).unwrap();
         assert!(first.same_binding(&Connector::compile(&base, &|_| Some("a".repeat(32))).unwrap()));

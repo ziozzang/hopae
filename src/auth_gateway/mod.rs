@@ -2,6 +2,7 @@
 //! Evidence construction stays crate-private: request claims cannot authenticate themselves.
 pub mod authority;
 pub mod breaker;
+pub mod lua;
 pub mod publication;
 pub mod relay;
 pub mod runtime;

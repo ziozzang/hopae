@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 24 -->
+<!-- doc-rev: 25 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -334,4 +334,23 @@ Configured external factors now appear in the native step-up chooser. Either
 a configured TOTP keyring or a nonempty external registry enables document step-up;
 API requests still fail closed without elevated evidence. External factors use
 the native HTTPS/CSRF/browser-bound response form and atomic owner completion.
-Lua orchestration and external enrollment/recovery remain unimplemented.
+An optional `eligibility_lua` text script can restrict a factor by native owner
+context in unreleased source (not in tagged 0.0.3 artifacts or deployment).
+For example, `return context.service == 'orders'` allows verification
+only for that service. The environment contains only `context.service`,
+`context.connector` and `context.subject`; these are server-owned identifiers,
+not browser claims. Scripts have no standard libraries, credentials, network,
+filesystem, session writers, permission or assurance authority. Never place
+secrets in scripts. Only a boolean is accepted; false rejects before any API call,
+and errors/budget exhaustion fail closed. True still requires authenticated HTTPS
+proof validation and atomic native owner completion.
+
+Limits are 16 KiB source, 256 KiB Lua heap, at most 20,100 instructions (100
+instruction hook interval), five milliseconds including VM setup, and the existing
+64 concurrent calls per connector. Each evaluation uses a fresh VM. Syntax and
+text-only mode are checked at startup. The source is included in the immutable
+verifier binding; changes require a newer configuration revision and revoke
+affected factor sessions through the existing publication path. With no script,
+serialized binding material is unchanged. This adds eligibility execution, not
+general Lua connector orchestration, credential translation or recovery; those
+remain implementation work.

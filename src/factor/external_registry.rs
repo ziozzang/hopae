@@ -79,6 +79,7 @@ mod tests {
             timeout_ms: 100,
             allow_private_endpoints: false,
             ca: None,
+            eligibility_lua: None,
         }
     }
     #[test]

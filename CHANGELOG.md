@@ -8,6 +8,10 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- Embedded bounded Lua 5.4 eligibility for external second factors. Operator-approved scripts can restrict native verifier use, with isolated context, heap/instruction/time limits and strict boolean results; native proof/session authority remains mandatory. General connector orchestration and credential translation remain unfinished.
+
 ### Fixed
 
 - Native macOS qualification harness: actual process RSS, portable failed-evidence output, bounded loopback verifier startup and complete-frame handling after HTTP connection reset. Truncated/ambiguous responses remain errors; release authentication behavior is unchanged.

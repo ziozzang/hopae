@@ -1,10 +1,18 @@
 # Second-factor extensions
 
-<!-- doc-rev: 15 -->
+<!-- doc-rev: 16 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
 ## Implementation status
+
+Unreleased source now embeds Lua 5.4 for external-factor eligibility; see
+[configuration](CONFIG.md#external-verifier-startup-configuration). Its isolated
+boolean gate cannot create authentication evidence or replace HTTPS verification
+and atomic owner completion. Source/heap/instruction/time limits apply, and the
+script participates in revisioned authority bindings. General Lua connector
+orchestration, first-factor integration and credential translation remain open.
+The tagged 0.0.3 artifacts and internal deployment do not include this new gate.
 
 Native TOTP enrollment and confirmation exist, including encrypted seeds,
 owner authorization and durable counter fencing. The profile uses six digits,
@@ -22,7 +30,8 @@ identity at AAL 0; they cannot count as human second-factor evidence.
 
 The native `external_transport` and `external_service` modules now provide an
 HTTPS-authenticated receipt and schema-v6 atomic owner completion. Root configuration now compiles and publishes verifiers at startup;
-external portal forms are now implemented; Lua runtime remains unavailable. Earlier
+external portal forms and unreleased Lua eligibility are implemented; general
+Lua factor orchestration remains unavailable. Earlier
 sections below record implementation stages; the latest owner section supersedes
 their statement that durable external completion is absent.
 
