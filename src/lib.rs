@@ -55,3 +55,5 @@ pub mod store;
 pub mod telemetry;
 pub mod update;
 pub mod verify;
+
+pub mod auth_gateway;

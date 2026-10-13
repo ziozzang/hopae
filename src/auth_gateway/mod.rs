@@ -1,0 +1,133 @@
+//! Authentication gateway contracts. Connectors and Hangang wiring are implemented separately.
+//! Evidence construction stays crate-private: request claims cannot authenticate themselves.
+pub mod breaker;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrincipalKind {
+    Human,
+    Service,
+    Workload,
+    Network,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Subject {
+    pub issuer: String,
+    pub realm: String,
+    pub subject: String,
+    pub kind: PrincipalKind,
+}
+#[derive(Clone, Debug)]
+pub struct VerifiedEvidence {
+    subject: Subject,
+    connector: String,
+    expires_at: u64,
+}
+impl VerifiedEvidence {
+    pub fn subject(&self) -> &Subject {
+        &self.subject
+    }
+    pub fn connector(&self) -> &str {
+        &self.connector
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Composition {
+    Any,
+    All,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompositionError {
+    InvalidPolicy,
+    Missing,
+    Expired,
+    Conflict,
+}
+/// Joins only evidence for the same namespaced principal. Network factors describe
+/// context and cannot be implicitly merged with a human/service subject; a connector
+/// must supply an explicitly verified subject relationship before composition.
+pub fn compose<'a>(
+    mode: Composition,
+    required: &[String],
+    evidence: &'a [VerifiedEvidence],
+    now: u64,
+) -> Result<&'a Subject, CompositionError> {
+    if required.is_empty() || required.len() > 16 || evidence.len() > 16 {
+        return Err(CompositionError::InvalidPolicy);
+    }
+    if required
+        .iter()
+        .enumerate()
+        .any(|(i, id)| id.is_empty() || id.len() > 128 || required[..i].contains(id))
+    {
+        return Err(CompositionError::InvalidPolicy);
+    }
+    let mut selected = None;
+    let mut supplied = 0u16;
+    for item in evidence {
+        let Some(index) = required.iter().position(|id| id == &item.connector) else {
+            return Err(CompositionError::InvalidPolicy);
+        };
+        let bit = 1u16 << index;
+        if supplied & bit != 0 {
+            return Err(CompositionError::InvalidPolicy);
+        }
+        supplied |= bit;
+        if item.expires_at <= now {
+            return Err(CompositionError::Expired);
+        }
+        if selected.is_some_and(|subject| subject != &item.subject) {
+            return Err(CompositionError::Conflict);
+        }
+        selected = Some(&item.subject);
+    }
+    if mode == Composition::All && supplied.count_ones() as usize != required.len() {
+        return Err(CompositionError::Missing);
+    }
+    selected.ok_or(CompositionError::Missing)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn evidence(connector: &str, subject: &str) -> VerifiedEvidence {
+        VerifiedEvidence {
+            connector: connector.into(),
+            subject: Subject {
+                issuer: "issuer".into(),
+                realm: "external".into(),
+                subject: subject.into(),
+                kind: PrincipalKind::Human,
+            },
+            expires_at: 10,
+        }
+    }
+    #[test]
+    fn composition_never_joins_conflicting_or_expired_subjects() {
+        let required = vec!["oidc".into(), "directory".into()];
+        let one = vec![evidence("oidc", "alice")];
+        assert!(compose(Composition::Any, &required, &one, 1).is_ok());
+        assert_eq!(
+            compose(Composition::All, &required, &one, 1),
+            Err(CompositionError::Missing)
+        );
+        assert_eq!(
+            compose(Composition::Any, &required, &one, 10),
+            Err(CompositionError::Expired)
+        );
+        let conflict = vec![evidence("oidc", "alice"), evidence("directory", "bob")];
+        assert_eq!(
+            compose(Composition::Any, &required, &conflict, 1),
+            Err(CompositionError::Conflict)
+        );
+        let mut other_realm = evidence("directory", "alice");
+        other_realm.subject.realm = "internal".into();
+        assert_eq!(
+            compose(
+                Composition::All,
+                &required,
+                &[evidence("oidc", "alice"), other_realm],
+                1
+            ),
+            Err(CompositionError::Conflict)
+        );
+    }
+}

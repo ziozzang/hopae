@@ -1,6 +1,6 @@
 # Hangang 네이티브 검증과 콘솔 위임
 
-<!-- translation-status: source=../HANGANG_NATIVE.md source-rev=2 status=current -->
+<!-- translation-status: source=../HANGANG_NATIVE.md source-rev=3 status=current -->
 
 [English](../HANGANG_NATIVE.md) · [문서](README.md)
 
@@ -119,3 +119,11 @@ Hangang의 선택적인 `--hopae-sso`는 ID/PW 아래에 SSO 버튼을 추가합
 바인딩을 확인하고, 불투명 browser bearer의 parent API 직접 인증을 거부합니다.
 private parent lease는 5초, 재사용은 최대 1초입니다. 계정/grant를 자동 생성하지 않습니다.
 구성·콜백/CSRF·재시작·로그아웃 동작은 Hangang `CONSOLE_PLUGINS.md`를 참고합니다.
+
+## 인증 게이트웨이 구현 상태
+
+OIDC 외부 HTTP client는 provider별 origin 서킷을 제한된 크기로 유지하며 복제된 fetcher가 상태를 공유합니다. 백엔드 장애 3회 후 30초 동안 차단하고 half-open 요청 하나로 복구를 확인합니다. 전송 오류/타임아웃·불완전하거나 크기를 초과한 응답·HTTP 429·HTTP 5xx를 백엔드 장애로 셉니다. 일반적인 HTTP 400/401/403 인증 거부는 장애로 세지 않습니다. 취소된 요청도 장애를 기록하고 probe를 해제합니다. 세대에 연결된 복제 불가능 permit으로 오래된 완료가 새로운 서킷을 닫지 못하게 하며, 버려진 probe도 만료됩니다. provider client당 origin은 최대 16개이며 포화·오염된 상태는 거부합니다. 경로·질의 문자열·자격 정보·인증 코드는 서킷 key에 들어가지 않습니다. HTTP/TLS client 초기화 실패 시에도 제한 없는 fallback으로 보내지 않고 요청을 차단합니다.
+
+실제 discovery·JWKS·token·user-info 요청 경로에 적용됩니다. 캐시된 discovery/JWKS는 기존의 엄격한 유효 기한을 따르며 서킷이 인증을 승인하거나 credential 유효성을 연장하지 않습니다. 서킷은 프로세스 로컬 상태이고 provider client 재생성 시 초기화됩니다. 전용 콘솔 제어·영속 quarantine·분산 조정은 남아 있습니다.
+
+인증 게이트웨이 코어는 namespace가 있는 사람/서비스/워크로드/네트워크 신원과 제한된 Any/All 근거 결합을 정의합니다. 만료·중복·미등록·충돌 근거를 거부하며 다른 realm의 같은 subject 문자열도 합치지 않습니다. 공개 요청의 주장으로 근거를 생성할 수 없습니다. 이 타입은 기반 구현이며 실제 connector나 새로운 로그인 방식으로 연결된 것은 아닙니다. LDAP·자체 비밀번호·API 릴레이/introspection·네트워크 신원·명시적 provider 간 연결·서비스에 묶인 자격 변환은 구현 작업으로 남아 있습니다. 현재 동작하는 외부 인증 connector는 다중 OIDC입니다.

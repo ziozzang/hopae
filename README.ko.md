@@ -107,7 +107,7 @@ target/release/hopae run     --config deploy/hopae.example.json
 
 [품계(Pumgye)](https://github.com/ziozzang/pumgye)가 서비스별 역할·권한·정보등급과
 사용자/네트워크 배정을 소유합니다. 호패의 네이티브 검증은 신원과 인증 수준을
-제공하고, Hangang에 내장된 품계 게이트가 수문장 네트워크 근거와 결합해 집행합니다.
+제공하고, Hangang은 독립 품계 서버에 권한 판단을 위임하고 수문장 네트워크 근거와 결합해 집행합니다.
 인증 성공만으로 서비스 권한을 부여하지 않습니다. 미배정 사용자는 guest이며
 auth-proxy가 보호 요청을 거부합니다. 프로바이더·사용자·세션은 계속 호패 소유이고,
 네이티브 콘솔 관리 권한은 서비스 접근 권한과 구분합니다.

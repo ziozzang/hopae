@@ -1,6 +1,6 @@
 # Native Hangang verification and delegated console
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 3 -->
 
 [한국어](ko/HANGANG_NATIVE.md) · [Documentation](README.md)
 
@@ -147,3 +147,11 @@ bearers are opaque and cannot authenticate directly at the parent admin API;
 private parent leases last five seconds and are reused for at most one second.
 No account/grant is automatically created. See Hangang's `CONSOLE_PLUGINS.md` for
 configuration, callback/CSRF checks and restart/logout behavior.
+
+## Authentication gateway implementation status
+
+The OIDC outbound client now owns bounded per-provider-origin circuits shared across cloned fetchers. Three backend failures open a circuit for 30 seconds; a single half-open exchange probes recovery. Transport/timeouts, incomplete or oversized responses, HTTP 429 and HTTP 5xx count as backend failures. Ordinary HTTP 400/401/403 credential denial does not count as an outage. A cancelled exchange records failure and releases its probe; generation-bound, non-copyable permits prevent a stale completion from closing a newer circuit. Abandoned probes expire. At most 16 origins are retained per provider client; capacity and poisoned state fail closed. Paths, query strings, credentials and authorization codes never form circuit keys. Failed HTTP/TLS client initialization also fences exchanges rather than sending through an unrestricted fallback.
+
+This protects actual discovery, JWKS, token and user-info exchanges. Cached discovery/JWKS continue to obey their existing hard validity deadlines; a circuit never authenticates a request or extends credential validity. Circuit state is process-local and resets when the provider client is rebuilt; dedicated console controls, persistent quarantine and fleet coordination remain pending.
+
+The authentication-gateway core also defines namespaced human/service/workload/network subjects and bounded Any/All evidence composition. It rejects expired, duplicate, unknown and conflicting evidence, including equal subject strings from different realms. Evidence is not constructible from public request claims. These composition types are a foundation, not a wired connector or new login method. LDAP, local passwords, API relay/introspection, network identity, explicit cross-provider links and service-bound credential translation remain implementation work. Multiple OIDC providers remain the currently working external authentication connectors.
