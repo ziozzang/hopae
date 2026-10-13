@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 31 -->
+<!-- doc-rev: 32 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -336,7 +336,7 @@ API requests still fail closed without elevated evidence. External factors use
 the native HTTPS/CSRF/browser-bound response form and atomic owner completion.
 An optional `eligibility_lua` text script can restrict a factor by native owner
 context in unreleased source (not in tagged 0.0.3 artifacts). The internal
-`0.0.3-service-lua-5125ff7` candidate includes the runtime; production external factors
+`0.0.3-mixed-f14287a` candidate includes the runtime; production external factors
 and scripts remain unconfigured.
 For example, `return context.service == 'orders'` allows verification
 only for that service. The environment contains only `context.service`,
@@ -382,7 +382,7 @@ path without VM execution. Syntax is validated before secret resolution. Script
 limits match external-factor eligibility above. General credential translation,
 connector orchestration and human first-factor hooks remain unfinished. Tagged
 0.0.3 artifacts do not contain this later service-profile extension. Internal
-`0.0.3-service-lua-5125ff7` includes it with production scripts unconfigured.
+`0.0.3-mixed-f14287a` includes it with production scripts unconfigured.
 Earlier JSON-only private candidates tested the durable profiles, not the proposed
 service Lua policy, because their DB copy already contained an authority document.
 The corrected offline-publication candidate checks the stored desired document
@@ -412,5 +412,8 @@ linking identities requires explicit authorization mapping, not issuer collision
 The routing marker grants no identity. The complete presented mixed
 credential is capped at 4096 printable ASCII bytes. This is deterministic service
 credential routing/unwrapping, not general connector composition or human identity
-translation. The current `0.0.3-service-lua-5125ff7` image and tagged 0.0.3 assets
-do not include this later feature.
+translation. Internal `0.0.3-mixed-f14287a` includes this feature; its authoritative
+production profile document retains native-only credentials without scripts or
+mixed routing. Existing configuration, keys and consistent owner/delegation v6
+rollback backups are preserved; live gateway/console regressions pass. Tagged
+0.0.3 assets do not include this later feature.

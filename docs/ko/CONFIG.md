@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=31 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=32 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -326,7 +326,7 @@ verifier 자격·CA 내용·클라이언트는 상태 생성·마이그레이션
 
 선택적인 `eligibility_lua` 텍스트 스크립트는 네이티브 소유자 문맥으로 factor 사용을
 제한합니다. 미릴리스 소스 기능이며 태그 0.0.3의 artifact에는 포함되지 않습니다.
-내부 `0.0.3-service-lua-5125ff7` 후보는 런타임을 포함하지만 운영 외부 factor·스크립트는
+내부 `0.0.3-mixed-f14287a` 후보는 런타임을 포함하지만 운영 외부 factor·스크립트는
 설정하지 않았습니다.
 예를 들어 `return context.service == 'orders'`는 해당 서비스에서만
 검증을 진행합니다. 환경에는 서버 소유 식별자인 `context.service`, `context.connector`,
@@ -363,7 +363,7 @@ relay 전송·스크립트 실행으로 신선도를 연장하지 않습니다. 
 옵션을 생략하면 직렬화 설정과 인덱스 경로를 유지하며 VM을 실행하지 않습니다. 비밀
 참조 해석 전에 문법을 검사하고 실행 제한은 위 외부 factor와 같습니다. 범용 자격
 변환·커넥터 조합·사람의 1차 인증 hook은 후속입니다. 태그 0.0.3 asset에는 이 후속
-서비스 profile 확장이 없습니다. 내부 `0.0.3-service-lua-5125ff7`은 기능을 포함하지만
+서비스 profile 확장이 없습니다. 내부 `0.0.3-mixed-f14287a`는 기능을 포함하지만
 운영 스크립트는 설정하지 않았습니다. 이전 JSON만 바꾼 후보는 DB 복사본의 authority
 문서가 우선해 제안한 서비스 Lua 대신 저장된 profile을 검증했습니다. 수정한 오프라인
 publication 후보는 시작 전 저장된 문서 일치를 검사하고 upstream이 승인한 신원을
@@ -388,5 +388,7 @@ issuer·realm·subject·서비스·종류는 커넥터가 검증하며 AAL 0과 
 신원 연결은 issuer 충돌 대신 명시적인 권한 매핑으로 처리해야 합니다.
 라우팅 표시는 신원을 부여하지 않습니다. 제시하는 전체 혼합 자격은 출력 가능한
 ASCII 4096 bytes로 제한합니다. 결정적인 서비스 자격 라우팅·접두사 제거이며 범용
-커넥터 조합·사람 신원 변환은 후속입니다. 현재 내부 `0.0.3-service-lua-5125ff7` 및
-태그 0.0.3 asset에는 이 후속 기능이 없습니다.
+커넥터 조합·사람 신원 변환은 후속입니다. 내부 `0.0.3-mixed-f14287a`는 기능을
+포함하지만 실제 운영 profile 문서는 스크립트·혼합 라우팅 없는 자체 자격을 유지합니다.
+기존 설정·키와 일관된 owner·delegation v6 복구 백업을 보관하며 라이브 게이트웨이·
+콘솔 회귀가 통과했습니다. 태그 0.0.3 asset에는 이 후속 기능이 없습니다.
