@@ -533,3 +533,9 @@ keyring 설정·결합 챌린지와 CSRF·영속 설정 세대 검사·원자 �
 receipt 동시성 검증은 독립 SQLite 연결 8개를 소비 전에 동기화해 정확히 한 호출만 commit하고 별도로 증가한 소유자 작업 counter도 1이며 DB 재연결 후 같은 receipt를 거부하는 것을 확인합니다. 마지막 권한 검사가 실패하면 nonce·작업을 취소하고 이후 허용된 재시도는 성공합니다. receipt 테스트 14건이 통과했으며 단일 소비 transaction 검증이지 다중 node membership·자격 endpoint 활성화·10k/100k 처리량 검증은 아닙니다.
 
 호출자 작업과 마지막 권한 검사 이후, 만료 검사와 commit 직전에 DB registry revision을 다시 확인합니다. 작업 안에서 registry를 변경하는 회귀 테스트는 registry·nonce·관련 작업이 함께 rollback되고 정상 재시도는 성공함을 확인합니다. receipt 테스트 15건이 통과했습니다. 자격 endpoint 연결 전 소스 라이브러리 단계입니다.
+
+## 인증된 자격 변환 증명 쌍 승인
+
+미릴리스 `projection_admission`은 네이티브 키 registry로 두 receipt를 검증하고 신원 authority epoch·subject/종류/AAL·신원 revision/자격 generation·서비스·대상·정확한 요청 digest의 일치를 검사합니다. permit은 서명이 포함된 전체 인증 receipt의 SHA-256과 결합해야 합니다. issuer/key 선택은 용도별이며 다른 신원·요청의 정상 서명 permit도 승인되지 않습니다. 문맥은 검증된 네이티브 소유자에서 가져와야 하며 호출자가 제공한 분류 자체를 인증하지 않습니다.
+
+필드가 비공개이고 Clone 불가능한 승인 객체는 두 nonce와 관련 DB 작업을 하나의 소유자 transaction에서 소비하며 DB registry·시각·마지막 권한 검사를 재사용합니다. 두 번째 nonce가 이미 소비됐거나 어느 receipt든 만료되면 전체 작업을 취소합니다. 독립 SQLite 연결 8개에서 정확히 한 증명 쌍만 승인되는 것을 포함해 새 공격 시나리오 테스트 4건과 인증 gateway 테스트 총 44건 및 fmt/clippy/경계 검사가 통과했습니다. 자격 endpoint·signer 서비스·운영 변환 경로는 아직 활성화하지 않았습니다. 실시간 신원/정책/네트워크/plan 검사는 호출자 guard의 책임이며 자격 노출은 commit 성공 이후여야 합니다.

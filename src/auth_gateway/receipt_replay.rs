@@ -21,6 +21,27 @@ pub fn consume<T>(
     guard: &dyn Fn(&Connection) -> Result<(), Refused>,
     operation: impl FnOnce(&Transaction<'_>) -> Result<T, Refused>,
 ) -> Result<T, Refused> {
+    consume_group(db, &[checked], clock, guard, operation)
+}
+/// Internal bounded admission for one receipt or an authenticated projection pair.
+/// The caller must validate chain relationships before entering this transaction.
+pub(crate) fn consume_group<T>(
+    db: &mut Connection,
+    receipts: &[&Checked],
+    clock: &dyn Fn() -> u64,
+    guard: &dyn Fn(&Connection) -> Result<(), Refused>,
+    operation: impl FnOnce(&Transaction<'_>) -> Result<T, Refused>,
+) -> Result<T, Refused> {
+    if receipts.is_empty() || receipts.len() > 2 {
+        return Err(Refused);
+    }
+    let checked = receipts[0];
+    if receipts
+        .iter()
+        .any(|item| item.revision() != checked.revision())
+    {
+        return Err(Refused);
+    }
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| Refused)?;
@@ -35,8 +56,10 @@ pub fn consume<T>(
         .unwrap_or(0);
     let now = clock().max(floor);
     let begun = std::time::Instant::now();
-    let claims = checked.receipt().claims();
-    if now < claims.issued_ms || now >= claims.expires_ms {
+    if receipts.iter().any(|item| {
+        let claims = item.receipt().claims();
+        now < claims.issued_ms || now >= claims.expires_ms
+    }) {
         return Err(Refused);
     }
     let mut count = match value(&tx, COUNT)? {
@@ -85,22 +108,26 @@ pub fn consume<T>(
         .map_err(|_| Refused)?;
         count = count.checked_sub(1).ok_or(Refused)?;
     }
-    let id = data_encoding::HEXLOWER.encode(checked.replay_key());
-    let id_key = format!("{IDS}{id}");
-    if count >= 1_000_000 || value(&tx, &id_key)?.is_some() {
-        return Err(Refused);
+    for checked in receipts {
+        let claims = checked.receipt().claims();
+        let id = data_encoding::HEXLOWER.encode(checked.replay_key());
+        let id_key = format!("{IDS}{id}");
+        if count >= 1_000_000 || value(&tx, &id_key)?.is_some() {
+            return Err(Refused);
+        }
+        tx.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            rusqlite::params![id_key, claims.expires_ms.to_string()],
+        )
+        .map_err(|_| Refused)?;
+        tx.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            rusqlite::params![format!("{EXPIRY}{:020}:{id}", claims.expires_ms), id],
+        )
+        .map_err(|_| Refused)?;
+        count += 1;
     }
-    tx.execute(
-        "INSERT INTO meta(key,value) VALUES(?1,?2)",
-        rusqlite::params![id_key, claims.expires_ms.to_string()],
-    )
-    .map_err(|_| Refused)?;
-    tx.execute(
-        "INSERT INTO meta(key,value) VALUES(?1,?2)",
-        rusqlite::params![format!("{EXPIRY}{:020}:{id}", claims.expires_ms), id],
-    )
-    .map_err(|_| Refused)?;
-    put(&tx, COUNT, &(count + 1).to_string())?;
+    put(&tx, COUNT, &count.to_string())?;
     put(&tx, CLOCK, &now.to_string())?;
     let result = operation(&tx)?;
     guard(&tx)?;
@@ -110,7 +137,10 @@ pub fn consume<T>(
     }
     let final_now =
         clock().max(now.saturating_add(begun.elapsed().as_millis().min(u64::MAX as u128) as u64));
-    if final_now >= claims.expires_ms {
+    if receipts
+        .iter()
+        .any(|item| final_now >= item.receipt().claims().expires_ms)
+    {
         return Err(Refused);
     }
     put(&tx, CLOCK, &final_now.to_string())?;
