@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Owned real Hopae, Pumgye and Hangang processes; no operational identities or credentials."""
-import argparse, copy, hashlib, http.client, http.server, json, os, secrets, ssl, struct, subprocess, tempfile, threading, time, urllib.request
+import argparse, copy, hashlib, sqlite3, http.client, http.server, json, os, secrets, ssl, struct, subprocess, tempfile, threading, time, urllib.request
 from pathlib import Path
 from remote_hangang_smoke import port
 
@@ -8,6 +8,7 @@ def main():
     p=argparse.ArgumentParser()
     for name in ['gateway','hopae','pumgye']:p.add_argument('--'+name+'-binary',required=True,type=Path)
     p.add_argument('--external-verifier',action='store_true')
+    p.add_argument('--durable-restart',action='store_true')
     args=p.parse_args();processes=[];seen=[];verifier_state={'unavailable':False,'calls':0}
     class Origin(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -102,6 +103,19 @@ def main():
                 for _ in range(3):assert request()==503
                 calls=verifier_state['calls'];assert request()==503 and verifier_state['calls']==calls,'open connector circuit sent another request'
             count=len(seen);owner.terminate();owner.wait(timeout=5);assert request()==503 and len(seen)==count
+            if args.durable_restart:
+                hopae.terminate();hopae.wait(timeout=5)
+                # Owned offline operator fixture: install a tombstone while keeping bootstrap unchanged.
+                with sqlite3.connect(root/'hopae-state'/'hopae.db') as db:
+                    key='authentication_profile_authority_v1'
+                    raw=db.execute('SELECT value FROM meta WHERE key=?',(key,)).fetchone();assert raw,'startup did not import the authority'
+                    document=json.loads(raw[0]);document['revision']+=1;document['configuration']=None;document['digest']=hashlib.sha256(b'null').hexdigest()
+                    db.execute('UPDATE meta SET value=? WHERE key=?',(json.dumps(document),key))
+                hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-restarted');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae-restarted')
+                status=request();assert status in (401,503),f'restarted authority returned {status}'
+                # The first borrowed connection can be stale after process replacement; it must fail closed.
+                for _ in range(3):assert request()==401,'reconnected authority resurrected the disabled profile'
+                print('PASS: owned offline tombstone survives actual Hopae restart despite unchanged bootstrap file.')
             print('PASS: three actual processes over mTLS HOP1/PPG1; scoped API authentication, service/IP/class/method rights, guest denial, durable revocation/restoration, audience isolation, credential consumption and authority-outage fail-closed. Guard is not part of this fixture; no full-stack throughput claim.')
     finally:
         for process in reversed(processes):

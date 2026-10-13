@@ -1,6 +1,6 @@
 # 인증 프로필 게시
 
-<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=4 status=current -->
+<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=5 status=current -->
 
 [문서](README.md) · [English](../AUTH_PROFILE_PUBLICATION.md)
 
@@ -72,3 +72,11 @@ GatewayState에 공유 authority reader를 전달할 수 있습니다. HTTP/HOP1
 요청의 거부를 확인합니다. 운영 시작 경로와 위임 관리는 명시적인 연결 구현까지 기존
 파일 소유 경로를 사용합니다. 이미 열린 upstream 애플리케이션 stream 회수는 아직
 구현하지 않았습니다.
+
+프로필 또는 영속 상태가 있으면 애플리케이션 시작 시 기존 utility connection으로
+authority를 초기화하고 앱 범위를 검증하여 reader를 gateway router와 공유합니다.
+실제 세 프로세스 fixture에서 bootstrap 파일을 그대로 둔 호패 교체 후에도 DB 삭제
+상태가 유지됩니다. 첫 오래된 pooled 연결은 503일 수 있고 이후 재연결은 401입니다.
+fixture의 삭제는 소유한 오프라인 DB 운영자 작업이며 아직 구현하지 않은 위임 관리
+API를 증명하지 않습니다. 운영의 오래된 bootstrap 비밀 참조를 제거하기 전 파일 중심
+CLI/preflight 동작에 대한 별도 이전 검토도 필요합니다.

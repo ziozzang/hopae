@@ -190,6 +190,8 @@ impl Readiness {
 /// Everything the routers and services are built from.
 #[derive(Clone)]
 pub struct Services {
+    pub authentication_authority:
+        Option<Arc<std::sync::Mutex<crate::auth_gateway::authority::Authority>>>,
     pub config: Arc<Config>,
     pub store: Store,
     pub clock: Arc<dyn Clock>,
@@ -325,11 +327,12 @@ pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
         Some(Arc::new(counters::inc)),
         Some(services.emitter.clone()),
     );
-    if let Some(config) = &services.config.authentication_gateway {
-        let runtime = crate::auth_gateway::runtime::Runtime::compile(config, &|name| {
-            std::env::var(name).ok()
-        })?;
-        gateway_state = gateway_state.with_authentication_gateway(runtime)?;
+    if let Some(authority) = &services.authentication_authority {
+        let reader = authority
+            .lock()
+            .map_err(|_| anyhow::anyhow!("authentication authority unavailable"))?
+            .reader();
+        gateway_state = gateway_state.with_authentication_authority(reader)?;
     }
     let adapter = Adapter::new(
         services.session_service()?,
@@ -627,7 +630,32 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         .await
         .context("binding portal listener")?;
     let portal_addr = portal.local_addr()?;
+    let authentication_authority = {
+        let mut connection = store.conn();
+        let durable = crate::auth_gateway::publication::read(&connection)?;
+        if cfg.authentication_gateway.is_some() || durable.is_some() {
+            let validate = |profiles: &crate::auth_gateway::runtime::Config| {
+                let mut candidate = cfg.clone();
+                candidate.authentication_gateway = Some(profiles.clone());
+                candidate
+                    .validate()
+                    .map_err(|_| crate::auth_gateway::publication::Error::Invalid)
+            };
+            Some(Arc::new(std::sync::Mutex::new(
+                crate::auth_gateway::authority::Authority::load(
+                    &mut connection,
+                    cfg.authentication_gateway.clone(),
+                    &|name| std::env::var(name).ok(),
+                    &validate,
+                )?,
+            )))
+        } else {
+            None
+        }
+    };
     let services = Services {
+        authentication_authority,
+
         config: Arc::new(cfg.clone()),
         store: store.clone(),
         clock: env.clock.clone(),

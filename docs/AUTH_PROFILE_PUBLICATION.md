@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
@@ -85,3 +85,13 @@ scenario publishes a tombstone while retaining the connection and verifies the
 next request is denied. Production startup and delegated administration still use
 the existing file-owned path until their explicit wiring is completed; this does
 not yet revoke an already-open upstream application stream.
+
+The application startup now initializes an authority from its existing utility
+connection when profiles or durable state exist, validates application scope, and
+shares its reader with the gateway router. The actual three-process fixture verifies
+a disabled durable authority survives Hopae replacement with its bootstrap file
+unchanged. The first stale pooled connection may return 503; subsequent reconnects
+return 401. The fixture installs the tombstone as an owned offline database operator;
+it does not prove a delegated management API, which remains unimplemented. Older
+file-oriented CLI/preflight semantics still require separate migration review before
+removing obsolete bootstrap secret references in an operational deployment.
