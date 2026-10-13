@@ -149,6 +149,42 @@ impl Fetcher {
         }
     }
 
+    /// Dedicated HTTPS verifier client. Caller admission bounds active requests;
+    /// idle connections are capped and expire. Optional roots add operator trust
+    /// without disabling certificate or server-name verification.
+    pub fn for_verifier(
+        allow_private: bool,
+        timeout: Duration,
+        roots: Vec<reqwest::Certificate>,
+    ) -> Result<Self, ProviderError> {
+        let mut builder = reqwest::Client::builder()
+            .https_only(true)
+            .no_proxy()
+            .redirect(Policy::none())
+            .timeout(timeout)
+            .connect_timeout(timeout)
+            .pool_max_idle_per_host(64)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .user_agent(concat!("hopae/", env!("CARGO_PKG_VERSION")));
+        if !allow_private {
+            builder = builder.dns_resolver(Arc::new(VettingResolver));
+        }
+        for root in roots {
+            builder = builder.add_root_certificate(root);
+        }
+        Ok(Self {
+            client: builder
+                .build()
+                .map_err(|_| ProviderError::ProviderUnavailable)?,
+            ready: true,
+            allow_private,
+            circuits: Arc::new(Circuits {
+                started: Instant::now(),
+                by_origin: Mutex::new(HashMap::new()),
+            }),
+        })
+    }
+
     pub fn get(&self, url: &url::Url) -> reqwest::RequestBuilder {
         self.client.get(url.clone())
     }
@@ -160,7 +196,16 @@ impl Fetcher {
     /// Send and read at most [`MAX_BODY_BYTES`]. A 3xx answer is returned as
     /// is (never followed); the caller decides what it means.
     pub async fn send(&self, req: reqwest::RequestBuilder) -> Result<Response, ProviderError> {
-        if !self.ready {
+        self.send_bounded(req, MAX_BODY_BYTES).await
+    }
+
+    /// Apply a stricter protocol-specific limit before buffering the body.
+    pub async fn send_bounded(
+        &self,
+        req: reqwest::RequestBuilder,
+        limit: usize,
+    ) -> Result<Response, ProviderError> {
+        if !self.ready || limit == 0 || limit > MAX_BODY_BYTES {
             return Err(ProviderError::ProviderUnavailable);
         }
         let request = req.build().map_err(classify)?;
@@ -181,15 +226,12 @@ impl Fetcher {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_ascii_lowercase());
-        if resp
-            .content_length()
-            .is_some_and(|n| n > MAX_BODY_BYTES as u64)
-        {
+        if resp.content_length().is_some_and(|n| n > limit as u64) {
             return Err(ProviderError::ProviderResponseTooLarge);
         }
         let mut body = Vec::new();
         while let Some(chunk) = resp.chunk().await.map_err(classify)? {
-            if body.len() + chunk.len() > MAX_BODY_BYTES {
+            if body.len() + chunk.len() > limit {
                 return Err(ProviderError::ProviderResponseTooLarge);
             }
             body.extend_from_slice(&chunk);

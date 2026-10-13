@@ -1,6 +1,6 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=7 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=8 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
@@ -267,3 +267,36 @@ HTTP·풀링 mTLS HOP1의 서비스 허용·guest·잘못된 자격 거절을 �
 MFA·복구·계정 및 분산 시도 제한·키 폐기와 재암호화·메뉴·전체 스택 성능은
 여전히 미검증·미완료이며 선택적 런타임 활성화로 전체 인증 게이트웨이나
 제로트러스트 백본의 완료를 주장해서는 안 됩니다.
+
+## 외부 HTTPS 호출 프리미티브 — 2026-10-14
+
+`src/factor/external_transport.rs`가 고정된 인증 HTTPS factor 요청을 호출하고 기존
+문맥 파서로 응답을 검증합니다. 네이티브 라이브러리 프리미티브이며 활성화된 portal·
+provider 설정은 아닙니다. 운영 사용자 인증 전에 영속 증명 소비, 소유자 등급 상승,
+런타임 게시와 Lua 호출 연결이 필요합니다.
+
+타입 설정은 factor, 0이 아닌 configuration_revision, 고정 HTTPS url,
+verifier_key_env, timeout_ms(1–1000), allow_private_endpoints와 선택적인 절대 CA
+경로입니다. private endpoint를 허용해도 HTTP는 거부하며 CA·서버 이름 검증을 유지합니다.
+환경 프록시와 redirect를 끄고 public 목적지에는 검증한 DNS·주소 선택을 적용합니다.
+해석된 verifier key와 custom CA 파일 내용도 불변 binding에 포함하여 같은 참조의
+실제 값이 바뀌면 기존 connector를 재사용할 수 없습니다.
+
+connector마다 대기 없이 최대 64개 동시 호출을 허용합니다. idle pool은 origin별
+최대 64개 연결을 30초 유지합니다. 전체 기한은 TLS·요청·응답 본문을 포함하며 선언된
+길이와 streaming 본문 모두 8 KiB 초과 시 전체 버퍼링 전에 거부합니다. 인증 응답 입력은
+4096바이트 이하입니다. 재시도·캐시·더 약한 provider fallback은 없습니다. 서버 소유
+`started_at`는 브라우저 challenge 생성 시간이 아닌 이번 검증 교환의 준비 시점입니다.
+5초 근거 수명은 그 시점부터 계산하고 challenge의 별도 만료도 적용합니다. 교환 중
+관찰된 벽시계 역행은 완료를 거부합니다.
+
+HTTP 200의 정확한 문맥에 결합된 타입 JSON 응답만 유효한 factor 판정입니다.
+유효한 `active:false`는 정상적인 자격 거부입니다. 단순 401·403, redirect, 문맥 불일치,
+임의 등급 주장, 잘못된 응답, timeout과 취소는 verifier 실패로 처리하며 3회 실패하면
+30초 서킷을 엽니다. 비밀·응답 본문·proof·URL을 포함하는 전송 오류는 출력하지 않습니다.
+
+자체 TLS 테스트가 OpenSSL로 격리된 CA·서버 인증서를 생성합니다. 성공·거절 근거,
+실제 연결 재사용, 잘못된 CA, 사용자 교차·등급 주입, 잘못된 본문·type·status,
+서버가 stream을 유지하는 header·chunked 크기 상한, 본문·교환 기한, 동시성 거부,
+취소, 서킷 거부·복구, 시계 역행과 비밀·CA 값 변경 binding을 검증합니다. 이 결과는
+브라우저 외부 MFA, 영속 재사용 방지나 분산 세션 등급 상승의 검증은 아닙니다.

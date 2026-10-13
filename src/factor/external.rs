@@ -107,7 +107,7 @@ pub fn validate(
     }))
 }
 
-fn bounded_identifier(value: &str) -> bool {
+pub(super) fn bounded_identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
         && value

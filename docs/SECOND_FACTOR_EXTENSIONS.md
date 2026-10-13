@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -301,3 +301,43 @@ prior runtime stages. Production-user MFA, recovery, account/distributed
 admission, key retirement/rewrapping, navigation and full-stack performance are
 still unqualified or unfinished; do not treat optional runtime activation as
 completion of the authentication gateway or the full zero-trust backbone.
+
+## External HTTPS transport primitive — 2026-10-14
+
+`src/factor/external_transport.rs` now executes fixed, authenticated HTTPS factor
+requests and validates the replies using the existing context parser. This is a
+native library primitive, not an enabled portal/provider setting. Durable proof
+consumption, owner elevation, runtime publication and Lua orchestration remain
+required before external MFA can authenticate an operational user.
+
+The typed configuration contains factor, nonzero configuration_revision, fixed
+HTTPS url, verifier_key_env, timeout_ms (1–1000), allow_private_endpoints and an
+optional absolute CA path. HTTP is refused even for opted-in private endpoints;
+CA and hostname verification stay enabled. Environment proxies and redirects
+are disabled. Public destinations use vetted DNS/address selection. The resolved
+verifier key and custom CA bytes participate in the immutable binding, so reuse
+must not preserve a connector across material changes at the same reference.
+
+Each connector admits at most 64 concurrent exchanges without waiting. Its idle
+pool retains at most 64 connections per origin for 30 seconds. The total deadline
+covers TLS, request and response body; declared and streamed bodies exceeding
+8 KiB are rejected before buffering the complete response. Factor response input
+is bounded to 4096 bytes. No retry, cache or weaker-provider fallback exists.
+The server-owned `started_at` denotes preparation of this verification exchange,
+not the creation time of a browser challenge. The five-second evidence window
+includes time since that preparation; the challenge's independent expiry also
+applies. A wall-clock rollback observed during exchange refuses completion.
+
+Only HTTP 200 with a context-bound typed JSON reply is a valid factor decision.
+A valid `active:false` is healthy credential rejection. Bare 401/403, redirects,
+wrong context, extra assurance claims, malformed responses, timeouts and cancelled
+calls are verifier failures; three failures open the circuit for 30 seconds.
+No secret, response body, proof or URL-bearing transport error is reported.
+
+Owned TLS tests generate an isolated CA and server certificate with OpenSSL.
+They exercise accepted/rejected evidence, actual connection reuse, wrong CA,
+cross-user/assurance injection, malformed/content-type/status responses,
+header and chunked body limits with a server holding the stream open, body and
+exchange deadlines, capacity rejection, cancellation, circuit refusal/recovery,
+clock rollback and resolved secret/CA binding changes. These tests do not prove
+browser external MFA, durable replay fencing or distributed session elevation.
