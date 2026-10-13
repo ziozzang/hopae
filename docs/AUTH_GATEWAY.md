@@ -42,9 +42,19 @@ kind, authority/issuer, realm and configured subject. It emits
 `x-hopae-service-id`; it does not invent a human
 account, verified email or MFA. Replies contain no credential and use
 `Cache-Control: no-store`. Authentication is not a service permission grant:
-Hangang/Pumgye must enforce the service matrix. Parent support for typed
-non-human assurance and credential consumption/translation is a follow-up; do
-not treat this connector as a completed end-to-end service authorization flow.
+Hangang/Pumgye enforce the service matrix. Hangang validates the service kind,
+AAL 0 and exact authenticated service audience, requires an enforced Pumgye
+gate, and consumes the incoming Authorization credential before policy/transforms
+and upstream dispatch. A role must explicitly allow AAL 0; an API key cannot
+satisfy a human/MFA requirement.
+
+`tools/service_stack_smoke.py` runs three actual isolated processes over mTLS
+HOP1/PPG1. It verifies authentication, IP/class/method rights, unknown/invalid
+credential denial, durable permission revocation/restoration without rewriting
+gateway configuration, cross-service isolation, credential consumption and
+Pumgye-outage fail-closed. Guard is outside this fixture; it is not a full-stack
+throughput measurement. Operational rollout and full credential lifecycle,
+including existing-stream credential revocation, remain separate work.
 
 LDAP, local human passwords, remote API relay/introspection, Any/All composition
 with actual connector relationships, upstream credential translation, full

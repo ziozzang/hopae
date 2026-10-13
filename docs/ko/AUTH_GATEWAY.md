@@ -36,9 +36,16 @@ Profile은 제시한 Bearer credential을 선택합니다. 없는 credential은 
 `s_…` 신원을 출력합니다. `x-hopae-principal-kind: service`·`x-hopae-aal: 0`·인증된 `x-hopae-service-id`를
 출력하며 사람 계정·검증된 이메일·MFA를 만들지 않습니다. 응답에는 credential이
 없고 `Cache-Control: no-store`를 적용합니다. 인증은 서비스 권한 부여가 아니므로
-Hangang/품계가 서비스 매트릭스를 집행해야 합니다. Parent의 비인간 assurance
-처리와 credential 소비/변환은 후속 작업이며 완성된 전체 서비스 권한 흐름으로
-취급하지 않습니다.
+Hangang/품계가 서비스 매트릭스를 집행합니다. Hangang은 서비스 kind·AAL 0·정확한
+인증 서비스 audience를 검증하고 강제되는 품계 게이트를 요구하며 정책/변환과
+upstream 전송 전에 Authorization credential을 소비합니다. 역할이 AAL 0을
+명시적으로 허용해야 하고 API 키로 사람/MFA 요구를 만족할 수 없습니다.
+
+`tools/service_stack_smoke.py`는 mTLS HOP1/PPG1의 실제 격리된 세 프로세스를
+실행합니다. 인증·IP/등급/메서드 권한·미등록/잘못된 credential 거부·gateway 설정을
+다시 쓰지 않는 영속 권한 회수/복원·서비스 간 격리·credential 소비·품계 장애 시
+거부를 검증합니다. 수문장은 이 fixture 밖에 있으며 전체 스택 처리량 측정이 아닙니다.
+운영 배포와 기존 스트림 credential 회수를 포함한 전체 수명주기는 별도 작업입니다.
 
 LDAP·자체 사람 비밀번호·원격 API 릴레이/introspection·실제 connector 관계의
 Any/All 결합·upstream credential 변환·전체 credential 수명주기·전체 스택 100k QPS
