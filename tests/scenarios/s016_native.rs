@@ -1218,7 +1218,12 @@ fn owned_oidc_portal_totp_enrollment_then_bound_stepup_rotates_credentials_and_h
             .cookie(&h.cookie_name(), &old_app)
             .cookie(&app_bind.0, &app_bind.1),
     );
-    assert_eq!(unenrolled.status, 302);
+    assert_eq!(
+        unenrolled.status,
+        302,
+        "unenrolled bootstrap reason={:?}",
+        unenrolled.header("x-hopae-reason")
+    );
     let url = url::Url::parse(unenrolled.location().unwrap()).unwrap();
     let welcome = client.get(&format!("{}?{}", url.path(), url.query().unwrap()));
     assert_eq!(welcome.status, 200);

@@ -228,6 +228,299 @@ mod hopae_frame_tests {
         assert!(validate_ber_tree(&[0x30, 1, 0x04]).is_err());
         assert!(validate_ber_tree(&[0x30, 0]).is_ok());
     }
+    fn tlv(tag: u8, payload: &[u8]) -> Vec<u8> {
+        assert!(payload.len() < 128);
+        let mut out = vec![tag, payload.len() as u8];
+        out.extend(payload);
+        out
+    }
+    fn message(op: Vec<u8>, extra: Vec<u8>) -> Vec<u8> {
+        let mut body = vec![2, 1, 1];
+        body.extend(op);
+        body.extend(extra);
+        tlv(0x30, &body)
+    }
+    fn result(op: u8) -> Vec<u8> {
+        tlv(op, &[10, 1, 0, 4, 0, 4, 0])
+    }
+    #[test]
+    fn semantic_gate_refuses_incomplete_fields_types_utf8_and_controls_without_panics() {
+        let mut bad = vec![
+            vec![0x30, 0],
+            tlv(0x30, &[2, 1, 1]),
+            message(tlv(0x61, &[]), vec![]),
+            message(tlv(0x61, &[10, 0, 4, 0, 4, 0]), vec![]),
+            message(tlv(0x61, &[10, 1, 255, 4, 0, 4, 0]), vec![]),
+            message(tlv(0x61, &[10, 1, 0, 4, 1, 255, 4, 0]), vec![]),
+            message(tlv(0x61, &[10, 1, 0, 4, 0, 4, 0, 0x83, 0]), vec![]),
+            message(tlv(0x64, &[4, 0, 0x30, 2, 0x30, 0]), vec![]),
+        ];
+        for id in [
+            vec![4, 1, 1],
+            vec![2, 0],
+            vec![2, 1, 255],
+            vec![2, 5, 0, 0, 0, 0, 1],
+        ] {
+            let mut body = id;
+            body.extend(result(0x61));
+            bad.push(tlv(0x30, &body));
+        }
+        for control in [
+            vec![],
+            vec![4, 1, 255],
+            vec![4, 0, 1, 0],
+            vec![4, 0, 1, 2, 0, 0],
+            vec![4, 0, 0x24, 0],
+            vec![4, 0, 4, 0, 4, 0],
+        ] {
+            bad.push(message(result(0x61), tlv(0xa0, &tlv(0x30, &control))));
+        }
+        for packet in bad {
+            let outcome =
+                std::panic::catch_unwind(|| decode_inner(&mut BytesMut::from(packet.as_slice())));
+            assert!(outcome.is_ok(), "wire decoder panicked");
+            assert!(outcome.unwrap().is_err());
+        }
+    }
+    #[test]
+    fn valid_results_binary_entries_refs_controls_and_ad_notice_remain_supported() {
+        let control = tlv(
+            0xa0,
+            &tlv(0x30, &[4, 3, b'1', b'.', b'2', 1, 1, 255, 4, 1, 255]),
+        );
+        for packet in [
+            message(result(0x61), control),
+            message(result(0x65), vec![]),
+            message(result(0x78), tlv(0x8a, b"1.2.3")),
+            message(tlv(0x73, &tlv(4, b"ldaps://example.test")), vec![]),
+            message(
+                tlv(
+                    0x64,
+                    &[4, 0, 0x30, 10, 0x30, 8, 4, 1, b'a', 0x31, 3, 4, 1, 255],
+                ),
+                vec![],
+            ),
+        ] {
+            let (id, (tag, _)) = decode_inner(&mut BytesMut::from(packet.as_slice()))
+                .unwrap()
+                .unwrap();
+            assert_eq!(id, 1);
+            if single_response(&tag) || matches!(&tag,Tag::StructureTag(t)if t.id==5) {
+                let _: crate::result::LdapResultExt = tag.into();
+            } else if let Tag::StructureTag(t) = tag {
+                if t.id == 4 {
+                    let entry = crate::SearchEntry::construct(crate::ResultEntry(t, vec![]));
+                    assert_eq!(entry.bin_attrs["a"], vec![vec![255]]);
+                } else {
+                    assert_eq!(crate::search::parse_refs(t).len(), 1);
+                }
+            }
+        }
+    }
+    #[test]
+    fn deterministic_wire_mutations_never_expose_panicking_result_or_entry_shapes() {
+        let packets = [
+            message(result(0x61), vec![]),
+            message(
+                tlv(
+                    0x64,
+                    &[4, 0, 0x30, 10, 0x30, 8, 4, 1, b'a', 0x31, 3, 4, 1, 255],
+                ),
+                vec![],
+            ),
+        ];
+        for packet in packets {
+            for position in 0..packet.len() {
+                for byte in [0, 1, 16, 127, 128, 255] {
+                    let mut mutated = packet.clone();
+                    mutated[position] = byte;
+                    let outcome = std::panic::catch_unwind(|| {
+                        if let Ok(Some((_, (tag, _)))) =
+                            decode_inner(&mut BytesMut::from(mutated.as_slice()))
+                        {
+                            if single_response(&tag)
+                                || matches!(&tag,Tag::StructureTag(t)if t.id==5)
+                            {
+                                let _: crate::result::LdapResultExt = tag.into();
+                            } else if let Tag::StructureTag(t) = tag {
+                                if t.id == 4 {
+                                    crate::SearchEntry::construct(crate::ResultEntry(t, vec![]));
+                                } else {
+                                    crate::search::parse_refs(t);
+                                }
+                            }
+                        }
+                    });
+                    assert!(outcome.is_ok(), "mutation exposed a parser panic");
+                }
+            }
+        }
+    }
+}
+
+// Credential-scope semantic gate: downstream upstream parsers use infallible
+// conversions. Validate their exact response shapes before exposing any tag.
+fn semantic_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid LDAP response structure",
+    )
+}
+fn children(t: &StructureTag, class: TagClass, id: u64) -> io::Result<&[StructureTag]> {
+    if t.class != class || t.id != id {
+        return Err(semantic_error());
+    }
+    match &t.payload {
+        PL::C(values) => Ok(values),
+        _ => Err(semantic_error()),
+    }
+}
+fn primitive(t: &StructureTag, class: TagClass, id: u64) -> io::Result<&[u8]> {
+    if t.class != class || t.id != id {
+        return Err(semantic_error());
+    }
+    match &t.payload {
+        PL::P(value) => Ok(value),
+        _ => Err(semantic_error()),
+    }
+}
+fn text(t: &StructureTag, class: TagClass, id: u64) -> io::Result<()> {
+    std::str::from_utf8(primitive(t, class, id)?)
+        .map(|_| ())
+        .map_err(|_| semantic_error())
+}
+fn unsigned(t: &StructureTag, id: u64, max: u64) -> io::Result<()> {
+    let bytes = primitive(t, TagClass::Universal, id)?;
+    if bytes.is_empty() || bytes.len() > 4 || bytes[0] & 0x80 != 0 {
+        return Err(semantic_error());
+    }
+    let (_, value) = parse_uint(bytes).map_err(|_| semantic_error())?;
+    if value > max {
+        return Err(semantic_error());
+    }
+    Ok(())
+}
+fn referrals(t: &StructureTag, class: TagClass, id: u64) -> io::Result<()> {
+    let values = children(t, class, id)?;
+    if values.is_empty() {
+        return Err(semantic_error());
+    }
+    for value in values {
+        text(value, TagClass::Universal, 4)?;
+    }
+    Ok(())
+}
+fn controls(t: &StructureTag) -> io::Result<()> {
+    for control in children(t, TagClass::Context, 0)? {
+        let fields = children(control, TagClass::Universal, 16)?;
+        if fields.is_empty() || fields.len() > 3 {
+            return Err(semantic_error());
+        }
+        text(&fields[0], TagClass::Universal, 4)?;
+        let mut next = 1;
+        if fields.get(next).is_some_and(|t| t.id == 1) {
+            if primitive(&fields[next], TagClass::Universal, 1)?.len() != 1 {
+                return Err(semantic_error());
+            }
+            next += 1;
+        }
+        if let Some(value) = fields.get(next) {
+            primitive(value, TagClass::Universal, 4)?;
+            next += 1;
+        }
+        if next != fields.len() {
+            return Err(semantic_error());
+        }
+    }
+    Ok(())
+}
+pub(crate) fn expected_single_response(tag: &Tag) -> Option<u64> {
+    let (class, id) = match tag {
+        Tag::Sequence(t) => (t.class, t.id),
+        Tag::StructureTag(t) => (t.class, t.id),
+        _ => return None,
+    };
+    if class != TagClass::Application {
+        return None;
+    }
+    match id {
+        0 => Some(1),
+        6 => Some(7),
+        8 => Some(9),
+        10 => Some(11),
+        12 => Some(13),
+        14 => Some(15),
+        23 => Some(24),
+        _ => None,
+    }
+}
+pub(crate) fn single_response(tag: &Tag) -> bool {
+    matches!(tag,Tag::StructureTag(t) if t.class==TagClass::Application && matches!(t.id,1|7|9|11|13|15|24))
+}
+fn validate_response(t: &StructureTag) -> io::Result<()> {
+    let outer = children(t, TagClass::Universal, 16)?;
+    if !(2..=3).contains(&outer.len()) {
+        return Err(semantic_error());
+    }
+    unsigned(&outer[0], 2, i32::MAX as u64)?;
+    let op = &outer[1];
+    let fields = children(op, TagClass::Application, op.id)?;
+    match op.id {
+        1 | 5 | 7 | 9 | 11 | 13 | 15 | 24 => {
+            if fields.len() < 3 {
+                return Err(semantic_error());
+            }
+            unsigned(&fields[0], 10, u32::MAX as u64)?;
+            text(&fields[1], TagClass::Universal, 4)?;
+            text(&fields[2], TagClass::Universal, 4)?;
+            let mut seen = 0u16;
+            for field in &fields[3..] {
+                if field.class != TagClass::Context || field.id > 11 || seen & (1 << field.id) != 0
+                {
+                    return Err(semantic_error());
+                }
+                seen |= 1 << field.id;
+                match field.id {
+                    3 => referrals(field, TagClass::Context, 3)?,
+                    7 if op.id == 1 => {
+                        primitive(field, TagClass::Context, 7)?;
+                    }
+                    10 if op.id == 24 => text(field, TagClass::Context, 10)?,
+                    11 if op.id == 24 => {
+                        primitive(field, TagClass::Context, 11)?;
+                    }
+                    _ => return Err(semantic_error()),
+                }
+            }
+        }
+        4 => {
+            if fields.len() != 2 {
+                return Err(semantic_error());
+            }
+            text(&fields[0], TagClass::Universal, 4)?;
+            for attribute in children(&fields[1], TagClass::Universal, 16)? {
+                let parts = children(attribute, TagClass::Universal, 16)?;
+                if parts.len() != 2 {
+                    return Err(semantic_error());
+                }
+                text(&parts[0], TagClass::Universal, 4)?;
+                for value in children(&parts[1], TagClass::Universal, 17)? {
+                    primitive(value, TagClass::Universal, 4)?;
+                }
+            }
+        }
+        19 => referrals(op, TagClass::Application, 19)?,
+        _ => return Err(semantic_error()),
+    }
+    if let Some(extra) = outer.get(2) {
+        if extra.class == TagClass::Context && extra.id == 10 && op.id == 24 {
+            // Preserve the upstream AD disconnection-OID workaround.
+            text(extra, TagClass::Context, 10)?;
+        } else {
+            controls(extra)?;
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::type_complexity)]
@@ -245,6 +538,7 @@ fn decode_inner(buf: &mut BytesMut) -> Result<Option<(RequestId, (Tag, Vec<Contr
         Err(_e) => return Err(decoding_error),
         Ok((i, ref tag)) => (i, tag),
     };
+    validate_response(tag)?;
     buf.advance(buf.len() - i.len());
     let tag = tag.clone();
     let mut tags = match tag

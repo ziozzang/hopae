@@ -34,7 +34,7 @@ def main():
                 peers=[];failures=[]
                 deep=b'\x04\x00'
                 for _ in range(64):deep=b'\x30\x82'+len(deep).to_bytes(2,'big')+deep
-                for key,packet in [('OWNED_LDAP_OVERSIZE',b'\x30\x83\x01\x00\x00'),('OWNED_LDAP_DEEP',deep)]:
+                for key,packet in [('OWNED_LDAP_OVERSIZE',b'\x30\x83\x01\x00\x00'),('OWNED_LDAP_DEEP',deep),('OWNED_LDAP_EMPTY',b'\x30\x00'),('OWNED_LDAP_RESULT',b'\x30\x08\x02\x01\x01\x61\x03\x0a\x01\x00'),('OWNED_LDAP_CONTROL',bytes.fromhex('301702010161070a010004000400a00930070403312e320100')),('OWNED_LDAP_WRONG_BIND',bytes.fromhex('3009020101640404003000')),('OWNED_LDAP_WRONG_SEARCH',None),('OWNED_LDAP_WRONG_RESULT',bytes.fromhex('300c02010178070a010004000400')),('OWNED_LDAP_FLOOD',b'flood')]:
                     listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen(1);listener.settimeout(60)
                     env[key]=f'ldaps://127.0.0.1:{listener.getsockname()[1]}'
                     def serve(listener=listener,packet=packet):
@@ -43,7 +43,10 @@ def main():
                             connection,_=listener.accept()
                             with context.wrap_socket(connection,server_side=True)as tls:
                                 tls.settimeout(1);assert tls.recv(8192)
-                                tls.sendall(packet)
+                                if packet is None or packet==b'flood':
+                                    tls.sendall(bytes.fromhex('300c02010161070a010004000400'));assert tls.recv(8192)
+                                    tls.sendall(bytes.fromhex('300c02010261070a010004000400')if packet is None else bytes.fromhex('3009020102640404003000')*9)
+                                else:tls.sendall(packet)
                                 # Keep the peer open: require client rejection rather than server EOF.
                                 while tls.recv(8192):pass
                         except Exception as error:failures.append(type(error).__name__)
@@ -57,6 +60,6 @@ def main():
                     diagnostic=(result.stdout+result.stderr).decode(errors='replace').replace(bind,'[REDACTED]').replace(user,'[REDACTED]')
                     Path('/tmp/hopae-owned-ldap-test-failure.log').write_text(diagnostic)
                     raise RuntimeError('owned LDAP credential test failed; sanitized diagnostic in /tmp/hopae-owned-ldap-test-failure.log')
-            print('PASS: real owned OpenLDAP over LDAPS and mandatory StartTLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection, oversized/deep TLS response rejection and backend-circuit classification. Portal/session/runtime activation is not qualified.')
+            print('PASS: real owned OpenLDAP over LDAPS and mandatory StartTLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection, oversized/deep/semantic-malformed and wrong-operation TLS response rejection and backend-circuit classification. Portal/session/runtime activation is not qualified.')
         finally:subprocess.run(['docker','rm','-f',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 if __name__=='__main__':main()

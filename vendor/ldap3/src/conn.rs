@@ -362,8 +362,8 @@ enum LoopMode {
 /// passed to [`with_settings()`](#method.with_settings).
 pub struct LdapConnAsync {
     msgmap: Arc<Mutex<(i32, HashSet<i32>)>>,
-    resultmap: HashMap<i32, ResultSender>,
-    searchmap: HashMap<i32, ItemSender>,
+    resultmap: HashMap<i32, (u64, ResultSender)>,
+    searchmap: HashMap<i32, (u8, ItemSender)>,
     rx: mpsc::UnboundedReceiver<(RequestId, LdapOp, Tag, MaybeControls, ResultSender)>,
     id_scrub_rx: mpsc::UnboundedReceiver<RequestId>,
     misc_rx: mpsc::UnboundedReceiver<MiscSender>,
@@ -769,15 +769,16 @@ impl LdapConnAsync {
                 op_tuple = self.rx.recv() => {
                     if let Some((id, op, tag, controls, tx)) = op_tuple {
                         if let LdapOp::Search(ref search_tx) = op {
-                            self.searchmap.insert(id, search_tx.clone());
+                            self.searchmap.insert(id, (0,search_tx.clone()));
                         }
+                        let expected = if matches!(op,LdapOp::Single) {Some(crate::protocol::expected_single_response(&tag).ok_or_else(||LdapError::from(std::io::Error::new(std::io::ErrorKind::InvalidData,"unsupported single-operation request kind")))?)} else {None};
                         if let Err(e) = self.stream.send((id, tag, controls)).await {
                             warn!("socket send error: {}", e);
                             return Err(LdapError::from(e));
                         } else {
                             match op {
                                 LdapOp::Single => {
-                                    self.resultmap.insert(id, tx);
+                                    self.resultmap.insert(id, (expected.ok_or_else(||LdapError::from(std::io::Error::new(std::io::ErrorKind::InvalidData,"missing expected response kind")))?,tx));
                                     continue;
                                 },
                                 LdapOp::Search(_) => (),
@@ -832,17 +833,21 @@ impl LdapConnAsync {
                         },
                         Some(Ok(resp)) => resp,
                     };
-                    if let Some(tx) = self.searchmap.get(&id) {
+                    if let Some((responses,tx)) = self.searchmap.get_mut(&id) {
+                        // Server-side size limits are only hints. Keep the
+                        // credential-only search channel/collector bounded.
+                        *responses+=1;
+                        if *responses>8 {return Err(LdapError::from(std::io::Error::new(std::io::ErrorKind::InvalidData,"too many credential search responses")));}
                         let protoop = if let Tag::StructureTag(protoop) = tag {
                             protoop
                         } else {
-                            panic!("unmatched tag structure: {:?}", tag);
+                            return Err(LdapError::from(std::io::Error::new(std::io::ErrorKind::InvalidData,"invalid search response structure")));
                         };
                         let (item, mut remove) = match protoop.id {
                             4 | 25 => (SearchItem::Entry(protoop), false),
                             5 => (SearchItem::Done(Tag::StructureTag(protoop).into()), true),
                             19 => (SearchItem::Referral(protoop), false),
-                            _ => panic!("unrecognized op id: {}", protoop.id),
+                            _ => return Err(LdapError::from(std::io::Error::new(std::io::ErrorKind::InvalidData,"unexpected search response kind"))),
                         };
                         if let Err(e) = tx.send((item, controls)) {
                             warn!("ldap search item send error, op={}: {:?}", id, e);
@@ -851,7 +856,8 @@ impl LdapConnAsync {
                         if remove {
                             self.searchmap.remove(&id);
                         }
-                    } else if let Some(tx) = self.resultmap.remove(&id) {
+                    } else if let Some((expected,tx)) = self.resultmap.remove(&id) {
+                        if !matches!(&tag,Tag::StructureTag(t) if t.id==expected) || !crate::protocol::single_response(&tag) {return Err(LdapError::from(std::io::Error::new(std::io::ErrorKind::InvalidData,"unexpected single-operation response kind")));}
                         if let Err(e) = tx.send((tag, controls)) {
                             warn!("ldap result send error: {:?}", e);
                         }

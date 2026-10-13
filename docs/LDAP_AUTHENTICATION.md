@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 27 -->
+<!-- doc-rev: 28 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -457,3 +457,33 @@ reports unavailable within that bound. Both cases pass during LDAPS and StartTLS
 fixture runs. Existing real-directory identity, invalid credentials and circuit tests
 also pass. These bounds do not qualify all LDAP semantic/control parsing, aggregate
 memory, directory revocation or actual browser/gateway activation.
+
+## Credential response semantics and aggregate bounds
+
+The vendored LDAP codec now validates response shapes before upstream infallible
+conversion paths: message arity/classes/IDs, nonnegative bounded integers,
+result fields and UTF-8, referrals, entry attribute/value shapes (binary values
+remain supported) and control wrappers including Boolean length. Unsupported
+credential operations are refused. The AD extended-response outer-OID workaround
+is retained after validation. Dispatch binds each single response to its request
+operation, so a success ExtendedResponse cannot authenticate a Bind request.
+Unexpected search response kinds become connection errors rather than panics.
+
+Credential searches are limited to eight response frames before enqueueing,
+independently of a server-side size-limit hint. At the existing 64 KiB frame cap
+this bounds queued search wire payload to 512 KiB per operation; parsed object
+and other connection overhead are additional. The connector's concurrency and
+whole-operation deadline remain in force. This fork is credential-only: generic
+intermediate/sync operations, opaque control-value parsers and GSSAPI/SASL paths
+are not enabled/qualified by these changes.
+
+Six focused vendored tests cover framing, semantic rejection without panics,
+valid results/binary entries/referrals/controls/AD notice and deterministic wire
+mutations passed through downstream result/entry parsing. The owned TLS fixture
+passes real LDAPS and mandatory StartTLS authentication plus malicious peers
+that send empty/missing-result/invalid-control frames, a search entry or wrong
+success-result kind during Bind, a Bind response during Search, or nine valid
+search entries while withholding completion. These peers keep the connection
+open; client closure and unavailable classification must occur within one second.
+The runtime configuration barrier remains: actual LDAP browser/session/revocation
+and distributed lifecycle qualification are still required before activation.

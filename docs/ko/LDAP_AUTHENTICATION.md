@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=27 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=28 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -402,3 +402,28 @@ primitive 내용은 자식으로 해석하지 않고 건너뛰며 여러 프레�
 실제 디렉터리 신원·자격 거부·서킷 테스트도 유지됩니다. 모든 LDAP 의미·control
 파싱, 전체 메모리, 디렉터리 회수, 실제 브라우저·게이트웨이 활성화를 완료했다는
 의미는 아닙니다.
+
+## 자격 응답 의미와 집계 제한
+
+Vendored LDAP codec이 upstream의 infallible 변환 전에 응답 구조를 검사합니다.
+메시지 원소 수·class·ID·음수가 아닌 제한된 정수·결과 필드·UTF-8·referral·
+엔트리 속성과 값 구조 및 Boolean 길이를 포함한 control wrapper를 검사하며
+바이너리 값은 유지합니다. 미지원 자격 연산은 거절합니다. AD 확장 응답의
+바깥 OID 예외는 검증 후 유지합니다. 단일 응답은 요청 연산과 결합되어 성공
+ExtendedResponse로 Bind를 인증할 수 없습니다. 잘못된 Search 응답 종류도
+panic 대신 연결 오류로 처리합니다.
+
+서버 size-limit 힌트와 별개로 자격 검색은 enqueue 전에 응답 프레임 8개로
+제한합니다. 기존 64 KiB 프레임 제한에서 대기 검색 wire payload는 연산당
+512 KiB 이내이며 파싱 객체·기타 연결 overhead는 별도입니다. 커넥터 동시성·
+전체 연산 deadline도 유지합니다. 자격 전용 fork이며 일반 intermediate·sync,
+불투명 control-value 파서·GSSAPI·SASL은 이번 변경으로 활성화·검증하지 않습니다.
+
+Vendored 집중 테스트 6건은 framing·panic 없는 의미 거절·정상 결과·바이너리
+엔트리·referral·control·AD notice 및 다운스트림 결과·엔트리 파서까지의
+결정적 wire mutation을 검증합니다. 자체 TLS fixture는 실제 LDAPS·필수
+StartTLS 인증과 빈 응답·결과 필드 누락·잘못된 control, Bind 중 SearchEntry나
+다른 성공 결과, Search 중 Bind 응답, 완료 없이 정상 엔트리 9개를 보내는
+악성 peer를 통과합니다. Peer가 연결을 열어 둔 상태에서 클라이언트 종료·
+불가용 분류를 1초 이내 요구합니다. 런타임 설정 제한은 유지하며 활성화 전
+실제 LDAP 브라우저·세션·철회·분산 수명주기 검증이 필요합니다.

@@ -512,7 +512,17 @@ mod tests {
             provider.circuit.state(),
             Some(crate::auth_gateway::breaker::State::Closed)
         );
-        for name in ["OWNED_LDAP_OVERSIZE", "OWNED_LDAP_DEEP"] {
+        for name in [
+            "OWNED_LDAP_OVERSIZE",
+            "OWNED_LDAP_DEEP",
+            "OWNED_LDAP_EMPTY",
+            "OWNED_LDAP_RESULT",
+            "OWNED_LDAP_CONTROL",
+            "OWNED_LDAP_WRONG_BIND",
+            "OWNED_LDAP_WRONG_SEARCH",
+            "OWNED_LDAP_WRONG_RESULT",
+            "OWNED_LDAP_FLOOD",
+        ] {
             let mut malicious = config.clone();
             malicious.endpoint = std::env::var(name).unwrap();
             malicious.starttls = false;
