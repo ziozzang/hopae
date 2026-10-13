@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 17 -->
+<!-- doc-rev: 18 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -287,3 +287,20 @@ bind_password_env, username_attribute, subject_attribute, subject_encoding
 to OIDC; LDAP cannot use OIDC credentials or implicit account linking. LDAP portal
 activation is still rejected by configuration validation. See
 [LDAP implementation status](LDAP_AUTHENTICATION.md).
+
+## TOTP keyring bootstrap
+
+Optional `totp_keyring` is a reference-only startup setting. Example:
+
+```json
+{"totp_keyring":{"active_key":"v1","keys":[{"id":"v1","key_env":"TOTP_KEY"}]}}
+```
+
+One active ID must name one of 1–16 unique key entries; each environment name must
+be conventional and unique. Referenced material is 32 high-entropy bytes encoded as
+43 unpadded Base64url characters. Startup rejects unavailable, malformed, zero or
+reused material before opening state/listeners. Keys remain in memory for the process;
+configuration does not contain their values. Authenticated gateway callers are required.
+Retained IDs permit decryption of prior envelopes; retirement needs rewrapping first.
+This setting prepares key services only: it does not enable enrollment/OTP HTTP routes,
+step-up or MFA session issuance. See [authentication gateway](AUTH_GATEWAY.md).

@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=17 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=18 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -279,3 +279,19 @@ username_attribute·subject_attribute·subject_encoding(text/binary_hex)·
 timeout_ms(1–2000)입니다. client_id 필수 조건은 OIDC에 적용하며 LDAP는 OIDC
 자격 정보나 암시적 계정 연결을 사용하지 않습니다. 설정 검증의 LDAP portal 활성화
 제한은 유지합니다. [LDAP 구현 상태](LDAP_AUTHENTICATION.md)를 참고하세요.
+
+## TOTP keyring bootstrap
+
+선택 `totp_keyring`은 참조만 포함한 시작 설정입니다. 예:
+
+```json
+{"totp_keyring":{"active_key":"v1","keys":[{"id":"v1","key_env":"TOTP_KEY"}]}}
+```
+
+Active ID는 1–16개 고유 키 중 하나여야 하며 환경 변수 이름도 일반 이름·고유값이어야
+합니다. 키는 충분히 무작위인 32 byte를 padding 없는 Base64url 43자리로 참조합니다.
+누락·잘못된·0·재사용 값은 상태·listener를 열기 전에 거부하고 키는 프로세스 메모리에
+유지합니다. 설정에 실제 값을 넣지 않습니다. 인증된 gateway caller가 필요합니다.
+유지 ID로 이전 envelope를 복호화하고 폐기 전에 재암호화해야 합니다.
+이 설정은 키 서비스만 준비하며 등록·OTP HTTP route, step-up·MFA 세션 발급을
+활성화하지 않습니다. [인증 게이트웨이](AUTH_GATEWAY.md)를 참고하세요.

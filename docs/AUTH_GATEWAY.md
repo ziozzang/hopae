@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 15 -->
+<!-- doc-rev: 16 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -378,3 +378,17 @@ for key retirement, envelope rewrapping, enrollment/step-up HTTP/UI and atomic
 challenge/session completion remain unfinished. Source changes are not in the current
 internal `owner-v5-d876909` image. Key rotation tests do not constitute deployed
 operator key-management or complete MFA lifecycle support.
+
+## Startup keyring wiring
+
+Root `totp_keyring` now validates reference shape and material in preflight. Application
+binding compiles and retains an immutable Arc keyring before acquiring the instance
+lock, opening/migrating the database or binding listeners. Invalid material fails with
+one redacted error. With no setting, existing startup and provider behavior is retained.
+A config regression covers known-key parsing/reference validation/redacted material
+errors, and a bind regression verifies missing material creates no state directory.
+
+This is bootstrap wiring, not complete factor HTTP support. Runtime key publication/
+retirement fencing, rewrapping, recent authentication, admission, enrollment/step-up UI,
+challenge/session atomicity and internal MFA dogfooding remain required. The deployed
+internal `owner-v5-d876909` image predates this setting and is not configured with it.

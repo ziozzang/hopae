@@ -122,6 +122,13 @@ pub(super) const ROOT: Node = Obj(&[
         ]),
     ),
     (
+        "totp_keyring",
+        Obj(&[
+            ("active_key", Leaf),
+            ("keys", Arr(&Obj(&[("id", Leaf), ("key_env", Leaf)]))),
+        ]),
+    ),
+    (
         "authentication_gateway",
         Obj(&[
             ("authority_id", Leaf),

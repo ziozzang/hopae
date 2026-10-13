@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=15 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=16 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -334,3 +334,17 @@ Keyring은 서비스 호출 동안 불변입니다.
 HTTP·UI와 challenge·세션 원자 완료는 미완성입니다. 현재 내부
 `owner-v5-d876909` 이미지에는 이번 소스 변경이 없습니다. 키 교체 테스트가
 운영 키 관리나 전체 MFA 수명주기를 완성했다는 의미는 아닙니다.
+
+## 시작 keyring 연결
+
+Root `totp_keyring`의 참조 구조·값을 preflight에서 검사합니다. 앱 bind는
+인스턴스 lock·DB 열기·마이그레이션·listener 전에 keyring을 컴파일하고
+불변 Arc로 유지합니다. 잘못된 값은 일정한 비밀 없는 오류로 거부합니다.
+설정이 없으면 기존 시작·provider 동작을 유지합니다. 설정 회귀는 key 파싱·참조
+검사·오류 비밀 제거를 확인하고 bind 회귀는 누락된 키가 상태 디렉터리를
+생성하지 않음을 확인합니다.
+
+Bootstrap 연결이며 요인 HTTP 지원 완료는 아닙니다. 실행 중 키 배포·폐기 검사,
+재암호화·최근 인증·시도 제한·등록·step-up UI·challenge와 세션 원자 처리·내부
+MFA 도그푸딩은 남아 있습니다. 현재 내부 `owner-v5-d876909` 이미지는 이 설정
+이전 버전이며 해당 설정을 넣지 않았습니다.

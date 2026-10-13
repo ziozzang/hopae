@@ -29,6 +29,8 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
+    pub totp_keyring: Option<crate::factor::keyring::Configuration>,
+    #[serde(default)]
     pub listen: Listen,
     /// Writable directory for runtime state (created with mode 0700).
     pub state_dir: PathBuf,
@@ -843,6 +845,15 @@ impl Config {
         self.validate_admin(&mut errs);
         self.validate_providers(&mut errs);
         self.validate_bounds(&mut errs);
+        if let Some(keys) = &self.totp_keyring {
+            if keys.validate_references().is_err() {
+                errs.push("totp_keyring: invalid key references".into());
+            }
+            if self.gateway.allow_unauthenticated_caller {
+                errs.push("totp_keyring requires authenticated gateway callers".into());
+            }
+        }
+
         if let Some(config) = &self.authentication_gateway {
             if let Err(error) = config.validate() {
                 errs.push(format!("authentication_gateway: {error}"));
@@ -1735,6 +1746,11 @@ pub fn check_env(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<S
             }
         }
     }
+    if let Some(keys) = &cfg.totp_keyring
+        && crate::factor::keyring::Keyring::compile(keys, &lookup).is_err()
+    {
+        out.push("totp_keyring: unavailable or invalid key material".into());
+    }
     if let Some(config) = &cfg.authentication_gateway
         && let Err(error) = crate::auth_gateway::runtime::Runtime::compile(config, &lookup)
     {
@@ -1771,6 +1787,24 @@ mod tests {
       "portal": {"public_url": "https://auth.example.test"},
       "gateway": {"kind": "hangang", "caller_key_env": "K"}
     }"#;
+
+    #[test]
+    fn totp_key_references_validate_and_material_errors_are_redacted() {
+        let config=with(r#"{"totp_keyring":{"active_key":"owned","keys":[{"id":"owned","key_env":"OWNED_FACTOR_KEY"}]}}"#).unwrap();
+        assert!(config.totp_keyring.is_some());
+        let secret = "raw-secret-not-an-encryption-key";
+        let problems = check_env(&config, |name| {
+            Some(if name == "K" {
+                "caller-value".into()
+            } else {
+                secret.into()
+            })
+        });
+        assert!(problems.iter().any(|p| p.contains("totp_keyring")));
+        assert!(!problems.join(" ").contains(secret));
+        assert!(with(r#"{"totp_keyring":{"active_key":"missing","keys":[]}}"#).is_err());
+        assert!(with(r#"{"totp_keyring":{"active_key":"owned","keys":[{"id":"owned","key_env":"OWNED_FACTOR_KEY","secret":"forbidden"}]}}"#).is_err());
+    }
 
     fn with(extra: &str) -> Result<Config, ConfigError> {
         let mut v: serde_json::Value = serde_json::from_str(BASE).unwrap();

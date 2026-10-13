@@ -31,39 +31,7 @@ impl Keyring {
         configuration: &Configuration,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, InvalidKeyring> {
-        if configuration.keys.is_empty() || configuration.keys.len() > 16 {
-            return Err(InvalidKeyring);
-        }
-        let mut ids = HashSet::new();
-        let mut refs = HashSet::new();
-        // Validate the whole reference set before looking up any secret.
-        for reference in &configuration.keys {
-            if reference.id.is_empty()
-                || reference.id.len() > 128
-                || !reference
-                    .id
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
-                || !reference
-                    .key_env
-                    .as_bytes()
-                    .first()
-                    .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
-                || reference.key_env.is_empty()
-                || reference.key_env.len() > 128
-                || !reference
-                    .key_env
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                || !ids.insert(reference.id.clone())
-                || !refs.insert(reference.key_env.clone())
-            {
-                return Err(InvalidKeyring);
-            }
-        }
-        if !ids.contains(&configuration.active_key) {
-            return Err(InvalidKeyring);
-        }
+        configuration.validate_references()?;
         let mut keys = HashMap::new();
         let mut fingerprints = HashSet::new();
         for reference in &configuration.keys {
@@ -101,6 +69,45 @@ impl Keyring {
         self.keys.get(envelope.key_id())
     }
 }
+impl Configuration {
+    pub fn validate_references(&self) -> Result<(), InvalidKeyring> {
+        if self.keys.is_empty() || self.keys.len() > 16 {
+            return Err(InvalidKeyring);
+        }
+        let mut ids = HashSet::new();
+        let mut refs = HashSet::new();
+        // Validate the whole reference set before looking up any secret.
+        for reference in &self.keys {
+            if reference.id.is_empty()
+                || reference.id.len() > 128
+                || !reference
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+                || !reference
+                    .key_env
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+                || reference.key_env.is_empty()
+                || reference.key_env.len() > 128
+                || !reference
+                    .key_env
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                || !ids.insert(reference.id.clone())
+                || !refs.insert(reference.key_env.clone())
+            {
+                return Err(InvalidKeyring);
+            }
+        }
+        if !ids.contains(&self.active_key) {
+            return Err(InvalidKeyring);
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

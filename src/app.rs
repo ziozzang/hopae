@@ -190,6 +190,7 @@ impl Readiness {
 /// Everything the routers and services are built from.
 #[derive(Clone)]
 pub struct Services {
+    pub totp_keyring: Option<Arc<crate::factor::keyring::Keyring>>,
     pub authentication_authority:
         Option<Arc<std::sync::Mutex<crate::auth_gateway::authority::Authority>>>,
     pub config: Arc<Config>,
@@ -469,6 +470,16 @@ fn provider_rows(cfg: &Config) -> Vec<ProviderRow> {
 /// listeners. Failing here is a start failure.
 pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     let real_env = |n: &str| std::env::var(n).ok();
+    let totp_keyring = cfg
+        .totp_keyring
+        .as_ref()
+        .map(|keys| {
+            crate::factor::keyring::Keyring::compile(keys, &real_env)
+                .map(Arc::new)
+                .map_err(|_| anyhow::anyhow!("totp_keyring: unavailable or invalid key material"))
+        })
+        .transpose()?;
+
     for w in cfg.warnings() {
         tracing::warn!("{w}");
     }
@@ -658,6 +669,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         }
     };
     let services = Services {
+        totp_keyring,
         authentication_authority,
 
         config: Arc::new(cfg.clone()),
@@ -1729,6 +1741,31 @@ pub async fn admin_check_warnings(cfg: &Config) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_totp_key_refuses_bind_before_state_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("uncreated");
+        let name = format!(
+            "HOPAE_MISSING_TOTP_KEY_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let value = serde_json::json!({"state_dir":state,"portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_CALLER_REFERENCE"},"totp_keyring":{"active_key":"owned","keys":[{"id":"owned","key_env":name}]}});
+        let cfg = crate::config::parse(&value.to_string()).unwrap();
+        let error = bind(&cfg).await.err().expect("must refuse missing key");
+        assert_eq!(
+            error.to_string(),
+            "totp_keyring: unavailable or invalid key material"
+        );
+        assert!(
+            !state.exists(),
+            "key failure created state or lock before refusal"
+        );
+    }
 
     fn keys(cur: Option<&str>, next: Option<&str>, unauth: bool) -> CallerKeys {
         CallerKeys::new(
