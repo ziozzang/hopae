@@ -1,6 +1,6 @@
 # Documentation
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [한국어 목차](ko/README.md)
 
@@ -31,3 +31,5 @@ Further reference pages (providers, sessions, management) are added as
 milestones land. The [roadmap](ROADMAP.md) describes the intended shape.
 
 - [Native Hangang integration](HANGANG_NATIVE.md) — HOP1 verification and delegated console.
+
+- [Authentication profile publication](AUTH_PROFILE_PUBLICATION.md) — proposed durable ownership and snapshot publication contract.

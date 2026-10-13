@@ -1,0 +1,60 @@
+# Authentication profile publication
+
+<!-- doc-rev: 1 -->
+
+[Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
+
+## Status and ownership
+
+This is a proposed implementation contract. Current authentication profiles are
+file-owned and compiled at startup. Hopae owns the future profile database,
+credential references, publication audit and compiled runtime. Hangang delegates
+administration through its existing authenticated console lease; Pumgye continues
+to own permissions. Neither gateway callers nor classifiers may publish profiles.
+
+## Durable model
+
+Store one authority document with revision, canonical document digest and schema
+version, plus append-only publication audit in Hopae's own SQLite transaction.
+The document contains environment references, never bearer material. A deletion
+is a persisted empty/disabled authority, not a missing row: restarting must never
+restore removed profiles from the bootstrap file. File import happens only before
+an authority row exists. Changing authority/realm/issuer namespaces requires an
+explicit identity migration; publication must not silently inherit old grants.
+
+## Publication and request execution
+
+A bounded blocking worker serializes publications under the existing exclusive
+instance ownership. Validate document size, application scope and connector bounds,
+resolve allowed secret references, and compile the complete candidate before writing.
+The mutation requires administrator authorization, existing CSRF/origin checks,
+and an exact revision precondition. Viewer and data-plane credentials cannot mutate.
+
+Commit the document, next revision, digest and audit together, then atomically swap
+an ArcSwap runtime containing that revision. Do not await between commit and swap.
+Cancellation of the HTTP caller must not cancel the worker. A post-commit inability
+to install the snapshot fences authentication readiness until recovery; it cannot
+continue answering with a known stale allow. Startup loads and compiles the durable
+row before becoming ready; missing references or corrupt state fail closed.
+
+Each request loads one immutable runtime snapshot. No profile database query or
+lock is allowed in the authentication hot path. Reply evidence carries the authority
+revision and bounded freshness. Successful publication also advances the revocation
+generation consumed by Hangang streams and pools. Profile/key removal must invalidate
+open streams within the declared one-second evidence bound; request-only rejection
+is insufficient. An unchanged verifier connector may retain its circuit across a
+publication only when endpoint, issuer, secret reference and security options match.
+
+## Interface and verification gates
+
+Proposed delegated GET/PUT `/v1/authentication/profiles` returns revision, digest
+and reference-only configuration. PUT uses If-Match; stale concurrent writes return
+409, invalid candidates 422, unavailable durable storage 503. The authenticated
+actor and outcome are audited without credentials or verifier response bodies.
+
+Before activation, test durable deletion across restart, malformed/oversized bodies,
+missing secret references, viewer/data-plane denial, concurrent CAS, cancellation
+before and after commit, persistence failure, failed snapshot installation, and
+open-stream revocation. Exercise actual Hopae/Hangang processes and preserve old
+provider sessions. DB-backed distributed followers require separate signed/revisioned
+snapshot leases and are not implemented by this single-owner publication contract.

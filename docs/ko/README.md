@@ -1,6 +1,6 @@
 # 문서
 
-<!-- translation-status: source=../README.md source-rev=6 status=current -->
+<!-- translation-status: source=../README.md source-rev=7 status=current -->
 
 [English](../README.md)
 
@@ -31,3 +31,5 @@
 추가됩니다. [로드맵](ROADMAP.md)이 의도한 형태를 설명합니다.
 
 - [Hangang 네이티브 통합](HANGANG_NATIVE.md) — HOP1 검증과 콘솔 위임.
+
+- [인증 프로필 게시](AUTH_PROFILE_PUBLICATION.md) — 영속 소유권과 스냅샷 게시 제안 계약.
