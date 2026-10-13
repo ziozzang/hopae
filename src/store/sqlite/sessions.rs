@@ -62,6 +62,27 @@ pub(super) fn insert_handle(conn: &Connection, h: &HandleRow) -> StoreResult<()>
     Ok(())
 }
 
+pub(super) fn insert_handoff_code(tx: &Transaction<'_>, code: &HandoffCodeRow) -> StoreResult<()> {
+    tx.execute(
+                "INSERT INTO handoff_codes (code_sha256, session_id, host, return_target, return_path, client_ip, bind_sha256, issued_aal, cred_gen, recovery_depth, created_at, expires_at, consumed_at, consumed_reason) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL,NULL)",
+                params![
+                    blob(&code.code_sha256),
+                    code.session_id.as_str(),
+                    code.host.as_str(),
+                    code.return_target.as_str(),
+                    code.return_target.path(),
+                    code.client_ip.to_string(),
+                    blob(&code.bind_sha256),
+                    code.issued_aal.as_i64(),
+                    i64::try_from(code.cred_gen).unwrap_or(i64::MAX),
+                    i64::from(code.recovery_depth),
+                    code.created_at.secs(),
+                    code.expires_at.secs(),
+                ],
+            )?;
+    Ok(())
+}
+
 /// Revoke the session's unrevoked handles with `reason`.
 pub(super) fn revoke_session_handles(
     tx: &Transaction<'_>,
@@ -725,23 +746,7 @@ impl Sessions for Store {
             if session.cred_gen != code.cred_gen {
                 return Err(StoreError::Conflict("stale credential generation"));
             }
-            tx.execute(
-                "INSERT INTO handoff_codes (code_sha256, session_id, host, return_target, return_path, client_ip, bind_sha256, issued_aal, cred_gen, recovery_depth, created_at, expires_at, consumed_at, consumed_reason) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,NULL,NULL)",
-                params![
-                    blob(&code.code_sha256),
-                    code.session_id.as_str(),
-                    code.host.as_str(),
-                    code.return_target.as_str(),
-                    code.return_target.path(),
-                    code.client_ip.to_string(),
-                    blob(&code.bind_sha256),
-                    code.issued_aal.as_i64(),
-                    i64::try_from(code.cred_gen).unwrap_or(i64::MAX),
-                    i64::from(code.recovery_depth),
-                    code.created_at.secs(),
-                    code.expires_at.secs(),
-                ],
-            )?;
+            insert_handoff_code(&tx, &code)?;
             insert_events(&tx, &shared, &events)?;
             finish(tx, &shared, None)
         })

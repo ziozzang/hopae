@@ -623,13 +623,24 @@ impl Service {
             || view.session.auth_time > now
             || now.since(view.session.auth_time) > Duration::from_secs(300)
             || view.session.authz_version_at_auth != view.user.authz_version
-            || !self.provider_row_live(&view.session.provider_id).await?
         {
             return Err(SessionError::Refused(reasons::INVALID_STATE));
         }
+        let provider = self
+            .directory
+            .providers()
+            .await?
+            .into_iter()
+            .find(|row| {
+                row.provider_id == view.session.provider_id
+                    && row.enabled
+                    && row.deleted_at.is_none()
+            })
+            .ok_or(SessionError::Refused(reasons::INVALID_STATE))?;
         let snapshot = self.snapshot.load_full();
         Ok(crate::store::FactorActor {
             request_id: ctx.request_id.clone(),
+            provider_configuration: (provider.kind, provider.config),
             view,
             authorized_at: now,
             session_idle: self.cfg.session.idle,

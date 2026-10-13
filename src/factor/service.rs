@@ -151,3 +151,53 @@ pub async fn confirm_authorized(
         at,
     })
 }
+
+/// Server-prepared, browser-bound step-up output. Callers must validate HTTPS,
+/// CSRF, both browser bindings and the live application policy before calling.
+pub struct StepUp<'a> {
+    pub enrollment: &'a str,
+    pub actor: crate::store::FactorActor,
+    pub code: &'a Secret,
+    pub transaction: crate::crypto::Digest,
+    pub portal_handle: crate::store::HandleRow,
+    pub handoff: crate::store::HandoffCodeRow,
+    pub events: Vec<Event>,
+}
+
+/// Verifies the code without consuming it, then commits proof, challenge,
+/// elevation, old-credential revocation and replacements as one owner write.
+/// This is a native service primitive, not an HTTP endpoint or policy bypass.
+pub async fn elevate_authorized(
+    store: &dyn Factors,
+    keys: &Keyring,
+    clock: &dyn Clock,
+    input: StepUp<'_>,
+) -> Result<(), Error> {
+    let user = input.actor.user().clone();
+    let row = store
+        .totp_enrollment(input.enrollment, &user)
+        .await
+        .map_err(Error::Store)?
+        .filter(|row| row.active)
+        .ok_or(Error::Refused)?;
+    let key = keys.for_envelope(&row.envelope).ok_or(Error::Refused)?;
+    let seed = key
+        .open(&row.envelope, user.as_str(), input.enrollment)
+        .map_err(|_| Error::Refused)?;
+    let counter = Parameters::default()
+        .matching_counter(&seed, clock.now(), input.code, row.last_counter)
+        .ok_or(Error::Refused)?;
+    store
+        .elevate_totp(crate::store::TotpElevation {
+            actor: input.actor,
+            enrollment: input.enrollment.into(),
+            revision: row.revision,
+            counter,
+            transaction: input.transaction,
+            portal_handle: input.portal_handle,
+            handoff: input.handoff,
+            events: input.events,
+        })
+        .await
+        .map_err(Error::Store)
+}

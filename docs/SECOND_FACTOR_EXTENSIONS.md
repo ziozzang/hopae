@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -9,7 +9,7 @@
 Native TOTP enrollment and confirmation exist, including encrypted seeds,
 owner authorization and durable counter fencing. The profile uses six digits,
 SHA-1 and a 30-second period. Manual setup is available; QR provisioning,
-recovery and atomic sign-in step-up remain unfinished. Enrollment does not
+recovery and browser sign-in step-up wiring remain unfinished. Enrollment does not
 raise a session's assurance. Google/OIDC login is separate from an authenticator
 application generating a TOTP code.
 
@@ -121,3 +121,39 @@ native configuration, not a script assertion.
 
 See [ADR-0008](adr/0008-second-factor-extension-point.md) for handle rotation
 and [Authentication gateway](AUTH_GATEWAY.md) for existing relay behavior.
+
+## Native atomic TOTP completion
+
+The native `elevate_authorized` service now verifies a real TOTP code without
+first consuming it and calls one owner transaction. This transaction consumes
+an unexpired `stepup` transaction and the revision-fenced TOTP counter, appends
+factor evidence, sets session/portal-handle AAL 2, advances credential generation,
+revokes all old handles and outstanding handoffs, and inserts the new portal
+handle and exact-target handoff. Primary provider authentication time is preserved.
+Required proof/revocation/handoff audit and outbox writes share the transaction.
+
+For native `stepup` transactions only, `conflicting_handle_sha256` binds the
+initiating portal handle; it retains its existing meaning for other purposes.
+The challenge must name the same session, application return target, browser
+binding digest, client IP and recovery depth as the new handoff. OAuth provider,
+state, nonce, PKCE and reauthentication metadata must be absent. Replacement
+credentials cannot exceed the existing handle/session lifetime or a 60-second
+handoff lifetime. The actor is refreshed by the session service and its provider
+kind/configuration is rechecked under the owner write lock. Native enrollment
+and removal also receive this provider configuration fence.
+
+Tests use real TOTP arithmetic and actual SQLite writes. They cover the atomic
+success state, two concurrent challenges with exactly one winner, invalid code,
+audit uniqueness failure, wrong challenge/generation/target/handle, disabled or
+changed provider, stale actor, expired challenge and revoked enrollment. Each
+refusal preserves proof/challenge and credential state. This is service/storage
+qualification, not an actual browser step-up qualification.
+
+The browser challenge creation/CSRF and portal/application binding flow, live
+application-policy/configuration epoch fencing, recovery/navigation and rollout
+are still required before activation. The caller must validate both browser
+bindings and the return target against live application policy; the storage
+command does not independently decide application permissions. Structural
+provider configuration equality is not a monotonic publication epoch or a
+fingerprint of environment secret/CA contents. No runtime route is enabled by
+this primitive, and the internally deployed image remains unchanged.

@@ -10,6 +10,72 @@ use rusqlite::{OptionalExtension, params};
 
 #[async_trait]
 impl Factors for Store {
+    async fn elevate_totp(&self, request: crate::store::TotpElevation) -> StoreResult<()> {
+        self.write("elevate_totp", move |env| {
+            use crate::{session::types::{Aal, FactorEntry, FactorKind}, event::types::reasons};
+            let shared = env.shared.clone();
+            let now = shared.clock.now();
+            let tx = env.begin()?;
+            let actor = &request.actor;
+            let view = &actor.view;
+            let user = actor.user();
+            let sid = &view.session.session_id;
+            require_actor(&tx, &shared, user.as_str(), actor)?;
+            let revision = i64::try_from(request.revision).map_err(|_| StoreError::Conflict("invalid enrollment revision"))?;
+            let counter = i64::try_from(request.counter).map_err(|_| StoreError::Conflict("invalid OTP counter"))?;
+            let generation = view.session.cred_gen.checked_add(1).and_then(|n| i64::try_from(n).ok()).ok_or(StoreError::Conflict("credential generation exhausted"))?;
+            let handle = &request.portal_handle;
+            let code = &request.handoff;
+            if handle.session_id != *sid || handle.host != view.handle.host
+                || handle.handle_sha256 == view.handle.handle_sha256
+                || handle.issued_aal != Aal::Two || handle.created_at.secs() != now.secs()
+                || handle.last_seen_at.secs() != now.secs()
+                || handle.absolute_expires_at.secs() <= now.secs()
+                || handle.absolute_expires_at > view.handle.absolute_expires_at.min(view.session.absolute_expires_at)
+                || handle.revoked_at.is_some() || handle.revoked_reason.is_some()
+                || code.session_id != *sid || code.issued_aal != Aal::Two
+                || i64::try_from(code.cred_gen).ok() != Some(generation)
+                || code.created_at.secs() != now.secs() || code.expires_at.secs() <= now.secs()
+                || code.expires_at > now.add(std::time::Duration::from_secs(60)).min(view.session.absolute_expires_at)
+                || code.consumed_at.is_some() || code.consumed_reason.is_some()
+                || code.return_target.scheme() != "https" || code.return_target.host_str() != Some(code.host.as_str())
+                || !code.return_target.username().is_empty() || code.return_target.password().is_some()
+                || code.return_target.fragment().is_some()
+            {
+                return Err(StoreError::Conflict("invalid elevated credentials"));
+            }
+            // A native step-up challenge is bound to the initiating portal handle.
+            // The existing conflicting-handle column has this purpose for stepup only.
+            let consumed = tx.execute(
+                "UPDATE login_txns SET consumed_at=?2,consumed_reason='elevation' WHERE txn_sha256=?1 AND purpose='stepup' AND portal_session_id=?3 AND conflicting_handle_sha256=?4 AND bind_sha256=?5 AND return_target=?6 AND client_ip=?7 AND recovery_depth=?8 AND consumed_at IS NULL AND created_at<=?2 AND expires_at>?2 AND reauth_max_age IS NULL AND provider_id IS NULL AND state_sha256 IS NULL AND nonce IS NULL AND pkce_verifier IS NULL",
+                params![&request.transaction.0[..],now.secs(),sid.as_str(),&view.handle.handle_sha256.0[..],&code.bind_sha256.0[..],code.return_target.as_str(),code.client_ip.to_string(),i64::from(code.recovery_depth)],
+            )?;
+            if consumed != 1 { return Err(StoreError::Conflict("step-up challenge unavailable")); }
+            if tx.execute("UPDATE totp_enrollments SET last_counter=?4,updated_at=?5 WHERE enrollment_id=?1 AND user_id=?2 AND revision=?3 AND state='active' AND last_counter<?4",params![request.enrollment,user.as_str(),revision,counter,now.secs()])? != 1 {
+                return Err(StoreError::Conflict("factor proof unavailable"));
+            }
+            let mut factors = view.session.factors.clone();
+            factors.push(FactorEntry { kind: FactorKind::Totp, provider: None, at: now });
+            // Preserve the primary authentication time: OTP is not provider reauthentication.
+            tx.execute("UPDATE sessions SET aal=2,factors=?2,cred_gen=?3 WHERE session_id=?1",params![sid.as_str(),super::rows::json_str(&factors)?,generation])?;
+            let mut events = request.events;
+            let live:Vec<String> = tx.prepare("SELECT host FROM session_handles WHERE session_id=?1 AND revoked_at IS NULL ORDER BY host,handle_sha256")?.query_map([sid.as_str()],|r|r.get(0))?.collect::<Result<_,_>>()?;
+            for host in live {
+                events.push(EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::HandleRevoked,Outcome::Success,&actor.request_id).user(user).session(sid).reason(reasons::ELEVATION).attr("host",host).build());
+            }
+            super::sessions::revoke_session_handles(&tx,sid,reasons::ELEVATION.0,now)?;
+            super::sessions::consume_session_codes(&tx,sid,reasons::ELEVATION.0,now)?;
+            super::sessions::insert_handle(&tx,handle)?;
+            super::sessions::insert_handoff_code(&tx,code)?;
+            let mut proof_event=factor_event(&shared,user,&request.enrollment,EventKind::FactorTotpConsumed,&actor.request_id);
+            proof_event.session_id=Some(sid.clone());proof_event.reason=Some(reasons::ELEVATION);
+            events.push(proof_event);
+            events.push(EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::SessionHandoff,Outcome::Success,&actor.request_id).user(user).session(sid).reason(reasons::ELEVATION).attr("host",code.host.as_str()).build());
+            insert_events(&tx,&shared,&events)?;
+            commit(tx,&shared,None)
+        }).await
+    }
+
     async fn has_active_totp(&self, user: &UserId) -> StoreResult<bool> {
         let user = user.clone();
         self.read("has_active_totp",move |conn| {
@@ -256,6 +322,11 @@ fn require_actor(
         return Err(StoreError::Conflict("factor authorization expired"));
     }
     let view = &actor.view;
+    super::sessions::require_provider_configuration(
+        tx,
+        view.session.provider_id.as_str(),
+        Some(&actor.provider_configuration),
+    )?;
     let live:bool=tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM sessions s JOIN session_handles h ON h.session_id=s.session_id JOIN users u ON u.user_id=s.user_id JOIN providers p ON p.provider_id=s.provider_id WHERE s.session_id=?1 AND s.user_id=?2 AND h.handle_sha256=?3 AND h.host=?4 AND s.cred_gen=?5 AND s.auth_time=?6 AND s.authz_version_at_auth=u.authz_version AND u.status='active' AND s.terminated_at IS NULL AND h.revoked_at IS NULL AND p.enabled=1 AND p.deleted_at IS NULL AND s.aal>=?11 AND h.issued_aal>=?12 AND s.absolute_expires_at>?7 AND h.absolute_expires_at>?7 AND s.last_seen_at>?8 AND h.last_seen_at>?9 AND s.auth_time>=?10 AND s.auth_time<=?7 AND s.factors=?13)",
         params![view.session.session_id.as_str(),user,&view.handle.handle_sha256.0[..],view.handle.host.as_str(),view.session.cred_gen as i64,view.session.auth_time.secs(),now.secs(),now.secs().saturating_sub(actor.session_idle.as_secs() as i64),now.secs().saturating_sub(actor.handle_idle.as_secs() as i64),now.secs().saturating_sub(300),view.session.aal.as_i64().max(1),view.handle.issued_aal.as_i64().max(1),super::rows::json_str(&view.session.factors)?],|r|r.get(0),

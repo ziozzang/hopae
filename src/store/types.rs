@@ -811,6 +811,7 @@ pub struct TotpEnrollment {
 /// Short-lived, non-serializable authorization issued only by the native session service.
 pub struct FactorActor {
     pub(crate) request_id: String,
+    pub(crate) provider_configuration: (ProviderKind, serde_json::Value),
     pub(crate) view: HandleView,
     pub(crate) authorized_at: Timestamp,
     pub(crate) session_idle: std::time::Duration,
@@ -826,4 +827,16 @@ impl std::fmt::Debug for FactorActor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("FactorActor(<redacted>)")
     }
+}
+
+/// Native-only OTP completion command. It cannot be constructed by external adapters.
+pub struct TotpElevation {
+    pub(crate) actor: FactorActor,
+    pub(crate) enrollment: String,
+    pub(crate) revision: u64,
+    pub(crate) counter: u64,
+    pub(crate) transaction: Digest,
+    pub(crate) portal_handle: HandleRow,
+    pub(crate) handoff: HandoffCodeRow,
+    pub(crate) events: Vec<crate::event::types::Event>,
 }

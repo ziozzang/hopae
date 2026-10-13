@@ -2781,6 +2781,7 @@ async fn factor_actor_fences_registration_after_session_or_authority_revocation(
             .unwrap();
         let actor = FactorActor {
             request_id: "r_owned_factor".into(),
+            provider_configuration: (ProviderKind::Oidc, serde_json::json!({})),
             view,
             authorized_at: f.now(),
             session_idle: Duration::from_secs(300),
@@ -2855,6 +2856,7 @@ async fn authorized_totp_confirmation_refuses_revoked_actor_and_active_removal_n
         .unwrap();
     let actor = |view| FactorActor {
         request_id: "r_owned_factor".into(),
+        provider_configuration: (ProviderKind::Oidc, serde_json::json!({})),
         view,
         authorized_at: f.now(),
         session_idle: Duration::from_secs(300),
@@ -3041,6 +3043,7 @@ async fn native_authorized_confirmation_verifies_real_code_before_activation() {
         .unwrap();
     let actor = || FactorActor {
         request_id: "r_owned_factor".into(),
+        provider_configuration: (ProviderKind::Oidc, serde_json::json!({})),
         view: view.clone(),
         authorized_at: f.now(),
         session_idle: Duration::from_secs(300),
@@ -3094,5 +3097,351 @@ async fn native_authorized_confirmation_verifies_real_code_before_activation() {
         )
         .await
         .is_err()
+    );
+}
+
+async fn totp_stepup_fixture(
+    f: &Fx,
+) -> (
+    crate::factor::keyring::Keyring,
+    Sess,
+    TransactionRow,
+    HandleView,
+    HandleRow,
+    HandoffCodeRow,
+) {
+    use crate::store::Factors;
+    let user = f.user(91).await;
+    f.clock.set(Timestamp(59_000));
+    f.store.conn().execute("INSERT INTO providers(provider_id,kind,display_name,enabled,managed_by,created_at,updated_at)VALUES('mock','oidc','Owned',1,'api',0,0)",[]).unwrap();
+    let keys = test_totp_keyring();
+    let session = f.session(&user, vec![]).await;
+    let seed = crate::factor::totp::Seed::from_bytes(b"12345678901234567890").unwrap();
+    let envelope = keys
+        .active()
+        .seal(&seed, user.user_id.as_str(), "elevate", &f.rng)
+        .unwrap();
+    f.store
+        .create_totp_pending("elevate".into(), user.user_id.clone(), envelope, vec![])
+        .await
+        .unwrap();
+    f.store
+        .activate_totp("elevate", &user.user_id, 1, 0, vec![])
+        .await
+        .unwrap();
+    let old = f.code(&session).await;
+    let mut txn = new_txn(f, &random_token(&f.rng, 32), "192.0.2.10");
+    txn.purpose = TxnPurpose::Stepup;
+    txn.portal_session_id = Some(session.row.session_id.clone());
+    txn.conflicting_handle_sha256 = Some(session.portal_digest);
+    txn.return_target = old.row.return_target.clone();
+    txn.bind_sha256 = Some(old.row.bind_sha256);
+    txn.recovery_depth = 0;
+    let digest = txn.txn_sha256;
+    f.store.create_transaction(txn, vec![]).await.unwrap();
+    let txn = f.store.transaction(&digest).await.unwrap().unwrap();
+    let view = f
+        .store
+        .lookup_handle(&session.portal_digest, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut handle = f.handle_row(&session.row.session_id, PORTAL_HOST, &handle_value(&f.rng));
+    handle.issued_aal = Aal::Two;
+    let mut code = old.row;
+    code.code_sha256 = random_token(&f.rng, 32).digest();
+    code.issued_aal = Aal::Two;
+    code.cred_gen += 1;
+    (keys, session, txn, view, handle, code)
+}
+fn stepup_actor(f: &Fx, view: HandleView) -> FactorActor {
+    FactorActor {
+        request_id: "r_owned_stepup".into(),
+        provider_configuration: (ProviderKind::Oidc, serde_json::json!({})),
+        view,
+        authorized_at: f.now(),
+        session_idle: Duration::from_secs(300),
+        handle_idle: Duration::from_secs(300),
+    }
+}
+#[tokio::test]
+async fn native_totp_stepup_atomically_consumes_proof_and_challenge_rotates_and_hands_off() {
+    use crate::factor::service::{StepUp, elevate_authorized};
+    use crate::store::Factors;
+    let f = fx();
+    let (keys, session, txn, view, handle, code) = totp_stepup_fixture(&f).await;
+    let proof = Secret::new("287082".into());
+    elevate_authorized(
+        &f.store,
+        &keys,
+        f.clock.as_ref(),
+        StepUp {
+            enrollment: "elevate",
+            actor: stepup_actor(&f, view.clone()),
+            code: &proof,
+            transaction: txn.txn_sha256,
+            portal_handle: handle.clone(),
+            handoff: code.clone(),
+            events: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    let elevated = f
+        .store
+        .lookup_handle(&handle.handle_sha256, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(elevated.session.aal, Aal::Two);
+    assert_eq!(elevated.handle.issued_aal, Aal::Two);
+    assert_eq!(elevated.session.cred_gen, 2);
+    assert_eq!(elevated.session.auth_time, session.row.auth_time);
+    assert_eq!(
+        elevated.session.factors.last().unwrap().kind,
+        FactorKind::Totp
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM session_handles WHERE revoked_reason='elevation'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM handoff_codes WHERE consumed_reason='elevation'"),
+        1
+    );
+    assert!(
+        f.store
+            .transaction(&txn.txn_sha256)
+            .await
+            .unwrap()
+            .unwrap()
+            .consumed_at
+            .is_some()
+    );
+    assert_eq!(
+        f.store
+            .totp_enrollment("elevate", &session.row.user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_counter,
+        Some(1)
+    );
+    assert!(
+        elevate_authorized(
+            &f.store,
+            &keys,
+            f.clock.as_ref(),
+            StepUp {
+                enrollment: "elevate",
+                actor: stepup_actor(&f, view),
+                code: &proof,
+                transaction: txn.txn_sha256,
+                portal_handle: handle,
+                handoff: code,
+                events: vec![]
+            }
+        )
+        .await
+        .is_err()
+    );
+}
+#[tokio::test]
+async fn native_totp_stepup_refusal_rolls_back_challenge_counter_and_credentials() {
+    use crate::factor::service::{StepUp, elevate_authorized};
+    for case in [
+        "invalid_code",
+        "audit",
+        "wrong_challenge",
+        "wrong_generation",
+        "wrong_target",
+        "wrong_handle",
+        "disabled_provider",
+        "provider_configuration",
+        "stale_actor",
+        "expired_challenge",
+        "revoked_enrollment",
+    ] {
+        let f = fx();
+        let (keys, session, txn, view, mut handle, mut code) = totp_stepup_fixture(&f).await;
+        let mut digest = txn.txn_sha256;
+        let mut events = vec![];
+        match case {
+            "audit" => {
+                let event = f.event(EventKind::SessionHandoff);
+                events.extend([event.clone(), event]);
+            }
+            "wrong_challenge" => digest = sha256(b"other"),
+            "wrong_generation" => code.cred_gen = 99,
+            "wrong_target" => {
+                code.return_target = url::Url::parse("https://app.example.test/other").unwrap()
+            }
+            "wrong_handle" => handle.host = host(APP_HOST),
+            "provider_configuration" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE providers SET config='{\"changed\":true}'", [])
+                    .unwrap();
+            }
+            "disabled_provider" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE providers SET enabled=0", [])
+                    .unwrap();
+            }
+            "stale_actor" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE sessions SET cred_gen=cred_gen+1", [])
+                    .unwrap();
+            }
+            "expired_challenge" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE login_txns SET expires_at=0", [])
+                    .unwrap();
+            }
+            "revoked_enrollment" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE totp_enrollments SET state='revoked'", [])
+                    .unwrap();
+            }
+            _ => {}
+        }
+        let proof = Secret::new(
+            if case == "invalid_code" {
+                "000000"
+            } else {
+                "287082"
+            }
+            .into(),
+        );
+        assert!(
+            elevate_authorized(
+                &f.store,
+                &keys,
+                f.clock.as_ref(),
+                StepUp {
+                    enrollment: "elevate",
+                    actor: stepup_actor(&f, view),
+                    code: &proof,
+                    transaction: digest,
+                    portal_handle: handle,
+                    handoff: code,
+                    events
+                }
+            )
+            .await
+            .is_err(),
+            "{case}"
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM sessions WHERE aal=2"),
+            0,
+            "{case}"
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM totp_enrollments WHERE last_counter=1"),
+            0,
+            "{case}"
+        );
+        assert!(
+            f.store
+                .transaction(&txn.txn_sha256)
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed_at
+                .is_none(),
+            "{case}"
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM session_handles WHERE revoked_at IS NOT NULL"),
+            0,
+            "{case}"
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM handoff_codes WHERE consumed_at IS NOT NULL"),
+            0,
+            "{case}"
+        );
+        assert_eq!(f.count("SELECT COUNT(*) FROM handoff_codes"), 1, "{case}");
+        assert_eq!(
+            f.store
+                .session(&session.row.session_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .aal,
+            Aal::One
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_totp_stepup_concurrent_challenges_have_one_winner() {
+    use crate::factor::service::{StepUp, elevate_authorized};
+    let f = fx();
+    let (keys, _, txn, view, handle, code) = totp_stepup_fixture(&f).await;
+    let mut second = new_txn(&f, &random_token(&f.rng, 32), "192.0.2.10");
+    second.purpose = TxnPurpose::Stepup;
+    second.portal_session_id = txn.portal_session_id.clone();
+    second.conflicting_handle_sha256 = txn.conflicting_handle_sha256;
+    second.return_target = txn.return_target.clone();
+    second.bind_sha256 = txn.bind_sha256;
+    second.recovery_depth = txn.recovery_depth;
+    let second_digest = second.txn_sha256;
+    f.store.create_transaction(second, vec![]).await.unwrap();
+    let mut second_handle = handle.clone();
+    second_handle.handle_sha256 = handle_value(&f.rng).digest();
+    let mut second_code = code.clone();
+    second_code.code_sha256 = random_token(&f.rng, 32).digest();
+    let proof = Secret::new("287082".into());
+    let a = elevate_authorized(
+        &f.store,
+        &keys,
+        f.clock.as_ref(),
+        StepUp {
+            enrollment: "elevate",
+            actor: stepup_actor(&f, view.clone()),
+            code: &proof,
+            transaction: txn.txn_sha256,
+            portal_handle: handle,
+            handoff: code,
+            events: vec![],
+        },
+    );
+    let b = elevate_authorized(
+        &f.store,
+        &keys,
+        f.clock.as_ref(),
+        StepUp {
+            enrollment: "elevate",
+            actor: stepup_actor(&f, view),
+            code: &proof,
+            transaction: second_digest,
+            portal_handle: second_handle,
+            handoff: second_code,
+            events: vec![],
+        },
+    );
+    let (a, b) = tokio::join!(a, b);
+    assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM login_txns WHERE consumed_reason='elevation'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM session_handles WHERE issued_aal=2 AND revoked_at IS NULL"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM handoff_codes WHERE issued_aal=2 AND consumed_at IS NULL"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM events WHERE kind='factor.totp_consumed'"),
+        1
     );
 }
