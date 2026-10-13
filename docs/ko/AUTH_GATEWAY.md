@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=25 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=26 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -44,6 +44,18 @@ network/route/plan revision을 추가합니다. domain
 사용하며 revision은 u64 big-endian, 종류/AAL은 byte입니다. 종류 코드는 사람=1,
 서비스=2, 워크로드=3, 네트워크=4입니다. 테스트 3건에 독립 Python 벡터와 서명된 다른
 문맥 거부를 포함합니다. 실시간 소유권·키 registry·replay/회수·endpoint 연결은 후속입니다.
+
+미릴리스 `receipt_keys::Registry`는 네이티브 issuer 참조·receipt 용도·key epoch로
+수신자 소유 공개 키를 선택하고 canonical binding·엄격한 서명을 검증합니다. wire가
+자기 검증 키를 고르지 못합니다. 전체 불변 view를 만들며 활성 키 64개, authority/용도
+floor 128개, 과거 키 소유권 256개로 제한합니다. revision/epoch rollback, 같은 epoch
+키 변경, 제거 키 부활, 약한/중복 키, 회수된 키를 포함한 다른 authority/용도 재사용을
+거부합니다. 새 registry revision에서 같은 활성 키/epoch는 유지할 수 있고 제거된 키는
+floor를 유지해 더 높은 epoch로만 다시 등록합니다. 조회 시 issuer 문자열을 할당하지 않습니다.
+
+현재 메모리 갱신 fence이며 이전 상태 없는 새 registry로 과거 floor를 증명하지 못합니다.
+문맥은 검증된 신원·결정에서 만들어야 합니다. 배포 전 DB 게시·재시작/복구 floor·원자적
+활성화·membership·replay 소비·실제 endpoint 연결이 필요합니다.
 
 미릴리스 소스는 네이티브 서비스 자격 검증 후 선택적인 제한된 Lua 사용 조건을
 적용합니다. [서비스 사용 조건 설정](../CONFIG.md#service-authentication-lua-eligibility-unreleased)을

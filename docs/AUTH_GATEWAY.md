@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 25 -->
+<!-- doc-rev: 26 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -53,6 +53,23 @@ big-endian length-prefixed fields; numeric revisions are u64 big-endian, kind/AA
 are bytes. Principal-kind codes are human=1, service=2, workload=3, network=4.
 Three tests include independent Python vectors and signed cross-context rejection.
 Live ownership, key registries, replay/revocation and endpoint wiring remain open.
+
+Unreleased `receipt_keys::Registry` now selects receiver-owned public keys by
+native issuer reference, receipt purpose and key epoch, then computes canonical
+binding and performs strict receipt verification. Wire data cannot select its own
+verification key. Compilation builds a complete immutable view, bounds active
+keys to 64, authority/purpose floors to 128 and historical key ownership to 256.
+Compilation rejects decreasing revisions or epochs, replacement without a newer
+epoch, reinstating removed material, weak or duplicate entries, and moving public
+material between authorities or purposes, including after retirement.
+Unchanged active keys may remain at their epoch in a newer registry revision.
+Removing a key retains its floor; reintroduction requires a higher epoch. Lookup
+borrows the issuer string without per-request allocation.
+
+These are in-memory transition fences. A fresh registry without prior state cannot
+prove historical floors, and caller-owned context still must derive from verified
+identity/decisions. Durable publication, restart/restore floors, atomic activation,
+membership, replay consumption and live endpoints are required before deployment.
 
 Runtime connectors authenticate local service API keys or relay a Bearer credential
 to a fixed external verifier, with optional IP conditions. It is opt-in through `authentication_gateway`; existing OIDC/session

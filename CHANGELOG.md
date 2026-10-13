@@ -10,6 +10,8 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- Immutable receiver-owned receipt key registry with native authority/purpose/epoch selection, removal and rollback fences, retained cross-purpose key ownership and bounded state. Durable publication and live issuance integration remain unfinished.
+
 - Canonical authentication/permit receipt bindings for identity and authority epochs, request/audience, credential generation, full policy/route/plan revisions and signed authentication chains; signed cross-context rejection tests. Live issuance integration remains unfinished.
 
 - Purpose-separated short Ed25519 projection receipt primitive with strict signature, size, binding and time validation; immutable verification wrapper. Live authority, replay/revocation and issuance integration remain unfinished.
