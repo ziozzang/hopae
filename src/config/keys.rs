@@ -106,6 +106,31 @@ pub(super) const ROOT: Node = Obj(&[
             ),
         ]),
     ),
+    (
+        "authentication_gateway",
+        Obj(&[
+            ("authority_id", Leaf),
+            (
+                "profiles",
+                Arr(&Obj(&[
+                    ("service_id", Leaf),
+                    ("host", Leaf),
+                    ("ports", Arr(&Leaf)),
+                    ("realm", Leaf),
+                    (
+                        "api_keys",
+                        Arr(&Obj(&[
+                            ("token_env", Leaf),
+                            ("subject", Leaf),
+                            ("expires_at", Leaf),
+                        ])),
+                    ),
+                    ("networks", Arr(&Leaf)),
+                    ("session_fallback", Leaf),
+                ])),
+            ),
+        ]),
+    ),
     ("state_dir", Leaf),
     ("store", Obj(&[("kind", Leaf), ("path", Leaf)])),
     (

@@ -1,6 +1,6 @@
 # Hangang 네이티브 검증과 콘솔 위임
 
-<!-- translation-status: source=../HANGANG_NATIVE.md source-rev=4 status=current -->
+<!-- translation-status: source=../HANGANG_NATIVE.md source-rev=5 status=current -->
 
 [English](../HANGANG_NATIVE.md) · [문서](README.md)
 
@@ -133,3 +133,5 @@ OIDC 외부 HTTP client는 provider별 origin 서킷을 제한된 크기로 유�
 `listen.native_gateway_tls`는 절대 경로의 PEM `certificate`·`key`·`client_ca`를 받습니다. 루프백 밖의 `listen.native_gateway`에는 이 설정이 필수이며 `0.0.0.0`에도 인증된 원격 리스너를 열 수 있습니다. TLS 파일별 크기는 1 MiB로 제한하고 readiness 이전에 읽습니다. 빈 client CA 또는 잘못된 인증서/key는 시작을 거부합니다. 서버는 설정한 client CA로 검증되는 인증서를 요구하고 ALPN `hop1`을 협상하며 TLS early data를 끕니다. 기존 gateway caller-key 핸드셰이크도 필수로 유지하므로 TLS가 호출 권한을 대신하지 않습니다.
 
 기존 최대 256개 연결 안에서 TLS 핸드셰이크를 3초로 제한합니다. 지속 연결은 300초 후 종료하고 프레임·검증 제한을 유지합니다. 전환을 위해 literal 루프백의 평문 연결만 허용합니다. Hangang 원격 TLS client 설정과 배포 검증은 후속 작업이며 서버 측 변경만으로 원격 Hangang 사용이 가능해진 것은 아닙니다.
+
+[서비스 인증 게이트웨이](AUTH_GATEWAY.md)에 선택적 API 키/network 런타임과 남은 connector/권한 작업을 기록했습니다.

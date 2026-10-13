@@ -48,6 +48,8 @@ pub struct Config {
     #[serde(default)]
     pub providers: Vec<ProviderEntry>,
     #[serde(default)]
+    pub authentication_gateway: Option<crate::auth_gateway::runtime::Config>,
+    #[serde(default)]
     pub linking: Linking,
     #[serde(default)]
     pub txn: Txn,
@@ -838,6 +840,31 @@ impl Config {
         self.validate_admin(&mut errs);
         self.validate_providers(&mut errs);
         self.validate_bounds(&mut errs);
+        if let Some(config) = &self.authentication_gateway {
+            if let Err(error) = config.validate() {
+                errs.push(format!("authentication_gateway: {error}"));
+            }
+            if self.gateway.allow_unauthenticated_caller {
+                errs.push("authentication_gateway requires authenticated gateway callers".into());
+            }
+            for profile in &config.profiles {
+                if !self.apps.iter().any(|app| {
+                    app.app_id.as_str() == profile.service_id
+                        && app
+                            .hosts
+                            .iter()
+                            .any(|host| host.eq_ignore_ascii_case(&profile.host))
+                        && profile.ports.iter().all(|port| {
+                            app.ports.as_ref().map_or(
+                                *port == if self.cookie.secure { 443 } else { 80 },
+                                |ports| ports.contains(port),
+                            )
+                        })
+                }) {
+                    errs.push("authentication_gateway profile must match a configured application host/port".into());
+                }
+            }
+        }
         if errs.is_empty() {
             Ok(())
         } else {
@@ -1674,6 +1701,11 @@ pub fn check_env(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<S
                 ));
             }
         }
+    }
+    if let Some(config) = &cfg.authentication_gateway
+        && let Err(error) = crate::auth_gateway::runtime::Runtime::compile(config, &lookup)
+    {
+        out.push(format!("authentication_gateway: {error}"));
     }
     out
 }

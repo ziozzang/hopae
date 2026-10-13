@@ -1,6 +1,7 @@
 //! Authentication gateway contracts. Connectors and Hangang wiring are implemented separately.
 //! Evidence construction stays crate-private: request claims cannot authenticate themselves.
 pub mod breaker;
+pub mod runtime;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrincipalKind {
@@ -21,8 +22,12 @@ pub struct VerifiedEvidence {
     subject: Subject,
     connector: String,
     expires_at: u64,
+    service: Option<String>,
 }
 impl VerifiedEvidence {
+    pub fn service(&self) -> Option<&str> {
+        self.service.as_deref()
+    }
     pub fn subject(&self) -> &Subject {
         &self.subject
     }
@@ -62,6 +67,7 @@ pub fn compose<'a>(
         return Err(CompositionError::InvalidPolicy);
     }
     let mut selected = None;
+    let mut selected_service: Option<Option<&str>> = None;
     let mut supplied = 0u16;
     for item in evidence {
         let Some(index) = required.iter().position(|id| id == &item.connector) else {
@@ -78,6 +84,10 @@ pub fn compose<'a>(
         if selected.is_some_and(|subject| subject != &item.subject) {
             return Err(CompositionError::Conflict);
         }
+        if selected_service.is_some_and(|service| service != item.service.as_deref()) {
+            return Err(CompositionError::Conflict);
+        }
+        selected_service = Some(item.service.as_deref());
         selected = Some(&item.subject);
     }
     if mode == Composition::All && supplied.count_ones() as usize != required.len() {
@@ -98,7 +108,29 @@ mod tests {
                 kind: PrincipalKind::Human,
             },
             expires_at: 10,
+            service: None,
         }
+    }
+    #[test]
+    fn composition_cannot_join_evidence_from_different_service_audiences() {
+        let mut api = evidence("api", "scheduler");
+        let mut network = evidence("network", "scheduler");
+        api.subject.kind = PrincipalKind::Service;
+        network.subject.kind = PrincipalKind::Service;
+        api.service = Some("orders".into());
+        network.service = Some("billing".into());
+        let required = vec!["api".into(), "network".into()];
+        assert_eq!(
+            compose(
+                Composition::All,
+                &required,
+                &[api.clone(), network.clone()],
+                1
+            ),
+            Err(CompositionError::Conflict)
+        );
+        network.service = Some("orders".into());
+        assert!(compose(Composition::All, &required, &[api, network], 1).is_ok());
     }
     #[test]
     fn composition_never_joins_conflicting_or_expired_subjects() {

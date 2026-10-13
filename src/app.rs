@@ -317,7 +317,7 @@ pub struct Routers {
 /// Assemble both routers from `services`. The portal and the gateway share the
 /// store, the provider registry and the emitter, never a route.
 pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
-    let gateway_state = http::gateway::GatewayState::new(
+    let mut gateway_state = http::gateway::GatewayState::new(
         crate::gateway::hangang::GatewayConfig::from_config(&services.config),
         services.verify_context(),
         services.caller_keys.clone(),
@@ -325,6 +325,12 @@ pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
         Some(Arc::new(counters::inc)),
         Some(services.emitter.clone()),
     );
+    if let Some(config) = &services.config.authentication_gateway {
+        let runtime = crate::auth_gateway::runtime::Runtime::compile(config, &|name| {
+            std::env::var(name).ok()
+        })?;
+        gateway_state = gateway_state.with_authentication_gateway(runtime)?;
+    }
     let adapter = Adapter::new(
         services.session_service()?,
         services.registry.clone(),

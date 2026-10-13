@@ -1,6 +1,6 @@
 # Native Hangang verification and delegated console
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [한국어](ko/HANGANG_NATIVE.md) · [Documentation](README.md)
 
@@ -161,3 +161,5 @@ The authentication-gateway core also defines namespaced human/service/workload/n
 `listen.native_gateway_tls` takes absolute `certificate`, `key` and `client_ca` PEM paths. Outside loopback, `listen.native_gateway` requires this configuration; `0.0.0.0` can bind an authenticated remote listener. TLS material is limited to 1 MiB per file and loaded before readiness. An empty client CA or invalid certificate/key rejects startup. The server requires a certificate chaining to the configured client CA, negotiates ALPN `hop1`, disables TLS early data, and still requires the existing gateway caller-key handshake. TLS never replaces caller authorization.
 
 TLS handshakes have a 3-second bound within the existing 256-connection limit. Persistent connections expire after 300 seconds; frame and verification bounds remain unchanged. Plaintext remains available only on literal loopback for migration. Hangang's remote TLS client configuration and deployment qualification are follow-up work; this server-side change does not by itself enable remote Hangang use.
+
+[Service authentication gateway](AUTH_GATEWAY.md) documents the opt-in API-key/network runtime and remaining connector/authorization work.

@@ -37,6 +37,7 @@ pub struct GatewayState {
     emitter: Option<Emitter>,
     next_id: AtomicU64,
     id_salt: RandomState,
+    authentication_gateway: Option<Arc<crate::auth_gateway::runtime::Runtime>>,
 }
 
 impl GatewayState {
@@ -60,7 +61,18 @@ impl GatewayState {
             emitter,
             next_id: AtomicU64::new(0),
             id_salt: RandomState::new(),
+            authentication_gateway: None,
         })
+    }
+
+    pub fn with_authentication_gateway(
+        mut self: Arc<Self>,
+        runtime: crate::auth_gateway::runtime::Runtime,
+    ) -> anyhow::Result<Arc<Self>> {
+        Arc::get_mut(&mut self)
+            .ok_or_else(|| anyhow::anyhow!("authentication gateway state is already shared"))?
+            .authentication_gateway = Some(Arc::new(runtime));
+        Ok(self)
     }
 
     fn count(&self, name: &str, labels: &[(&str, &str)]) {
@@ -162,6 +174,42 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
         }
     };
     let (input, env) = (parsed.input, parsed.env);
+    if let Some(runtime) = &st.authentication_gateway
+        && runtime.handles(input.host.as_str(), input.port)
+        && matches!(
+            input.canonical_path.reserved(),
+            crate::verify::types::Reserved::No
+        )
+    {
+        let presented = hangang::service_identity::bearer(&headers);
+        let fallback = matches!(presented, Ok(None))
+            && runtime.session_fallback(input.host.as_str(), input.port);
+        if !fallback {
+            let evidence = presented.ok().and_then(|token| {
+                runtime
+                    .authenticate(
+                        input.host.as_str(),
+                        input.port,
+                        token,
+                        input.client_ip,
+                        st.ctx.clock.now().0.max(0) as u64,
+                    )
+                    .ok()
+            });
+            st.count(
+                "hopae_authentication_gateway_total",
+                &[(
+                    "decision",
+                    if evidence.is_some() {
+                        "authenticated"
+                    } else {
+                        "denied"
+                    },
+                )],
+            );
+            return hangang::service_identity::response(evidence.as_ref(), &request_id);
+        }
+    }
     let document = matches!(input.navigation, Navigation::Document);
     let client_ip = input.client_ip;
 
