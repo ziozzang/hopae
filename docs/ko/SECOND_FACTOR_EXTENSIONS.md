@@ -1,6 +1,6 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=9 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=10 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
@@ -352,3 +352,11 @@ foundation 테스트는 구조·guard 누락과 counter 손상을 거부합니�
 SQLite 소유자 검증이며 실제 브라우저 외부 MFA나 독립 follower DB 간 재사용 방지 검증은
 아닙니다. root snapshot 게시, 서비스별 factor 선택·등록, 브라우저 UI·CSRF·유입 제한,
 프로세스 전체 유입 제한, Lua 연결과 fleet 검증은 남아 있습니다.
+
+## 불변 verifier registry
+
+네이티브 external_registry는 최대 64개의 고유한 factor 설정을 모두 검증·컴파일한
+후 새 snapshot을 반환합니다. 비밀 누락이나 CA·클라이언트 설정 오류는 후보 전체를
+거부합니다. 실제 설정 값이 같으면 같은 connector Arc와 연결 풀·서킷을 유지하고
+회전하면 교체합니다. registry에서 제거하는 것만으로 소유자 authority가 비활성화되지는
+않습니다. 운영 활성화 전에 원자적 소유자 정합 처리와 root·portal 연결이 필요합니다.

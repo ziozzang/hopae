@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 9 -->
+<!-- doc-rev: 10 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -405,3 +405,12 @@ are native service and SQLite-owner tests, not actual browser external MFA or
 proof of replay protection across independent follower databases. Root snapshot
 publication, service-scoped factor choice/enrollment, browser UI/CSRF/rate limits,
 process-wide admission, Lua orchestration and fleet qualification remain open.
+
+## Immutable verifier registry
+
+The native external_registry compiles at most 64 unique, validated factor configurations
+before returning a new snapshot. Missing secrets or invalid CA/client configuration
+refuse the complete candidate. Unchanged material reuses the same connector Arc,
+preserving its pool and circuit; rotation replaces it. Removing a registry entry
+does not itself disable owner authority: atomic owner reconciliation and root/portal
+integration remain required before runtime activation.
