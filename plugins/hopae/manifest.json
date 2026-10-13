@@ -1,11 +1,11 @@
 {
   "id": "hopae",
   "name": "Hopae",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "api_version": 1,
   "entry": "index.js",
   "assets": {
-    "index.js": "e91479b3cc68d7c7e1434855e7493f87e21a73e74a9053537435eb72f6f3948c",
+    "index.js": "ac1c51f08f3ebac5fd901e1b41523c94446f8f69d5edc115dd43cb291423969c",
     "style.css": "5a557146b34acf8c7a9f8b33f47dea8cab6f8005eaebade246df1d7047f044ef"
   },
   "routes": [

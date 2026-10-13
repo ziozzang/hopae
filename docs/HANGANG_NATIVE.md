@@ -1,8 +1,17 @@
 # Native Hangang verification and delegated console
 
-<!-- doc-rev: 5 -->
+<!-- doc-rev: 6 -->
 
 [한국어](ko/HANGANG_NATIVE.md) · [Documentation](README.md)
+
+Console package 0.1.4 adds an authentication-profile overview from the active
+DB document: service, realm, native-key count/relay, issuer namespaces, relay
+prefix, Lua eligibility and missing-credential session fallback. The JSON editor
+updates a local preview; saving still uses the existing revision-checked owner
+publication. The preview is not server validation. Read-only users cannot edit
+or save, and all displayed values use text nodes. Credential material is never
+part of the overview. English/Korean guidance explains DB-over-bootstrap priority
+and deterministic mixed routing without changing native authorization checks.
 
 Provider-independent integration now includes a native verification listener and
 an operator-installed console package. Providers, OIDC state/code exchange,

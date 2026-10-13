@@ -1,8 +1,16 @@
 # Hangang 네이티브 검증과 콘솔 위임
 
-<!-- translation-status: source=../HANGANG_NATIVE.md source-rev=5 status=current -->
+<!-- translation-status: source=../HANGANG_NATIVE.md source-rev=6 status=current -->
 
 [English](../HANGANG_NATIVE.md) · [문서](README.md)
+
+콘솔 패키지 0.1.4는 실제 DB 문서에서 서비스·realm·자체 key 개수/relay·issuer
+namespace·relay 접두사·Lua 조건·자격 미제시 시 session 대체를 표로 표시합니다.
+JSON 편집은 로컬 미리보기만 갱신하고 저장은 기존 revision 확인 소유자 publication을
+사용합니다. 미리보기는 서버 검증이 아닙니다. 조회 전용 사용자는 편집·저장할 수 없고
+표시 값은 text node로 처리합니다. 표에 실제 자격 값을 넣지 않습니다. 영문·한국어
+안내는 DB가 bootstrap보다 우선하고 혼합 라우팅이 결정적임을 설명하며 네이티브
+권한 검사를 바꾸지 않습니다.
 
 프로바이더와 OIDC 상태/코드 교환·비밀값·사용자·세션·네이티브 관리 권한은 Hopae에 유지합니다.
 선택적인 통합 모드에서는 콘솔 권한을 Hangang에 위임합니다.

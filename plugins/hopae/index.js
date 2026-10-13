@@ -47,7 +47,27 @@ export async function mount(host) {
       content.replaceChildren();
       if(view==='profiles'){
         const help=node('p',label('Edit service authentication profiles. Use declared credential references; enter no passwords or token values. Saving replaces the complete profile configuration.','서비스 인증 프로필을 편집합니다. 선언된 자격 정보 참조를 사용하고 비밀번호·토큰 값을 입력하지 마세요. 저장하면 프로필 설정 전체를 교체합니다.'));
+        const routing=node('p',label('Active profiles come from the database; startup JSON only bootstraps an empty authority. Mixed native keys and relay require relay_token_prefix (for example partner:), which is removed once before forwarding. Keep it when retiring keys. Use a distinct relay issuer. Lua conditions restrict verified identities and grant no permissions.','활성 프로필은 DB가 소유하며 시작 JSON은 비어 있는 authority만 초기화합니다. 자체 key·relay 혼합에는 relay_token_prefix(예: partner:)가 필요하며 전달 시 하나를 제거합니다. key 회수 후에도 유지하고 다른 relay issuer를 사용하세요. Lua 조건은 검증된 신원을 제한하며 권한을 부여하지 않습니다.'));
+        const summary=node('div');
+        const summarize=(configuration)=>{
+          summary.replaceChildren();
+          if(configuration==null){summary.append(node('p',label('Service authentication is disabled.','서비스 인증이 비활성 상태입니다.')));return;}
+          if(!Array.isArray(configuration.profiles)){summary.append(node('p',label('No preview; the server validates the configuration.','미리보기가 없습니다. 서버가 설정을 검증합니다.')));return;}
+          const t=node('table'),head=node('thead'),tr=node('tr');
+          for(const title of [label('Service','서비스'),label('Realm','Realm'),label('Methods','인증수단'),label('Issuers','Issuer'),label('Relay prefix','Relay 접두사'),label('Lua condition','Lua 조건'),label('Session fallback','Session 대체')])tr.append(node('th',title));
+          head.append(tr);t.append(head);const body=node('tbody');
+          for(const profile of configuration.profiles){
+            if(!profile||typeof profile!=='object')continue;
+            const count=Array.isArray(profile.api_keys)?profile.api_keys.length:0,relay=profile.api_relay,row=node('tr');
+            const methods=[count?label('Native keys: ','자체 key: ')+count:null,relay?'API relay':null].filter(Boolean).join(' + ');
+            const issuers=[count?'hopae:'+show(configuration.authority_id):null,relay?show(relay.issuer):null].filter(Boolean).join(' / ');
+            for(const value of [profile.service_id,profile.realm,methods,issuers,profile.relay_token_prefix,profile.eligibility_lua?label('Enabled','활성'):label('None','없음'),profile.session_fallback?label('Missing credential only','자격 미제시만'):label('Disabled','비활성')])row.append(node('td',show(value)));
+            body.append(row);
+          }t.append(body);summary.append(t);
+        };
         const editor=node('textarea');editor.rows=20;editor.maxLength=65536;editor.setAttribute('aria-label',label('Authentication profile configuration','인증 프로필 설정'));editor.value=JSON.stringify(data.configuration??null,null,2);editor.disabled=!canWrite;
+        summarize(data.configuration??null);
+        editor.oninput=()=>{try{summarize(JSON.parse(editor.value));}catch{summary.replaceChildren(node('p',label('Invalid JSON; preview unavailable.','JSON 오류로 미리보기를 표시할 수 없습니다.')));}};
         const save=node('button',label('Save profiles','프로필 저장'));save.disabled=!canWrite;
         save.onclick=async()=>{if(busy||disposed||paused||!canWrite)return;busy=true;save.disabled=true;refresh.disabled=true;error.textContent='';let saved=false;
           try{const configuration=JSON.parse(editor.value);await host.api('authentication/profiles/publish',{method:'POST',json:{revision:data.revision,configuration}});saved=true;}
@@ -55,7 +75,7 @@ export async function mount(host) {
           finally{busy=false;if(!disposed&&!paused){save.disabled=!canWrite;refresh.disabled=false;}}
           if(saved&&!disposed&&!paused)await load();
         };
-        content.append(node('p',label('Revision: ','Revision: ')+show(data.revision)),help,editor,save);next=null;
+        content.append(node('p',label('Revision: ','Revision: ')+show(data.revision)),help,routing,summary,editor,save);next=null;
       }
       else if(view==='status'){
         const grid=node('div',undefined,'hopae-metrics');
