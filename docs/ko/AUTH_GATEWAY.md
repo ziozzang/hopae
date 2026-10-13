@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=16 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=17 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -348,3 +348,16 @@ Bootstrap 연결이며 요인 HTTP 지원 완료는 아닙니다. 실행 중 키
 재암호화·최근 인증·시도 제한·등록·step-up UI·challenge와 세션 원자 처리·내부
 MFA 도그푸딩은 남아 있습니다. 현재 내부 `owner-v5-d876909` 이미지는 이 설정
 이전 버전이며 해당 설정을 넣지 않았습니다.
+
+## Schema-v5 기반 구조 검사
+
+시작·CLI 기반 검증이 TOTP 소유 테이블·수명주기·암호문 열, STRICT mode,
+사용자별 두 unique partial index를 요구합니다. 이름만 확인하지 않고 고유성·
+partial 여부·정확한 owner 열·pending 또는 active 조건을 검사합니다.
+손상된 구조는 기존 읽기 전용 precheck에서 백업·마이그레이션 전에 schema-v5
+오류로 거부합니다. 모든 테이블 제약이나 row의 암호학적 내용을 검증하는 것은 아닙니다.
+
+회귀 테스트는 새 in-memory DB를 마이그레이션한 뒤 테이블·counter 열·index
+존재·고유성·owner 열·조건을 손상시킵니다. 각 손상은 거부하고 정상 v5는 통과합니다.
+전체 앱·복구 검증, 요인 HTTP·UI, challenge·세션 원자 완료와 이후 변경의
+내부 배포는 아직 남아 있습니다.

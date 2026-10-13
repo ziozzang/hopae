@@ -3374,3 +3374,24 @@ fn a_panicking_bounded_job_restores_sqlite_busy_state() {
     conn.execute_batch("CREATE TABLE recovery(id INTEGER)")
         .unwrap();
 }
+
+#[test]
+fn v5_foundation_refuses_missing_or_weakened_totp_structures() {
+    for damage in [
+        "DROP TABLE totp_enrollments",
+        "ALTER TABLE totp_enrollments RENAME COLUMN last_counter TO unrelated",
+        "DROP INDEX totp_one_pending_per_user",
+        "DROP INDEX totp_one_active_per_user;CREATE INDEX totp_one_active_per_user ON totp_enrollments(user_id) WHERE state='active'",
+        "DROP INDEX totp_one_active_per_user;CREATE UNIQUE INDEX totp_one_active_per_user ON totp_enrollments(enrollment_id) WHERE state='active'",
+        "DROP INDEX totp_one_active_per_user;CREATE UNIQUE INDEX totp_one_active_per_user ON totp_enrollments(user_id) WHERE state='pending'",
+    ] {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::migrate(&conn).unwrap();
+        super::super::validate_foundation(&conn, 5).unwrap();
+        conn.execute_batch(damage).unwrap();
+        assert!(matches!(
+            super::super::validate_foundation(&conn, 5),
+            Err(StoreError::Corrupt(_))
+        ));
+    }
+}

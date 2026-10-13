@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 16 -->
+<!-- doc-rev: 17 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -392,3 +392,17 @@ This is bootstrap wiring, not complete factor HTTP support. Runtime key publicat
 retirement fencing, rewrapping, recent authentication, admission, enrollment/step-up UI,
 challenge/session atomicity and internal MFA dogfooding remain required. The deployed
 internal `owner-v5-d876909` image predates this setting and is not configured with it.
+
+## Schema-v5 foundation checks
+
+Startup/CLI foundation validation now requires the TOTP owner table, lifecycle and
+ciphertext columns, STRICT mode, and both unique partial per-user indexes. It checks
+index uniqueness, partial status, exact owner column and pending/active predicate;
+matching an index name alone is insufficient. An invalid structure returns a redacted
+schema-v5 corruption error through the existing read-only precheck before backup or
+migration. This does not validate every table constraint or row's cryptographic content.
+
+A regression migrates fresh in-memory databases and damages the table, counter column,
+index presence, uniqueness, owner column or predicate. Every damaged case is refused;
+normal v5 passes. Full application/recovery qualification, factor HTTP/UI, atomic
+challenge/session completion and internal rollout of these later changes remain open.

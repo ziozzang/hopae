@@ -25,7 +25,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant};
 
-use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
 pub use window::Shape;
 
@@ -719,6 +719,65 @@ pub fn validate_foundation(conn: &Connection, version: u32) -> Result<(), StoreE
             return Err(StoreError::Corrupt(
                 "schema v4 is missing LDAP provider support".into(),
             ));
+        }
+    }
+    if version >= 5 {
+        let corrupt =
+            |what: &str| StoreError::Corrupt(format!("schema v5 invalid TOTP structure: {what}"));
+        if !table("totp_enrollments")? {
+            return Err(corrupt("table"));
+        }
+        for name in [
+            "enrollment_id",
+            "user_id",
+            "envelope",
+            "revision",
+            "state",
+            "last_counter",
+            "pending_expires_at",
+            "created_at",
+            "updated_at",
+        ] {
+            if !column("totp_enrollments", name)? {
+                return Err(corrupt("column"));
+            }
+        }
+        let strict: bool = conn.query_row(
+            "SELECT strict FROM pragma_table_list WHERE schema='main' AND name='totp_enrollments'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !strict {
+            return Err(corrupt("strict table"));
+        }
+        for (name, state) in [
+            ("totp_one_pending_per_user", "pending"),
+            ("totp_one_active_per_user", "active"),
+        ] {
+            let flags: Option<(bool,bool)> = conn.query_row("SELECT [unique],partial FROM pragma_index_list('totp_enrollments') WHERE name=?1",[name],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+            if flags != Some((true, true)) {
+                return Err(corrupt("unique partial index"));
+            }
+            let columns: Vec<String> = conn
+                .prepare("SELECT name FROM pragma_index_info(?1) ORDER BY seqno")?
+                .query_map([name], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            if columns != ["user_id"] {
+                return Err(corrupt("index owner"));
+            }
+            let sql: String = conn.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?1",
+                [name],
+                |row| row.get(0),
+            )?;
+            let normalized: String = sql
+                .to_ascii_lowercase()
+                .chars()
+                .filter(|c| !c.is_whitespace() && *c != '"')
+                .collect();
+            if !normalized.ends_with(&format!("wherestate='{state}'")) {
+                return Err(corrupt("index predicate"));
+            }
         }
     }
     Ok(())
