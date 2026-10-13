@@ -8,6 +8,13 @@ use anyhow::{Result, ensure};
 use ldap3::{Ldap, LdapConnAsync, LdapConnSettings, Scope, SearchEntry, SearchOptions};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectEncoding {
+    #[default]
+    Text,
+    BinaryHex,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -20,6 +27,8 @@ pub struct Config {
     pub bind_password_env: String,
     pub username_attribute: String,
     pub subject_attribute: String,
+    #[serde(default)]
+    pub subject_encoding: SubjectEncoding,
     pub timeout_ms: u64,
 }
 fn attribute(value: &str) -> bool {
@@ -73,6 +82,67 @@ impl Config {
             "LDAP deadline must be 1..2000 ms"
         );
         Ok(())
+    }
+}
+fn immutable_subject(
+    entry: &SearchEntry,
+    attribute: &str,
+    encoding: SubjectEncoding,
+) -> Result<String, CredentialError> {
+    let text: Vec<_> = entry
+        .attrs
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(attribute))
+        .collect();
+    let binary: Vec<_> = entry
+        .bin_attrs
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(attribute))
+        .collect();
+    if text.len() + binary.len() != 1 {
+        return Err(CredentialError::Unavailable);
+    }
+    let namespace = attribute.to_ascii_lowercase();
+    match encoding {
+        SubjectEncoding::Text => {
+            let values = text
+                .first()
+                .map(|(_, values)| *values)
+                .ok_or(CredentialError::Unavailable)?;
+            let value = values
+                .first()
+                .filter(|value| {
+                    values.len() == 1
+                        && !value.is_empty()
+                        && value.len() <= 128
+                        && !value.chars().any(char::is_control)
+                })
+                .ok_or(CredentialError::Unavailable)?;
+            Ok(format!("t:{namespace}:{value}"))
+        }
+        SubjectEncoding::BinaryHex => {
+            let bytes = if let Some((_, values)) = binary.first() {
+                if values.len() != 1 {
+                    return Err(CredentialError::Unavailable);
+                }
+                values[0].as_slice()
+            } else {
+                let values = text[0].1;
+                if values.len() != 1 {
+                    return Err(CredentialError::Unavailable);
+                }
+                values[0].as_bytes()
+            };
+            if bytes.is_empty() || bytes.len() > 64 {
+                return Err(CredentialError::Unavailable);
+            }
+            use std::fmt::Write;
+            let mut subject = format!("b:{namespace}:");
+            for byte in bytes {
+                write!(&mut subject, "{byte:02x}").map_err(|_| CredentialError::Unavailable)?;
+            }
+            Ok(subject)
+        }
     }
 }
 pub struct LdapProvider {
@@ -200,19 +270,11 @@ impl LdapProvider {
             {
                 return Err(CredentialError::Unavailable);
             }
-            let values = entry
-                .attrs
-                .iter()
-                .find(|(name, _)| name.eq_ignore_ascii_case(&self.config.subject_attribute))
-                .map(|(_, values)| values);
-            let subject = values
-                .filter(|values| values.len() == 1)
-                .and_then(|values| values.first())
-                .filter(|value| {
-                    !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
-                })
-                .ok_or(CredentialError::Unavailable)?
-                .clone();
+            let subject = immutable_subject(
+                &entry,
+                &self.config.subject_attribute,
+                self.config.subject_encoding,
+            )?;
             selected = Some((entry.dn, subject));
         }
         let result = search.finish().await;
@@ -281,6 +343,36 @@ impl CredentialProvider for LdapProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn binary_identity_is_stable_and_namespaced_without_text_collision() {
+        let mut entry = SearchEntry {
+            dn: "uid=owned,dc=example,dc=test".into(),
+            attrs: Default::default(),
+            bin_attrs: Default::default(),
+        };
+        entry
+            .bin_attrs
+            .insert("objectGUID".into(), vec![vec![0, 1, 255]]);
+        assert_eq!(
+            immutable_subject(&entry, "objectguid", SubjectEncoding::BinaryHex).unwrap(),
+            "b:objectguid:0001ff"
+        );
+        assert!(immutable_subject(&entry, "objectguid", SubjectEncoding::Text).is_err());
+        entry.bin_attrs.clear();
+        entry.attrs.insert("objectGUID".into(), vec!["abc".into()]);
+        assert_eq!(
+            immutable_subject(&entry, "objectguid", SubjectEncoding::BinaryHex).unwrap(),
+            "b:objectguid:616263"
+        );
+        assert_eq!(
+            immutable_subject(&entry, "objectguid", SubjectEncoding::Text).unwrap(),
+            "t:objectguid:abc"
+        );
+        entry
+            .attrs
+            .insert("OBJECTGUID".into(), vec!["different".into()]);
+        assert!(immutable_subject(&entry, "objectguid", SubjectEncoding::BinaryHex).is_err());
+    }
     #[tokio::test]
     #[ignore = "requires the owned OpenLDAP fixture; run tools/owned_ldap_smoke.py"]
     async fn owned_ldaps_authenticates_immutable_identity_and_rejects_bad_credentials_and_ca() {
@@ -295,6 +387,7 @@ mod tests {
             bind_password_env: "OWNED_LDAP_BIND_KEY".into(),
             username_attribute: "uid".into(),
             subject_attribute: "entryUUID".into(),
+            subject_encoding: SubjectEncoding::Text,
             timeout_ms: 2000,
         };
         let env = |name: &str| std::env::var(name).ok();
@@ -311,8 +404,19 @@ mod tests {
             .unwrap();
         assert_eq!(first.subject, second.subject);
         assert_ne!(first.subject, "alice");
-        assert_eq!(first.subject.len(), 36);
+        assert!(first.subject.starts_with("t:entryuuid:"));
+        assert_eq!(first.subject.len(), 48);
         assert!(!first.email_verified && !first.email_authoritative && first.auth_time.is_none());
+        let mut binary = config.clone();
+        binary.subject_attribute = "jpegPhoto".into();
+        binary.subject_encoding = SubjectEncoding::BinaryHex;
+        let binary_provider =
+            LdapProvider::compile(ProviderId::new("owned-binary-directory"), binary, &env).unwrap();
+        let binary_identity = binary_provider
+            .verify_password(PasswordInput::new("alice", &password).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(binary_identity.subject, "b:jpegphoto:0001ff");
         let wrong = Secret::new("owned-wrong-password".into());
         assert!(matches!(
             provider
@@ -416,6 +520,7 @@ mod tests {
             bind_password_env: "OWNED_LDAP_KEY".into(),
             username_attribute: "uid".into(),
             subject_attribute: "entryUUID".into(),
+            subject_encoding: SubjectEncoding::Text,
             timeout_ms: 1000,
         };
         assert!(config.validate().is_ok());

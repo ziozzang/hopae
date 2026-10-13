@@ -17,7 +17,7 @@ def main():
         openssl('x509','-req','-in','server.csr','-CA','ca.pem','-CAkey','ca.key','-CAcreateserial','-days','1','-extfile','server.ext','-out','server.pem')
         bind,user=secrets.token_hex(32),secrets.token_hex(32)
         (root/'slapd.conf').write_text('include /etc/ldap/schema/core.schema\ninclude /etc/ldap/schema/cosine.schema\ninclude /etc/ldap/schema/inetorgperson.schema\npidfile /owned/slapd.pid\nargsfile /owned/slapd.args\nmodulepath /usr/lib/ldap\nmoduleload back_mdb\nTLSCACertificateFile /owned/ca.pem\nTLSCertificateFile /owned/server.pem\nTLSCertificateKeyFile /owned/server.key\ndatabase mdb\nmaxsize 16777216\nsuffix "dc=example,dc=test"\nrootdn "cn=reader,dc=example,dc=test"\nrootpw '+bind+'\ndirectory /owned/db\naccess to * by dn.exact="cn=reader,dc=example,dc=test" manage by self read by anonymous auth\n')
-        ldif='dn: dc=example,dc=test\nobjectClass: dcObject\nobjectClass: organization\ndc: example\no: Owned fixture\n\ndn: uid=alice,dc=example,dc=test\nobjectClass: inetOrgPerson\nuid: alice\ncn: Alice\nsn: Owned\nuserPassword: '+user+'\n'
+        ldif='dn: dc=example,dc=test\nobjectClass: dcObject\nobjectClass: organization\ndc: example\no: Owned fixture\n\ndn: uid=alice,dc=example,dc=test\nobjectClass: inetOrgPerson\nuid: alice\ncn: Alice\nsn: Owned\njpegPhoto:: AAH/\nuserPassword: '+user+'\n'
         for label in ['One','Two']:
             ldif+='\ndn: cn=Duplicate'+label+',dc=example,dc=test\nobjectClass: inetOrgPerson\nuid: duplicated\ncn: Duplicate'+label+'\nsn: Owned\nuserPassword: '+user+'\n'
         subprocess.run(['docker','run','--rm','-i','-v',str(root)+':/owned',args.image,'slapadd','-f','/owned/slapd.conf'],input=ldif.encode(),check=True,capture_output=True)
