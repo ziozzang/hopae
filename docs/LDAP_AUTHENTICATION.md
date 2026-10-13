@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 14 -->
+<!-- doc-rev: 15 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -274,3 +274,12 @@ second session. These are service-level tests with a controlled connector, not a
 full real-LDAP browser login. Existing library/native regressions and Clippy pass.
 Portal form/CSRF/throttling wiring, configured-connector epoch fencing, remote LDAP
 revocation and operational activation remain required.
+
+## Browser mismatch before verification
+
+The direct-completion store scenario now presents a valid challenge from a different
+portal cookie. It verifies refusal consumes that challenge without invoking the
+credential connector or creating another session. Existing invalid-credential retry,
+success, replay and provider-disable cases remain in the same scenario. Clippy passes.
+This verifies the service binding boundary; HTTP CSRF and password-form integration
+remain separate work before operational activation.

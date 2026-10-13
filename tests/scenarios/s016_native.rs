@@ -883,6 +883,51 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         2,
         "replayed challenge called the credential backend"
     );
+    let misplaced_token = random_token(fx.rng.as_ref(), 16);
+    fx.store
+        .create_transaction(
+            NewTransaction {
+                txn_sha256: misplaced_token.digest(),
+                ..transaction.clone()
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+    let misplaced_challenge = service
+        .begin_password(&ctx, &misplaced_token, &id, Some(&cookie))
+        .await
+        .unwrap();
+    let other_browser = random_token(fx.rng.as_ref(), 16);
+    assert!(
+        service
+            .complete_password(
+                &ctx,
+                PasswordCompletion {
+                    provider_id: &id,
+                    challenge: &misplaced_challenge,
+                    input: PasswordInput::new("worker", &password).unwrap(),
+                    portal_cookie: Some(&other_browser),
+                    portal_handle: None
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        direct.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "browser mismatch reached credential verification"
+    );
+    assert!(
+        fx.store
+            .transaction(&misplaced_token.digest())
+            .await
+            .unwrap()
+            .unwrap()
+            .consumed_at
+            .is_some()
+    );
     let next_token = random_token(fx.rng.as_ref(), 16);
     fx.store
         .create_transaction(

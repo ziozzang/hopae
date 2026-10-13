@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=14 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=15 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -235,3 +235,11 @@ provider 종류/설정을 재검사하여 공통 신원·세션·handoff 완료�
 추가 세션 미생성을 확인했습니다. 서비스 수준 테스트이며 실제 LDAP 브라우저 로그인
 전체 흐름은 아닙니다. 라이브러리/네이티브 회귀와 Clippy를 통과했습니다. portal의
 form/CSRF/throttling 연결·설정 커넥터 epoch fence·원격 LDAP 회수·운영 활성화는 남았습니다.
+
+## 자격 검증 전 브라우저 불일치
+
+직접 완료 store 시나리오에서 유효한 challenge를 다른 portal cookie로 제출합니다.
+자격 커넥터 호출이나 추가 세션 생성 없이 거부하고 challenge를 소비하는지 검증합니다.
+잘못된 자격 재시도·성공·replay·provider 비활성 사례도 같은 시나리오에서 유지합니다.
+Clippy가 통과했습니다. 서비스 바인딩 경계 검증이며 HTTP CSRF·비밀번호 form 연결은
+운영 활성화 전에 별도로 필요합니다.
