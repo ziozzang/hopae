@@ -663,3 +663,15 @@ publication routes. Actual Chromium tests cover EN/admin and KO/viewer, hostile
 text, invalid JSON without publication, conflict retention, successful revision
 assignment/disable and the viewer guard; the existing profile view also passes.
 Package source tests do not prove production deployment or credential issuance.
+
+Internal dogfooding now runs `hopae:0.0.3-projection-1319351` and pinned console
+package 0.1.5. The optimized static candidate validates projection bootstrap
+readback, existing service HTTP/pooled-mTLS parity and actual Chromium external
+MFA/TOTP with a copied owner DB. Live API/matrix/module/SSO/native regressions and
+actual Hangang browser profile/projection tabs pass. Existing production config
+and keys remain unchanged; projection is unconfigured/disabled, and live browser
+qualification performs no publication and preserves owner documents/revisions.
+Consistent stopped owner/delegation backups, previous image and plugin registry
+backup are retained. Rust source matches the 898-pass/42-ignored qualified update.
+This is administration dogfooding, not credential issuance or throughput proof;
+immutable tagged release assets remain unchanged.
