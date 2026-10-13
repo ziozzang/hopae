@@ -52,7 +52,7 @@ use crate::provider::oidc::{ProviderReport, Reporter};
 use crate::provider::types::ProviderId;
 use crate::session::service::{Deps, Service, ServiceConfig};
 use crate::store::types::{EventRetention, ImportReport, ProviderRow};
-use crate::store::{Directory, Events, Sessions, Store, StoreHooks};
+use crate::store::{Directory, Events, Factors, Sessions, Store, StoreHooks};
 use crate::telemetry::counters;
 use crate::verify::types::{KeySlot, VerifyContext};
 
@@ -190,6 +190,7 @@ impl Readiness {
 /// Everything the routers and services are built from.
 #[derive(Clone)]
 pub struct Services {
+    pub external_verifiers: Arc<crate::factor::external_registry::Registry>,
     pub totp_keyring: Option<Arc<crate::factor::keyring::Keyring>>,
     pub authentication_authority:
         Option<Arc<std::sync::Mutex<crate::auth_gateway::authority::Authority>>>,
@@ -480,6 +481,16 @@ fn provider_rows(cfg: &Config) -> Vec<ProviderRow> {
 /// listeners. Failing here is a start failure.
 pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     let real_env = |n: &str| std::env::var(n).ok();
+    let external_verifiers = Arc::new(
+        crate::factor::external_registry::Registry::compile(
+            &cfg.external_verifiers,
+            &real_env,
+            None,
+        )
+        .map_err(|_| {
+            anyhow::anyhow!("external_verifiers: unavailable or invalid verifier material")
+        })?,
+    );
     let totp_keyring = cfg
         .totp_keyring
         .as_ref()
@@ -591,6 +602,11 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     } else {
         directory.config_generation().await?
     };
+    let external_revision = store.external_snapshot_revision().await?;
+    external_verifiers
+        .publish_authorized_configuration(&store, generation, external_revision)
+        .await
+        .context("publishing external verifier snapshot")?;
     let mut snapshot = cfg.snapshot(generation);
     let listeners_attr = match cfg.admin_addr() {
         Some(a) => format!(
@@ -679,6 +695,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         }
     };
     let services = Services {
+        external_verifiers,
         totp_keyring,
         authentication_authority,
 
@@ -1751,6 +1768,31 @@ pub async fn admin_check_warnings(cfg: &Config) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_external_verifier_key_refuses_bind_before_state_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("uncreated");
+        let name = format!(
+            "HOPAE_MISSING_EXTERNAL_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let value = serde_json::json!({"state_dir":state,"portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_CALLER_REFERENCE"},"external_verifiers":[{"factor":"push","configuration_revision":1,"url":"https://verifier.example.test/check","verifier_key_env":name,"timeout_ms":100}]});
+        let cfg = crate::config::parse(&value.to_string()).unwrap();
+        let error = bind(&cfg)
+            .await
+            .err()
+            .expect("missing external verifier must refuse");
+        assert_eq!(
+            error.to_string(),
+            "external_verifiers: unavailable or invalid verifier material"
+        );
+        assert!(!state.exists());
+    }
 
     #[tokio::test]
     async fn missing_totp_key_refuses_bind_before_state_creation() {

@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=22 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=23 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -303,3 +303,22 @@ route는 404입니다. 등록만으로 AAL이 올라가지는 않습니다. 인�
 통해 portal을 노출해야 합니다.
 
 AAL 1의 1차 인증 신선도 규칙은 keyring 없이도 제공자 재인증으로 처리합니다.
+
+## 외부 verifier 시작 설정
+
+선택적인 `external_verifiers`는 기본 `[]` 배열이며 운영자가 승인한 독립 2차 verifier를
+고유한 식별자로 최대 64개 설정합니다. 항목은 `factor`, `configuration_revision`
+(1..i64::MAX), 고정 HTTPS `url`, `verifier_key_env`, `timeout_ms`(1..1000), 선택적인
+`allow_private_endpoints`(기본 false)와 절대 `ca` 경로입니다. 비밀 직접 입력·미등록 키는
+거부하며 gateway caller 인증이 필수입니다.
+
+verifier 자격·CA 내용·클라이언트는 상태 생성·마이그레이션·리스너 이전에 모두 컴파일합니다.
+값이 없거나 잘못되면 비밀을 출력하지 않는 오류 범주로 시작을 거부하며 `--check`도 같은
+문제를 보고합니다. 설정 import와 epoch 선택 후, Services나 리스너를 공개하기 전에
+제거 tombstone·세션 회수를 포함한 전체 registry를 원자적으로 게시합니다. revision·실제 값
+충돌은 시작을 거부합니다. 설정 제거 후 재시작하면 이전 authority가 비활성화되며 revision은
+[인증 요소 lifecycle](SECOND_FACTOR_EXTENSIONS.md)에 맞춰 유지·증가해야 합니다.
+
+이 설정은 verifier authority와 네이티브 연결 registry를 게시합니다. 외부 브라우저
+challenge·응답 폼과 Lua는 활성화하지 않았고 기존 네이티브 TOTP 규칙은 현재 동작을
+유지합니다. 설정만으로 외부 요소가 로그인·step-up chooser에 표시되지는 않습니다.

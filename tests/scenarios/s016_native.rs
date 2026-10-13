@@ -1685,3 +1685,55 @@ fn owned_ldap_runtime_browser_form_issues_bound_session_and_handoff() {
         401
     );
 }
+
+#[test]
+fn configured_external_verifier_bootstrap_publishes_and_removal_restart_disables() {
+    use crate::support::{
+        MockIdp,
+        process::{Fixture, Hopae},
+    };
+    let idp = MockIdp::start("default");
+    let verifier = serde_json::json!({"factor":"push","configuration_revision":1,"url":"https://verifier.example.test/check","verifier_key_env":"OWNED_FACTOR_KEY","timeout_ms":100});
+    let mut h = Hopae::spawn(
+        Fixture::with(
+            "m1-basic",
+            serde_json::json!({"external_verifiers":[verifier]}),
+        ),
+        &idp,
+        &[(
+            "OWNED_FACTOR_KEY",
+            "owned-verifier-key-at-least-thirty-two-bytes",
+        )],
+    );
+    let db = || rusqlite::Connection::open(h.state_dir.path().join("state/hopae.db")).unwrap();
+    assert_eq!(db().query_row("SELECT revision FROM external_factor_authorities WHERE factor='push' AND binding IS NOT NULL",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    assert_eq!(
+        db().query_row(
+            "SELECT value FROM meta WHERE key='external_factor_snapshot_revision'",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "1"
+    );
+    assert!(
+        !h.log()
+            .contains("owned-verifier-key-at-least-thirty-two-bytes")
+    );
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(h.config_path()).unwrap()).unwrap();
+    config["external_verifiers"] = serde_json::json!([]);
+    std::fs::write(h.config_path(), serde_json::to_vec(&config).unwrap()).unwrap();
+    h.restart();
+    let db = rusqlite::Connection::open(h.state_dir.path().join("state/hopae.db")).unwrap();
+    assert_eq!(db.query_row("SELECT revision FROM external_factor_authorities WHERE factor='push' AND binding IS NULL",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM events WHERE kind='factor.registry_published'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2
+    );
+}

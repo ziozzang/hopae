@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 11 -->
+<!-- doc-rev: 12 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -21,8 +21,8 @@ relays in [Authentication gateway](AUTH_GATEWAY.md) continue to issue service
 identity at AAL 0; they cannot count as human second-factor evidence.
 
 The native `external_transport` and `external_service` modules now provide an
-HTTPS-authenticated receipt and schema-v6 atomic owner completion. External MFA
-still has no enabled root configuration, portal form or Lua runtime. Earlier
+HTTPS-authenticated receipt and schema-v6 atomic owner completion. Root configuration now compiles and publishes verifiers at startup;
+external portal forms and Lua runtime remain unavailable. Earlier
 sections below record implementation stages; the latest owner section supersedes
 their statement that durable external completion is absent.
 
@@ -437,3 +437,25 @@ batch rejection after a single-factor change, invalid global epoch, late
 per-factor conflict and final audit rollback with a previously elevated session.
 This native publication primitive does not enable root configuration, browser
 factor selection or Lua. It does not prove distributed follower propagation.
+
+## Startup registry activation — 2026-10-14
+
+The typed `external_verifiers` root setting now connects compilation and atomic
+owner publication to server startup. Missing material is refused before any
+state directory is created. Successful publication precedes Services activation
+and listener binding. An empty desired set reconciles existing authorities on
+restart. `factor.registry_published` is a required event committing with its
+snapshot; it is distinct from the application `config.loaded` event. There are
+now 33 registered event kinds, 28 required and five diagnostic kinds.
+
+Real-process qualification starts Hopae with an owned verifier reference,
+checks its published authority/revision without making a remote call, removes
+the config and restarts to verify the disable tombstone. Unit tests cover missing
+material before state creation, duplicate references, caller authentication and
+redacted validation. This supersedes historical missing-root-wiring notes;
+external browser execution, factor enrollment/selection, Lua and fleet rollout
+remain unqualified. Internal deployment remains the existing schema-v5 image.
+
+Individual authority publication uses required `factor.authority_published`;
+whole-registry publication uses `factor.registry_published`. Both commit with
+owner state and are refused by standalone event append.

@@ -1,6 +1,6 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=11 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=12 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
@@ -20,8 +20,8 @@
 검증 릴레이는 AAL 0 서비스 신원을 발급하며 사람의 2차 인증 근거가 아닙니다.
 
 네이티브 `external_transport`와 `external_service`가 HTTPS 인증 receipt와 schema v6
-소유자의 원자적 완료를 제공합니다. 외부 MFA의 root 설정·portal 폼·Lua 런타임은 아직
-활성화되지 않았습니다. 아래 기록은 단계별 구현 상태이며 최신 소유자 구현 절이
+소유자의 원자적 완료를 제공합니다. root 설정은 시작 시 verifier를 컴파일·게시합니다. 외부 portal 폼·Lua 런타임은
+아직 활성화하지 않았습니다. 아래 기록은 단계별 구현 상태이며 최신 소유자 구현 절이
 영속 외부 완료가 없다는 과거 문구를 대체합니다.
 
 ## 네이티브 권한과 확장 경계
@@ -380,3 +380,21 @@ revision·필수 감사·outbox가 함께 commit되며 뒤늦은 충돌·용량�
 거부, 잘못된 전역 epoch, 뒤늦은 factor 충돌과 이전 elevated session이 있는 상태의
 최종 감사 실패 롤백을 검증합니다. 네이티브 게시 프리미티브이며 root 설정·브라우저
 factor 선택·Lua는 활성화하지 않습니다. 분산 follower 전파 검증은 아닙니다.
+
+## 시작 시 registry 활성화 — 2026-10-14
+
+타입화된 root 설정 `external_verifiers`가 서버 시작의 컴파일·원자적 소유자 게시 경로에
+연결되었습니다. 값 누락은 상태 디렉터리 생성 전에 거부합니다. 게시 성공 후 Services를
+활성화하고 리스너를 바인딩합니다. 빈 원하는 구성은 재시작 시 기존 authority를 정합 처리합니다.
+`factor.registry_published`는 snapshot과 함께 commit하는 필수 이벤트이며 전체 앱의
+`config.loaded`와 별개입니다. 등록 이벤트 33개 중 필수 28개, 진단 5개입니다.
+
+실제 프로세스 테스트로 자체 verifier 참조를 설정해 호패를 시작하고, 원격 호출 없이
+게시된 authority·revision을 확인한 뒤 설정 제거·재시작의 disable tombstone을 검증합니다.
+단위 테스트는 상태 생성 전 비밀 누락, 중복 참조, caller 인증과 비밀을 출력하지 않는
+검증을 다룹니다. 과거 root 연결 부재 기록을 대체하며 외부 브라우저 실행, factor 등록·
+선택, Lua와 fleet 운영은 후속입니다. 내부 배포는 기존 schema v5 이미지를 유지합니다.
+
+개별 authority 게시의 필수 이벤트는 `factor.authority_published`, 전체 registry는
+`factor.registry_published`입니다. 둘 다 소유자 상태와 함께 commit하며 독립 이벤트
+append로 삽입할 수 없습니다.

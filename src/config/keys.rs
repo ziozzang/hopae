@@ -122,6 +122,18 @@ pub(super) const ROOT: Node = Obj(&[
         ]),
     ),
     (
+        "external_verifiers",
+        Arr(&Obj(&[
+            ("factor", Leaf),
+            ("configuration_revision", Leaf),
+            ("url", Leaf),
+            ("verifier_key_env", Leaf),
+            ("timeout_ms", Leaf),
+            ("allow_private_endpoints", Leaf),
+            ("ca", Leaf),
+        ])),
+    ),
+    (
         "totp_keyring",
         Obj(&[
             ("active_key", Leaf),

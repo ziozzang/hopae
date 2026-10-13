@@ -29,6 +29,8 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
+    pub external_verifiers: Vec<crate::factor::external_transport::Config>,
+    #[serde(default)]
     pub totp_keyring: Option<crate::factor::keyring::Configuration>,
     #[serde(default)]
     pub listen: Listen,
@@ -845,6 +847,20 @@ impl Config {
         self.validate_admin(&mut errs);
         self.validate_providers(&mut errs);
         self.validate_bounds(&mut errs);
+        if self.external_verifiers.len() > 64 {
+            errs.push("external_verifiers: capacity exceeded".into());
+        }
+        let mut external_ids = std::collections::BTreeSet::new();
+        for (index, verifier) in self.external_verifiers.iter().enumerate() {
+            if verifier.validate().is_err() || !external_ids.insert(verifier.factor.as_str()) {
+                errs.push(format!(
+                    "external_verifiers[{index}]: invalid or duplicate configuration"
+                ));
+            }
+        }
+        if !self.external_verifiers.is_empty() && self.gateway.allow_unauthenticated_caller {
+            errs.push("external_verifiers requires authenticated gateway callers".into());
+        }
         if let Some(keys) = &self.totp_keyring {
             if keys.validate_references().is_err() {
                 errs.push("totp_keyring: invalid key references".into());
@@ -1748,6 +1764,11 @@ pub fn check_env(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<S
             }
         }
     }
+    if crate::factor::external_registry::Registry::compile(&cfg.external_verifiers, &lookup, None)
+        .is_err()
+    {
+        out.push("external_verifiers: unavailable or invalid verifier material".into());
+    }
     if let Some(keys) = &cfg.totp_keyring
         && crate::factor::keyring::Keyring::compile(keys, &lookup).is_err()
     {
@@ -1789,6 +1810,27 @@ mod tests {
       "portal": {"public_url": "https://auth.example.test"},
       "gateway": {"kind": "hangang", "caller_key_env": "K"}
     }"#;
+
+    #[test]
+    fn external_verifier_configuration_validates_references_and_redacts_material_errors() {
+        let verifier = serde_json::json!({"factor":"push","configuration_revision":1,"url":"https://verifier.example.test/check","verifier_key_env":"OWNED_FACTOR_KEY","timeout_ms":100});
+        let config =
+            with(&serde_json::json!({"external_verifiers":[verifier.clone()]}).to_string())
+                .unwrap();
+        assert_eq!(config.external_verifiers.len(), 1);
+        let raw = "not-a-valid-verifier-secret";
+        let errors = check_env(&config, |_| Some(raw.into()));
+        assert!(errors.iter().any(|e| e.contains("external_verifiers")));
+        assert!(!errors.join(" ").contains(raw));
+        assert!(
+            with(
+                &serde_json::json!({"external_verifiers":[verifier.clone(),verifier.clone()]})
+                    .to_string()
+            )
+            .is_err()
+        );
+        assert!(with(&serde_json::json!({"external_verifiers":[verifier],"gateway":{"kind":"hangang","allow_unauthenticated_caller":true}}).to_string()).is_err());
+    }
 
     #[test]
     fn totp_key_references_validate_and_material_errors_are_redacted() {

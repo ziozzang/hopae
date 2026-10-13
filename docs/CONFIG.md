@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 22 -->
+<!-- doc-rev: 23 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -310,3 +310,26 @@ With no keyring, these routes return 404. Enrollment alone does not raise AAL. A
 The deployment must expose the portal through its existing trusted HTTPS ingress.
 
 AAL 1 primary-freshness rules use provider reauthentication even without a keyring.
+
+## External verifier startup configuration
+
+Optional `external_verifiers` is an array, default `[]`, of at most 64 unique
+operator-approved independent second-factor verifiers. Each entry contains
+`factor`, `configuration_revision` (1..i64::MAX), fixed HTTPS `url`,
+`verifier_key_env`, `timeout_ms` (1..1000), optional `allow_private_endpoints`
+(default false) and optional absolute `ca` path. Inline secrets and unknown keys
+are refused. Authenticated gateway callers are mandatory.
+
+All verifier credentials, CA contents and clients are compiled before state
+creation, migration or listeners. Missing/invalid material fails startup with a
+redacted category; `--check` reports the same material problem. After config
+import and epoch selection, startup atomically publishes the complete desired
+registry, including removal tombstones/session revocation, before exposing it
+through Services or binding listeners. Revision/material conflicts refuse startup.
+Removal plus restart disables the old authority; retain or increase revision as
+required by [the factor lifecycle](SECOND_FACTOR_EXTENSIONS.md).
+
+This config publishes verifier authority and its native connection registry.
+External browser challenge/response forms and Lua orchestration are not enabled;
+existing native TOTP step-up rules keep their current behavior. The setting does
+not itself make an external factor available in the login/step-up chooser.

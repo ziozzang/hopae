@@ -44,7 +44,7 @@ impl Factors for Store {
                 }
             }
             let revision=advance_external_snapshot_revision(&tx)?;
-            let event=EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::ConfigLoaded,Outcome::Success,"r_external_snapshot_publication").attr("count",request.authorities.len() as u64).build();
+            let event=EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::FactorRegistryPublished,Outcome::Success,"r_external_snapshot_publication").attr("count",request.authorities.len() as u64).build();
             insert_events(&tx,&shared,&[event])?;
             commit(tx,&shared,None)?;Ok(revision)
         }).await
@@ -667,7 +667,7 @@ fn apply_external_publication(
     let event = EventBuilder::new(
         shared.clock.as_ref(),
         shared.rng().as_ref(),
-        EventKind::ConfigLoaded,
+        EventKind::FactorAuthorityPublished,
         Outcome::Success,
         "r_external_factor_publication",
     )

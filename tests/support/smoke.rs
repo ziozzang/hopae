@@ -31,13 +31,14 @@ fn spawn_basic_reaches_portal_gateway_and_hooks() {
     assert_eq!(h.hooks.now_ms(), 1_800_000_090_000);
     assert!(before > 1_600_000_000_000);
     // Start records exactly one `config.loaded` event (and its delivery); the
-    // document navigation above started one login, nothing else happened.
+    // registry publication is separate; the navigation started one login.
     let evs = h.hooks.events(None, Some(10));
     let loaded = evs.iter().filter(|e| e["kind"] == "config.loaded").count();
     assert_eq!(loaded, 1, "{evs:?}");
     assert!(
-        evs.iter()
-            .all(|e| e["kind"] == "config.loaded" || e["kind"] == "login.started"),
+        evs.iter().all(|e| e["kind"] == "config.loaded"
+            || e["kind"] == "login.started"
+            || e["kind"] == "factor.registry_published"),
         "{evs:?}"
     );
     assert_eq!(

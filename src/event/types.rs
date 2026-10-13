@@ -92,6 +92,8 @@ pub enum EventKind {
     FactorEnrollmentExpired,
     FactorTotpConsumed,
     FactorExternalConsumed,
+    FactorRegistryPublished,
+    FactorAuthorityPublished,
     FactorEnrollmentRevoked,
 
     SessionHandoff,
@@ -120,7 +122,7 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 31] = [
+    pub const ALL: [EventKind; 33] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -130,6 +132,8 @@ impl EventKind {
         EventKind::FactorEnrollmentExpired,
         EventKind::FactorTotpConsumed,
         EventKind::FactorExternalConsumed,
+        EventKind::FactorRegistryPublished,
+        EventKind::FactorAuthorityPublished,
         EventKind::FactorEnrollmentRevoked,
         EventKind::SessionHandoff,
         EventKind::HandoffRejected,
@@ -178,6 +182,8 @@ impl EventKind {
             EventKind::FactorEnrollmentExpired => "factor.enrollment_expired",
             EventKind::FactorTotpConsumed => "factor.totp_consumed",
             EventKind::FactorExternalConsumed => "factor.external_consumed",
+            EventKind::FactorRegistryPublished => "factor.registry_published",
+            EventKind::FactorAuthorityPublished => "factor.authority_published",
             EventKind::FactorEnrollmentRevoked => "factor.enrollment_revoked",
 
             EventKind::SessionHandoff => "session.handoff",
@@ -598,14 +604,14 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 26);
+        assert_eq!(required, 28);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 31);
+        assert_eq!(EventKind::ALL.len(), 33);
         for (kind, name) in [
             (
                 EventKind::FactorExternalConsumed,
