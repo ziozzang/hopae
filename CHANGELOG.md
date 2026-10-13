@@ -10,6 +10,8 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- Native domain-separated projection request digest with explicit field lengths, exact target/entity binding and an independently generated fixed vector. Projection signing/issuance integration remains unfinished.
+
 - Hangang console package 0.1.4 shows active profile methods, issuer namespaces, mixed routing and Lua/fallback state with a local JSON preview, read-only controls and English/Korean owner-publication guidance.
 
 - Explicit mixed native API-key/external relay credential routing with a bounded prefix discriminator. Local expired/revoked/unknown keys never fall through to relay; issuer namespaces and native authorization boundaries remain distinct.

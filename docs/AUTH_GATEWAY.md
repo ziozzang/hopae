@@ -1,8 +1,25 @@
 # Service authentication gateway
 
-<!-- doc-rev: 22 -->
+<!-- doc-rev: 23 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
+
+Unreleased `auth_gateway::request_binding` implements the projection request
+digest primitive. SHA-256 hashes the domain separator
+`hangang-zerotrust:credential-projection:request:v1` plus a NUL byte, then five
+32-bit big-endian length-prefixed byte fields in order: native service reference,
+audience reference, uppercase method, exact validated origin-form path/query and
+the 32-byte SHA-256 of the complete entity. It preserves percent encoding and
+query order; it does not resolve routes or normalize URLs. Native routing must
+supply and recheck the audience/route revisions. Unknown streaming bodies need
+their own contract and cannot use an empty-body placeholder.
+
+The independent vector for service `ab`, audience `c`, method `GET`, target
+`/private?x=1` and SHA-256 of an empty entity is
+`234488f459d8b3069a74d308d639fa9bfb402b12a9544a413c06c6136a8dab11`.
+Malformed/ambiguous targets and oversized fields fail. This primitive is not
+receipt authentication, replay admission, authorization or credential issuance;
+it is not wired into the deployed projection path, which remains unimplemented.
 
 Runtime connectors authenticate local service API keys or relay a Bearer credential
 to a fixed external verifier, with optional IP conditions. It is opt-in through `authentication_gateway`; existing OIDC/session

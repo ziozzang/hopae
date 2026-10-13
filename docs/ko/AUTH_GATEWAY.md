@@ -1,8 +1,21 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=22 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=23 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
+
+미릴리스 `auth_gateway::request_binding`은 변환 요청 digest 기본 함수를 구현합니다.
+SHA-256에 `hangang-zerotrust:credential-projection:request:v1`과 NUL byte를 넣고
+네이티브 서비스 참조·대상 참조·대문자 method·검증된 정확한 origin-form path/query·
+완전한 entity의 32-byte SHA-256을 순서대로 각각 32-bit big-endian 길이와 함께
+해시합니다. percent encoding·query 순서를 유지하며 route 해석·URL 정규화는 하지
+않습니다. 네이티브 라우팅이 대상·route 버전을 제공하고 재검증해야 합니다. 아직 모르는
+streaming body에는 별도 계약이 필요하고 빈 body 해시로 대체하지 않습니다.
+
+서비스 `ab`, 대상 `c`, method `GET`, `/private?x=1`, 빈 entity 해시의 독립 벡터는
+`234488f459d8b3069a74d308d639fa9bfb402b12a9544a413c06c6136a8dab11`입니다.
+잘못되거나 모호한 대상·너무 큰 필드는 거부합니다. receipt 인증·재사용 입장·권한·
+자격 발급은 아니며 아직 구현하지 않은 실제 변환 경로에 연결되지 않았습니다.
 
 미릴리스 소스는 네이티브 서비스 자격 검증 후 선택적인 제한된 Lua 사용 조건을
 적용합니다. [서비스 사용 조건 설정](../CONFIG.md#service-authentication-lua-eligibility-unreleased)을
