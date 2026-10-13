@@ -1,17 +1,17 @@
 //! File-owned, compiled service authentication. No credential material enters snapshots or replies.
 use super::{PrincipalKind, Subject, VerifiedEvidence};
 use anyhow::{Result, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, net::IpAddr};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub authority_id: String,
     pub profiles: Vec<Profile>,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     pub service_id: String,
@@ -27,7 +27,7 @@ pub struct Profile {
     #[serde(default)]
     pub session_fallback: bool,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiKey {
     pub token_env: String,

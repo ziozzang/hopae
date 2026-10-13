@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
@@ -58,3 +58,14 @@ before and after commit, persistence failure, failed snapshot installation, and
 open-stream revocation. Exercise actual Hopae/Hangang processes and preserve old
 provider sessions. DB-backed distributed followers require separate signed/revisioned
 snapshot leases and are not implemented by this single-owner publication contract.
+
+## Implemented storage primitive
+
+`auth_gateway::publication` now stores a revisioned reference-only document and
+append-only audit keys in Hopae's existing `meta` table in one immediate SQLite
+transaction. It validates bounded configuration, verifies the document digest on
+read, rejects stale revisions and preserves a disabled tombstone across reopen.
+An audit collision rolls the authority update back. This primitive does not yet
+connect the startup loader, management API, compiled runtime swap or stream
+revocation; those activation gates remain required. Production callers must compile
+and authorize before publishing, and install or fence the runtime after commit.

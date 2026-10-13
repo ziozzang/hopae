@@ -1,6 +1,6 @@
 # 인증 프로필 게시
 
-<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=1 status=current -->
+<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=2 status=current -->
 
 [문서](README.md) · [English](../AUTH_PROFILE_PUBLICATION.md)
 
@@ -49,3 +49,13 @@ PUT은 If-Match를 요구하며 충돌은 409, 잘못된 후보는 422, 저장 �
 동시 CAS·commit 전후 취소·영속화 실패·스냅샷 설치 실패·열린 stream 회수를 검증합니다.
 실제 호패/Hangang 프로세스로 기존 provider 세션 보존도 확인합니다. DB 분산 follower의
 서명/revision 스냅샷 lease는 별도 설계이며 이 단일 소유자 계약에서 구현하지 않습니다.
+
+## 구현된 저장 기초 계층
+
+`auth_gateway::publication`은 호패의 기존 `meta` 테이블에 revision 문서와 추가 전용
+감사 키를 하나의 immediate SQLite 트랜잭션으로 저장합니다. 제한된 참조 전용 설정을
+검증하고 읽기 시 digest를 확인하며 오래된 revision을 거부하고 재연결 후에도 비활성
+삭제 상태를 유지합니다. 감사 키 충돌은 authority 갱신까지 롤백합니다. 시작 로더·관리
+API·컴파일 런타임 교체·stream 회수는 아직 연결하지 않았으며 활성화 검증이 필요합니다.
+운영 호출자는 게시 전에 컴파일·권한 검증을 하고 commit 후 런타임 설치 또는 차단을
+수행해야 합니다.

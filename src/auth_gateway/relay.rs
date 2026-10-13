@@ -2,7 +2,7 @@
 use super::{PrincipalKind, Subject, VerifiedEvidence, runtime::Error};
 use crate::provider::oidc::http::{EndpointPolicy, Fetcher};
 use anyhow::{Result, ensure};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 struct Circuit {
     started: std::time::Instant,
@@ -51,7 +51,7 @@ impl Drop for Lease {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub url: String,
