@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=1 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=2 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -68,3 +68,14 @@ kind=ldap 활성화 전에 생성한 CA와 소유한 OpenLDAP 서버로 선택/f
 - [OpenLDAP 보안](https://www.openldap.org/doc/admin26/security.html): 빈 비밀번호 simple bind는 비인증 접근일 수 있습니다.
 - [OpenLDAP TLS](https://www.openldap.org/doc/admin26/tls.html): 인증서 검증과 TLS 방식.
 - [RFC 4513](https://datatracker.ietf.org/doc/html/rfc4513): LDAP 인증과 TLS 보안.
+
+## 구현된 인터페이스 기초 계층
+
+`provider::credentials::CredentialProvider`는 OAuth begin/callback과 분리된
+직접 비밀번호 검증을 정의하고 향후 세션 연결에 기존 ProviderIdentity 형태를
+반환합니다. PasswordInput은 Secret을 빌리며 serialization/clone 구현이 없고
+Debug에서 username과 password를 모두 숨깁니다. 생성자는 비밀번호를 trim하지
+않고 빈 자격·username 제어 문자·과대 입력을 거부합니다. 오류는 잘못된 자격·
+provider 장애·비활성 provider를 구분합니다. LDAP TLS/search/bind·자체 비밀번호
+hash·portal form·세션 발급은 아직 구현하지 않았습니다. 신원/assurance 요건은
+해당 경로 검증까지 connector·portal 구현 계약입니다.

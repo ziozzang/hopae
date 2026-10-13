@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -81,3 +81,16 @@ No production directory is assumed to be available for this qualification.
 - [OpenLDAP security considerations](https://www.openldap.org/doc/admin26/security.html): empty-password simple bind can be unauthenticated access.
 - [OpenLDAP TLS configuration](https://www.openldap.org/doc/admin26/tls.html): certificate verification and TLS modes.
 - [RFC 4513](https://datatracker.ietf.org/doc/html/rfc4513): LDAP authentication and TLS security mechanisms.
+
+## Implemented interface foundation
+
+`provider::credentials::CredentialProvider` now defines bounded direct password
+verification separately from OAuth begin/callback and returns the existing
+ProviderIdentity shape for future session integration. PasswordInput borrows a
+Secret, has no serialization/clone implementation and redacts both username and
+password in Debug. Its constructor rejects empty credentials, control characters
+in usernames and oversized input without trimming password material. Typed failures
+distinguish invalid credentials, unavailable provider and disabled provider. This
+interface does not yet implement LDAP TLS/search/bind, local password hashing,
+portal form handling or session issuance; its identity/assurance requirements remain
+connector and portal implementation contracts until those paths are qualified.
