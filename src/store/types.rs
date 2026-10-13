@@ -796,3 +796,14 @@ pub mod skip {
     /// The resolved user is disabled.
     pub const USER_DISABLED: &str = "user_disabled";
 }
+
+/// Internal-only encrypted factor material; never serialize into a console response.
+#[derive(Debug)]
+pub struct TotpEnrollment {
+    pub enrollment_id: String,
+    pub user_id: crate::identity::types::UserId,
+    pub revision: u64,
+    pub active: bool,
+    pub last_counter: Option<u64>,
+    pub envelope: crate::factor::seed_cipher::Envelope,
+}

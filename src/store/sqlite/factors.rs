@@ -6,10 +6,32 @@ use crate::{
     store::{Factors, StoreError, StoreResult},
 };
 use async_trait::async_trait;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 #[async_trait]
 impl Factors for Store {
+    async fn totp_enrollment(
+        &self,
+        id: &str,
+        user: &UserId,
+    ) -> StoreResult<Option<crate::store::TotpEnrollment>> {
+        let (id, user) = (id.to_owned(), user.clone());
+        let clock = self.inner.shared.clock.clone();
+        self.read("totp_enrollment",move |conn| {
+            let row: Option<(i64,String,Option<i64>,String)>=conn.query_row(
+                "SELECT revision,state,last_counter,envelope FROM totp_enrollments WHERE enrollment_id=?1 AND user_id=?2 AND state!='revoked' AND (state='active' OR pending_expires_at>?3) AND EXISTS(SELECT 1 FROM users WHERE user_id=?2 AND status='active')",
+                params![id,user.as_str(),clock.now().secs()],
+                |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+            ).optional()?;
+            row.map(|(revision,state,counter,envelope)| {
+                let revision=u64::try_from(revision).ok().filter(|n|*n>0).ok_or_else(||StoreError::Corrupt("totp revision".into()))?;
+                let last_counter=counter.map(u64::try_from).transpose().map_err(|_|StoreError::Corrupt("totp counter".into()))?;
+                let envelope=crate::factor::seed_cipher::Envelope::from_json(&envelope).map_err(|_|StoreError::Corrupt("totp envelope".into()))?;
+                Ok(crate::store::TotpEnrollment { enrollment_id:id,user_id:user,revision,active:state=="active",last_counter,envelope })
+            }).transpose()
+        }).await
+    }
+
     async fn create_totp_pending(
         &self,
         id: String,

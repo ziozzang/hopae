@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -216,3 +216,21 @@ read/enrollment services, expired-pending cleanup, replacement, recovery and UI 
 unfinished; no HTTP handler invokes these primitives. Source schema v5 is not deployed
 internally. Rollback requires consistent prior-schema backup restoration because old
 binaries cannot open an upgraded database.
+
+## Internal enrollment read and lifecycle qualification
+
+The Factors boundary now reads an encrypted enrollment by exact owner and ID.
+It returns only active or unexpired pending state for an active user; revoked,
+expired, wrong-owner and disabled-user state is unavailable. The internal row is
+not serializable and its envelope Debug is redacted; it must never be returned by
+the console broker. The authentication service still needs to decrypt using the
+configured keyring and recheck lifecycle revision at its final write.
+
+A SQLite lifecycle regression verifies pending read/decryption, exact expiry refusal,
+revocation of expired pending state, rollback of activation when required event
+insertion fails, persisted active revision/counter through an independent reopen,
+and disabled-user read/consumption refusal while revocation remains possible.
+The rollback test uses a synthetic existing required event to force a duplicate-ID
+failure; it does not implement factor-specific audit semantics. Full process restart,
+challenge/session atomicity, pending cleanup/replacement, enrollment/recovery UI,
+key management and internal MFA dogfooding remain required.

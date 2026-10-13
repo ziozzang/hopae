@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=7 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=8 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -187,3 +187,19 @@ Counter는 신뢰한 호출자가 이미 검증해야 합니다. Challenge·세�
 HTTP handler에서 이 연산을 호출하지 않습니다. 소스 schema v5는 내부 미배포입니다.
 오래된 바이너리가 업그레이드 DB를 열 수 없어 롤백은 일관된 이전 스키마 백업
 복원을 요구합니다.
+
+## 내부 등록 조회와 수명주기 검증
+
+Factors 경계는 정확한 owner·ID로 암호화 등록을 조회합니다. Active 사용자의
+active 또는 미만료 pending만 반환하며 회수·만료·다른 owner·비활성 사용자
+상태는 조회되지 않습니다. 내부 row는 직렬화하지 않고 envelope Debug도 가립니다.
+콘솔 broker 응답으로 내보내면 안 됩니다. 인증 서비스는 설정된 keyring으로
+복호화하고 최종 쓰기에서 수명주기 revision을 다시 검사해야 합니다.
+
+SQLite 수명주기 회귀는 pending 조회·복호화, 정확한 만료 거부, 만료 pending
+회수, 필수 이벤트 삽입 실패 시 활성화 롤백, 독립 reopen을 통한 active revision·
+counter 보존, 비활성 사용자 조회·소비 거부와 회수 가능을 확인합니다.
+롤백 테스트는 기존 필수 이벤트의 ID 중복을 인위적으로 만들어 실패시키며
+요인 전용 감사 의미를 구현하지는 않습니다. 전체 프로세스 재시작,
+challenge·세션 원자 처리, pending 정리·교체, 등록·복구 UI·키 관리·내부 MFA
+도그푸딩은 필수로 남아 있습니다.

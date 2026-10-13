@@ -2348,3 +2348,127 @@ async fn totp_enrollment_counter_is_monotonic_owner_bound_and_revocable() {
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn totp_storage_expiry_disable_audit_rollback_and_reopen() {
+    use crate::store::Factors;
+    let f = fx();
+    let user = f.user(1).await;
+    let key = crate::factor::seed_cipher::Key::new("key-1".into(), [7; 32]).unwrap();
+    let seed = crate::factor::totp::Seed::from_bytes(&[5; 20]).unwrap();
+    let encrypted = |id| key.seal(&seed, user.user_id.as_str(), id, &f.rng).unwrap();
+    let event = f.event(EventKind::SessionCreated);
+    f.store
+        .create_totp_pending(
+            "expired".into(),
+            user.user_id.clone(),
+            encrypted("expired"),
+            vec![event.clone()],
+        )
+        .await
+        .unwrap();
+    let row = f
+        .store
+        .totp_enrollment("expired", &user.user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!row.active);
+    assert_eq!(row.revision, 1);
+    assert!(
+        key.open(&row.envelope, user.user_id.as_str(), "expired")
+            .is_ok()
+    );
+    f.clock.advance(Duration::from_secs(600));
+    assert!(
+        f.store
+            .totp_enrollment("expired", &user.user_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !f.store
+            .activate_totp("expired", &user.user_id, 1, 20, vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        f.store
+            .revoke_totp("expired", &user.user_id, 1, vec![])
+            .await
+            .unwrap()
+    );
+    f.store
+        .create_totp_pending(
+            "live".into(),
+            user.user_id.clone(),
+            encrypted("live"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    // Duplicate required event forces rollback after the state UPDATE.
+    assert!(
+        f.store
+            .activate_totp("live", &user.user_id, 1, 20, vec![event])
+            .await
+            .is_err()
+    );
+    let row = f
+        .store
+        .totp_enrollment("live", &user.user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!row.active);
+    assert_eq!(row.last_counter, None);
+    assert_eq!(row.revision, 1);
+    assert!(
+        f.store
+            .activate_totp("live", &user.user_id, 1, 20, vec![])
+            .await
+            .unwrap()
+    );
+    let reopened = Store::open(
+        &f._dir.path().join("hopae.db"),
+        f.clock.clone(),
+        vec![],
+        None,
+    )
+    .unwrap();
+    let row = reopened
+        .totp_enrollment("live", &user.user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.active);
+    assert_eq!(row.last_counter, Some(20));
+    assert_eq!(row.revision, 2);
+    f.store
+        .conn()
+        .execute(
+            "UPDATE users SET status='disabled' WHERE user_id=?1",
+            [user.user_id.as_str()],
+        )
+        .unwrap();
+    assert!(
+        reopened
+            .totp_enrollment("live", &user.user_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        !reopened
+            .consume_totp_counter("live", &user.user_id, 2, 21, vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        reopened
+            .revoke_totp("live", &user.user_id, 2, vec![])
+            .await
+            .unwrap()
+    );
+}
