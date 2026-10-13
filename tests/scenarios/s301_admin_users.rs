@@ -854,7 +854,7 @@ fn s301_4_disable_ends_sessions_with_audit_in_one_transaction() {
         4,
         "cred_gen incremented"
     );
-    assert_eq!(k.count("SELECT COUNT(*) FROM session_handles WHERE session_id LIKE 's_x%' AND revoked_at IS NULL"), 0);
+    assert_eq!(k.count("SELECT COUNT(*) FROM session_handles WHERE session_id IN (SELECT session_id FROM sessions WHERE user_id = 'u_x') AND revoked_at IS NULL"), 0);
     assert_eq!(
         k.count("SELECT COUNT(*) FROM handoff_codes WHERE consumed_at IS NULL"),
         0,
@@ -944,7 +944,7 @@ fn s301_5_enable_restores_sign_in_and_revives_nothing() {
     assert_eq!(r.json(), json!({"changed": true}));
     assert_eq!(user_row(&k, "u_x"), ("active".to_string(), 5));
     assert_eq!(live_sessions_of(&k, "u_x"), 0, "nothing revived");
-    assert_eq!(k.count("SELECT COUNT(*) FROM session_handles WHERE session_id LIKE 's_x%' AND revoked_at IS NULL"), 0);
+    assert_eq!(k.count("SELECT COUNT(*) FROM session_handles WHERE session_id IN (SELECT session_id FROM sessions WHERE user_id = 'u_x') AND revoked_at IS NULL"), 0);
     let en = k.events("admin.user_enable");
     assert_eq!(en.len(), 1);
     assert_eq!(en[0]["user_id"], "u_x");
