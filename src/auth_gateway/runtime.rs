@@ -18,7 +18,10 @@ pub struct Profile {
     pub host: String,
     pub ports: Vec<u16>,
     pub realm: String,
+    #[serde(default)]
     pub api_keys: Vec<ApiKey>,
+    #[serde(default)]
+    pub api_relay: Option<super::relay::Config>,
     #[serde(default)]
     pub networks: Vec<String>,
     #[serde(default)]
@@ -56,10 +59,15 @@ impl Config {
             let host = crate::policy::types::Host::parse(&p.host)?;
             ensure!(
                 (1..=16).contains(&p.ports.len())
-                    && (1..=256).contains(&p.api_keys.len())
+                    && p.api_keys.len() <= 256
+                    && ((p.api_relay.is_some() && p.api_keys.is_empty())
+                        || (p.api_relay.is_none() && !p.api_keys.is_empty()))
                     && p.networks.len() <= 256,
                 "authentication profile exceeds bounds"
             );
+            if let Some(relay) = &p.api_relay {
+                relay.validate()?;
+            }
             total += p.api_keys.len();
             ensure!(total <= 4096, "authentication credential capacity exceeded");
             for port in &p.ports {
@@ -166,9 +174,11 @@ struct Credential {
 }
 struct Prepared {
     service_id: String,
+    realm: String,
     keys: HashMap<[u8; 32], Credential>,
     networks: Networks,
     session_fallback: bool,
+    relay: Option<super::relay::Connector>,
 }
 pub struct Runtime {
     profiles: HashMap<String, HashMap<u16, std::sync::Arc<Prepared>>>,
@@ -180,6 +190,7 @@ pub enum Error {
     Invalid,
     Expired,
     NetworkDenied,
+    Unavailable,
 }
 impl Runtime {
     pub fn compile(config: &Config, env: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
@@ -217,9 +228,15 @@ impl Runtime {
             }
             let prepared = std::sync::Arc::new(Prepared {
                 service_id: p.service_id.clone(),
+                realm: p.realm.clone(),
                 keys,
                 networks: Networks::compile(&p.networks, &mut budget)?,
                 session_fallback: p.session_fallback,
+                relay: p
+                    .api_relay
+                    .as_ref()
+                    .map(|r| super::relay::Connector::compile(r, env))
+                    .transpose()?,
             });
             for port in &p.ports {
                 profiles
@@ -243,6 +260,36 @@ impl Runtime {
             .get(host)
             .and_then(|ports| ports.get(&port))
             .is_some_and(|p| p.session_fallback)
+    }
+    pub async fn authenticate_async(
+        &self,
+        host: &str,
+        port: u16,
+        token: Option<&str>,
+        ip: IpAddr,
+        now: u64,
+    ) -> Result<VerifiedEvidence, Error> {
+        let profile = self
+            .profiles
+            .get(host)
+            .and_then(|ports| ports.get(&port))
+            .ok_or(Error::Invalid)?;
+        if let Some(relay) = &profile.relay {
+            if !profile.networks.permits(ip) {
+                return Err(Error::NetworkDenied);
+            }
+            let token = token.ok_or(Error::Missing)?;
+            self.observed_time
+                .fetch_max(now, std::sync::atomic::Ordering::AcqRel);
+            let now = self
+                .observed_time
+                .load(std::sync::atomic::Ordering::Acquire);
+            relay
+                .authenticate(&profile.service_id, &profile.realm, token, ip, now)
+                .await
+        } else {
+            self.authenticate(host, port, token, ip, now)
+        }
     }
     pub fn authenticate(
         &self,

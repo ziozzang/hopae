@@ -88,3 +88,15 @@ pub fn response(evidence: Option<&VerifiedEvidence>, request_id: &str) -> Respon
     }
     response
 }
+
+pub fn unavailable(request_id: &str) -> Response<Body> {
+    let mut response = response(None, request_id);
+    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    response
+        .headers_mut()
+        .remove(http::header::WWW_AUTHENTICATE);
+    response
+        .headers_mut()
+        .insert(http::header::RETRY_AFTER, HeaderValue::from_static("1"));
+    response
+}

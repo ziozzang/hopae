@@ -1,10 +1,11 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=1 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=2 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
-첫 런타임 connector는 선택적인 IP 조건과 함께 서비스 API 키를 인증합니다.
+런타임 connector는 선택적인 IP 조건과 함께 자체 서비스 API 키를 인증하거나 고정된
+외부 검증 서버에 Bearer credential을 릴레이합니다.
 `authentication_gateway`로 활성화하며 이 설정이 없으면 기존 OIDC/세션 라우트를
 유지합니다. HTTP와 HOP1 모두 API credential을 읽기 전에 동일한 caller 키·제한된
 동시성·forwarded 요청 문맥 검증을 적용합니다.
@@ -47,7 +48,34 @@ upstream 전송 전에 Authorization credential을 소비합니다. 역할이 AA
 거부를 검증합니다. 수문장은 이 fixture 밖에 있으며 전체 스택 처리량 측정이 아닙니다.
 운영 배포와 기존 스트림 credential 회수를 포함한 전체 수명주기는 별도 작업입니다.
 
-LDAP·자체 사람 비밀번호·원격 API 릴레이/introspection·실제 connector 관계의
+LDAP·자체 사람 비밀번호·표준 introspection adapter·실제 connector 관계의
 Any/All 결합·upstream credential 변환·전체 credential 수명주기·전체 스택 100k QPS
-검증은 남아 있습니다. 기존 OIDC 서킷은 provider 네트워크 호출을 보호하며
-인메모리 API 키 connector에는 서킷을 적용할 원격 백엔드가 없습니다.
+검증은 남아 있습니다. 기존 OIDC 서킷은 provider 호출을 보호하고 외부 verifier 릴레이에도 범위가
+정해진 서킷을 적용합니다. 인메모리 API 키 connector에는 원격 백엔드가 없습니다.
+
+## 외부 API 검증 릴레이
+
+Profile은 `api_keys` 대신 `api_relay`를 설정할 수 있고 둘은 동시에 사용할 수
+없습니다. 고정 `url`·신뢰하는 `issuer` namespace·선택적 `verifier_key_env`·
+`timeout_ms`(1–1000, 기본 100)를 설정합니다. 명시적으로 활성화한 루프백 fixture
+외에는 HTTPS가 필수입니다. 사설 목적지는 `allow_private_endpoints:true`가
+필요합니다. 리다이렉트·URL 자격 정보/질의/fragment·환경 프록시를 거부하고 실제
+연결 시 공인 DNS 주소를 검증합니다. 설정 issuer/realm이 신원을 결정하며 응답으로
+다른 issuer 또는 사람 assurance를 선택할 수 없습니다.
+
+Connector는 JSON `{service_id, client_ip}`를 POST하고 원래 credential을 민감한
+Bearer Authorization 헤더로 보냅니다. 선택적인 verifier credential은 민감한
+`x-hopae-verifier-key` 헤더를 사용합니다. 요청에서 URL을 받지 않습니다. Verifier는
+`active`·`subject`·`service_id`·`expires_at` 필드만 있는 JSON을 반환합니다. Active
+응답은 정확한 서비스·제한된 subject·응답 수신 이후 5초 안의 절대 Unix 밀리초
+만료가 필요합니다. 근거는 최대 1초이며 만료 검증에 네트워크 시간을 포함합니다.
+거짓 assurance/추가 필드·다른 audience·만료된 응답은 거부합니다. 기존 서비스
+namespace와 AAL 0을 사용하고 이후 품계가 권한을 별도로 집행합니다.
+
+Connector당 최대 64개 요청과 지속 HTTP 연결을 사용하고 전체 기한·64 KiB 응답
+제한을 적용합니다. Credential 거부는 401, 백엔드/계약 오류·포화·타임아웃은 세션
+fallback 없이 503입니다. 연속 백엔드/의미 오류 3회 후 프로세스 로컬 서킷을
+30초 동안 열고 단일 복구 probe를 허용합니다. 취소는 probe를 해제하고 일반적인
+credential 거부는 서킷 장애로 세지 않습니다. 이 첫 verifier 계약에는 결과 캐시·
+upstream credential 교환·영속 quarantine·관리 게시·RFC 7662 필드 adapter를
+구현하지 않았습니다.

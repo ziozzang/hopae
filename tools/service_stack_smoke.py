@@ -7,11 +7,23 @@ from remote_hangang_smoke import port
 def main():
     p=argparse.ArgumentParser()
     for name in ['gateway','hopae','pumgye']:p.add_argument('--'+name+'-binary',required=True,type=Path)
-    args=p.parse_args();processes=[];seen=[]
+    p.add_argument('--external-verifier',action='store_true')
+    args=p.parse_args();processes=[];seen=[];verifier_state={'unavailable':False,'calls':0}
     class Origin(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             seen.append(dict(self.headers));self.send_response(200);self.end_headers();self.wfile.write(b'owned')
         def log_message(self,*args):pass
+    class Verifier(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            verifier_state['calls']+=1
+            body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            if verifier_state['unavailable']:status,reply=503,{}
+            elif self.headers.get('Authorization')!='Bearer '+api_key:status,reply=401,{}
+            elif body.get('service_id')!='orders':status,reply=200,{'active':False}
+            else:status,reply=200,{'active':True,'subject':'worker','service_id':'orders','expires_at':int(time.time()*1000)+1000}
+            self.send_response(status);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(json.dumps(reply).encode())
+        def log_message(self,*args):pass
+    verifier=http.server.ThreadingHTTPServer(('127.0.0.1',0),Verifier);threading.Thread(target=verifier.serve_forever,daemon=True).start()
     origin=http.server.ThreadingHTTPServer(('127.0.0.1',0),Origin);threading.Thread(target=origin.serve_forever,daemon=True).start()
     try:
         with tempfile.TemporaryDirectory(prefix='owned-service-stack-') as tmp:
@@ -25,7 +37,7 @@ def main():
                 (root/(name+'.ext')).write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage='+usage+'\nsubjectAltName=DNS:hopae.example.test,DNS:pumgye.example.test,IP:127.0.0.1\n')
                 openssl('x509','-req','-in',name+'.csr','-CA','ca.pem','-CAkey','ca.key','-CAcreateserial','-days','1','-extfile',name+'.ext','-out',name+'.pem')
             digest=hashlib.sha256(bytes([1]))
-            for value in ['hopae:owned','services','worker']:
+            for value in ['owned-external' if args.external_verifier else 'hopae:owned','services','worker']:
                 value=value.encode();digest.update(struct.pack('!Q',len(value)));digest.update(value)
             subject='s_'+digest.hexdigest()[:48]
             policy={'version':1,'information_classes':['internal','restricted'],'services':{'orders':{'permissions':['read','write'],'require_guard':False,'roles':{'reader':{'permissions':['read'],'information_classes':['internal'],'minimum_aal':0}},'users':{subject:['reader']},'networks':[{'cidr':'127.0.0.1/32','roles':['reader']}]}}}
@@ -35,6 +47,8 @@ def main():
             hop['listen']={'portal':f'127.0.0.1:{portal}','gateway':f'127.0.0.1:{http_verify}','native_gateway':f'0.0.0.0:{hop_native}','native_gateway_tls':{'certificate':str(root/'server.pem'),'key':str(root/'server.key'),'client_ca':str(root/'ca.pem')}}
             hop['apps'][0]['app_id']='orders';hop['apps'][0]['ports']=[public]
             hop['authentication_gateway']={'authority_id':'owned','profiles':[{'service_id':'orders','host':'app.example.test','ports':[public],'realm':'services','api_keys':[{'token_env':'OWNED_API_KEY','subject':'worker'}],'networks':['127.0.0.1/32']}]}
+            if args.external_verifier:
+                profile=hop['authentication_gateway']['profiles'][0];profile.pop('api_keys');profile['api_relay']={'url':f'http://127.0.0.1:{verifier.server_port}/verify','issuer':'owned-external','allow_private_endpoints':True,'timeout_ms':500}
             (root/'hopae.json').write_text(json.dumps(hop))
             def tls(name):return {'server_name':name,'ca':str(root/'ca.pem'),'certificate':str(root/'client.pem'),'key':str(root/'client.key')}
             config={'http':[{'id':'orders','host':'app.example.test','path_prefix':'/secure','path_match':'segment_prefix','access_mode':'protected','backends':[f'http://127.0.0.1:{origin.server_port}'],'auth':{'url':f'http://127.0.0.1:{http_verify}/_hopae/verify','native':{'address':f'127.0.0.1:{hop_native}','tls':tls('hopae.example.test')},'request_headers':['authorization'],'response_headers':['x-forwarded-user','x-hopae-aal','x-hopae-principal-kind'],'static_request_headers':{'x-hopae-gateway-key':{'env':'FIXTURE_KEY'},'x-hopae-contract':'1'},'forward_response':True},'resource_policy':{'resource_id':'orders','principal':{'source':'external','subject_header':'x-forwarded-user'},'allow':[],'pumgye':{'service_id':'orders','information_class':'internal','permissions':{'GET':['read'],'POST':['write']}}}}],'pumgye_authority':{'decision_address':f'127.0.0.1:{pum_native}','management_address':f'127.0.0.1:{pum_http}','decision_token_env':'PUMGYE_DECISION_TOKEN','admin_token_env':'PUMGYE_ADMIN_TOKEN','tls':tls('pumgye.example.test'),'timeout_ms':1000}}
@@ -83,6 +97,10 @@ def main():
             classified['http'][0]['resource_policy']['pumgye']['information_class']='internal';api('/v1/config','PUT',classified,{'If-Match':f'"{classified["revision"]}"'})
             changed,_=api();changed['http'][0]['resource_policy']['pumgye']['service_id']='billing';changed,_=api('/v1/config','PUT',changed,{'If-Match':f'"{changed["revision"]}"'});assert request()==403,'API credential crossed service audience'
             changed['http'][0]['resource_policy']['pumgye']['service_id']='orders';api('/v1/config','PUT',changed,{'If-Match':f'"{changed["revision"]}"'});assert request()==200
+            if args.external_verifier:
+                verifier_state['unavailable']=True
+                for _ in range(3):assert request()==503
+                calls=verifier_state['calls'];assert request()==503 and verifier_state['calls']==calls,'open connector circuit sent another request'
             count=len(seen);owner.terminate();owner.wait(timeout=5);assert request()==503 and len(seen)==count
             print('PASS: three actual processes over mTLS HOP1/PPG1; scoped API authentication, service/IP/class/method rights, guest denial, durable revocation/restoration, audience isolation, credential consumption and authority-outage fail-closed. Guard is not part of this fixture; no full-stack throughput claim.')
     finally:
@@ -91,6 +109,6 @@ def main():
                 process.terminate()
                 try:process.wait(timeout=5)
                 except subprocess.TimeoutExpired:process.kill();process.wait()
-        origin.shutdown();origin.server_close()
+        origin.shutdown();origin.server_close();verifier.shutdown();verifier.server_close()
 
 if __name__=='__main__':main()

@@ -125,6 +125,16 @@ pub(super) const ROOT: Node = Obj(&[
                             ("expires_at", Leaf),
                         ])),
                     ),
+                    (
+                        "api_relay",
+                        Obj(&[
+                            ("url", Leaf),
+                            ("issuer", Leaf),
+                            ("timeout_ms", Leaf),
+                            ("allow_private_endpoints", Leaf),
+                            ("verifier_key_env", Leaf),
+                        ]),
+                    ),
                     ("networks", Arr(&Leaf)),
                     ("session_fallback", Leaf),
                 ])),

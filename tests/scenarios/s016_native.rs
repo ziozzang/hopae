@@ -502,3 +502,91 @@ async fn service_api_credential_http_native_parity_and_no_human_assurance() {
     tx.send(true).unwrap();
     task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn external_api_verifier_http_native_parity_and_outage_classification() {
+    use axum::{Json, http::StatusCode, routing::post};
+    let fx = Fx::new("m1-basic");
+    let expires = fx.ctx.clock.now().0 as u64 + 1000;
+    let verifier = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = verifier.local_addr().unwrap();
+    let app=axum::Router::new().route("/verify",post(move |headers:axum::http::HeaderMap,Json(body):Json<serde_json::Value>|async move {
+        assert_eq!(body["service_id"],"app");
+        let credential=headers["authorization"].to_str().unwrap();
+        if credential.contains("unavailable"){return (StatusCode::BAD_GATEWAY,Json(serde_json::json!({"active":false})));}
+        if credential.contains("invalid"){return (StatusCode::UNAUTHORIZED,Json(serde_json::json!({"active":false})));}
+        (StatusCode::OK,Json(serde_json::json!({"active":true,"subject":"partner-worker","service_id":"app","expires_at":expires})))
+    }));
+    let verifier_task = tokio::spawn(async move { axum::serve(verifier, app).await.unwrap() });
+    let config:hopae::auth_gateway::runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"partner","api_relay":{"url":format!("http://{address}/verify"),"issuer":"https://partner.example.test","timeout_ms":100,"allow_private_endpoints":true},"networks":["203.0.113.0/24"]}]})).unwrap();
+    let runtime = hopae::auth_gateway::runtime::Runtime::compile(&config, &|_| None).unwrap();
+    let keys = Arc::new(CallerKeys::new(
+        Some(Secret::new("native-test-key".into())),
+        None,
+        false,
+    ));
+    let state = GatewayState::new(
+        GatewayConfig::from_config(&fx.cfg),
+        fx.ctx.clone(),
+        keys.clone(),
+        32,
+        None,
+        None,
+    )
+    .with_authentication_gateway(runtime)
+    .unwrap();
+    let router = router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (tx, rx) = watch::channel(false);
+    let native_task = tokio::spawn(native_gateway::serve(listener, router.clone(), keys, rx));
+    let mut socket = TcpStream::connect(address).await.unwrap();
+    assert_eq!(exchange(&mut socket, 0, b"native-test-key").await.1, [1]);
+    for (id, token, status) in [
+        (1, "valid-partner-token-at-least-sixteen", 200),
+        (2, "invalid-partner-token-at-least-sixteen", 401),
+        (3, "unavailable-partner-token-at-least-sixteen", 503),
+    ] {
+        let mut headers = context("/private");
+        headers.push((
+            "authorization".into(),
+            format!("Bearer {token}").into_bytes(),
+        ));
+        let mut request = Request::builder()
+            .uri("/_hopae/verify")
+            .body(Body::empty())
+            .unwrap();
+        for (name, value) in &headers {
+            request.headers_mut().append(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_bytes(value).unwrap(),
+            );
+        }
+        request
+            .headers_mut()
+            .insert("x-hopae-gateway-key", "native-test-key".parse().unwrap());
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status().as_u16(), status);
+        let (_, payload) =
+            exchange(&mut socket, id, &wire::encode_request(&headers).unwrap()).await;
+        let response = wire::decode_reply(&payload).unwrap();
+        assert_eq!(response.status, status);
+        if status == 200 {
+            assert!(
+                response
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "x-hopae-principal-kind" && value == b"service")
+            );
+            assert!(
+                response
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "x-hopae-service-id" && value == b"app")
+            );
+        }
+    }
+    tx.send(true).unwrap();
+    native_task.await.unwrap().unwrap();
+    verifier_task.abort();
+}
