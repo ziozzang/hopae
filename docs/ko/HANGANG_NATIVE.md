@@ -1,6 +1,6 @@
 # Hangang 네이티브 검증과 콘솔 위임
 
-<!-- translation-status: source=../HANGANG_NATIVE.md source-rev=3 status=current -->
+<!-- translation-status: source=../HANGANG_NATIVE.md source-rev=4 status=current -->
 
 [English](../HANGANG_NATIVE.md) · [문서](README.md)
 
@@ -12,7 +12,7 @@ Hangang에는 콘솔 shell과 요청 집행, 프로바이더와 독립된 전송
 ## HOP1 검증
 
 선택적인 `listen.native_gateway`는 다른 리스너와 구분된 literal loopback TCP 주소를
-사용합니다. 비인증 caller 모드는 거부하며 기존 HTTP gateway도 유지합니다.
+사용하며 원격 주소는 아래 mTLS 설정이 필요합니다. 비인증 caller 모드는 거부하며 기존 HTTP gateway도 유지합니다.
 프레임은 HOP1 4바이트·big-endian u64 요청 ID·u32 본문 길이로 시작합니다.
 최대 payload는 128 KiB입니다. ID 0 핸드셰이크는 최대 4096바이트 caller key,
 응답은 1/0 한 바이트입니다. 이후 요청 ID는 양수이며 연결마다 증가해야 합니다.
@@ -127,3 +127,9 @@ OIDC 외부 HTTP client는 provider별 origin 서킷을 제한된 크기로 유�
 실제 discovery·JWKS·token·user-info 요청 경로에 적용됩니다. 캐시된 discovery/JWKS는 기존의 엄격한 유효 기한을 따르며 서킷이 인증을 승인하거나 credential 유효성을 연장하지 않습니다. 서킷은 프로세스 로컬 상태이고 provider client 재생성 시 초기화됩니다. 전용 콘솔 제어·영속 quarantine·분산 조정은 남아 있습니다.
 
 인증 게이트웨이 코어는 namespace가 있는 사람/서비스/워크로드/네트워크 신원과 제한된 Any/All 근거 결합을 정의합니다. 만료·중복·미등록·충돌 근거를 거부하며 다른 realm의 같은 subject 문자열도 합치지 않습니다. 공개 요청의 주장으로 근거를 생성할 수 없습니다. 이 타입은 기반 구현이며 실제 connector나 새로운 로그인 방식으로 연결된 것은 아닙니다. LDAP·자체 비밀번호·API 릴레이/introspection·네트워크 신원·명시적 provider 간 연결·서비스에 묶인 자격 변환은 구현 작업으로 남아 있습니다. 현재 동작하는 외부 인증 connector는 다중 OIDC입니다.
+
+## 네이티브 원격 mTLS 리스너
+
+`listen.native_gateway_tls`는 절대 경로의 PEM `certificate`·`key`·`client_ca`를 받습니다. 루프백 밖의 `listen.native_gateway`에는 이 설정이 필수이며 `0.0.0.0`에도 인증된 원격 리스너를 열 수 있습니다. TLS 파일별 크기는 1 MiB로 제한하고 readiness 이전에 읽습니다. 빈 client CA 또는 잘못된 인증서/key는 시작을 거부합니다. 서버는 설정한 client CA로 검증되는 인증서를 요구하고 ALPN `hop1`을 협상하며 TLS early data를 끕니다. 기존 gateway caller-key 핸드셰이크도 필수로 유지하므로 TLS가 호출 권한을 대신하지 않습니다.
+
+기존 최대 256개 연결 안에서 TLS 핸드셰이크를 3초로 제한합니다. 지속 연결은 300초 후 종료하고 프레임·검증 제한을 유지합니다. 전환을 위해 literal 루프백의 평문 연결만 허용합니다. Hangang 원격 TLS client 설정과 배포 검증은 후속 작업이며 서버 측 변경만으로 원격 Hangang 사용이 가능해진 것은 아닙니다.

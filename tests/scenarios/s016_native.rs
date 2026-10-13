@@ -15,12 +15,16 @@ use hopae::{
 };
 use std::{sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     sync::watch,
 };
 use tower::ServiceExt;
-async fn exchange(s: &mut TcpStream, id: u64, b: &[u8]) -> (u64, Vec<u8>) {
+async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
+    s: &mut S,
+    id: u64,
+    b: &[u8],
+) -> (u64, Vec<u8>) {
     let mut out = wire::frame_header(id, b.len()).unwrap().to_vec();
     out.extend_from_slice(b);
     s.write_all(&out).await.unwrap();
@@ -183,4 +187,209 @@ async fn native_wrong_key_and_injected_caller_key_are_rejected() {
     );
     tx.send(true).unwrap();
     task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn native_mtls_remote_listener_identity_revocation_and_client_certificate_required() {
+    use std::process::{Command, Stdio};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let run = |args: &[&str]| {
+        assert!(
+            Command::new("openssl")
+                .current_dir(root)
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    run(&[
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        "ca.key",
+        "-out",
+        "ca.pem",
+        "-days",
+        "1",
+        "-subj",
+        "/CN=Owned HOP1 CA",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+    ]);
+    for (name, usage) in [("server", "serverAuth"), ("client", "clientAuth")] {
+        let key = format!("{name}.key");
+        let csr = format!("{name}.csr");
+        let cert = format!("{name}.pem");
+        let ext = format!("{name}.ext");
+        run(&[
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            &key,
+            "-out",
+            &csr,
+            "-subj",
+            &format!("/CN={name}"),
+        ]);
+        std::fs::write(root.join(&ext),format!("basicConstraints=critical,CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage={usage}\nsubjectAltName=DNS:hopae.example.test\n")).unwrap();
+        run(&[
+            "x509",
+            "-req",
+            "-in",
+            &csr,
+            "-CA",
+            "ca.pem",
+            "-CAkey",
+            "ca.key",
+            "-CAcreateserial",
+            "-days",
+            "1",
+            "-extfile",
+            &ext,
+            "-out",
+            &cert,
+        ]);
+    }
+    let tls = native_gateway::tls_acceptor(&hopae::config::NativeGatewayTls {
+        certificate: root.join("server.pem"),
+        key: root.join("server.key"),
+        client_ca: root.join("ca.pem"),
+    })
+    .unwrap();
+    let fx = Fx::new("m1-basic");
+    let keys = Arc::new(CallerKeys::new(
+        Some(Secret::new("native-test-key".into())),
+        None,
+        false,
+    ));
+    let router = router(GatewayState::new(
+        GatewayConfig::from_config(&fx.cfg),
+        fx.ctx.clone(),
+        keys.clone(),
+        32,
+        None,
+        None,
+    ));
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let address = format!("127.0.0.1:{port}");
+    let (tx, rx) = watch::channel(false);
+    let task = tokio::spawn(native_gateway::serve_with_tls(
+        listener,
+        router,
+        keys,
+        rx,
+        Some(tls),
+    ));
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut std::fs::read(root.join("ca.pem")).unwrap().as_slice()) {
+        roots.add(cert.unwrap()).unwrap();
+    }
+    let certs =
+        rustls_pemfile::certs(&mut std::fs::read(root.join("client.pem")).unwrap().as_slice())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+    let key = rustls_pemfile::private_key(
+        &mut std::fs::read(root.join("client.key")).unwrap().as_slice(),
+    )
+    .unwrap()
+    .unwrap();
+    let mut client = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots.clone())
+        .with_client_auth_cert(certs, key)
+        .unwrap();
+    client.alpn_protocols = vec![b"hop1".to_vec()];
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(client));
+    assert!(
+        connector
+            .connect(
+                "wrong.example.test".try_into().unwrap(),
+                TcpStream::connect(&address).await.unwrap()
+            )
+            .await
+            .is_err()
+    );
+    let mut s = connector
+        .connect(
+            "hopae.example.test".try_into().unwrap(),
+            TcpStream::connect(&address).await.unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exchange(&mut s, 0, b"native-test-key").await.1, [1]);
+    let user = fx.user("native@example.test", Some("native"), None).await;
+    let session = fx.session(&user).await;
+    let handle = fx.handle(&session, "app.example.test").await;
+    let mut hs = context("/private");
+    hs.push((
+        "cookie".into(),
+        format!("__Host-hopae={}", handle.expose()).into_bytes(),
+    ));
+    let payload = wire::encode_request(&hs).unwrap();
+    assert_eq!(
+        wire::decode_reply(&exchange(&mut s, 1, &payload).await.1)
+            .unwrap()
+            .status,
+        200
+    );
+    fx.exec("UPDATE sessions SET terminated_at=1800000000,terminated_reason='logout'");
+    assert_ne!(
+        wire::decode_reply(&exchange(&mut s, 2, &payload).await.1)
+            .unwrap()
+            .status,
+        200
+    );
+    let mut anonymous = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    anonymous.alpn_protocols = vec![b"hop1".to_vec()];
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(anonymous));
+    if let Ok(mut anonymous) = connector
+        .connect(
+            "hopae.example.test".try_into().unwrap(),
+            TcpStream::connect(&address).await.unwrap(),
+        )
+        .await
+    {
+        let mut byte = [0];
+        assert!(anonymous.read(&mut byte).await.is_err());
+    }
+    tx.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}
+
+#[test]
+fn native_remote_configuration_requires_complete_mtls_and_authenticated_callers() {
+    let mut cfg = Fx::new("m1-basic").cfg;
+    cfg.listen.native_gateway = Some("0.0.0.0:8703".into());
+    assert!(cfg.validate().is_err());
+    cfg.listen.native_gateway_tls = Some(hopae::config::NativeGatewayTls {
+        certificate: "/etc/hopae/server.pem".into(),
+        key: "/etc/hopae/server.key".into(),
+        client_ca: "/etc/hopae/client-ca.pem".into(),
+    });
+    assert!(cfg.validate().is_ok());
+    cfg.gateway.allow_unauthenticated_caller = true;
+    assert!(cfg.validate().is_err());
+    cfg.gateway.allow_unauthenticated_caller = false;
+    cfg.listen.native_gateway_tls.as_mut().unwrap().key = "relative.key".into();
+    assert!(cfg.validate().is_err());
+    cfg.listen.native_gateway_tls.as_mut().unwrap().key = "/etc/hopae/server.key".into();
+    cfg.listen.native_gateway = None;
+    assert!(cfg.validate().is_err());
 }

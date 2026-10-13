@@ -411,6 +411,7 @@ struct EventWiring {
 /// Bound listeners and the open store; call [`Bound::run`] to serve.
 pub struct Bound {
     native_gateway: Option<(TcpListener, SocketAddr)>,
+    native_gateway_tls: Option<tokio_rustls::TlsAcceptor>,
     portal: TcpListener,
     gateway: TcpListener,
     /// The admin listener, bound after the portal and before the gateway.
@@ -669,6 +670,13 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         .await
         .context("binding gateway listener")?;
     let gateway_addr = gateway.local_addr()?;
+    let native_gateway_tls = cfg
+        .listen
+        .native_gateway_tls
+        .as_ref()
+        .map(http::native_gateway::tls_acceptor)
+        .transpose()
+        .context("loading native gateway mTLS")?;
     let native_gateway = match &cfg.listen.native_gateway {
         Some(value) => {
             let listener = TcpListener::bind(value)
@@ -694,6 +702,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     }
     Ok(Bound {
         native_gateway,
+        native_gateway_tls,
         portal,
         gateway,
         admin,
@@ -850,8 +859,14 @@ impl Bound {
         let native = async {
             match self.native_gateway {
                 Some((listener, _)) => {
-                    http::native_gateway::serve(listener, native_router, native_keys, native_stop)
-                        .await
+                    http::native_gateway::serve_with_tls(
+                        listener,
+                        native_router,
+                        native_keys,
+                        native_stop,
+                        self.native_gateway_tls,
+                    )
+                    .await
                 }
                 None => Ok(()),
             }

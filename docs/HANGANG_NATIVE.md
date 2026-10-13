@@ -1,6 +1,6 @@
 # Native Hangang verification and delegated console
 
-<!-- doc-rev: 3 -->
+<!-- doc-rev: 4 -->
 
 [한국어](ko/HANGANG_NATIVE.md) · [Documentation](README.md)
 
@@ -13,8 +13,8 @@ native login/logout entry handling.
 
 ## HOP1 verification
 
-Optional `listen.native_gateway` enables a literal loopback TCP address, distinct
-from other bound listeners. Unauthenticated caller mode is refused. Keep the
+Optional `listen.native_gateway` enables a literal TCP address, distinct
+from other bound listeners. Remote addresses require the mTLS configuration below. Unauthenticated caller mode is refused. Keep the
 ordinary HTTP gateway available for existing clients and diagnostics.
 
 Each frame has `HOP1` (4 bytes), request ID (u64 big endian) and payload length
@@ -155,3 +155,9 @@ The OIDC outbound client now owns bounded per-provider-origin circuits shared ac
 This protects actual discovery, JWKS, token and user-info exchanges. Cached discovery/JWKS continue to obey their existing hard validity deadlines; a circuit never authenticates a request or extends credential validity. Circuit state is process-local and resets when the provider client is rebuilt; dedicated console controls, persistent quarantine and fleet coordination remain pending.
 
 The authentication-gateway core also defines namespaced human/service/workload/network subjects and bounded Any/All evidence composition. It rejects expired, duplicate, unknown and conflicting evidence, including equal subject strings from different realms. Evidence is not constructible from public request claims. These composition types are a foundation, not a wired connector or new login method. LDAP, local passwords, API relay/introspection, network identity, explicit cross-provider links and service-bound credential translation remain implementation work. Multiple OIDC providers remain the currently working external authentication connectors.
+
+## Native remote mTLS listener
+
+`listen.native_gateway_tls` takes absolute `certificate`, `key` and `client_ca` PEM paths. Outside loopback, `listen.native_gateway` requires this configuration; `0.0.0.0` can bind an authenticated remote listener. TLS material is limited to 1 MiB per file and loaded before readiness. An empty client CA or invalid certificate/key rejects startup. The server requires a certificate chaining to the configured client CA, negotiates ALPN `hop1`, disables TLS early data, and still requires the existing gateway caller-key handshake. TLS never replaces caller authorization.
+
+TLS handshakes have a 3-second bound within the existing 256-connection limit. Persistent connections expire after 300 seconds; frame and verification bounds remain unchanged. Plaintext remains available only on literal loopback for migration. Hangang's remote TLS client configuration and deployment qualification are follow-up work; this server-side change does not by itself enable remote Hangang use.

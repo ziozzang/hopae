@@ -10,13 +10,53 @@ use axum::{
 };
 use std::{io, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{TcpListener, TcpStream},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::TcpListener,
     sync::{Semaphore, watch},
     task::JoinSet,
 };
 use tower::ServiceExt;
-async fn read_frame(stream: &mut TcpStream) -> io::Result<(u64, Vec<u8>)> {
+pub fn tls_acceptor(
+    settings: &crate::config::NativeGatewayTls,
+) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
+    use std::io::Read;
+    fn read(path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() <= 1024 * 1024,
+            "native TLS material exceeds bound"
+        );
+        Ok(bytes)
+    }
+    let cert = read(&settings.certificate)?;
+    let key = read(&settings.key)?;
+    let ca = read(&settings.client_ca)?;
+    let certs = rustls_pemfile::certs(&mut cert.as_slice()).collect::<io::Result<Vec<_>>>()?;
+    let key = rustls_pemfile::private_key(&mut key.as_slice())?
+        .ok_or_else(|| anyhow::anyhow!("native TLS key missing"))?;
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls_pemfile::certs(&mut ca.as_slice()) {
+        roots.add(cert?)?;
+    }
+    anyhow::ensure!(!roots.is_empty(), "native TLS client CA missing");
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+        Arc::new(roots),
+        provider.clone(),
+    )
+    .build()?;
+    let mut config = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certs, key)?;
+    config.alpn_protocols = vec![b"hop1".to_vec()];
+    config.max_early_data_size = 0;
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+}
+async fn read_frame<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<(u64, Vec<u8>)> {
     let mut h = [0; 16];
     stream.read_exact(&mut h).await?;
     let (id, n) = wire::parse_header(h)?;
@@ -24,7 +64,11 @@ async fn read_frame(stream: &mut TcpStream) -> io::Result<(u64, Vec<u8>)> {
     stream.read_exact(&mut bytes).await?;
     Ok((id, bytes))
 }
-async fn write_frame(stream: &mut TcpStream, id: u64, bytes: &[u8]) -> io::Result<()> {
+async fn write_frame<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    id: u64,
+    bytes: &[u8],
+) -> io::Result<()> {
     let mut out = Vec::with_capacity(16 + bytes.len());
     out.extend_from_slice(&wire::frame_header(id, bytes.len())?);
     out.extend_from_slice(bytes);
@@ -33,13 +77,12 @@ async fn write_frame(stream: &mut TcpStream, id: u64, bytes: &[u8]) -> io::Resul
 fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid native verify exchange")
 }
-async fn connection(
-    mut stream: TcpStream,
+async fn connection<S: AsyncRead + AsyncWrite + Unpin>(
+    mut stream: S,
     router: Router,
     keys: Arc<CallerKeys>,
     mut stop: watch::Receiver<bool>,
 ) -> io::Result<()> {
-    stream.set_nodelay(true)?;
     let (id, key) = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut stream))
         .await
         .map_err(|_| invalid())??;
@@ -104,17 +147,30 @@ pub async fn serve(
     listener: TcpListener,
     router: Router,
     keys: Arc<CallerKeys>,
-    mut stop: watch::Receiver<bool>,
+    stop: watch::Receiver<bool>,
 ) -> io::Result<()> {
+    serve_with_tls(listener, router, keys, stop, None).await
+}
+pub async fn serve_with_tls(
+    listener: TcpListener,
+    router: Router,
+    keys: Arc<CallerKeys>,
+    mut stop: watch::Receiver<bool>,
+    tls: Option<tokio_rustls::TlsAcceptor>,
+) -> io::Result<()> {
+    if tls.is_none() && !listener.local_addr()?.ip().is_loopback() {
+        return Err(invalid());
+    }
     let slots = Arc::new(Semaphore::new(256));
     let mut tasks = JoinSet::new();
     let connections_stop = stop.clone();
     loop {
         tokio::select! {
-         _=stop.wait_for(|v|*v)=>break,
-         Some(_)=tasks.join_next()=>{},
-         accepted=listener.accept()=>{let(stream,_)=accepted?;let Ok(permit)=slots.clone().try_acquire_owned()else{continue;};let router=router.clone();let keys=keys.clone();let stop=connections_stop.clone();tasks.spawn(async move{let _permit=permit;let _=connection(stream,router,keys,stop).await;});}
-        }
+                 _=stop.wait_for(|v|*v)=>break,
+                 Some(_)=tasks.join_next()=>{},
+                 accepted=listener.accept()=>{let(stream,_)=accepted?;let Ok(permit)=slots.clone().try_acquire_owned()else{continue;};let router=router.clone();let keys=keys.clone();let stop=connections_stop.clone();let tls=tls.clone();tasks.spawn(async move{let _permit=permit;if stream.set_nodelay(true).is_err(){return;}
+        if let Some(tls)=tls{if let Ok(Ok(stream))=tokio::time::timeout(Duration::from_secs(3),tls.accept(stream)).await{if stream.get_ref().1.alpn_protocol()!=Some(b"hop1".as_slice()){return;}let _=tokio::time::timeout(Duration::from_secs(300),connection(stream,router,keys,stop)).await;}}else{let _=tokio::time::timeout(Duration::from_secs(300),connection(stream,router,keys,stop)).await;}});}
+                }
     }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}

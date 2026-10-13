@@ -73,12 +73,22 @@ pub struct Listen {
     pub portal: String,
     #[serde(default = "default_gateway_addr")]
     pub gateway: String,
-    /// Authenticated persistent verification; loopback only.
+    /// Authenticated persistent verification; remote transport requires mTLS.
     #[serde(default)]
     pub native_gateway: Option<String>,
+    #[serde(default)]
+    pub native_gateway_tls: Option<NativeGatewayTls>,
     /// Admin listener; `127.0.0.1:8702` when `admin.public_url` is set.
     #[serde(default)]
     pub admin: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeGatewayTls {
+    pub certificate: PathBuf,
+    pub key: PathBuf,
+    pub client_ca: PathBuf,
 }
 
 impl Default for Listen {
@@ -87,6 +97,7 @@ impl Default for Listen {
             portal: default_portal_addr(),
             gateway: default_gateway_addr(),
             native_gateway: None,
+            native_gateway_tls: None,
             admin: None,
         }
     }
@@ -761,9 +772,17 @@ impl Config {
         {
             errs.push("listen.portal and listen.gateway must differ".to_string());
         }
+        if let Some(tls) = &self.listen.native_gateway_tls
+            && (self.listen.native_gateway.is_none()
+                || [&tls.certificate, &tls.key, &tls.client_ca]
+                    .iter()
+                    .any(|p| !p.is_absolute()))
+        {
+            errs.push("native gateway TLS requires a listener and absolute certificate/key/client_ca paths".into());
+        }
         if let Some(value) = &self.listen.native_gateway {
             match value.parse::<SocketAddr>() {
-                Ok(address) if address.ip().is_loopback() => {
+                Ok(address) if (address.ip().is_loopback() || self.listen.native_gateway_tls.is_some()) && !address.ip().is_multicast() => {
                     if address.port() != 0
                         && (Some(address) == portal
                             || Some(address) == gateway
@@ -781,7 +800,7 @@ impl Config {
                     }
                 }
                 _ => errs
-                    .push("listen.native_gateway must be a literal loopback socket address".into()),
+                    .push("listen.native_gateway must be a literal socket address; outside loopback mTLS is required".into()),
             }
         }
         if let Some(a) = &self.listen.admin {
