@@ -2,13 +2,81 @@
 //! a response-size cap. Nothing here logs a URL query, a header value or a
 //! body, so no secret or token can reach a log through this module.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::redirect::Policy;
 
+use crate::auth_gateway::breaker::{Breaker, Permit};
 use crate::provider::types::ProviderError;
+
+struct Circuits {
+    started: Instant,
+    by_origin: Mutex<HashMap<String, Breaker>>,
+}
+impl Circuits {
+    fn now(&self) -> u64 {
+        self.started.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+    fn admit(self: &Arc<Self>, url: &url::Url) -> Result<Exchange, ProviderError> {
+        // Origin excludes paths, queries, credentials and authorization codes.
+        let origin = url.origin().ascii_serialization();
+        let mut circuits = self
+            .by_origin
+            .lock()
+            .map_err(|_| ProviderError::ProviderUnavailable)?;
+        if !circuits.contains_key(&origin) {
+            if circuits.len() >= 16 {
+                return Err(ProviderError::ProviderUnavailable);
+            }
+            circuits.insert(
+                origin.clone(),
+                Breaker::new(3, 30_000).expect("constant circuit bounds"),
+            );
+        }
+        let permit = circuits
+            .get_mut(&origin)
+            .unwrap()
+            .admit(self.now())
+            .ok_or(ProviderError::ProviderUnavailable)?;
+        Ok(Exchange {
+            circuits: self.clone(),
+            origin,
+            permit: Some(permit),
+        })
+    }
+}
+struct Exchange {
+    circuits: Arc<Circuits>,
+    origin: String,
+    permit: Option<Permit>,
+}
+impl Exchange {
+    fn finish(mut self, failed: bool) {
+        self.record(failed);
+    }
+    fn record(&mut self, failed: bool) {
+        if let Some(permit) = self.permit.take()
+            && let Ok(mut circuits) = self.circuits.by_origin.lock()
+            && let Some(circuit) = circuits.get_mut(&self.origin)
+        {
+            if failed {
+                circuit.backend_failure(permit, self.circuits.now());
+            } else {
+                circuit.healthy(permit);
+            }
+        }
+    }
+}
+impl Drop for Exchange {
+    fn drop(&mut self) {
+        // Cancellation and early transport/body errors release a half-open probe.
+        self.record(true);
+    }
+}
 
 /// Total time for one outbound request, body included.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -43,16 +111,17 @@ impl Resolve for VettingResolver {
 #[derive(Clone)]
 pub struct Fetcher {
     client: reqwest::Client,
+    ready: bool,
     allow_private: bool,
+    circuits: Arc<Circuits>,
 }
 
 impl Fetcher {
     /// `allow_private` lifts the address vetting (loopback, private, ...);
     /// redirects are never followed either way.
     pub fn new(allow_private: bool) -> Fetcher {
-        // A failure to build the client (TLS backend initialisation) is a
-        // programming or platform error; fall back to a client that still
-        // refuses redirects rather than panicking on the request path.
+        // A failed TLS/client initialization fences every send. The fallback
+        // only constructs request builders; it must never perform an exchange.
         let mut builder = reqwest::Client::builder()
             // No automatic environment proxy (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY):
             // a proxy resolves the destination itself, which would bypass the
@@ -65,10 +134,18 @@ impl Fetcher {
         if !allow_private {
             builder = builder.dns_resolver(std::sync::Arc::new(VettingResolver));
         }
-        let client = builder.build().unwrap_or_default();
+        let (client, ready) = match builder.build() {
+            Ok(client) => (client, true),
+            Err(_) => (reqwest::Client::default(), false),
+        };
         Fetcher {
             client,
+            ready,
             allow_private,
+            circuits: Arc::new(Circuits {
+                started: Instant::now(),
+                by_origin: Mutex::new(HashMap::new()),
+            }),
         }
     }
 
@@ -83,6 +160,9 @@ impl Fetcher {
     /// Send and read at most [`MAX_BODY_BYTES`]. A 3xx answer is returned as
     /// is (never followed); the caller decides what it means.
     pub async fn send(&self, req: reqwest::RequestBuilder) -> Result<Response, ProviderError> {
+        if !self.ready {
+            return Err(ProviderError::ProviderUnavailable);
+        }
         let request = req.build().map_err(classify)?;
         // An address literal bypasses name resolution, so it is vetted here.
         let literal = match request.url().host() {
@@ -93,6 +173,7 @@ impl Fetcher {
         if !self.allow_private && literal.is_some_and(|ip| !addr_allowed(ip)) {
             return Err(ProviderError::ProviderUnavailable);
         }
+        let exchange = self.circuits.admit(request.url())?;
         let mut resp = self.client.execute(request).await.map_err(classify)?;
         let status = resp.status().as_u16();
         let content_type = resp
@@ -113,6 +194,9 @@ impl Fetcher {
             }
             body.extend_from_slice(&chunk);
         }
+        // Ordinary credential denial (400/401/403) is a reachable provider,
+        // not a backend outage. Rate limiting and server errors trip the circuit.
+        exchange.finish(status == 429 || status >= 500);
         Ok(Response {
             status,
             content_type,
@@ -253,6 +337,102 @@ impl EndpointPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn failed_client_initialization_never_uses_a_fallback_transport() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = url(&format!("http://{}/", listener.local_addr().unwrap()));
+        let mut fetcher = Fetcher::new(true);
+        fetcher.ready = false;
+        assert!(matches!(
+            fetcher.send(fetcher.get(&endpoint)).await,
+            Err(ProviderError::ProviderUnavailable)
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn actual_provider_outages_trip_but_credential_denial_does_not() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (status, calls) in [(503, 3), (429, 3), (401, 5), (403, 5)] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = url(&format!("http://{}/token", listener.local_addr().unwrap()));
+            let server = tokio::spawn(async move {
+                for _ in 0..calls {
+                    let (mut stream, _) =
+                        tokio::time::timeout(Duration::from_secs(2), listener.accept())
+                            .await
+                            .unwrap()
+                            .unwrap();
+                    let mut request = [0; 4096];
+                    let received = stream.read(&mut request).await.unwrap();
+                    assert!(received > 0, "owned client sent a request");
+                    let response = format!(
+                        "HTTP/1.1 {status} Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                    );
+                    stream.write_all(response.as_bytes()).await.unwrap();
+                }
+                listener
+            });
+            let fetcher = Fetcher::new(true);
+            for _ in 0..calls {
+                assert_eq!(
+                    fetcher.send(fetcher.get(&endpoint)).await.unwrap().status,
+                    status
+                );
+            }
+            let listener = server.await.unwrap();
+            if status == 503 || status == 429 {
+                assert!(matches!(
+                    fetcher.send(fetcher.get(&endpoint)).await,
+                    Err(ProviderError::ProviderUnavailable)
+                ));
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(30), listener.accept())
+                        .await
+                        .is_err()
+                );
+            } else {
+                let origin = endpoint.origin().ascii_serialization();
+                assert_eq!(
+                    fetcher.circuits.by_origin.lock().unwrap()[&origin].state(),
+                    crate::auth_gateway::breaker::State::Closed
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cancelled_exchanges_count_failures_and_endpoint_state_is_bounded() {
+        let circuits = Arc::new(Circuits {
+            started: Instant::now(),
+            by_origin: Mutex::new(HashMap::new()),
+        });
+        let endpoint = url("https://issuer.example.test/token?code=private");
+        for _ in 0..3 {
+            drop(circuits.admit(&endpoint).unwrap());
+        }
+        assert!(circuits.admit(&endpoint).is_err());
+        assert_eq!(
+            circuits.by_origin.lock().unwrap().keys().next().unwrap(),
+            "https://issuer.example.test"
+        );
+        for port in 1..16 {
+            circuits
+                .admit(&url(&format!("https://issuer.example.test:{port}/")))
+                .unwrap()
+                .finish(false);
+        }
+        assert!(
+            circuits
+                .admit(&url("https://another.example.test/"))
+                .is_err()
+        );
+    }
 
     fn url(s: &str) -> url::Url {
         url::Url::parse(s).unwrap()

@@ -109,10 +109,10 @@ updated in the same change.
 
 ## Service authorization ownership
 
-[Pumgye (품계)](https://github.com/ziozzang/pumgye) owns service-scoped roles,
+[Pumgye](https://github.com/ziozzang/pumgye) owns service-scoped roles,
 permissions, information classes and user/network assignments. Hopae's native
-verification establishes identity and assurance; Hangang's embedded Pumgye gate
-then enforces access with Sumunjang network evidence. Successful authentication
+verification establishes identity and assurance; Hangang delegates authorization
+to the independent Pumgye authority and enforces access with Sumunjang network evidence. Successful authentication
 alone does not grant service access: unassigned users remain guest and the
 auth-proxy refuses protected requests. Hopae retains provider, user and session
 ownership; native console grants remain distinct from service permissions.

@@ -535,10 +535,18 @@ async fn s012_1_discovery_down_at_start_degraded() {
     assert!(matches!(e, ProviderError::ProviderUnavailable), "{e:?}");
     assert_eq!(rig.idp.discovery_fetches(), 3);
 
-    // The provider recovers once the backoff elapses; no restart needed.
+    // Advancing the wall-clock/cache fixture cannot bypass the monotonic circuit.
     rig.idp.set_profile("default");
     rig.advance(Duration::from_secs(61));
     rig.p.refresh_discovery().await;
+    assert!(matches!(rig.p.health().await, ProviderHealth::Degraded(_)));
+    assert_eq!(rig.idp.discovery_fetches(), 3);
+    // Both the real 30 s circuit and cache backoff must elapse. Recovery needs
+    // no restart, and the successful half-open exchange closes the circuit.
+    tokio::time::sleep(Duration::from_millis(30_100)).await;
+    rig.advance(Duration::from_secs(61));
+    rig.p.refresh_discovery().await;
+    assert_eq!(rig.idp.discovery_fetches(), 4);
     assert_eq!(rig.p.health().await, ProviderHealth::Ok);
     assert!(rig.login().await.is_ok());
 }
