@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=2 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=3 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -79,3 +79,13 @@ fallback 없이 503입니다. 연속 백엔드/의미 오류 3회 후 프로세�
 credential 거부는 서킷 장애로 세지 않습니다. 이 첫 verifier 계약에는 결과 캐시·
 upstream credential 교환·영속 quarantine·관리 게시·RFC 7662 필드 adapter를
 구현하지 않았습니다.
+
+## 조합된 인증 근거 기한
+
+`compose_verified` 코어 계약은 검증된 subject와 서비스 audience를 보존하고 전달된
+근거의 가장 이른 만료 또는 1초 중 더 짧은 기한을 사용합니다. Any/All은 미등록·중복
+커넥터·만료 근거·충돌하는 namespace subject·불일치 audience를 거부합니다. 읽기
+전용 결과에는 assurance 수준 주장이 없으며 서비스/network 근거가 여러 개라도 사람
+MFA가 되지 않습니다. audience 유지·최초 만료·1초 상한·만료 거부를 검증했습니다.
+조합 기초 계층이며 런타임 connector 실행 조합과 명시적으로 검증된 provider 간
+subject 관계는 남아 있습니다. 기존 요청 프로필은 설정된 커넥터를 사용합니다.

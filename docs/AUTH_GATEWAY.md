@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 3 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -93,3 +93,15 @@ recovery probe; cancellation releases its probe. Ordinary credential denial
 does not trip the circuit. No result cache, upstream credential exchange,
 persisted quarantine, management publication or RFC 7662 field adapter is
 implemented by this first verifier contract.
+
+## Composed evidence lease
+
+The `compose_verified` core contract now preserves the validated subject and service
+audience and caps freshness at the earliest supplied evidence expiry or one second,
+whichever comes first. Any/All still reject unknown or duplicate connectors, expired
+evidence, conflicting namespaced subjects and mismatched audiences. The resulting
+read-only evidence contains no assurance-level claim; multiple service/network
+factors do not imply human MFA. Tests verify audience retention, earliest expiry,
+the one-second cap and expiry rejection. This is a composition primitive; runtime
+connector orchestration and explicitly verified cross-provider subject relationships
+remain pending. Existing request profiles still select their configured connector.

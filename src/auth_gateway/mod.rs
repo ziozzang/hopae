@@ -98,6 +98,46 @@ pub fn compose<'a>(
     }
     selected.ok_or(CompositionError::Missing)
 }
+/// Composed evidence keeps the validated audience and shortest freshness lease.
+/// It carries no assurance-level claim: several factors cannot manufacture human MFA.
+#[derive(Clone, Debug)]
+pub struct ComposedEvidence {
+    subject: Subject,
+    service: Option<String>,
+    fresh_until: u64,
+}
+impl ComposedEvidence {
+    pub fn subject(&self) -> &Subject {
+        &self.subject
+    }
+    pub fn service(&self) -> Option<&str> {
+        self.service.as_deref()
+    }
+    pub fn fresh_until(&self) -> u64 {
+        self.fresh_until
+    }
+}
+/// Preserve the earliest evidence deadline, capped to a one-second decision lease.
+/// Evidence construction and subject relationship verification remain connector-owned.
+pub fn compose_verified(
+    mode: Composition,
+    required: &[String],
+    evidence: &[VerifiedEvidence],
+    now: u64,
+) -> Result<ComposedEvidence, CompositionError> {
+    let subject = compose(mode, required, evidence, now)?.clone();
+    let fresh_until = evidence
+        .iter()
+        .map(|item| item.expires_at)
+        .min()
+        .ok_or(CompositionError::Missing)?
+        .min(now.saturating_add(1000));
+    Ok(ComposedEvidence {
+        subject,
+        service: evidence.first().and_then(|item| item.service.clone()),
+        fresh_until,
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +153,33 @@ mod tests {
             expires_at: 10,
             service: None,
         }
+    }
+    #[test]
+    fn composed_service_evidence_preserves_audience_and_earliest_deadline() {
+        let required = vec!["api".into(), "network".into()];
+        let mut first = evidence("api", "worker");
+        first.subject.kind = PrincipalKind::Service;
+        first.service = Some("orders".into());
+        first.expires_at = 9000;
+        let mut second = first.clone();
+        second.connector = "network".into();
+        second.expires_at = 200;
+        let result =
+            compose_verified(Composition::All, &required, &[first.clone(), second], 100).unwrap();
+        assert_eq!(result.fresh_until(), 200);
+        assert_eq!(result.service(), Some("orders"));
+        assert_eq!(result.subject().kind, PrincipalKind::Service);
+        let result = compose_verified(Composition::Any, &required, &[first], 100).unwrap();
+        assert_eq!(result.fresh_until(), 1100);
+        assert!(matches!(
+            compose_verified(
+                Composition::Any,
+                &required,
+                &[evidence("api", "worker")],
+                10
+            ),
+            Err(CompositionError::Expired)
+        ));
     }
     #[test]
     fn composition_cannot_join_evidence_from_different_service_audiences() {
