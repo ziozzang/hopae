@@ -3,6 +3,7 @@
 import http.server
 import json
 import pathlib
+import socketserver
 import ssl
 import sys
 import uuid
@@ -44,7 +45,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
-server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+class LoopbackServer(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer normally performs getfqdn() during startup. An owned
+        # loopback fixture must not depend on DNS availability or its timeout.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = 'localhost'
+        self.server_port = self.server_address[1]
+
+
+server = LoopbackServer(('127.0.0.1', 0), Handler)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(root / 'server.pem', root / 'server.key')
 server.socket = context.wrap_socket(server.socket, server_side=True)
