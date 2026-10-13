@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=9 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=10 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -220,3 +220,25 @@ challenge·세션 원자 처리, pending 정리·교체, 등록·복구 UI·키 
 keyring 선택·요인 전용 감사·복구·UI·내부 도그푸딩은 남아 있습니다.
 Counter만 소비한 뒤 별도 트랜잭션으로 안전하지 않게 세션을 승격하면 안 되며,
 통합 완료는 하나의 원자 쓰기로 구현해야 합니다.
+
+## 내부 v3→v5 마이그레이션·백업 롤백 검증
+
+실제 내부 호패 schema-v3 DB를 SQLite backup API로 비공개 검증 디렉터리에
+복사했습니다. 현재 Store 구현이 오프라인 후보를 v5로 마이그레이션했고,
+integrity check·집계 내용 비교로 기존 13개 업무 테이블의 보존을 확인했습니다.
+일관성 백업을 복원하면 v3와 원래 내용이 재현됐습니다. 업그레이드 후보를
+포함한 모든 복사에 backup API를 사용합니다. 주 파일만 복사하면 WAL의
+마이그레이션을 놓쳐 잘못된 롤백 결과를 얻을 수 있습니다.
+
+현재 운영 `0.0.2-profile-console-9b307c0` 이미지를 네트워크·운영 상태 mount
+없는 격리 컨테이너에서 실행했습니다. `admin list`는 복원 v3를 열고,
+검증된 v5 후보는 새 스키마로 거부했습니다. 자격증명·CLI 출력은 공개 증거에
+포함하지 않았고 운영 DB는 마이그레이션하지 않았습니다. 오프라인 데이터와
+구버전 CLI 호환 검증이며 전체 앱 부팅·provider 로그인·배포 준비 완료는 아닙니다.
+
+재현은 `cargo build --example qualify_owner_migration` 후
+`python3 tools/qualify_owner_migration.py --database <owner-db> --output <new-private-directory> --qualifier target/debug/examples/qualify_owner_migration`입니다.
+Rust helper는 기존 `migration-candidate.db`만 허용하고 Python은 입력 DB를
+마이그레이션하지 않습니다. 후보·백업에는 비공개 신원·세션 자료가 있으므로
+비공개로 보관합니다. 내부 반영 전 후보 이미지·전체 부팅 회귀 검증과
+마이그레이션을 고려한 롤백이 아직 필요합니다.

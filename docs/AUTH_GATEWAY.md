@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 9 -->
+<!-- doc-rev: 10 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -252,3 +252,27 @@ HTTP route: admission, recent authentication, challenge binding, atomic challeng
 completion, keyring selection, factor-specific audit, recovery/UI and internal dogfooding
 remain required. Counter consumption alone must not be followed by a separate unsafe
 session elevation transaction; integrated completion still needs one atomic write.
+
+## Internal v3-to-v5 migration and backup rollback qualification
+
+The actual internal Hopae schema-v3 database was copied with SQLite's backup API
+into a private qualification directory. The offline candidate was opened by the
+current Store implementation and migrated to v5. Integrity checks and aggregate
+content comparisons verified preservation of all 13 existing business tables.
+Restoring the consistent backup reproduced schema v3 and the original table contents.
+All copies, including the upgraded candidate, use the backup API: copying only the
+main file can omit WAL-resident migrations and give a false rollback result.
+
+The currently deployed `0.0.2-profile-console-9b307c0` image was run in isolated
+containers without network or live-state mounts. Its `admin list` command opened
+the restored v3 database and refused a verified v5 candidate as too new. Private
+credentials and CLI output were kept outside public evidence. Production state was
+not migrated. This proves offline data migration and old-image CLI compatibility,
+not complete application boot, provider/login qualification or deployment readiness.
+
+Reproduce with `cargo build --example qualify_owner_migration` and
+`python3 tools/qualify_owner_migration.py --database <owner-db> --output <new-private-directory> --qualifier target/debug/examples/qualify_owner_migration`.
+The Rust helper accepts only an existing `migration-candidate.db`; the Python runner
+never migrates its input. The candidate and backups contain private identity/session
+material and must remain private. Operational rollout still needs a candidate image,
+full boot/regression checks and migration-aware rollback before internal activation.
