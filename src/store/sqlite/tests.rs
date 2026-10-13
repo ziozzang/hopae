@@ -2579,3 +2579,91 @@ async fn totp_prepare_returns_secret_only_after_pending_commit() {
     );
     assert_eq!(f.count("SELECT COUNT(*) FROM totp_enrollments"), 1);
 }
+
+#[tokio::test]
+async fn expired_totp_pending_replacement_and_factor_audit_are_atomic() {
+    use crate::store::Factors;
+    let f = fx();
+    let count_kind =
+        |kind: &str| f.count(&format!("SELECT COUNT(*) FROM events WHERE kind='{kind}'"));
+    let user = f.user(1).await;
+    let key = crate::factor::seed_cipher::Key::new("key-1".into(), [7; 32]).unwrap();
+    let seed = crate::factor::totp::Seed::from_bytes(&[5; 20]).unwrap();
+    let envelope = |id| key.seal(&seed, user.user_id.as_str(), id, &f.rng).unwrap();
+    let existing = f.event(EventKind::SessionCreated);
+    f.store
+        .create_totp_pending(
+            "first".into(),
+            user.user_id.clone(),
+            envelope("first"),
+            vec![existing.clone()],
+        )
+        .await
+        .unwrap();
+    assert!(
+        f.store
+            .create_totp_pending(
+                "second".into(),
+                user.user_id.clone(),
+                envelope("second"),
+                vec![]
+            )
+            .await
+            .is_err()
+    );
+    f.clock.advance(Duration::from_secs(600));
+    assert!(
+        f.store
+            .create_totp_pending(
+                "second".into(),
+                user.user_id.clone(),
+                envelope("second"),
+                vec![existing]
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM totp_enrollments WHERE state='pending'"),
+        1
+    );
+    assert_eq!(count_kind("factor.enrollment_expired"), 0);
+    f.store
+        .create_totp_pending(
+            "second".into(),
+            user.user_id.clone(),
+            envelope("second"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(count_kind("factor.enrollment_prepared"), 2);
+    assert_eq!(count_kind("factor.enrollment_expired"), 1);
+    f.clock.advance(Duration::from_secs(1));
+    assert!(
+        f.store
+            .activate_totp("second", &user.user_id, 1, 10, vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        f.store
+            .consume_totp_counter("second", &user.user_id, 2, 11, vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        f.store
+            .revoke_totp("second", &user.user_id, 2, vec![])
+            .await
+            .unwrap()
+    );
+    for name in [
+        "factor.enrollment_activated",
+        "factor.totp_consumed",
+        "factor.enrollment_revoked",
+    ] {
+        assert_eq!(count_kind(name), 1);
+    }
+    assert_eq!(f.count("SELECT COUNT(*) FROM event_deliveries d JOIN events e USING(event_id) WHERE e.kind LIKE 'factor.%' AND d.state='pending'"),6);
+}

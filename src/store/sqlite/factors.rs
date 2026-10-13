@@ -1,7 +1,7 @@
 //! Encrypted TOTP enrollment lifecycle and serialized monotonic counter consumption.
 use super::{Store, commit, events::insert_events};
 use crate::{
-    event::types::Event,
+    event::types::{Event, EventBuilder, EventKind, Outcome},
     identity::types::UserId,
     store::{Factors, StoreError, StoreResult},
 };
@@ -55,7 +55,13 @@ impl Factors for Store {
             let shared=env.shared.clone();let now=shared.clock.now().secs();let tx=env.begin()?;
             let active: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM users WHERE user_id=?1 AND status='active')",[user.as_str()],|r|r.get(0))?;
             if !active { return Err(StoreError::Conflict("user unavailable")); }
+            let expired: Option<String> = tx.query_row("SELECT enrollment_id FROM totp_enrollments WHERE user_id=?1 AND state='pending' AND pending_expires_at<=?2",params![user.as_str(),now],|row|row.get(0)).optional()?;
+            if let Some(expired)=expired {
+                tx.execute("UPDATE totp_enrollments SET state='revoked',revision=revision+1,pending_expires_at=NULL,updated_at=?2 WHERE enrollment_id=?1",params![expired,now])?;
+                insert_events(&tx,&shared,&[factor_event(&shared,&user,&expired,EventKind::FactorEnrollmentExpired)])?;
+            }
             tx.execute("INSERT INTO totp_enrollments(enrollment_id,user_id,envelope,revision,state,pending_expires_at,created_at,updated_at)VALUES(?1,?2,?3,1,'pending',?4,?5,?5)",params![id,user.as_str(),envelope,now.saturating_add(600),now])?;
+            insert_events(&tx,&shared,&[factor_event(&shared,&user,&id,EventKind::FactorEnrollmentPrepared)])?;
             insert_events(&tx,&shared,&events)?;commit(tx,&shared,None)
         }).await
     }
@@ -118,7 +124,22 @@ impl Store {
                 _ => return Err(StoreError::Conflict("invalid factor operation")),
             };
             if tx.execute(sql,params![id,user.as_str(),revision,counter,now])?!=1 { return Ok(false); }
+            let kind=match operation { "activate"=>EventKind::FactorEnrollmentActivated,"consume"=>EventKind::FactorTotpConsumed,_=>EventKind::FactorEnrollmentRevoked };
+            insert_events(&tx,&shared,&[factor_event(&shared,&user,&id,kind)])?;
             insert_events(&tx,&shared,&events)?;commit(tx,&shared,None)?;Ok(true)
         }).await
     }
+}
+
+fn factor_event(shared: &super::Shared, user: &UserId, id: &str, kind: EventKind) -> Event {
+    EventBuilder::new(
+        shared.clock.as_ref(),
+        shared.rng().as_ref(),
+        kind,
+        Outcome::Success,
+        "r_totp_store",
+    )
+    .user(user)
+    .attr("enrollment_id", id)
+    .build()
 }

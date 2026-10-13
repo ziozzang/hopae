@@ -87,6 +87,12 @@ pub enum EventKind {
     LoginSucceeded,
     LoginFailed,
     SessionCreated,
+    FactorEnrollmentPrepared,
+    FactorEnrollmentActivated,
+    FactorEnrollmentExpired,
+    FactorTotpConsumed,
+    FactorEnrollmentRevoked,
+
     SessionHandoff,
     HandoffRejected,
     SessionTerminated,
@@ -113,11 +119,16 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 25] = [
+    pub const ALL: [EventKind; 30] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
         EventKind::SessionCreated,
+        EventKind::FactorEnrollmentPrepared,
+        EventKind::FactorEnrollmentActivated,
+        EventKind::FactorEnrollmentExpired,
+        EventKind::FactorTotpConsumed,
+        EventKind::FactorEnrollmentRevoked,
         EventKind::SessionHandoff,
         EventKind::HandoffRejected,
         EventKind::SessionTerminated,
@@ -160,6 +171,12 @@ impl EventKind {
             EventKind::LoginSucceeded => "login.succeeded",
             EventKind::LoginFailed => "login.failed",
             EventKind::SessionCreated => "session.created",
+            EventKind::FactorEnrollmentPrepared => "factor.enrollment_prepared",
+            EventKind::FactorEnrollmentActivated => "factor.enrollment_activated",
+            EventKind::FactorEnrollmentExpired => "factor.enrollment_expired",
+            EventKind::FactorTotpConsumed => "factor.totp_consumed",
+            EventKind::FactorEnrollmentRevoked => "factor.enrollment_revoked",
+
             EventKind::SessionHandoff => "session.handoff",
             EventKind::HandoffRejected => "handoff.rejected",
             EventKind::SessionTerminated => "session.terminated",
@@ -373,6 +390,7 @@ pub mod reasons {
 pub const ATTR_ALLOWLIST: &[&str] = &[
     "aal",
     "actor",
+    "enrollment_id",
     "actor_session",
     "delegated_issuer",
     "delegated_actor",
@@ -575,14 +593,14 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 20);
+        assert_eq!(required, 25);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 25);
+        assert_eq!(EventKind::ALL.len(), 30);
         for (kind, name) in [
             (EventKind::AdminGrant, "admin.grant"),
             (EventKind::AdminRevoke, "admin.revoke"),

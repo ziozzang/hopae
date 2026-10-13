@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=12 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=13 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -281,3 +281,23 @@ no-store·referrer·CSP 응답 제한, QR·확인·복구·해제 UI·시도 제
 challenge와 세션 원자 처리는 남아 있습니다. 등록 route는 활성화하지 않았습니다.
 과거 원본 [Google key URI format](https://github.com/google/google-authenticator/wiki/Key-Uri-Format)을
 encoding 참고로 사용하며 현재 실제 앱 scan은 아직 검증하지 않았습니다.
+
+## 만료 pending 교체와 필수 요인 감사
+
+새 pending 등록 생성은 같은 active 사용자의 만료 pending을 회수하고 새 row를
+넣는 작업을 한 트랜잭션에서 수행합니다. 살아 있는 pending은 중복 준비를
+막으며 삽입·호출자 필수 감사 실패 시 정리·새 등록 모두 롤백합니다. 정리된
+이전 row는 revision을 올리고 회수 상태로 남아 시계 역행으로 되살아나지 않습니다.
+기존 active 요인을 교체하거나 등록 HTTP route를 제공하는 것은 아닙니다.
+
+저장소는 호출자 이벤트가 없어도 필수 `factor.enrollment_prepared`,
+`factor.enrollment_activated`, `factor.enrollment_expired`, `factor.totp_consumed`,
+`factor.enrollment_revoked`를 생성합니다. Owner·등록 식별자와 저장소 correlation
+표식만 포함하고 동일 transactional outbox를 사용합니다. Seed·URI·code·counter·key는
+감사 속성에 넣지 않습니다. 저장소 변경에 대한 이벤트이며 counter 소비 감사만으로
+challenge에 묶인 MFA 세션이나 HTTP actor를 증명하지 않습니다.
+
+실제 저장소 회귀는 살아 있는 pending 거부, 만료 교체, 필수 이벤트 중복 시
+롤백, 6개 수명주기 이벤트와 pending outbox를 확인합니다. 최근 인증·actor
+연결, active 요인 원자 교체, challenge·세션 완료, 복구·UI·내부 MFA 도그푸딩은
+아직 남아 있습니다.

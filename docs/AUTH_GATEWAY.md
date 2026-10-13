@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 12 -->
+<!-- doc-rev: 13 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -318,3 +318,25 @@ confirmation/recovery/removal UI, admission, keyring loading and challenge/sessi
 atomicity remain required. No registration route is enabled. The historical upstream
 [Google key URI format](https://github.com/google/google-authenticator/wiki/Key-Uri-Format)
 is the encoding reference; a current real-app scan has not been qualified.
+
+## Expired pending replacement and required factor audit
+
+Creating a fresh pending enrollment now revokes an expired pending enrollment for
+the same active user in the same transaction as insertion. A live pending enrollment
+still prevents duplicate preparation. Failure of insertion or caller-required audit
+rolls back both cleanup and new enrollment. Cleanup permanently advances the old
+revision and tombstones its state; clock rollback cannot revive that cleaned row.
+It does not replace an existing active factor or provide an enrollment HTTP route.
+
+The store emits required `factor.enrollment_prepared`, `factor.enrollment_activated`,
+`factor.enrollment_expired`, `factor.totp_consumed` and `factor.enrollment_revoked`
+events even when the trusted caller supplies no events. Each contains only owner and
+enrollment identifiers with a store correlation marker, and travels through the same
+transactional outbox. No seed, URI, code, counter or key is added to event attributes.
+Factor events describe storage mutations; consumed-counter audit alone does not
+prove a challenge-bound MFA session or identify an HTTP actor.
+
+A real-store regression checks live-pending refusal, expired replacement, rollback
+on duplicate required event, and six lifecycle events with their pending outbox rows.
+Recent-authentication/actor correlation, atomic active-factor replacement,
+challenge/session completion, recovery/UI and internal MFA dogfooding remain open.
