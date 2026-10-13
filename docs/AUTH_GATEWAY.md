@@ -751,3 +751,12 @@ boundary/docs/scenario coverage and the existing scoped dependency audit policy
 (verification-only RSA exception, rustls-pemfile unmaintained warning). Receipt RPC
 activation is still pending; the gateway revocation fence applies to existing
 service authentication independently of receipt transport.
+
+Internal dogfooding now runs `hopae:0.0.3-service-fence-ec1ed5d` with existing pinned
+console package 0.1.5. The optimized copied-DB bootstrap/HTTP/pooled-mTLS/Chromium
+MFA/TOTP qualification and live API/matrix/module/SSO/native/browser regressions
+pass. Production configuration/keys remain unchanged, projection remains disabled
+and no receipt RPC is activated. Consistent stopped owner/delegation backups and
+previous projection-1319351 image are retained. The controlled revocation race is
+qualified by native tests; the live smoke checks do not perform a production
+profile mutation or prove distributed/fleet behavior. Tagged assets are unchanged.

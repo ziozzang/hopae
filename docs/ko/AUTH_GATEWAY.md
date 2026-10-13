@@ -668,3 +668,12 @@ adapter 테스트는 원격 verifier 대기 중 프로필을 회수해 신원 �
 문서/시나리오 커버리지·기존 제한된 의존성 감사 정책(검증 전용 RSA 예외·
 rustls-pemfile 유지보수 중단 경고)도 통과했습니다. receipt RPC 활성화는
 남아 있으며 gateway 회수 fence는 기존 서비스 인증에도 독립적으로 적용됩니다.
+
+내부 dogfooding은 `hopae:0.0.3-service-fence-ec1ed5d`와 기존 pin된 콘솔
+패키지 0.1.5를 사용합니다. 최적화 DB 복사본 bootstrap/HTTP/pooled mTLS/
+Chromium MFA/TOTP·운영 API/매트릭스/모듈/SSO/네이티브/브라우저 회귀가
+통과했습니다. 운영 설정/키를 보존하고 변환은 비활성이며 receipt RPC는
+활성화하지 않습니다. 정지 상태의 일관된 소유자/위임 DB 백업·이전
+projection-1319351 이미지를 유지합니다. 제어된 회수 race는 네이티브
+테스트로 검증했으며 운영 smoke는 프로필을 변경하거나 분산/fleet 동작을
+증명하지 않습니다. 태그 릴리스 자산은 유지합니다.
