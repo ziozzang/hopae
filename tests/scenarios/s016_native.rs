@@ -649,6 +649,9 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         fn enabled(&self) -> bool {
             true
         }
+        fn matches_configuration(&self, configuration: &serde_json::Value) -> bool {
+            configuration == &serde_json::json!({})
+        }
         async fn verify_password(
             &self,
             input: PasswordInput<'_>,
@@ -828,6 +831,41 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         Err(SessionError::AlreadyBound)
     ));
     assert_eq!(direct.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    fx.store
+        .conn()
+        .execute(
+            "UPDATE providers SET config='{\"changed\":true}' WHERE provider_id='directory'",
+            [],
+        )
+        .unwrap();
+    let blocked = Secret::new("owned-correct-value".into());
+    assert!(
+        service
+            .complete_password(
+                &ctx,
+                PasswordCompletion {
+                    provider_id: &id,
+                    challenge: &challenge,
+                    input: PasswordInput::new("worker", &blocked).unwrap(),
+                    portal_cookie: Some(&cookie),
+                    portal_handle: None
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        direct.calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "stale connector received a credential"
+    );
+    fx.store
+        .conn()
+        .execute(
+            "UPDATE providers SET config='{}' WHERE provider_id='directory'",
+            [],
+        )
+        .unwrap();
     let wrong = Secret::new("owned-wrong-value".into());
     assert!(
         service

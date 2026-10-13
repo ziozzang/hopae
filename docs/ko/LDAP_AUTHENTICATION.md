@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=21 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=22 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -317,3 +317,17 @@ epoch fence·디렉토리 응답의 엄격한 크기 제한·회수 작업 전�
 정확히 10개만 허용되는지 확인했습니다. 상태 lock 손상 시 panic이나 quota 재개 대신
 차단되는 것도 검증했습니다. 용량·만료·단조 시간 window 검사도 통과했습니다. admission
 불변조건 검증이며 분산 quota 구현이나 전체 스택 처리량 benchmark는 아닙니다.
+
+## 자격증명 제출 전 설정 최신성 확인
+
+직접 비밀번호 인증 완료 경로는 자격증명을 제출하기 전에 현재 DB의 LDAP 설정과
+커넥터가 컴파일한 타입 설정을 비교합니다. 불일치하면 백엔드를 호출하지 않고
+거부합니다. 타입 파싱은 기본값을 포함하며 endpoint, TLS 모드, CA 경로,
+bind 비밀 참조, 디렉터리 속성, timeout이 일치해야 합니다. 인증 후 DB 설정을
+다시 비교하는 기존 검사도 유지합니다.
+
+실제 저장소 시나리오는 설정 변경 시 올바른 비밀번호도 커넥터에 전달되지 않음을
+확인합니다. 소유한 LDAPS·StartTLS 테스트는 커넥터 설정 일치를 확인하며,
+집중 테스트와 엄격한 Clippy가 통과했습니다. CA 파일 내용이나 해석된 비밀값의
+fingerprint, 동시 설정 변경에 대한 최종 DB commit fencing, LDAP 운영 활성화
+검증은 아직 포함하지 않습니다.

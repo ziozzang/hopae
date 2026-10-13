@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 21 -->
+<!-- doc-rev: 22 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -368,3 +368,17 @@ and verifies exactly one shared ten-attempt IP budget. A poisoned-state test pro
 admission fails closed rather than panicking or reopening the quota. Capacity,
 expiry and monotonic-window tests also pass. This is an admission invariant check,
 not a distributed quota implementation or full-stack throughput benchmark.
+
+## Configuration freshness before credential submission
+
+Direct password completion compares the live database LDAP configuration with the
+connector's compiled typed configuration before submitting credentials. A mismatch
+fails closed without calling the backend. Typed parsing includes default values;
+endpoint, TLS mode, CA path, bind-secret reference, directory attributes and timeout
+must match. The existing post-authentication database comparison remains in place.
+
+The real-store scenario verifies that changing configuration prevents even a correct
+password from reaching the connector. Owned LDAPS and StartTLS tests verify connector
+configuration matching; focused tests and strict Clippy pass. This does not fingerprint
+CA file contents or resolved secret values, fence the final database commit against a
+concurrent configuration change, or qualify LDAP production activation.

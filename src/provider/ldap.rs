@@ -321,6 +321,13 @@ impl CredentialProvider for LdapProvider {
     fn enabled(&self) -> bool {
         true
     }
+    fn matches_configuration(&self, configuration: &serde_json::Value) -> bool {
+        configuration
+            .get("ldap")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<Config>(value).ok())
+            .is_some_and(|config| config == self.config)
+    }
     async fn verify_password(
         &self,
         input: PasswordInput<'_>,
@@ -394,6 +401,10 @@ mod tests {
         let provider =
             LdapProvider::compile(ProviderId::new("owned-directory"), config.clone(), &env)
                 .unwrap();
+        assert!(provider.matches_configuration(&serde_json::json!({"ldap":config})));
+        let mut changed = config.clone();
+        changed.base_dn = "dc=other,dc=test".into();
+        assert!(!provider.matches_configuration(&serde_json::json!({"ldap":changed})));
         let first = provider
             .verify_password(PasswordInput::new("alice", &password).unwrap())
             .await

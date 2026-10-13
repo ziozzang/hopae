@@ -1312,6 +1312,16 @@ impl Service {
                 )
                 .await);
         };
+        if !provider.matches_configuration(&before.config) {
+            return Err(self
+                .refuse(
+                    ctx,
+                    Some(&txn),
+                    Some(provider_id),
+                    reasons::PROVIDER_UNAVAILABLE,
+                )
+                .await);
+        }
         let verified = match crate::provider::credentials::authenticate_password(
             provider.as_ref(),
             input,

@@ -57,6 +57,9 @@ pub trait CredentialProvider: Send + Sync {
     fn id(&self) -> &ProviderId;
     fn kind(&self) -> CredentialKind;
     fn enabled(&self) -> bool;
+    fn matches_configuration(&self, _configuration: &serde_json::Value) -> bool {
+        false
+    }
     async fn verify_password(
         &self,
         input: PasswordInput<'_>,
