@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=6 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=7 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -135,3 +135,15 @@ unit test로 모호함·인코딩 격리를 검증하고 실제 소유한 OpenLD
 바이너리 attribute를 TLS 두 방식에서 정확한 인코딩으로 확인했습니다. Active
 Directory 호환성이나 사용자 수명주기 검증은 아닙니다. 이번 prototype subject
 형식 변경 전에 운영 LDAP 신원은 없었습니다.
+
+## Provider 저장 준비
+
+migration 0004는 하나의 트랜잭션에서 기존 provider 데이터를 보존하면서 별도
+ldap 종류를 추가합니다. 새 종류가 없는 v4 주장 DB는 foundation 검사에서 거부합니다.
+LDAP는 비밀번호 factor이며 MFA를 의미하지 않습니다. 선택 화면·transaction·세션
+연결까지 설정과 registry 활성화는 제한합니다. 내부 배포에는 적용하지 않았습니다.
+
+provider 소유권·비밀 참조 유지와 반복 이전을 검증하고 테이블 교체 후 실패를 만들어
+원래 테이블과 이전 버전 복원을 확인합니다. 기존 사용자/세션/관리자 이전 검사도
+통과했습니다. v3 바이너리는 v4 DB를 열지 못하므로 향후 복구에는 이미지 교체뿐
+아니라 일관된 이전 전 DB 백업이 필요합니다.

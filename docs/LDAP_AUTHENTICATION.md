@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -157,3 +157,17 @@ Unit tests verify ambiguity and encoding isolation. Real owned OpenLDAP returns 
 non-UTF-8 binary attribute and its exact encoding is checked over both TLS modes.
 This does not certify Active Directory compatibility or user lifecycle. No operational
 LDAP identities existed before this prototype subject format change.
+
+## Provider storage preparation
+
+Migration 0004 adds the distinct ldap provider kind while preserving existing
+provider data in one transaction. Foundation validation rejects claimed v4 state
+without the new kind. LDAP uses a password factor and does not imply MFA.
+Configuration and registry activation remain disabled until chooser, transaction
+and session wiring is complete. This schema is not deployed internally.
+
+Tests preserve provider ownership and secret references, verify idempotence and
+force failure after table replacement to prove restoration of the original table
+and migration version. Existing user/session/admin migration checks pass. Older
+schema-v3 binaries cannot open v4 databases: future rollback requires a consistent
+pre-migration database backup, not just restoring the previous image.
