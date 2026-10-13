@@ -94,6 +94,7 @@ impl Config {
     }
 }
 pub struct Connector {
+    binding: [u8; 32],
     url: url::Url,
     issuer: String,
     timeout: Duration,
@@ -126,7 +127,14 @@ impl Connector {
         } else {
             None
         };
+        use sha2::{Digest, Sha256};
+        let mut fingerprint = Sha256::new();
+        fingerprint.update(serde_json::to_vec(config)?);
+        if let Some(key) = &key {
+            fingerprint.update(Sha256::digest(key.as_bytes()));
+        }
         Ok(Self {
+            binding: fingerprint.finalize().into(),
             url: url::Url::parse(&config.url)?,
             issuer: config.issuer.clone(),
             timeout: Duration::from_millis(config.timeout_ms),
@@ -140,6 +148,9 @@ impl Connector {
                 ),
             }),
         })
+    }
+    pub(crate) fn same_binding(&self, other: &Self) -> bool {
+        self.binding == other.binding
     }
     pub async fn authenticate(
         &self,
@@ -239,6 +250,24 @@ mod tests {
         routing::post,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[test]
+    fn changed_verifier_secret_or_security_options_have_distinct_bindings() {
+        let mut config = Config {
+            url: "https://verifier.example.test/check".into(),
+            issuer: "owned".into(),
+            timeout_ms: 100,
+            allow_private_endpoints: false,
+            verifier_key_env: Some("OWNED_VERIFIER_KEY".into()),
+        };
+        let first = Connector::compile(&config, &|_| Some("a".repeat(32))).unwrap();
+        let same = Connector::compile(&config, &|_| Some("a".repeat(32))).unwrap();
+        assert!(first.same_binding(&same));
+        let rotated = Connector::compile(&config, &|_| Some("b".repeat(32))).unwrap();
+        assert!(!first.same_binding(&rotated));
+        config.allow_private_endpoints = true;
+        let changed = Connector::compile(&config, &|_| Some("a".repeat(32))).unwrap();
+        assert!(!first.same_binding(&changed));
+    }
     #[tokio::test]
     async fn fixed_verifier_authenticates_scope_and_rejects_false_assurance() {
         let calls = Arc::new(AtomicUsize::new(0));

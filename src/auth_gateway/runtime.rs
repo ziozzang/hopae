@@ -178,11 +178,11 @@ struct Prepared {
     keys: HashMap<[u8; 32], Credential>,
     networks: Networks,
     session_fallback: bool,
-    relay: Option<super::relay::Connector>,
+    relay: Option<std::sync::Arc<super::relay::Connector>>,
 }
 pub struct Runtime {
     profiles: HashMap<String, HashMap<u16, std::sync::Arc<Prepared>>>,
-    observed_time: std::sync::atomic::AtomicU64,
+    pub(crate) observed_time: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -194,6 +194,13 @@ pub enum Error {
 }
 impl Runtime {
     pub fn compile(config: &Config, env: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
+        Self::compile_resuming(config, env, None)
+    }
+    pub(crate) fn compile_resuming(
+        config: &Config,
+        env: &dyn Fn(&str) -> Option<String>,
+        previous: Option<&Self>,
+    ) -> Result<Self> {
         config.validate()?;
         let mut profiles: HashMap<String, HashMap<u16, std::sync::Arc<Prepared>>> = HashMap::new();
         let mut budget = 0;
@@ -226,17 +233,29 @@ impl Runtime {
                     "duplicate API credential in service scope"
                 );
             }
+            let relay = p
+                .api_relay
+                .as_ref()
+                .map(|r| super::relay::Connector::compile(r, env))
+                .transpose()?
+                .map(std::sync::Arc::new);
+            let relay = relay.map(|candidate| {
+                previous
+                    .and_then(|runtime| runtime.profiles.get(&p.host.to_ascii_lowercase()))
+                    .and_then(|ports| p.ports.iter().find_map(|port| ports.get(port)))
+                    .filter(|old| old.service_id == p.service_id && old.realm == p.realm)
+                    .and_then(|old| old.relay.as_ref())
+                    .filter(|old| old.same_binding(&candidate))
+                    .cloned()
+                    .unwrap_or(candidate)
+            });
             let prepared = std::sync::Arc::new(Prepared {
                 service_id: p.service_id.clone(),
                 realm: p.realm.clone(),
                 keys,
                 networks: Networks::compile(&p.networks, &mut budget)?,
                 session_fallback: p.session_fallback,
-                relay: p
-                    .api_relay
-                    .as_ref()
-                    .map(|r| super::relay::Connector::compile(r, env))
-                    .transpose()?,
+                relay,
             });
             for port in &p.ports {
                 profiles
@@ -247,7 +266,9 @@ impl Runtime {
         }
         Ok(Self {
             profiles,
-            observed_time: std::sync::atomic::AtomicU64::new(0),
+            observed_time: previous
+                .map(|runtime| runtime.observed_time.clone())
+                .unwrap_or_default(),
         })
     }
     pub fn handles(&self, host: &str, port: u16) -> bool {
@@ -339,6 +360,66 @@ mod tests {
         serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"api.example.test","ports":[443],"realm":"partner","api_keys":[{"token_env":"OWNED_API_TOKEN","subject":"scheduler","expires_at":5000}],"networks":["192.0.2.0/24","2001:db8::/32"]}]})).unwrap()
     }
     const KEY: &str = "owned-service-key-at-least-thirty-two-bytes";
+    #[tokio::test]
+    async fn unchanged_verifier_keeps_open_circuit_across_publication() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = axum::Router::new().route(
+            "/verify",
+            axum::routing::post(move || {
+                let counted = counted.clone();
+                async move {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut config:Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"app.example.test","ports":[443],"realm":"owned","api_relay":{"url":format!("http://{address}/verify"),"issuer":"owned","allow_private_endpoints":true}}]})).unwrap();
+        let first = Runtime::compile(&config, &|_| None).unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                first
+                    .authenticate_async(
+                        "app.example.test",
+                        443,
+                        Some(KEY),
+                        "127.0.0.1".parse().unwrap(),
+                        100
+                    )
+                    .await
+                    .unwrap_err(),
+                Error::Unavailable
+            );
+        }
+        config.profiles[0].networks = vec!["127.0.0.1/32".into()];
+        let next = Runtime::compile_resuming(&config, &|_| None, Some(&first)).unwrap();
+        assert_eq!(
+            next.authenticate_async(
+                "app.example.test",
+                443,
+                Some(KEY),
+                "127.0.0.1".parse().unwrap(),
+                100
+            )
+            .await
+            .unwrap_err(),
+            Error::Unavailable
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            3,
+            "publication reset an open verifier circuit"
+        );
+        server.abort();
+        let _ = server.await;
+    }
     #[test]
     fn scope_expiry_network_and_namespace_are_authenticated() {
         let runtime = Runtime::compile(&config(), &|_| Some(KEY.into())).unwrap();

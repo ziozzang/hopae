@@ -13,6 +13,7 @@ pub struct Authorization<'a> {
     pub guard: &'a dyn Fn(&Connection) -> Result<(), publication::Error>,
 }
 pub struct Authority {
+    observed_time: Arc<std::sync::atomic::AtomicU64>,
     snapshot: Arc<ArcSwap<Snapshot>>,
 }
 impl Authority {
@@ -34,7 +35,12 @@ impl Authority {
         } else {
             publication::publish(connection, 0, bootstrap, "bootstrap")?.revision
         };
+        let observed_time = runtime
+            .as_ref()
+            .map(|runtime| runtime.observed_time.clone())
+            .unwrap_or_default();
         Ok(Self {
+            observed_time,
             snapshot: Arc::new(ArcSwap::from_pointee(Snapshot { revision, runtime })),
         })
     }
@@ -85,7 +91,18 @@ impl Authority {
         if self.snapshot.load().revision != expected {
             return Err(publication::Error::Conflict);
         }
-        let runtime = Self::compile(configuration.as_ref(), env, validate)?;
+        let previous = self.snapshot.load_full();
+        let mut runtime = configuration
+            .as_ref()
+            .map(|config| {
+                validate(config)?;
+                runtime::Runtime::compile_resuming(config, env, previous.runtime.as_ref())
+                    .map_err(|_| publication::Error::Invalid)
+            })
+            .transpose()?;
+        if let Some(runtime) = &mut runtime {
+            runtime.observed_time = self.observed_time.clone();
+        }
         let document = publication::publish_guarded(
             connection,
             expected,
@@ -114,6 +131,45 @@ mod tests {
             "service_id":"orders","host":"app.example.test","ports":[443],"realm":"services",
             "api_keys":[{"token_env":"OWNED_KEY","subject":"worker"}]}]}))
         .unwrap()
+    }
+    #[test]
+    fn observed_expiration_floor_survives_disable_and_reenable() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT")
+            .unwrap();
+        let key = "owned-key-at-least-thirty-two-bytes-long";
+        let env = |_: &str| Some(key.to_owned());
+        let validate = |_: &runtime::Config| Ok(());
+        let mut profile = config();
+        profile.profiles[0].api_keys[0].expires_at = Some(1000);
+        let mut authority =
+            Authority::load(&mut db, Some(profile.clone()), &env, &validate).unwrap();
+        let old = authority.snapshot();
+        let ip = "127.0.0.1".parse().unwrap();
+        assert_eq!(
+            old.runtime
+                .as_ref()
+                .unwrap()
+                .authenticate("app.example.test", 443, Some(key), ip, 1001)
+                .unwrap_err(),
+            runtime::Error::Expired
+        );
+        authority
+            .publish(&mut db, 1, None, "admin", &env, &validate)
+            .unwrap();
+        authority
+            .publish(&mut db, 2, Some(profile), "admin", &env, &validate)
+            .unwrap();
+        assert_eq!(
+            authority
+                .snapshot()
+                .runtime
+                .as_ref()
+                .unwrap()
+                .authenticate("app.example.test", 443, Some(key), ip, 1)
+                .unwrap_err(),
+            runtime::Error::Expired
+        );
     }
     #[test]
     fn missing_secret_does_not_publish_and_tombstone_overrides_bootstrap() {

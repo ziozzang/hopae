@@ -1,6 +1,6 @@
 # 인증 프로필 게시
 
-<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=9 status=current -->
+<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=10 status=current -->
 
 [문서](README.md) · [English](../AUTH_PROFILE_PUBLICATION.md)
 
@@ -121,3 +121,15 @@ revision 증가·로그아웃 정리·익명 거부를 확인했습니다. Hanga
 15·시나리오 365건이 통과했고 시나리오 40건은 명시적 ignored입니다. 기존 PEM
 parser 유지보수 중단 audit 경고는 남아 있습니다. 내부 기능 배포이며 새 공개 다중
 플랫폼 릴리즈나 전체 수명주기/처리량 검증을 의미하지 않습니다.
+
+## 게시 상태 연속성
+
+서비스/realm과 verifier 바인딩이 같으면 게시 후에도 커넥터의 전송 풀·동시성 permit·
+circuit 상태를 유지합니다. 바인딩 fingerprint는 커넥터 설정 전체와 해석된 verifier
+credential digest를 포함하므로 비밀이나 보안 옵션이 바뀌면 재사용하지 않습니다.
+실제 루프백 검증 서버로 circuit을 연 뒤 network 프로필을 바꾸고 추가 외부 호출 없이
+다음 인증이 억제됨을 검증합니다. authority는 비활성 기간을 포함해 스냅샷 간 관측 시간
+기준을 공유하므로 게시와 시계 rollback이 이미 관측한 credential 만료를 되돌리지
+않습니다. 시간 기준은 프로세스 로컬이며 재시작 watermark는 아닙니다. 삭제 후 재생성
+커넥터·프로세스 교체의 영속 circuit/quarantine 수명주기는 남아 있습니다. 소스 검증된
+변경이며 현재 내부 바이너리에는 이 연속성 수정이 아직 들어가지 않았습니다.

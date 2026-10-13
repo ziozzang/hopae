@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 9 -->
+<!-- doc-rev: 10 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
@@ -145,3 +145,18 @@ kept private. All-target checks passed: 400 library, 15 other integration and 36
 scenario tests; 40 scenarios remain explicitly ignored. Audit retains its existing
 unmaintained PEM-parser warning. This is an internal feature deployment, not a
 new public multi-platform release or complete lifecycle/throughput qualification.
+
+## Publication continuity
+
+Unchanged service/realm verifier bindings retain their connector across publication,
+including transport pools, capacity permits and circuit state. Binding fingerprints
+cover the complete connector configuration and a digest of resolved verifier
+credential material; changed secrets or security options do not reuse the connector.
+A real loopback verifier test opens the circuit, changes the network profile and
+proves the next authentication is suppressed without another outbound request.
+The authority also shares its observed time floor across snapshots and disabled
+periods, so observed credential expiry cannot be undone by publication and a clock
+rollback. This floor is process-local, not a persistent restart watermark. Removed
+and subsequently recreated connectors and process replacement still need durable
+circuit/quarantine lifecycle work. These changes are source-qualified; the currently
+deployed internal binary predates this continuity fix.
