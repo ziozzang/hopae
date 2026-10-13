@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=13 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=14 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -301,3 +301,21 @@ challenge에 묶인 MFA 세션이나 HTTP actor를 증명하지 않습니다.
 롤백, 6개 수명주기 이벤트와 pending outbox를 확인합니다. 최근 인증·actor
 연결, active 요인 원자 교체, challenge·세션 완료, 복구·UI·내부 MFA 도그푸딩은
 아직 남아 있습니다.
+
+## 운영자 참조 keyring 소스 상태
+
+`src/factor/keyring.rs`는 active 암호화 키 하나와 명시적으로 유지하는 복호화
+키를 최대 16개까지 불변 메모리에 컴파일합니다. 설정은 ID·환경 변수 참조만
+포함합니다. 비밀을 읽기 전에 전체 참조의 ID 길이·일반 환경 변수 이름,
+ID·참조 중복·active ID 존재를 검사합니다. 값은 정확히 43자리 padding 없는
+Base64url에서 32 byte로 해석돼야 합니다. 0 키·누락·잘못된 값·실제 키 중복은
+거부합니다. 읽은 문자열·복호화 byte는 메모리를 지우고 keyring Debug를 가립니다.
+
+암호화는 active 키만 쓰며 envelope 복호화는 정확한 유지 key ID를 선택합니다.
+Active 키·환경·네트워크로 fallback하지 않습니다. 테스트 2건은 active 교체 후
+이전 복호화 유지, 키 폐기 시 거부, 잘못된·중복 참조·값을 확인합니다.
+설정 로딩 컴포넌트이며 활성 root 설정이나 HTTP·관리자 키 관리 endpoint는
+아닙니다. 앱 시작 로딩·안전한 revision 교체·재암호화·외부 키 보관·백업·폐기
+정책·등록 HTTP 흐름·내부 MFA 검증은 남아 있습니다. 운영자는 충분히 무작위인
+키를 생성해야 하며 구조 검사가 entropy를 증명하지 않습니다. 재암호화 전에
+참조 키를 폐기하면 해당 요인이 비활성화됩니다.

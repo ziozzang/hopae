@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 13 -->
+<!-- doc-rev: 14 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -340,3 +340,24 @@ A real-store regression checks live-pending refusal, expired replacement, rollba
 on duplicate required event, and six lifecycle events with their pending outbox rows.
 Recent-authentication/actor correlation, atomic active-factor replacement,
 challenge/session completion, recovery/UI and internal MFA dogfooding remain open.
+
+## Operator-reference keyring source status
+
+`src/factor/keyring.rs` compiles one active encryption key and up to sixteen
+explicit retained decryption keys into immutable memory. Configuration contains
+only IDs and environment references. The entire reference set is validated before
+secret resolution: bounded IDs, conventional environment names, unique IDs/references
+and an existing active ID. Each referenced value must decode from exactly 43
+unpadded Base64url characters into 32 bytes. Zero keys, missing/malformed material
+and duplicate actual key material are refused. Loaded strings/decoded buffers are
+zeroizing; the compiled keyring Debug is redacted.
+
+Encryption uses only the active key; envelope decryption selects the exact retained
+key ID with no active-key, environment or network fallback. Two tests qualify active
+key changes with retained old decryption, retirement refusal and malformed/duplicate
+references/material. This is a configuration loading component, not an enabled root
+configuration setting or HTTP/admin key-management endpoint. Keyring loading into
+application startup, safe revisioned rotation/rewrapping, external key storage,
+backup/retirement policy, enrollment HTTP flow and internal MFA qualification remain
+unfinished. Operators must generate high-entropy keys; structural validation does
+not prove entropy. Retiring a referenced key before rewrapping disables its factors.
