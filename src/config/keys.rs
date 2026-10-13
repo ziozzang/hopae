@@ -172,6 +172,7 @@ pub(super) const ROOT: Node = Obj(&[
                     ),
                     ("networks", Arr(&Leaf)),
                     ("session_fallback", Leaf),
+                    ("relay_token_prefix", Leaf),
                     ("eligibility_lua", Leaf),
                 ])),
             ),

@@ -10,6 +10,8 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- Explicit mixed native API-key/external relay credential routing with a bounded prefix discriminator. Local expired/revoked/unknown keys never fall through to relay; issuer namespaces and native authorization boundaries remain distinct.
+
 - Optional bounded Lua eligibility after native service API-key/relay verification, preserving namespaced service evidence, AAL 0 and expiry. Invalid credentials and networks remain native refusals; scripts cannot issue or translate identity.
 
 - Embedded bounded Lua 5.4 eligibility for external second factors. Operator-approved scripts can restrict native verifier use, with isolated context, heap/instruction/time limits and strict boolean results; native proof/session authority remains mandatory. General connector orchestration and credential translation remain unfinished.

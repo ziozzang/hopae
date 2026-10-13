@@ -28,6 +28,8 @@ pub struct Profile {
     pub session_fallback: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eligibility_lua: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_token_prefix: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -67,11 +69,29 @@ impl Config {
             ensure!(
                 (1..=16).contains(&p.ports.len())
                     && p.api_keys.len() <= 256
-                    && ((p.api_relay.is_some() && p.api_keys.is_empty())
-                        || (p.api_relay.is_none() && !p.api_keys.is_empty()))
+                    && (p.api_relay.is_some() || !p.api_keys.is_empty())
                     && p.networks.len() <= 256,
                 "authentication profile exceeds bounds"
             );
+            let mixed = p.api_relay.is_some() && !p.api_keys.is_empty();
+            ensure!(
+                !mixed || p.relay_token_prefix.is_some(),
+                "mixed authentication requires an explicit relay token prefix"
+            );
+            ensure!(
+                p.relay_token_prefix.is_none() || p.api_relay.is_some(),
+                "relay token prefix requires a relay"
+            );
+            if let Some(prefix) = &p.relay_token_prefix {
+                ensure!(
+                    (2..=32).contains(&prefix.len())
+                        && prefix.ends_with(':')
+                        && prefix[..prefix.len() - 1]
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+                    "invalid relay token prefix"
+                );
+            }
             if let Some(relay) = &p.api_relay {
                 relay.validate()?;
             }
@@ -188,6 +208,7 @@ struct Prepared {
     relay: Option<std::sync::Arc<super::relay::Connector>>,
     eligibility: Option<super::lua::Policy>,
     eligibility_capacity: tokio::sync::Semaphore,
+    relay_token_prefix: Option<String>,
 }
 pub struct Runtime {
     profiles: HashMap<String, HashMap<u16, std::sync::Arc<Prepared>>>,
@@ -222,6 +243,12 @@ impl Runtime {
                     (32..=1024).contains(&value.len())
                         && value.bytes().all(|b| b.is_ascii_graphic()),
                     "invalid API credential material"
+                );
+                ensure!(
+                    p.relay_token_prefix
+                        .as_ref()
+                        .is_none_or(|prefix| !value.starts_with(prefix)),
+                    "local credential collides with relay routing namespace"
                 );
                 let digest: [u8; 32] = Sha256::digest(value.as_bytes()).into();
                 let subject = Subject {
@@ -274,6 +301,7 @@ impl Runtime {
                         anyhow::anyhow!("invalid service authentication eligibility script")
                     })?,
                 eligibility_capacity: tokio::sync::Semaphore::new(64),
+                relay_token_prefix: p.relay_token_prefix.clone(),
             });
             for port in &p.ports {
                 profiles
@@ -318,6 +346,17 @@ impl Runtime {
                 return Err(Error::NetworkDenied);
             }
             let token = token.ok_or(Error::Missing)?;
+            let token = if let Some(prefix) = &profile.relay_token_prefix {
+                if token.len() > 4096 || !token.bytes().all(|b| b.is_ascii_graphic()) {
+                    return Err(Error::Invalid);
+                }
+                match token.strip_prefix(prefix) {
+                    Some(credential) => credential,
+                    None => return self.authenticate(host, port, Some(token), ip, now),
+                }
+            } else {
+                token
+            };
             self.observed_time
                 .fetch_max(now, std::sync::atomic::Ordering::AcqRel);
             let now = self
@@ -413,6 +452,107 @@ mod tests {
         serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"api.example.test","ports":[443],"realm":"partner","api_keys":[{"token_env":"OWNED_API_TOKEN","subject":"scheduler","expires_at":5000}],"networks":["192.0.2.0/24","2001:db8::/32"]}]})).unwrap()
     }
     const KEY: &str = "owned-service-key-at-least-thirty-two-bytes";
+    #[tokio::test]
+    async fn mixed_routing_never_sends_local_credentials_to_relay() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router=axum::Router::new().route("/verify",axum::routing::post(move |headers:axum::http::HeaderMap| {
+            let counted=counted.clone();
+            async move {
+                counted.fetch_add(1,Ordering::Relaxed);
+                assert_eq!(headers["authorization"],"Bearer external-owned-credential-at-least-sixteen");
+                axum::Json(serde_json::json!({"active":true,"subject":"partner-worker","service_id":"orders","expires_at":1100}))
+            }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut cfg = config();
+        cfg.profiles[0].api_relay = Some(super::super::relay::Config {
+            url: format!("http://{address}/verify"),
+            issuer: "partner-authority".into(),
+            timeout_ms: 500,
+            allow_private_endpoints: true,
+            verifier_key_env: None,
+        });
+        assert!(cfg.validate().is_err());
+        cfg.profiles[0].relay_token_prefix = Some("partner:".into());
+        let runtime = Runtime::compile(&cfg, &|_| Some(KEY.into())).unwrap();
+        let ip = "192.0.2.8".parse().unwrap();
+        let local = runtime
+            .authenticate_async("api.example.test", 443, Some(KEY), ip, 100)
+            .await
+            .unwrap();
+        assert_eq!(local.subject().issuer, "hopae:owned");
+        assert_eq!(local.subject().subject, "scheduler");
+        for token in [
+            "unknown-local-key-at-least-thirty-two-bytes",
+            "partner:",
+            "partner:short",
+        ] {
+            assert_eq!(
+                runtime
+                    .authenticate_async("api.example.test", 443, Some(token), ip, 100)
+                    .await
+                    .unwrap_err(),
+                Error::Invalid
+            );
+        }
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        let external = runtime
+            .authenticate_async(
+                "api.example.test",
+                443,
+                Some("partner:external-owned-credential-at-least-sixteen"),
+                ip,
+                100,
+            )
+            .await
+            .unwrap();
+        assert_eq!(external.subject().issuer, "partner-authority");
+        assert_eq!(external.subject().realm, "partner");
+        assert_eq!(external.subject().subject, "partner-worker");
+        assert_eq!(external.subject().kind, PrincipalKind::Service);
+        assert_eq!(external.service(), Some("orders"));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            runtime
+                .authenticate_async("api.example.test", 443, Some(KEY), ip, 5000)
+                .await
+                .unwrap_err(),
+            Error::Expired
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "expired local credential leaked to relay"
+        );
+        assert!(
+            Runtime::compile(&cfg, &|_| Some(
+                "partner:local-key-at-least-thirty-two-bytes".into()
+            ))
+            .is_err()
+        );
+        cfg.profiles[0].api_keys.clear();
+        let retired = Runtime::compile(&cfg, &|_| None).unwrap();
+        assert_eq!(
+            retired
+                .authenticate_async("api.example.test", 443, Some(KEY), ip, 100)
+                .await
+                .unwrap_err(),
+            Error::Invalid
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "retired local credential leaked to relay"
+        );
+        server.abort();
+    }
     #[tokio::test]
     async fn service_lua_filters_only_verified_identity_and_preserves_scope() {
         let ip = "192.0.2.8".parse().unwrap();

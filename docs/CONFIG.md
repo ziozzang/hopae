@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 28 -->
+<!-- doc-rev: 29 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -379,3 +379,25 @@ connector orchestration and human first-factor hooks remain unfinished. Tagged
 Optimized private-candidate HTTP/pooled mTLS and Chromium MFA/TOTP checks pass;
 native macOS runtime tests and live internal regressions also pass. Existing
 configuration/keys and consistent v6 rollback backups are preserved.
+
+## Mixed native and external service credentials (unreleased)
+
+A service profile can contain both `api_keys` and `api_relay` when it explicitly
+sets `relay_token_prefix`, for example `partner:`. The prefix is 2–32 printable
+ASCII bytes: letters/digits/underscore/hyphen followed by one colon. Matching
+Bearer credentials route only to the configured relay; Hopae removes exactly one
+prefix before forwarding the upstream credential. All other credentials route
+only to the native key index. Neither rejection, expiry, outage nor Lua denial
+tries another connector or a human session. Local secret material that starts
+with the prefix refuses compilation to prevent routing collisions.
+
+Keep the prefix when retiring the last native key; it remains valid for relay-only
+profiles and prevents retired native keys being forwarded. Prefixes require a
+relay; mixed profiles without a prefix refuse startup. Existing single-connector
+profiles with no prefix retain their behavior and serialized configuration.
+Issuer/realm/subject/service/kind remain connector-verified, AAL 0, and separately
+namespaced; the routing marker grants no identity. The complete presented mixed
+credential is capped at 4096 printable ASCII bytes. This is deterministic service
+credential routing/unwrapping, not general connector composition or human identity
+translation. The current `0.0.3-service-lua-5125ff7` image and tagged 0.0.3 assets
+do not include this later feature.

@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=28 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=29 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -361,3 +361,21 @@ relay 전송·스크립트 실행으로 신선도를 연장하지 않습니다. 
 운영 스크립트는 설정하지 않았습니다. 최적화 비공개 후보의 HTTP·지속 mTLS·Chromium
 MFA·TOTP, macOS 네이티브 runtime 및 내부 라이브 회귀가 통과했습니다. 기존 설정·키와
 일관된 v6 복구 백업을 유지합니다.
+
+## 자체·외부 서비스 자격 혼합 (미릴리스)
+
+서비스 profile에 `api_keys`와 `api_relay`를 함께 넣으려면 `relay_token_prefix`를
+명시합니다(예: `partner:`). 2–32 ASCII bytes이며 영문·숫자·밑줄·하이픈 뒤에 colon
+하나를 둡니다. 접두사가 일치하는 Bearer 자격은 설정된 relay로만 보내고 접두사 한 개를
+제거해 upstream 자격을 전달합니다. 나머지는 자체 key 인덱스로만 검증합니다. 거절·
+만료·장애·Lua 거부로 다른 커넥터나 사람 session을 시도하지 않습니다. 자체 비밀이
+접두사로 시작하면 라우팅 충돌을 막기 위해 컴파일을 거부합니다.
+
+마지막 자체 key를 회수해도 접두사를 유지하세요. relay 전용 profile에서도 유효해 회수된
+자체 key의 외부 전달을 방지합니다. 접두사에는 relay가 필요하며 접두사 없는 혼합 설정은
+시작을 거부합니다. 기존 단일 커넥터의 접두사 없는 설정은 동작·직렬화를 유지합니다.
+issuer·realm·subject·서비스·종류는 커넥터가 검증하며 AAL 0과 별도 신원 namespace를
+유지합니다. 라우팅 표시는 신원을 부여하지 않습니다. 제시하는 전체 혼합 자격은 출력 가능한
+ASCII 4096 bytes로 제한합니다. 결정적인 서비스 자격 라우팅·접두사 제거이며 범용
+커넥터 조합·사람 신원 변환은 후속입니다. 현재 내부 `0.0.3-service-lua-5125ff7` 및
+태그 0.0.3 asset에는 이 후속 기능이 없습니다.

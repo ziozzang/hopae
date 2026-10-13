@@ -612,8 +612,11 @@ async fn external_api_verifier_http_native_parity_and_outage_classification() {
         (StatusCode::OK,Json(serde_json::json!({"active":true,"subject":subject,"service_id":"app","expires_at":expires})))
     }));
     let verifier_task = tokio::spawn(async move { axum::serve(verifier, app).await.unwrap() });
-    let config:hopae::auth_gateway::runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"partner","eligibility_lua":"return context.subject == 'partner-worker' and context.service == 'app' and context.connector == 'api-relay'","api_relay":{"url":format!("http://{address}/verify"),"issuer":"https://partner.example.test","timeout_ms":100,"allow_private_endpoints":true},"networks":["203.0.113.0/24"]}]})).unwrap();
-    let runtime = hopae::auth_gateway::runtime::Runtime::compile(&config, &|_| None).unwrap();
+    let config:hopae::auth_gateway::runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"partner","api_keys":[{"token_env":"OWNED_MIXED_KEY","subject":"local-worker"}],"relay_token_prefix":"partner:","eligibility_lua":"return context.service == 'app' and ((context.subject == 'partner-worker' and context.connector == 'api-relay') or (context.subject == 'local-worker' and context.connector == 'api-key:app'))","api_relay":{"url":format!("http://{address}/verify"),"issuer":"https://partner.example.test","timeout_ms":100,"allow_private_endpoints":true},"networks":["203.0.113.0/24"]}]})).unwrap();
+    let runtime = hopae::auth_gateway::runtime::Runtime::compile(&config, &|_| {
+        Some("owned-local-service-key-at-least-thirty-two".into())
+    })
+    .unwrap();
     let keys = Arc::new(CallerKeys::new(
         Some(Secret::new("native-test-key".into())),
         None,
@@ -637,10 +640,12 @@ async fn external_api_verifier_http_native_parity_and_outage_classification() {
     let mut socket = TcpStream::connect(address).await.unwrap();
     assert_eq!(exchange(&mut socket, 0, b"native-test-key").await.1, [1]);
     for (id, token, status) in [
-        (1, "valid-partner-token-at-least-sixteen", 200),
-        (2, "invalid-partner-token-at-least-sixteen", 401),
-        (3, "unavailable-partner-token-at-least-sixteen", 503),
-        (4, "blocked-partner-token-at-least-sixteen", 401),
+        (1, "partner:valid-partner-token-at-least-sixteen", 200),
+        (2, "partner:invalid-partner-token-at-least-sixteen", 401),
+        (3, "partner:unavailable-partner-token-at-least-sixteen", 503),
+        (4, "partner:blocked-partner-token-at-least-sixteen", 401),
+        (5, "owned-local-service-key-at-least-thirty-two", 200),
+        (6, "unknown-local-service-key-at-least-thirty-two", 401),
     ] {
         let mut headers = context("/private");
         headers.push((
