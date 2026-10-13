@@ -129,6 +129,12 @@ impl ServiceConfig {
 /// Provider instances by id (implemented by `provider::Registry`).
 pub trait ProviderLookup: Send + Sync {
     fn get(&self, id: &ProviderId) -> Option<Arc<dyn Provider>>;
+    fn credential(
+        &self,
+        _id: &ProviderId,
+    ) -> Option<Arc<dyn crate::provider::credentials::CredentialProvider>> {
+        None
+    }
     /// Enabled providers in chooser order.
     fn enabled_sorted(&self) -> Vec<Arc<dyn Provider>>;
 }
@@ -428,7 +434,8 @@ impl Service {
         }
         // The provider id from the URL path is client input: name it only
         // when it is a configured provider.
-        let known = provider.filter(|p| self.providers.get(p).is_some());
+        let known = provider
+            .filter(|p| self.providers.get(p).is_some() || self.providers.credential(p).is_some());
         if let Some(p) = known.or(txn.and_then(|t| t.provider_id.as_ref())) {
             b = b.provider(p);
         }
@@ -728,6 +735,91 @@ impl Service {
         let row = self.load_live_txn(ctx, txn).await?;
         self.begin_provider_for(ctx, &row, provider_id, portal_cookie)
             .await
+    }
+
+    /// Prepare a direct password challenge after the portal validated its form/CSRF.
+    /// The secret is a single-use challenge handle, not an OAuth redirect URL.
+    pub async fn begin_password(
+        &self,
+        ctx: &RequestCtx,
+        txn: &Secret,
+        provider_id: &ProviderId,
+        portal_cookie: Option<&Secret>,
+    ) -> Result<Secret, SessionError> {
+        let cookie = portal_cookie
+            .filter(|cookie| is_well_formed_bind(cookie.expose()))
+            .ok_or(SessionError::Refused(reasons::PORTAL_BIND_MISMATCH))?;
+        let row = self.load_live_txn(ctx, txn).await?;
+        if row.purpose != TxnPurpose::Login {
+            return Err(wrong_purpose(row.purpose));
+        }
+        if !self.txn_ip_ok(&row, ctx) {
+            return Err(self.refuse_consuming(ctx, &row, reasons::TXN_BINDING).await);
+        }
+        if row.state_sha256.is_some() {
+            return Err(SessionError::AlreadyBound);
+        }
+        if row.reauth_max_age.is_some()
+            && let Some(session) = self.reauth_session(&row).await?
+            && &session.provider_id != provider_id
+        {
+            return Err(self
+                .refuse(
+                    ctx,
+                    Some(&row),
+                    Some(provider_id),
+                    reasons::PROVIDER_MISMATCH,
+                )
+                .await);
+        }
+        let Some(provider) = self.providers.credential(provider_id) else {
+            return Err(self
+                .refuse(
+                    ctx,
+                    Some(&row),
+                    Some(provider_id),
+                    reasons::PROVIDER_UNAVAILABLE,
+                )
+                .await);
+        };
+        let kind = match provider.kind() {
+            crate::provider::credentials::CredentialKind::Ldap => ProviderKind::Ldap,
+            crate::provider::credentials::CredentialKind::LocalPassword => ProviderKind::Password,
+        };
+        let live = self.directory.providers().await?.into_iter().any(|row| {
+            &row.provider_id == provider_id
+                && row.kind == kind
+                && row.enabled
+                && row.deleted_at.is_none()
+        });
+        if !provider.enabled() || !live {
+            return Err(self
+                .refuse(
+                    ctx,
+                    Some(&row),
+                    Some(provider_id),
+                    reasons::PROVIDER_DISABLED,
+                )
+                .await);
+        }
+        let challenge = random_token(self.rng.as_ref(), 32);
+        self.sessions
+            .bind_transaction(
+                &row.txn_sha256,
+                TransactionBinding {
+                    provider_id: provider_id.clone(),
+                    state_sha256: challenge.digest(),
+                    nonce: None,
+                    pkce_verifier: None,
+                    portal_bind_sha256: cookie.digest(),
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                StoreError::Conflict(_) => SessionError::AlreadyBound,
+                other => SessionError::Store(other),
+            })?;
+        Ok(challenge)
     }
 
     pub(crate) async fn begin_provider_for(

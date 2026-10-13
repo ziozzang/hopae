@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=12 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=13 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -206,3 +206,17 @@ TransactionBinding은 빈 OAuth placeholder 대신 선택적인 nonce·PKCE 값�
 라이브러리·OIDC callback 회귀 검사도 통과했습니다. 저장 준비 단계이며 LDAP 활성화
 전 portal의 직접 challenge 생성·CSRF·비밀번호 완료 경로가 필요합니다. 이미 nullable인
 열이라 추가 운영 스키마 이전은 없고 이 변경이 LDAP 로그인 endpoint를 켜지는 않습니다.
+
+## 세션 서비스의 직접 challenge 준비
+
+ProviderLookup에 redirect와 분리된 credential 조회를 추가했습니다. begin_password는
+살아 있는 로그인 transaction을 읽고 브라우저 cookie 형식·IP 바인딩·기존 바인딩을
+검사하며 DB의 선택 provider 종류·활성·삭제 상태와 재인증의 원래 provider를 확인합니다.
+OAuth 필드가 NULL인 임의 challenge digest와 불변 portal 바인딩을 만들며 준비 단계에서
+비밀번호 검증은 호출하지 않습니다. 알려진 직접 provider는 자격 값 없이 거부 진단에
+포함합니다.
+
+실제 소유한 store 시나리오로 cookie 누락·provider 비활성 거부, 거부 시 미바인딩,
+challenge 조회·OAuth 필드 부재·두 번째 바인딩 충돌을 검증했습니다. 라이브러리와
+네이티브 회귀 검사를 통과했습니다. 활성화 전 portal CSRF/form route와 자격 완료·
+세션 발급 연결이 필요합니다.

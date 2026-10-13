@@ -183,6 +183,12 @@ pub fn apply_stored_reauth(
 }
 
 impl crate::session::service::ProviderLookup for Registry {
+    fn credential(
+        &self,
+        id: &ProviderId,
+    ) -> Option<Arc<dyn super::credentials::CredentialProvider>> {
+        Registry::credential(self, id)
+    }
     fn get(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
         Registry::get(self, id)
     }

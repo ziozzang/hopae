@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 12 -->
+<!-- doc-rev: 13 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -241,3 +241,18 @@ Library and OIDC callback regressions pass. This is storage preparation; the por
 still needs explicit direct challenge creation, CSRF validation and password completion
 before LDAP activation. No new operational schema upgrade is needed for these already
 nullable columns, and no LDAP login endpoint is enabled by this change.
+
+## Session-service direct challenge preparation
+
+ProviderLookup now exposes credential providers separately from redirects. The
+session service's begin_password loads a live login transaction, checks browser
+cookie shape and IP binding, rejects existing binding, validates the selected
+provider's database kind/enabled/tombstone state and enforces own-provider
+reauthentication. It creates a random challenge digest with NULL OAuth fields and
+an immutable portal binding. Preparation never invokes password verification.
+Known direct providers are retained in refusal diagnostics without credentials.
+
+An owned real-store scenario verifies missing-cookie and disabled-provider rejection,
+no binding on rejection, successful challenge lookup, absent OAuth fields and
+second-bind conflict. Library and native regressions pass. Portal CSRF/form routing
+and credential completion/session issuance still need connection before activation.

@@ -617,3 +617,172 @@ async fn external_api_verifier_http_native_parity_and_outage_classification() {
     native_task.await.unwrap().unwrap();
     verifier_task.abort();
 }
+
+#[tokio::test]
+async fn direct_password_challenge_binds_once_without_oauth_fields() {
+    use hopae::crypto::{Clock, random_token, sha256};
+    use hopae::provider::{
+        Provider, ProviderId,
+        credentials::{CredentialError, CredentialKind, CredentialProvider, PasswordInput},
+    };
+    use hopae::session::service::{
+        Deps, ProviderLookup, RequestCtx, Service, ServiceConfig, SessionError,
+    };
+    use hopae::store::{
+        Sessions,
+        types::{NewTransaction, TxnPurpose},
+    };
+    struct Direct {
+        id: ProviderId,
+    }
+    #[async_trait::async_trait]
+    impl CredentialProvider for Direct {
+        fn id(&self) -> &ProviderId {
+            &self.id
+        }
+        fn kind(&self) -> CredentialKind {
+            CredentialKind::Ldap
+        }
+        fn enabled(&self) -> bool {
+            true
+        }
+        async fn verify_password(
+            &self,
+            _: PasswordInput<'_>,
+        ) -> Result<hopae::provider::ProviderIdentity, CredentialError> {
+            panic!("challenge preparation must not authenticate")
+        }
+    }
+    struct Lookup {
+        provider: Arc<Direct>,
+    }
+    impl ProviderLookup for Lookup {
+        fn get(&self, _: &ProviderId) -> Option<Arc<dyn Provider>> {
+            None
+        }
+        fn enabled_sorted(&self) -> Vec<Arc<dyn Provider>> {
+            vec![]
+        }
+        fn credential(&self, id: &ProviderId) -> Option<Arc<dyn CredentialProvider>> {
+            (id == &self.provider.id).then(|| self.provider.clone() as Arc<dyn CredentialProvider>)
+        }
+    }
+    let fx = Fx::new("m1-basic");
+    fx.store.conn().execute("INSERT INTO providers(provider_id,kind,display_name,enabled,managed_by,created_at,updated_at)VALUES('directory','ldap','Owned',1,'file',0,0)",[]).unwrap();
+    let (bus, _receiver) = hopae::event::bus::channel(64);
+    let emitter = hopae::event::bus::Emitter::new(
+        fx.clock.clone(),
+        fx.rng.clone(),
+        bus,
+        Arc::new(hopae::event::sampling::Sampler::default()),
+        Arc::new(hopae::event::prune::PruneTrigger::new(1000)),
+        false,
+    );
+    let service = Service::new(Deps {
+        directory: fx.ctx.directory.clone(),
+        sessions: fx.ctx.sessions.clone(),
+        events: fx.store.events(),
+        emitter,
+        clock: fx.clock.clone(),
+        rng: fx.rng.clone(),
+        snapshot: fx.snapshot.clone(),
+        providers: Arc::new(Lookup {
+            provider: Arc::new(Direct {
+                id: ProviderId::new("directory"),
+            }),
+        }),
+        config: ServiceConfig::from_config(&fx.cfg).unwrap(),
+    });
+    let token = random_token(fx.rng.as_ref(), 16);
+    let cookie = random_token(fx.rng.as_ref(), 16);
+    let now = fx.clock.now();
+    let ip = "192.0.2.10".parse().unwrap();
+    fx.store
+        .create_transaction(
+            NewTransaction {
+                txn_sha256: token.digest(),
+                created_at: now,
+                expires_at: now.add(Duration::from_secs(60)),
+                app_id: hopae::policy::types::AppId::new("app"),
+                return_target: "https://app.example.test/".parse().unwrap(),
+                bind_sha256: Some(sha256(b"owned-app")),
+                portal_bind_sha256: None,
+                retry_bind_sha256: None,
+                client_ip: ip,
+                ua_sha256: None,
+                provider_id: None,
+                state_sha256: None,
+                nonce: None,
+                pkce_verifier: None,
+                portal_session_id: None,
+                purpose: TxnPurpose::Login,
+                conflicting_handle_sha256: None,
+                pending_identity: None,
+                recovery_depth: 0,
+                reauth_max_age: None,
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+    let ctx = RequestCtx {
+        client_ip: ip,
+        user_agent: None,
+        request_id: "owned".into(),
+        client_request_id: None,
+    };
+    let id = ProviderId::new("directory");
+    assert!(
+        service
+            .begin_password(&ctx, &token, &id, None)
+            .await
+            .is_err()
+    );
+    fx.store
+        .conn()
+        .execute(
+            "UPDATE providers SET enabled=0 WHERE provider_id='directory'",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        service
+            .begin_password(&ctx, &token, &id, Some(&cookie))
+            .await,
+        Err(SessionError::Refused(_))
+    ));
+    assert!(
+        fx.store
+            .transaction(&token.digest())
+            .await
+            .unwrap()
+            .unwrap()
+            .state_sha256
+            .is_none()
+    );
+    fx.store
+        .conn()
+        .execute(
+            "UPDATE providers SET enabled=1 WHERE provider_id='directory'",
+            [],
+        )
+        .unwrap();
+    let challenge = service
+        .begin_password(&ctx, &token, &id, Some(&cookie))
+        .await
+        .unwrap();
+    let bound = fx
+        .store
+        .transaction_by_state(&challenge.digest())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(bound.nonce.is_none() && bound.pkce_verifier.is_none());
+    assert_eq!(bound.portal_bind_sha256, Some(cookie.digest()));
+    assert!(matches!(
+        service
+            .begin_password(&ctx, &token, &id, Some(&cookie))
+            .await,
+        Err(SessionError::AlreadyBound)
+    ));
+}
