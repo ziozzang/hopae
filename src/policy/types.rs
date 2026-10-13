@@ -206,6 +206,7 @@ pub struct ProviderConfig {
     pub display_name: String,
     pub enabled: bool,
     pub client_id: String,
+    pub ldap: Option<crate::provider::ldap::Config>,
     /// Environment variable *name*; the value is never held here.
     pub client_secret_env: Option<String>,
     pub issuer: Option<String>,

@@ -13,14 +13,39 @@ use crate::store::types::ProviderRow;
 
 pub struct Registry {
     by_id: HashMap<ProviderId, Arc<dyn Provider>>,
+    credential_by_id: HashMap<ProviderId, Arc<dyn super::credentials::CredentialProvider>>,
+    credential_order: Vec<ProviderId>,
     /// All ids, in `(sort_order, id)` order.
     order: Vec<ProviderId>,
 }
 
+struct DisabledCredentialProvider {
+    id: ProviderId,
+}
+#[async_trait::async_trait]
+impl super::credentials::CredentialProvider for DisabledCredentialProvider {
+    fn id(&self) -> &ProviderId {
+        &self.id
+    }
+    fn kind(&self) -> super::credentials::CredentialKind {
+        super::credentials::CredentialKind::Ldap
+    }
+    fn enabled(&self) -> bool {
+        false
+    }
+    async fn verify_password(
+        &self,
+        _: super::credentials::PasswordInput<'_>,
+    ) -> Result<super::ProviderIdentity, super::credentials::CredentialError> {
+        Err(super::credentials::CredentialError::Disabled)
+    }
+}
 impl Registry {
     pub fn empty() -> Registry {
         Registry {
             by_id: HashMap::new(),
+            credential_by_id: HashMap::new(),
+            credential_order: Vec::new(),
             order: Vec::new(),
         }
     }
@@ -41,6 +66,35 @@ impl Registry {
         });
         let mut reg = Registry::empty();
         for row in sorted {
+            if reg.by_id.contains_key(&row.provider_id)
+                || reg.credential_by_id.contains_key(&row.provider_id)
+            {
+                continue;
+            }
+            if row.kind == ProviderKind::Ldap {
+                let provider = if row.enabled && row.deleted_at.is_none() {
+                    row.config
+                        .get("ldap")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<super::ldap::Config>(value).ok())
+                        .and_then(|config| {
+                            super::ldap::LdapProvider::compile(row.provider_id.clone(), config, env)
+                                .ok()
+                        })
+                } else {
+                    None
+                };
+                let provider: Arc<dyn super::credentials::CredentialProvider> = match provider {
+                    Some(provider) => Arc::new(provider),
+                    None => Arc::new(DisabledCredentialProvider {
+                        id: row.provider_id.clone(),
+                    }),
+                };
+                reg.credential_order.push(row.provider_id.clone());
+                reg.credential_by_id
+                    .insert(row.provider_id.clone(), provider);
+                continue;
+            }
             if row.kind != ProviderKind::Oidc {
                 tracing::warn!(provider = %row.provider_id, kind = row.kind.as_str(), "provider kind not supported yet; skipped");
                 continue;
@@ -60,6 +114,20 @@ impl Registry {
         reg
     }
 
+    pub fn credential(
+        &self,
+        id: &ProviderId,
+    ) -> Option<Arc<dyn super::credentials::CredentialProvider>> {
+        self.credential_by_id.get(id).cloned()
+    }
+    pub fn enabled_credentials(&self) -> Vec<Arc<dyn super::credentials::CredentialProvider>> {
+        self.credential_order
+            .iter()
+            .filter_map(|id| self.credential_by_id.get(id))
+            .filter(|provider| provider.enabled())
+            .cloned()
+            .collect()
+    }
     /// Any configured provider, including disabled ones.
     pub fn get(&self, id: &ProviderId) -> Option<Arc<dyn Provider>> {
         self.by_id.get(id).cloned()
@@ -153,6 +221,46 @@ mod tests {
     }
 
     #[test]
+    fn disabled_or_invalid_directory_rows_remain_addressable_without_redirect_registration() {
+        let mut disabled = row("disabled-directory", 0);
+        disabled.kind = ProviderKind::Ldap;
+        disabled.enabled = false;
+        let mut deleted = row("deleted-directory", 1);
+        deleted.kind = ProviderKind::Ldap;
+        deleted.deleted_at = Some(Timestamp(1));
+        let registry = Registry::from_snapshot(
+            &[disabled, deleted],
+            &|_| panic!("disabled directory must not read credentials"),
+            clock(),
+            None,
+        );
+        for id in ["disabled-directory", "deleted-directory"] {
+            let id = ProviderId::new(id);
+            assert!(!registry.credential(&id).unwrap().enabled());
+            assert!(registry.get(&id).is_none());
+        }
+        assert!(registry.enabled_credentials().is_empty());
+        let mut named_preset = row("google", 0);
+        named_preset.kind = ProviderKind::Ldap;
+        named_preset.config = serde_json::json!({"reauth":"max_age"});
+        assert_eq!(
+            crate::provider::oidc::reauth_settings(&named_preset),
+            (
+                crate::provider::ReauthCapability::Unsupported,
+                crate::provider::ReauthPrompt::None
+            )
+        );
+        let mut invalid = row("invalid-directory", 0);
+        invalid.kind = ProviderKind::Ldap;
+        let registry = Registry::from_snapshot(&[invalid], &|_| None, clock(), None);
+        assert!(
+            !registry
+                .credential(&ProviderId::new("invalid-directory"))
+                .unwrap()
+                .enabled()
+        );
+    }
+    #[test]
     fn ordering_visibility_and_tombstones() {
         let mut gone = row("gone", 1);
         gone.deleted_at = Some(Timestamp(5));
@@ -198,6 +306,7 @@ mod tests {
             display_name: id.into(),
             enabled: true,
             client_id: "c".into(),
+            ldap: None,
             client_secret_env: None,
             issuer: None,
             scope: String::new(),

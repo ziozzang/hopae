@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 9 -->
+<!-- doc-rev: 10 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -196,3 +196,20 @@ typed allowlist rather than inheriting the OIDC raw-claim container. Tests rejec
 credential-bearing objects, AAL assertions, null and array results, and confirm the
 real LDAP connector still passes through both TLS modes. Portal/session issuance
 remains unimplemented; this is the result-boundary contract, not a full login flow.
+
+## Configuration and credential registry preparation
+
+ProviderEntry now carries a typed ldap configuration, preserved through policy
+snapshots and database import without password values. OIDC client_id remains
+required for OIDC; LDAP rejects OIDC credentials and implicit account linking.
+The known-key tree recognizes the LDAP fields and environment warnings identify
+missing bind references without reading disabled providers' credentials.
+
+Registry maintains direct credential providers separately from redirect providers.
+Stored enabled LDAP rows compile the TLS connector; malformed or disabled/deleted
+rows remain addressable as disabled credential providers. The owned OpenLDAP test
+looks up an LDAP provider through this registry and authenticates its stable subject
+over both TLS modes. LDAP reauthentication capabilities remain Unsupported/None,
+even if its ID matches an OIDC preset or stored config claims max_age. The CLI's
+LDAP portal activation gate remains: selector/form/transaction/session integration
+and operational deployment are still required.

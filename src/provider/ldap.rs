@@ -8,14 +8,14 @@ use anyhow::{Result, ensure};
 use ldap3::{Ldap, LdapConnAsync, LdapConnSettings, Scope, SearchEntry, SearchOptions};
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc, time::Duration};
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SubjectEncoding {
     #[default]
     Text,
     BinaryHex,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub endpoint: String,
@@ -434,6 +434,44 @@ mod tests {
             authenticated.auth_time_source(),
             crate::store::types::AuthTimeSource::HopaeCompletion
         );
+        let row = crate::store::types::ProviderRow {
+            provider_id: ProviderId::new("registered-directory"),
+            kind: super::super::ProviderKind::Ldap,
+            display_name: "Owned directory".into(),
+            enabled: true,
+            managed_by: crate::store::types::ManagedBy::File,
+            deleted_at: None,
+            sort_order: 0,
+            config: serde_json::json!({"ldap":config}),
+            client_secret_env: None,
+            allowed_email_domains: vec![],
+            authoritative_domains: vec![],
+            auto_link: false,
+            trust_email: false,
+        };
+        let registry = super::super::Registry::from_snapshot(
+            &[row],
+            &env,
+            Arc::new(crate::crypto::SystemClock),
+            None,
+        );
+        assert!(
+            registry
+                .get(&ProviderId::new("registered-directory"))
+                .is_none()
+        );
+        let registered = registry
+            .credential(&ProviderId::new("registered-directory"))
+            .unwrap();
+        assert!(registered.enabled());
+        let result = crate::provider::credentials::authenticate_password(
+            registered.as_ref(),
+            PasswordInput::new("alice", &password).unwrap(),
+            &crate::crypto::SystemClock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.identity().subject, first.subject);
         let wrong = Secret::new("owned-wrong-password".into());
         assert!(matches!(
             provider

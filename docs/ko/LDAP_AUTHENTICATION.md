@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=9 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=10 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -169,3 +169,17 @@ credential echo·assurance 주장은 검증된 세션 입력 객체를 만들기
 필요합니다. 자격 정보 객체·AAL 주장·null·array 거부와 실제 LDAP 커넥터의 두 TLS
 방식 통과를 검증합니다. portal/세션 발급은 미구현이며 결과 경계 계약이지 전체 로그인
 흐름의 완성을 의미하지 않습니다.
+
+## 설정·직접 자격 레지스트리 준비
+
+ProviderEntry의 typed ldap 설정을 비밀번호 값 없이 policy 스냅샷과 DB 가져오기에
+보존합니다. OIDC client_id는 OIDC에 필수이며 LDAP는 OIDC 자격 정보와 암시적 계정
+연결을 거부합니다. key tree에 LDAP 필드를 등록하고 환경 경고는 bind 참조 누락을
+표시합니다. 비활성 provider의 자격 정보는 읽지 않습니다.
+
+Registry는 직접 자격 provider와 redirect provider를 분리합니다. 저장된 활성 LDAP
+행은 TLS 커넥터를 컴파일하고 손상·비활성·삭제 행은 비활성 자격 provider로 조회됩니다.
+실제 OpenLDAP 검사에서 레지스트리 조회 후 안정된 subject 인증을 두 TLS 방식으로
+검증합니다. ID가 OIDC preset과 같거나 저장 설정에 max_age가 있어도 LDAP 재인증
+capability는 Unsupported/None입니다. CLI의 LDAP portal 활성화 제한은 유지하며
+선택/form/transaction/세션 연결과 운영 배포가 필요합니다.

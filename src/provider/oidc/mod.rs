@@ -106,6 +106,9 @@ fn preset_of(row: &ProviderRow) -> Option<&'static presets::Preset> {
 /// `max_age` and `login` (ADR-0016 decision 15). An unreadable stored value
 /// is ignored.
 pub fn reauth_settings(row: &ProviderRow) -> (ReauthCapability, ReauthPrompt) {
+    if row.kind == crate::provider::ProviderKind::Ldap {
+        return (ReauthCapability::Unsupported, ReauthPrompt::None);
+    }
     let capability = cfg_str(&row.config, "reauth")
         .and_then(|s| ReauthCapability::parse(&s))
         .or_else(|| preset_of(row).map(|p| p.reauth))

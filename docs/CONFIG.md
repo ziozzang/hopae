@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 16 -->
+<!-- doc-rev: 17 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -276,3 +276,14 @@ Related pages: [operations](OPERATIONS.md), [architecture](ARCHITECTURE.md), [ga
 `admin.hangang_delegation` optionally enables signed host-console delegation with
 `key_env` and an optional absolute private `sessions_file`. See
 [Native integration](HANGANG_NATIVE.md) for bounds, browser/paired sessions and grants.
+
+
+## LDAP configuration preparation
+
+The providers[].ldap object is parsed, validated and preserved in provider import.
+Its fields are endpoint, starttls, absolute ca path, base_dn, bind_dn,
+bind_password_env, username_attribute, subject_attribute, subject_encoding
+(text or binary_hex), and timeout_ms (1–2000). The client_id requirement applies
+to OIDC; LDAP cannot use OIDC credentials or implicit account linking. LDAP portal
+activation is still rejected by configuration validation. See
+[LDAP implementation status](LDAP_AUTHENTICATION.md).

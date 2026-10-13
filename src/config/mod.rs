@@ -473,7 +473,10 @@ pub struct ProviderEntry {
     pub display_name: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
     pub client_id: String,
+    #[serde(default)]
+    pub ldap: Option<crate::provider::ldap::Config>,
     /// Environment variable *name* holding the client secret.
     #[serde(default)]
     pub client_secret_env: Option<String>,
@@ -1126,13 +1129,34 @@ impl Config {
                     p.provider_id
                 ));
             }
+            if p.kind == ProviderKind::Ldap {
+                if let Some(ldap) = &p.ldap {
+                    if let Err(error) = ldap.validate() {
+                        errs.push(format!("{at}.ldap: {error}"));
+                    }
+                } else {
+                    errs.push(format!("{at}.ldap is required"));
+                }
+                if !p.client_id.is_empty()
+                    || p.client_secret_env.is_some()
+                    || p.issuer.is_some()
+                    || p.auto_link
+                    || p.trust_email
+                {
+                    errs.push(format!(
+                        "{at}: LDAP cannot use OIDC credentials or implicit account linking"
+                    ));
+                }
+            } else if p.ldap.is_some() {
+                errs.push(format!("{at}.ldap requires kind ldap"));
+            }
             if p.kind != ProviderKind::Oidc {
                 errs.push(format!(
                     "{at}.kind {:?} is not supported before M3; use oidc",
                     p.kind.as_str()
                 ));
             }
-            if p.client_id.is_empty() {
+            if p.kind == ProviderKind::Oidc && p.client_id.is_empty() {
                 errs.push(format!("{at}.client_id must not be empty"));
             }
             if let Some(env) = &p.client_secret_env
@@ -1433,6 +1457,7 @@ impl Config {
                     .unwrap_or_else(|| p.provider_id.clone()),
                 enabled: p.enabled,
                 client_id: p.client_id.clone(),
+                ldap: p.ldap.clone(),
                 client_secret_env: p.client_secret_env.clone(),
                 issuer: p.issuer.clone(),
                 scope: p.scope.clone(),
@@ -1445,10 +1470,18 @@ impl Config {
                 sort_order: i32::try_from(i).unwrap_or(i32::MAX),
                 // The preset's capability, else `max_age`; a stored setting
                 // overrides both where the provider is built from its row.
-                reauth: presets::by_name(&p.provider_id)
-                    .or_else(|| p.issuer.as_deref().and_then(presets::by_issuer))
-                    .map_or(ReauthCapability::MaxAge, |preset| preset.reauth),
-                reauth_prompt: ReauthPrompt::Login,
+                reauth: if p.kind == ProviderKind::Ldap {
+                    ReauthCapability::Unsupported
+                } else {
+                    presets::by_name(&p.provider_id)
+                        .or_else(|| p.issuer.as_deref().and_then(presets::by_issuer))
+                        .map_or(ReauthCapability::MaxAge, |preset| preset.reauth)
+                },
+                reauth_prompt: if p.kind == ProviderKind::Ldap {
+                    ReauthPrompt::None
+                } else {
+                    ReauthPrompt::Login
+                },
             })
             .collect()
     }
@@ -1717,7 +1750,11 @@ pub fn env_warnings(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Ve
         .iter()
         .filter(|p| p.enabled)
         .filter_map(|p| {
-            let name = p.client_secret_env.as_ref()?;
+            let name = if p.kind == ProviderKind::Ldap {
+                &p.ldap.as_ref()?.bind_password_env
+            } else {
+                p.client_secret_env.as_ref()?
+            };
             lookup(name)
                 .is_none_or(|v| v.is_empty())
                 .then(|| format!("provider {} disabled: {name} unset", p.provider_id))
@@ -1752,6 +1789,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn directory_configuration_is_reference_only_and_import_preserves_typed_settings() {
+        let entry:ProviderEntry=serde_json::from_value(serde_json::json!({"provider_id":"owned-directory","kind":"ldap","ldap":{
+            "endpoint":"ldaps://directory.example.test/","ca":"/owned/ca.pem","base_dn":"dc=example,dc=test","bind_dn":"cn=reader,dc=example,dc=test","bind_password_env":"OWNED_LDAP_KEY","username_attribute":"uid","subject_attribute":"entryUUID","timeout_ms":1000}})).unwrap();
+        assert!(entry.client_id.is_empty());
+        let mut config = with("{}").unwrap();
+        config.providers = vec![entry.clone()];
+        let snapshots = config.provider_configs();
+        assert_eq!(snapshots[0].reauth, ReauthCapability::Unsupported);
+        let row = crate::store::types::ProviderRow::from_config(&snapshots[0]);
+        assert_eq!(row.config["ldap"]["bind_password_env"], "OWNED_LDAP_KEY");
+        assert_eq!(row.kind, ProviderKind::Ldap);
+        assert!(
+            env_warnings(&config, |_| None)
+                .iter()
+                .any(|warning| warning.contains("OWNED_LDAP_KEY"))
+        );
+        assert!(
+            config.validate().is_err(),
+            "portal activation gate must remain until login wiring exists"
+        );
+        config.providers[0].kind = ProviderKind::Oidc;
+        config.providers[0].client_id = "owned".into();
+        assert!(
+            config.validate().is_err(),
+            "OIDC cannot accept LDAP settings"
+        );
+    }
     #[test]
     fn m0_config_still_parses_with_defaults() {
         let c = parse(BASE).unwrap();

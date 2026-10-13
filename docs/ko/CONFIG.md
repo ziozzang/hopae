@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=16 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=17 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -269,3 +269,13 @@ listen.native_gateway는 인증된 loopback HOP1 검증을 선택적으로 활�
 admin.hangang_delegation은 key_env와 선택적인 절대 경로 private sessions_file로
 서명된 host 콘솔 위임을 활성화합니다. 한도·브라우저/연결 세션·grant는
 [네이티브 통합](HANGANG_NATIVE.md)을 참고하세요.
+
+
+## LDAP 설정 준비
+
+providers[].ldap 객체를 파싱·검증하고 provider 가져오기에 보존합니다. 필드는
+endpoint·starttls·절대 ca 경로·base_dn·bind_dn·bind_password_env·
+username_attribute·subject_attribute·subject_encoding(text/binary_hex)·
+timeout_ms(1–2000)입니다. client_id 필수 조건은 OIDC에 적용하며 LDAP는 OIDC
+자격 정보나 암시적 계정 연결을 사용하지 않습니다. 설정 검증의 LDAP portal 활성화
+제한은 유지합니다. [LDAP 구현 상태](LDAP_AUTHENTICATION.md)를 참고하세요.
