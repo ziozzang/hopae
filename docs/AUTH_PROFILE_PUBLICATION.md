@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 8 -->
+<!-- doc-rev: 9 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
@@ -131,3 +131,17 @@ using the loaded revision for save and disabling viewer writes. An owned browser
 component fixture checks rendering, submitted revision/configuration, viewer denial
 and abort cleanup with a mocked host API. Actual deployed broker/UI publication
 qualification and stream revocation remain pending.
+
+## Internal deployment qualification
+
+The static Linux build and console package 0.1.3 are deployed internally. A real
+Hangang console browser loaded the durable reference-only profile, published the
+identical configuration through the signed broker, observed revision increment,
+and verified logout cleanup and anonymous denial. Gateway configuration revision
+and authentication settings stayed unchanged. Live service authentication, role
+matrix, mTLS native transports, unified module menus and existing SSO regressions
+passed. Consistent database backup, package pins and previous-image rollback are
+kept private. All-target checks passed: 400 library, 15 other integration and 365
+scenario tests; 40 scenarios remain explicitly ignored. Audit retains its existing
+unmaintained PEM-parser warning. This is an internal feature deployment, not a
+new public multi-platform release or complete lifecycle/throughput qualification.

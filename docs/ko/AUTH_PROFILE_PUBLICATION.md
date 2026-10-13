@@ -1,6 +1,6 @@
 # 인증 프로필 게시
 
-<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=8 status=current -->
+<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=9 status=current -->
 
 [문서](README.md) · [English](../AUTH_PROFILE_PUBLICATION.md)
 
@@ -109,3 +109,15 @@ middleware의 endpoint 허용 목록 연결은 남아 있으므로 새 쓰기는
 저장하며 viewer 쓰기를 비활성화합니다. 소유한 브라우저 컴포넌트 fixture는 mock host
 API로 표시·revision/설정 제출·viewer 거부·abort 정리를 확인합니다. 실제 배포된
 broker/UI 게시 검증과 stream 회수는 남아 있습니다.
+
+## 내부 배포 검증
+
+정적 Linux 빌드와 콘솔 패키지 0.1.3을 내부 배포했습니다. 실제 Hangang 콘솔
+브라우저로 DB의 참조 전용 프로필을 읽고 서명 broker를 통해 동일 설정을 게시하여
+revision 증가·로그아웃 정리·익명 거부를 확인했습니다. Hangang 설정 revision과
+인증 설정은 유지됐습니다. 실제 서비스 인증·권한 매트릭스·mTLS 네이티브 전송·
+통합 메뉴·기존 SSO 회귀 검사를 통과했습니다. 일관된 DB 백업·패키지 pin·이전
+이미지 복구 자료는 비공개입니다. 전체 target 검사에서 라이브러리 400·기타 통합
+15·시나리오 365건이 통과했고 시나리오 40건은 명시적 ignored입니다. 기존 PEM
+parser 유지보수 중단 audit 경고는 남아 있습니다. 내부 기능 배포이며 새 공개 다중
+플랫폼 릴리즈나 전체 수명주기/처리량 검증을 의미하지 않습니다.
