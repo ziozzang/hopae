@@ -10,43 +10,58 @@ use rusqlite::{OptionalExtension, params};
 
 #[async_trait]
 impl Factors for Store {
+    async fn external_snapshot_revision(&self) -> StoreResult<u64> {
+        self.read("external_snapshot_revision", external_snapshot_revision)
+            .await
+    }
+    async fn publish_external_snapshot(
+        &self,
+        request: crate::store::ExternalFactorSnapshot,
+    ) -> StoreResult<u64> {
+        self.write("publish_external_snapshot", move |env| {
+            let shared=env.shared.clone();let tx=env.begin()?;
+            require_stepup_generation(&tx,Some(request.config_generation))?;
+            if external_snapshot_revision(&tx)?!=request.expected_revision {
+                return Err(StoreError::Conflict("external factor snapshot revision changed"));
+            }
+            if request.authorities.len()>64 {return Err(StoreError::Conflict("external factor capacity"));}
+            let mut desired=std::collections::BTreeSet::new();
+            for authority in &request.authorities {
+                if !desired.insert(authority.factor.as_str()) {return Err(StoreError::Conflict("duplicate external factor id"));}
+            }
+            for authority in &request.authorities {
+                apply_external_publication(&tx,&shared,&crate::store::ExternalFactorPublication {
+                    factor:authority.factor.clone(),revision:authority.revision,binding:Some(authority.binding),config_generation:request.config_generation,
+                })?;
+            }
+            let old:Vec<(String,i64,Option<Vec<u8>>)>=tx.prepare("SELECT factor,revision,binding FROM external_factor_authorities ORDER BY factor")?.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?.collect::<Result<_,_>>()?;
+            for (factor,revision,binding) in old {
+                if !desired.contains(factor.as_str()) {
+                    let revision=if binding.is_some() {revision.checked_add(1).ok_or(StoreError::Conflict("external factor revision exhausted"))?} else {revision};
+                    apply_external_publication(&tx,&shared,&crate::store::ExternalFactorPublication {
+                        factor,revision:u64::try_from(revision).map_err(|_|StoreError::Corrupt("external factor revision".into()))?,binding:None,config_generation:request.config_generation,
+                    })?;
+                }
+            }
+            let revision=advance_external_snapshot_revision(&tx)?;
+            let event=EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::ConfigLoaded,Outcome::Success,"r_external_snapshot_publication").attr("count",request.authorities.len() as u64).build();
+            insert_events(&tx,&shared,&[event])?;
+            commit(tx,&shared,None)?;Ok(revision)
+        }).await
+    }
     async fn publish_external_factor(
         &self,
         request: crate::store::ExternalFactorPublication,
     ) -> StoreResult<()> {
         self.write("publish_external_factor", move |env| {
-            let shared=env.shared.clone(); let tx=env.begin()?;
-            require_stepup_generation(&tx,Some(request.config_generation))?;
-            let revision=i64::try_from(request.revision).ok().filter(|v|*v>0)
-                .ok_or(StoreError::Conflict("invalid external factor revision"))?;
-            if request.factor.is_empty() || request.factor.len()>128 || !request.factor.bytes().all(|b|b.is_ascii_alphanumeric()||b"_.:-".contains(&b)) {
-                return Err(StoreError::Conflict("invalid external factor id"));
+            let shared = env.shared.clone();
+            let tx = env.begin()?;
+            if apply_external_publication(&tx, &shared, &request)? {
+                advance_external_snapshot_revision(&tx)?;
             }
-            let old:Option<(i64,Option<Vec<u8>>,i64)>=tx.query_row("SELECT revision,binding,config_generation FROM external_factor_authorities WHERE factor=?1",[&request.factor],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-            if let Some((old_revision,old_binding,old_generation))=old {
-                if u64::try_from(old_generation).ok().is_none_or(|g|g>request.config_generation) {
-                    return Err(StoreError::Conflict("external factor configuration epoch decreased"));
-                }
-                if revision<old_revision || (revision==old_revision && old_binding.as_deref()!=request.binding.as_ref().map(|b|b.as_slice())) {
-                    return Err(StoreError::Conflict("external factor revision changed"));
-                }
-                if revision==old_revision && old_generation as u64==request.config_generation {return commit(tx,&shared,None);}
-                if revision!=old_revision || old_binding.as_deref()!=request.binding.as_ref().map(|b|b.as_slice()) {
-                    let sessions:Vec<(String,String)>=tx.prepare("SELECT s.session_id,s.user_id FROM external_factor_sessions e JOIN sessions s ON s.session_id=e.session_id WHERE e.factor=?1 AND s.terminated_at IS NULL")?.query_map([&request.factor],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<Result<_,_>>()?;
-                    for (sid,user) in sessions {
-                        let sid=crate::session::types::SessionId::new(sid);let user=UserId::new(user);
-                        let event=EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::SessionTerminated,Outcome::Success,"r_external_factor_publication").user(&user).session(&sid).reason(crate::event::types::reasons::FACTOR_REVOKED).attr("factor_id",request.factor.as_str()).build();
-                        super::sessions::terminate_in(&tx,&shared,&sid,crate::event::types::reasons::FACTOR_REVOKED,shared.clock.now(),&[event])?;
-                    }
-                }
-            } else {
-                let count:i64=tx.query_row("SELECT count(*) FROM external_factor_authorities",[],|r|r.get(0))?;
-                if count>=64 {return Err(StoreError::Conflict("external factor capacity"));}
-            }
-            tx.execute("INSERT INTO external_factor_authorities(factor,revision,binding,config_generation) VALUES(?1,?2,?3,?4) ON CONFLICT(factor) DO UPDATE SET revision=excluded.revision,binding=excluded.binding,config_generation=excluded.config_generation",params![request.factor,revision,request.binding.as_ref().map(|b|b.as_slice()),i64::try_from(request.config_generation).map_err(|_|StoreError::Conflict("invalid configuration generation"))?])?;
-            let event=EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::ConfigLoaded,Outcome::Success,"r_external_factor_publication").attr("factor_id",request.factor.as_str()).build();
-            insert_events(&tx,&shared,&[event])?; commit(tx,&shared,None)
-        }).await
+            commit(tx, &shared, None)
+        })
+        .await
     }
     async fn bind_external_stepup(
         &self,
@@ -569,4 +584,122 @@ fn external_context(
         return Err(StoreError::Conflict("invalid credential generation"));
     }
     Ok(serde_json::json!({"kind":"external","credential_generation":generation,"factor":authority.factor,"revision":authority.revision,"binding":crate::crypto::Digest(authority.binding).to_hex(),"config_generation":configuration}).to_string())
+}
+
+fn apply_external_publication(
+    tx: &rusqlite::Transaction<'_>,
+    shared: &super::Shared,
+    request: &crate::store::ExternalFactorPublication,
+) -> StoreResult<bool> {
+    require_stepup_generation(tx, Some(request.config_generation))?;
+    let revision = i64::try_from(request.revision)
+        .ok()
+        .filter(|v| *v > 0)
+        .ok_or(StoreError::Conflict("invalid external factor revision"))?;
+    if request.factor.is_empty()
+        || request.factor.len() > 128
+        || !request
+            .factor
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+    {
+        return Err(StoreError::Conflict("invalid external factor id"));
+    }
+    let old:Option<(i64,Option<Vec<u8>>,i64)>=tx.query_row("SELECT revision,binding,config_generation FROM external_factor_authorities WHERE factor=?1",[&request.factor],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+    if let Some((old_revision, old_binding, old_generation)) = old {
+        if u64::try_from(old_generation)
+            .ok()
+            .is_none_or(|g| g > request.config_generation)
+        {
+            return Err(StoreError::Conflict(
+                "external factor configuration epoch decreased",
+            ));
+        }
+        if revision < old_revision
+            || (revision == old_revision
+                && old_binding.as_deref() != request.binding.as_ref().map(|b| b.as_slice()))
+        {
+            return Err(StoreError::Conflict("external factor revision changed"));
+        }
+        if revision == old_revision && old_generation as u64 == request.config_generation {
+            return Ok(false);
+        }
+        if revision != old_revision
+            || old_binding.as_deref() != request.binding.as_ref().map(|b| b.as_slice())
+        {
+            let sessions:Vec<(String,String)>=tx.prepare("SELECT s.session_id,s.user_id FROM external_factor_sessions e JOIN sessions s ON s.session_id=e.session_id WHERE e.factor=?1 AND s.terminated_at IS NULL")?.query_map([&request.factor],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<Result<_,_>>()?;
+            for (sid, user) in sessions {
+                let sid = crate::session::types::SessionId::new(sid);
+                let user = UserId::new(user);
+                let event = EventBuilder::new(
+                    shared.clock.as_ref(),
+                    shared.rng().as_ref(),
+                    EventKind::SessionTerminated,
+                    Outcome::Success,
+                    "r_external_factor_publication",
+                )
+                .user(&user)
+                .session(&sid)
+                .reason(crate::event::types::reasons::FACTOR_REVOKED)
+                .attr("factor_id", request.factor.as_str())
+                .build();
+                super::sessions::terminate_in(
+                    tx,
+                    shared,
+                    &sid,
+                    crate::event::types::reasons::FACTOR_REVOKED,
+                    shared.clock.now(),
+                    &[event],
+                )?;
+            }
+        }
+    } else {
+        let count: i64 = tx.query_row(
+            "SELECT count(*) FROM external_factor_authorities",
+            [],
+            |r| r.get(0),
+        )?;
+        if count >= 64 {
+            return Err(StoreError::Conflict("external factor capacity"));
+        }
+    }
+    tx.execute("INSERT INTO external_factor_authorities(factor,revision,binding,config_generation) VALUES(?1,?2,?3,?4) ON CONFLICT(factor) DO UPDATE SET revision=excluded.revision,binding=excluded.binding,config_generation=excluded.config_generation",params![request.factor,revision,request.binding.as_ref().map(|b|b.as_slice()),i64::try_from(request.config_generation).map_err(|_|StoreError::Conflict("invalid configuration generation"))?])?;
+    let event = EventBuilder::new(
+        shared.clock.as_ref(),
+        shared.rng().as_ref(),
+        EventKind::ConfigLoaded,
+        Outcome::Success,
+        "r_external_factor_publication",
+    )
+    .attr("factor_id", request.factor.as_str())
+    .build();
+    insert_events(tx, shared, &[event])?;
+    Ok(true)
+}
+fn external_snapshot_revision(conn: &rusqlite::Connection) -> StoreResult<u64> {
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key='external_factor_snapshot_revision'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match value {
+        None => Ok(0),
+        Some(value) => value
+            .parse::<u64>()
+            .ok()
+            .filter(|v| *v > 0 && *v <= i64::MAX as u64)
+            .ok_or(StoreError::Corrupt(
+                "external factor snapshot revision".into(),
+            )),
+    }
+}
+fn advance_external_snapshot_revision(tx: &rusqlite::Transaction<'_>) -> StoreResult<u64> {
+    let revision = external_snapshot_revision(tx)?
+        .checked_add(1)
+        .filter(|v| *v <= i64::MAX as u64)
+        .ok_or(StoreError::Conflict("external snapshot revision exhausted"))?;
+    tx.execute("INSERT INTO meta(key,value) VALUES('external_factor_snapshot_revision',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[revision.to_string()])?;
+    Ok(revision)
 }

@@ -1,6 +1,6 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=10 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=11 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
@@ -360,3 +360,23 @@ SQLite 소유자 검증이며 실제 브라우저 외부 MFA나 독립 follower 
 거부합니다. 실제 설정 값이 같으면 같은 connector Arc와 연결 풀·서킷을 유지하고
 회전하면 교체합니다. registry에서 제거하는 것만으로 소유자 authority가 비활성화되지는
 않습니다. 운영 활성화 전에 원자적 소유자 정합 처리와 root·portal 연결이 필요합니다.
+
+## 전체 verifier 원자적 게시
+
+registry가 운영자가 승인한 원하는 전체 구성을 한 소유자 transaction으로 게시합니다.
+영속 snapshot revision을 compare-and-swap에 사용하며 단일 factor 변경도 이를
+증가시켜 오래된 전체 게시가 중간 disable·회전을 덮어쓰지 못하게 합니다. 전역 설정
+ epoch 검사는 게시 revision과 별도로 적용합니다. 소유자 게시 성공 후에만 메모리
+registry를 활성화해야 합니다.
+
+이전 활성 authority가 새 구성에 없으면 revision을 증가시킨 disable tombstone으로
+바꾸고 기존 factor/session 인덱스로 관련 elevated session·handle·code를 회수합니다.
+이미 비활성인 항목은 반복 누락 시 revision을 유지합니다. tombstone과 proof 이력을
+유지하여 재사용과 낮은 revision의 재활성화를 막습니다. 추가·제거·세션 회수·게시
+revision·필수 감사·outbox가 함께 commit되며 뒤늦은 충돌·용량·고갈·감사 실패는 전체를
+롤백합니다.
+
+자체 TLS·소유자 테스트로 동시 제거, 기존 proof 유지, 단일 변경 후 오래된 전체 게시
+거부, 잘못된 전역 epoch, 뒤늦은 factor 충돌과 이전 elevated session이 있는 상태의
+최종 감사 실패 롤백을 검증합니다. 네이티브 게시 프리미티브이며 root 설정·브라우저
+factor 선택·Lua는 활성화하지 않습니다. 분산 follower 전파 검증은 아닙니다.

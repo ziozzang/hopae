@@ -4354,3 +4354,219 @@ fn v6_external_mfa_foundation_refuses_missing_guard_or_counter_corruption_read_o
         );
     }
 }
+
+#[tokio::test]
+async fn external_snapshot_late_conflict_and_audit_failure_preserve_authority_and_elevated_sessions()
+ {
+    use crate::factor::external_service::{elevate_authorized, publish_authorized_configuration};
+    use crate::store::Factors;
+    for case in ["late_conflict", "audit"] {
+        let f = fx();
+        let (_, txn, view, handle, code) = external_stepup_fixture(&f, 110).await;
+        let fixture =
+            crate::factor::external_transport::tests::Fixture::with_clock(f.clock.clone()).await;
+        let connector = fixture.connector();
+        publish_authorized_configuration(&f.store, &connector, 1)
+            .await
+            .unwrap();
+        let response = Secret::new("accept".into());
+        elevate_authorized(
+            &f.store,
+            &connector,
+            f.clock.as_ref(),
+            external_stepup_input(&f, &txn, view, handle.clone(), code, &response),
+        )
+        .await
+        .unwrap();
+        let revision = f.store.external_snapshot_revision().await.unwrap();
+        assert_eq!(revision, 1);
+        let mut added = connector.authority();
+        added.factor = "a-added".into();
+        added.revision = 1;
+        let mut authorities = vec![added];
+        if case == "late_conflict" {
+            let mut invalid = connector.authority();
+            invalid.revision -= 1;
+            authorities.push(invalid);
+        } else {
+            f.store.conn().execute_batch("CREATE TRIGGER reject_snapshot_audit BEFORE INSERT ON events WHEN NEW.request_id='r_external_snapshot_publication' BEGIN SELECT RAISE(ABORT,'owned audit failure'); END;").unwrap();
+        }
+        assert!(
+            f.store
+                .publish_external_snapshot(ExternalFactorSnapshot {
+                    authorities,
+                    config_generation: 1,
+                    expected_revision: revision
+                })
+                .await
+                .is_err(),
+            "{case}"
+        );
+        assert_eq!(
+            f.store.external_snapshot_revision().await.unwrap(),
+            revision
+        );
+        assert_eq!(
+            f.count("SELECT count(*) FROM external_factor_authorities"),
+            1
+        );
+        assert_eq!(
+            f.count("SELECT revision FROM external_factor_authorities WHERE factor='partner-push'"),
+            7
+        );
+        assert_eq!(
+            f.count("SELECT count(*) FROM external_factor_authorities WHERE binding IS NULL"),
+            0
+        );
+        assert_eq!(
+            f.count(
+                "SELECT count(*) FROM events WHERE request_id='r_external_snapshot_publication'"
+            ),
+            0
+        );
+        assert_eq!(
+            f.count("SELECT count(*) FROM events WHERE kind='session.terminated'"),
+            0
+        );
+        assert_eq!(f.count("SELECT count(*) FROM external_factor_proofs"), 1);
+        let current = f
+            .store
+            .lookup_handle(&handle.handle_sha256, &host(PORTAL_HOST))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(current.session.terminated_at.is_none());
+        assert!(current.handle.revoked_at.is_none());
+        assert_eq!(current.session.cred_gen, 2);
+    }
+}
+#[tokio::test]
+async fn external_snapshot_concurrent_removal_has_one_winner_and_revokes_without_forgetting_proofs()
+{
+    use crate::factor::external_service::{elevate_authorized, publish_authorized_configuration};
+    use crate::store::Factors;
+    let f = fx();
+    let (_, txn, view, handle, code) = external_stepup_fixture(&f, 111).await;
+    let fixture =
+        crate::factor::external_transport::tests::Fixture::with_clock(f.clock.clone()).await;
+    let connector = fixture.connector();
+    publish_authorized_configuration(&f.store, &connector, 1)
+        .await
+        .unwrap();
+    let response = Secret::new("accept".into());
+    elevate_authorized(
+        &f.store,
+        &connector,
+        f.clock.as_ref(),
+        external_stepup_input(&f, &txn, view, handle.clone(), code, &response),
+    )
+    .await
+    .unwrap();
+    let registry =
+        crate::factor::external_registry::Registry::compile(&[], &|_| None, None).unwrap();
+    let revision = f.store.external_snapshot_revision().await.unwrap();
+    let (one, two) = tokio::join!(
+        registry.publish_authorized_configuration(&f.store, 1, revision),
+        registry.publish_authorized_configuration(&f.store, 1, revision)
+    );
+    assert_ne!(one.is_ok(), two.is_ok());
+    assert_eq!(
+        f.store.external_snapshot_revision().await.unwrap(),
+        revision + 1
+    );
+    assert_eq!(
+        f.count("SELECT revision FROM external_factor_authorities WHERE binding IS NULL"),
+        8
+    );
+    assert_eq!(
+        f.count("SELECT count(*) FROM events WHERE kind='session.terminated'"),
+        1
+    );
+    assert_eq!(f.count("SELECT count(*) FROM external_factor_proofs"), 1);
+    assert_eq!(f.count("SELECT used FROM external_factor_budget"), 1);
+    let revoked = f
+        .store
+        .lookup_handle(&handle.handle_sha256, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(revoked.session.terminated_at.is_some());
+    assert!(revoked.handle.revoked_at.is_some());
+    let next = registry
+        .publish_authorized_configuration(&f.store, 1, revision + 1)
+        .await
+        .unwrap();
+    assert_eq!(next, revision + 2);
+    assert_eq!(
+        f.count("SELECT revision FROM external_factor_authorities"),
+        8
+    );
+    assert!(
+        publish_authorized_configuration(&f.store, &connector, 1)
+            .await
+            .is_err()
+    );
+}
+#[tokio::test]
+async fn external_snapshot_single_publication_fences_stale_batch_and_invalid_epoch_changes_nothing()
+{
+    use crate::store::Factors;
+    let f = fx();
+    f.store
+        .conn()
+        .execute(
+            "INSERT INTO meta(key,value) VALUES('config_generation','1')",
+            [],
+        )
+        .unwrap();
+    let configs = [crate::factor::external_transport::Config {
+        factor: "push".into(),
+        configuration_revision: 1,
+        url: "https://verifier.example.test/check".into(),
+        verifier_key_env: "OWNED_FACTOR_KEY".into(),
+        timeout_ms: 100,
+        allow_private_endpoints: false,
+        ca: None,
+    }];
+    let registry = crate::factor::external_registry::Registry::compile(
+        &configs,
+        &|_| Some("a".repeat(32)),
+        None,
+    )
+    .unwrap();
+    assert!(
+        registry
+            .publish_authorized_configuration(&f.store, 2, 0)
+            .await
+            .is_err()
+    );
+    assert_eq!(f.store.external_snapshot_revision().await.unwrap(), 0);
+    assert_eq!(
+        registry
+            .publish_authorized_configuration(&f.store, 1, 0)
+            .await
+            .unwrap(),
+        1
+    );
+    let authority = registry.get("push").unwrap().authority();
+    f.store
+        .publish_external_factor(ExternalFactorPublication {
+            factor: authority.factor,
+            revision: 2,
+            binding: None,
+            config_generation: 1,
+        })
+        .await
+        .unwrap();
+    assert_eq!(f.store.external_snapshot_revision().await.unwrap(), 2);
+    assert!(
+        registry
+            .publish_authorized_configuration(&f.store, 1, 1)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        f.count("SELECT count(*) FROM external_factor_authorities WHERE binding IS NULL"),
+        1
+    );
+}

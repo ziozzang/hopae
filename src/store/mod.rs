@@ -471,6 +471,8 @@ pub trait Events: Send + Sync {
 /// Owner storage primitives; callers still validate recent authentication/challenges.
 #[async_trait]
 pub trait Factors: Send + Sync {
+    async fn external_snapshot_revision(&self) -> StoreResult<u64>;
+    async fn publish_external_snapshot(&self, request: ExternalFactorSnapshot) -> StoreResult<u64>;
     async fn publish_external_factor(&self, request: ExternalFactorPublication) -> StoreResult<()>;
     async fn bind_external_stepup(&self, request: BindExternalStepUp) -> StoreResult<()>;
     async fn elevate_external(&self, request: ExternalElevation) -> StoreResult<()>;

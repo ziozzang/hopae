@@ -890,3 +890,10 @@ pub struct ExternalElevation {
     pub(crate) handoff: HandoffCodeRow,
     pub(crate) events: Vec<crate::event::types::Event>,
 }
+
+/// Complete native desired set. Missing entries become durable disable tombstones.
+pub struct ExternalFactorSnapshot {
+    pub(crate) authorities: Vec<crate::factor::external_transport::Authority>,
+    pub(crate) config_generation: u64,
+    pub(crate) expected_revision: u64,
+}

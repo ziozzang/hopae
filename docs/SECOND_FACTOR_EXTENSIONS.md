@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 10 -->
+<!-- doc-rev: 11 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -414,3 +414,26 @@ refuse the complete candidate. Unchanged material reuses the same connector Arc,
 preserving its pool and circuit; rotation replaces it. Removing a registry entry
 does not itself disable owner authority: atomic owner reconciliation and root/portal
 integration remain required before runtime activation.
+
+## Atomic complete verifier publication
+
+The registry can now publish its complete operator-approved desired set in one
+owner transaction. A durable snapshot revision supplies compare-and-swap;
+changed single-factor publication advances it too, preventing a stale batch
+from overwriting an intervening disable or rotation. The current global
+configuration epoch is required independently of this publication revision.
+Activate the in-memory registry only after owner publication succeeds.
+
+Missing previously enabled authorities become revision-advanced disable
+tombstones and their elevated sessions/handles/codes are revoked using the
+existing factor/session index. Already-disabled entries retain their revision
+on repeated omission. Retained tombstones and proof history preserve anti-replay
+and prevent lower-revision reactivation. All additions, removals, session
+revocations, publication revision and required audit/outbox commit together;
+late conflict, capacity/exhaustion or audit failure rolls them all back.
+
+Owned TLS-to-owner tests cover concurrent removal, old proof retention, stale
+batch rejection after a single-factor change, invalid global epoch, late
+per-factor conflict and final audit rollback with a previously elevated session.
+This native publication primitive does not enable root configuration, browser
+factor selection or Lua. It does not prove distributed follower propagation.

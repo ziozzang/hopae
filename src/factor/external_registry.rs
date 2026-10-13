@@ -38,6 +38,26 @@ impl Registry {
             connectors: compiled,
         })
     }
+    /// Publish the complete operator-approved set atomically, including removals.
+    /// Activate this registry only after success; CAS refusal retains the old view.
+    pub async fn publish_authorized_configuration(
+        &self,
+        store: &dyn crate::store::Factors,
+        config_generation: u64,
+        expected_revision: u64,
+    ) -> crate::store::StoreResult<u64> {
+        store
+            .publish_external_snapshot(crate::store::ExternalFactorSnapshot {
+                authorities: self
+                    .connectors
+                    .values()
+                    .map(|connector| connector.authority())
+                    .collect(),
+                config_generation,
+                expected_revision,
+            })
+            .await
+    }
     pub fn get(&self, factor: &str) -> Option<&Arc<Connector>> {
         self.connectors.get(factor)
     }
