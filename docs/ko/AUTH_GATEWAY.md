@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=24 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=25 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -29,6 +29,21 @@ Ed25519 검증을 추가합니다. 146-byte receipt는 version·purpose, big-end
 builder는 구현해야 합니다. 서명 확인만으로 현재 권한을 증명하지 않으며 key registry·
 시계 rollback fence·회수·원자적 nonce 소비·issuer/receiver endpoint 연결은 후속입니다.
 실제 발급·배포 동작은 바뀌지 않습니다.
+
+미릴리스 `receipt_binding`은 네이티브 문맥의 canonical digest를 제공합니다. 공통
+필드는 signer 참조/key epoch, 신원 authority epoch, namespace가 결합된 subject
+참조, 신원 종류/AAL, 신원 revision/자격 generation, 서비스/대상, 요청 SHA-256입니다.
+사람은 AAL 1–3, 서비스·워크로드·네트워크는 AAL 0이며 참조는 제한된 식별자, revision은
+양수 JSON-safe 정수입니다. 호출자 필드의 인증은 아니며 서명·검증 전에 소유자가
+해당 값을 만들어야 합니다.
+
+인증은 정책·네트워크 주장이 없는 stage 1입니다. permit stage 2는 정확한 서명된 인증
+receipt SHA-256, decision/resource/action, 품계 authority epoch와 catalog/policy/
+network/route/plan revision을 추가합니다. domain
+`hangang-zerotrust:projection-receipt-binding:v1`과 NUL 및 u32 big-endian 길이를
+사용하며 revision은 u64 big-endian, 종류/AAL은 byte입니다. 종류 코드는 사람=1,
+서비스=2, 워크로드=3, 네트워크=4입니다. 테스트 3건에 독립 Python 벡터와 서명된 다른
+문맥 거부를 포함합니다. 실시간 소유권·키 registry·replay/회수·endpoint 연결은 후속입니다.
 
 미릴리스 소스는 네이티브 서비스 자격 검증 후 선택적인 제한된 Lua 사용 조건을
 적용합니다. [서비스 사용 조건 설정](../CONFIG.md#service-authentication-lua-eligibility-unreleased)을

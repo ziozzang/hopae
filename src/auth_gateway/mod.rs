@@ -5,6 +5,7 @@ pub mod breaker;
 pub mod lua;
 pub mod publication;
 pub mod receipt;
+pub mod receipt_binding;
 pub mod relay;
 pub mod request_binding;
 pub mod runtime;

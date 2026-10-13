@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 24 -->
+<!-- doc-rev: 25 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -36,6 +36,23 @@ epoch, complete request/audience, revisions and the authentication/decision chai
 Signature checks alone do not establish current permission: key registry, clock
 rollback fences, revocation, atomic nonce consumption and issuer/receiver endpoint
 integration remain required. No runtime issuance or deployment behavior changes.
+
+Unreleased `receipt_binding` supplies the canonical native context digest. Common
+fields bind signer reference/key epoch, identity authority epoch, canonical
+namespaced subject reference, principal kind/AAL, identity revision/credential
+generation, service/audience and request SHA-256. Human AAL is 1–3; service,
+workload and network identities remain AAL 0. References are bounded identifiers;
+revisions are positive JSON-safe integers. These constraints cannot authenticate
+caller-supplied fields: owners must derive them before signing or verification.
+
+Authentication uses stage 1 without policy/network assertions. Permit uses stage 2
+and appends the exact signed authentication receipt SHA-256, decision/resource/action,
+Pumgye authority epoch and catalog/policy/network/route/plan revisions. SHA-256
+uses domain `hangang-zerotrust:projection-receipt-binding:v1` plus NUL and u32
+big-endian length-prefixed fields; numeric revisions are u64 big-endian, kind/AAL
+are bytes. Principal-kind codes are human=1, service=2, workload=3, network=4.
+Three tests include independent Python vectors and signed cross-context rejection.
+Live ownership, key registries, replay/revocation and endpoint wiring remain open.
 
 Runtime connectors authenticate local service API keys or relay a Bearer credential
 to a fixed external verifier, with optional IP conditions. It is opt-in through `authentication_gateway`; existing OIDC/session

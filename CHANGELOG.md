@@ -10,6 +10,8 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- Canonical authentication/permit receipt bindings for identity and authority epochs, request/audience, credential generation, full policy/route/plan revisions and signed authentication chains; signed cross-context rejection tests. Live issuance integration remains unfinished.
+
 - Purpose-separated short Ed25519 projection receipt primitive with strict signature, size, binding and time validation; immutable verification wrapper. Live authority, replay/revocation and issuance integration remain unfinished.
 
 - Native domain-separated projection request digest with explicit field lengths, exact target/entity binding and an independently generated fixed vector. Projection signing/issuance integration remains unfinished.
