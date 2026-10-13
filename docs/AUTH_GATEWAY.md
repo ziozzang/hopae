@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 26 -->
+<!-- doc-rev: 27 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -70,6 +70,22 @@ These are in-memory transition fences. A fresh registry without prior state cann
 prove historical floors, and caller-owned context still must derive from verified
 identity/decisions. Durable publication, restart/restore floors, atomic activation,
 membership, replay consumption and live endpoints are required before deployment.
+
+Unreleased `receipt_key_store` persists the complete public registry/floors/history
+in the existing owner `meta` table. Native publication requires a caller-supplied
+authorization fence, expected revision and complete desired set. It compiles before
+writing, checks authorization again before commit, and stores the registry plus a
+reference-only revision/actor/digest audit atomically. A failure returns no registry
+for installation. The owner must install the successful result; no runtime endpoint
+or automatic snapshot activation has been added.
+
+Loading reconstructs and validates active entries, retained floors and public-value
+ownership, refusing malformed/duplicate/orphan/weak/inconsistent data and oversized
+documents (128 KiB). A trusted minimum revision refuses stale or missing state.
+Ordinary restart retains removals. Restoring an older whole DB still requires an
+external minimum/authority-epoch fence: the DB cannot prove its own rollback.
+Five registry/store tests cover restart, stale publication, actor revocation and
+failed audit rollback. No private signing key is stored or production DB modified.
 
 Runtime connectors authenticate local service API keys or relay a Bearer credential
 to a fixed external verifier, with optional IP conditions. It is opt-in through `authentication_gateway`; existing OIDC/session

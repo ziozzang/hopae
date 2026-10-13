@@ -10,6 +10,8 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- Atomic owner persistence for public receipt registry/history with revision CAS, repeated authorization checks and reference-only audit. Restart reconstruction and trusted minimum revision validation; live activation and whole-DB restore fences remain unfinished.
+
 - Immutable receiver-owned receipt key registry with native authority/purpose/epoch selection, removal and rollback fences, retained cross-purpose key ownership and bounded state. Durable publication and live issuance integration remain unfinished.
 
 - Canonical authentication/permit receipt bindings for identity and authority epochs, request/audience, credential generation, full policy/route/plan revisions and signed authentication chains; signed cross-context rejection tests. Live issuance integration remains unfinished.

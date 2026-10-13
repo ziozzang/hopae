@@ -26,7 +26,139 @@ pub struct Registry {
     floors: BTreeMap<(String, u8), Floor>,
     key_owners: BTreeMap<[u8; 32], (String, u8)>,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Snapshot {
+    version: u8,
+    revision: u64,
+    floors: Vec<SavedFloor>,
+    owners: Vec<SavedOwner>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedFloor {
+    issuer: String,
+    purpose: u8,
+    epoch: u64,
+    public_key: [u8; 32],
+    active: bool,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedOwner {
+    public_key: [u8; 32],
+    issuer: String,
+    purpose: u8,
+}
+fn valid_issuer(issuer: &str) -> bool {
+    !issuer.is_empty()
+        && issuer.len() <= 128
+        && issuer
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+}
 impl Registry {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub(crate) fn encode(&self) -> Result<String, Refused> {
+        let snapshot = Snapshot {
+            version: 1,
+            revision: self.revision,
+            floors: self
+                .floors
+                .iter()
+                .map(|((issuer, purpose), f)| SavedFloor {
+                    issuer: issuer.clone(),
+                    purpose: *purpose,
+                    epoch: f.epoch,
+                    public_key: f.public_key,
+                    active: f.active,
+                })
+                .collect(),
+            owners: self
+                .key_owners
+                .iter()
+                .map(|(key, (issuer, purpose))| SavedOwner {
+                    public_key: *key,
+                    issuer: issuer.clone(),
+                    purpose: *purpose,
+                })
+                .collect(),
+        };
+        let value = serde_json::to_string(&snapshot).map_err(|_| Refused)?;
+        if value.len() > 131072 {
+            return Err(Refused);
+        }
+        Ok(value)
+    }
+    pub(crate) fn decode(value: &str, minimum_revision: u64) -> Result<Self, Refused> {
+        if value.len() > 131072 {
+            return Err(Refused);
+        }
+        let s: Snapshot = serde_json::from_str(value).map_err(|_| Refused)?;
+        if s.version != 1
+            || !(1..=9_007_199_254_740_991).contains(&s.revision)
+            || s.revision < minimum_revision
+            || s.floors.len() > 128
+            || s.owners.len() > 256
+        {
+            return Err(Refused);
+        }
+        let mut owners = BTreeMap::new();
+        let mut floors = BTreeMap::new();
+        for o in s.owners {
+            let public = VerifyingKey::from_bytes(&o.public_key).map_err(|_| Refused)?;
+            if !valid_issuer(&o.issuer)
+                || !(1..=2).contains(&o.purpose)
+                || public.is_weak()
+                || owners.insert(o.public_key, (o.issuer, o.purpose)).is_some()
+            {
+                return Err(Refused);
+            }
+        }
+        let mut active = Vec::new();
+        for f in s.floors {
+            let context = (f.issuer.clone(), f.purpose);
+            if !valid_issuer(&f.issuer)
+                || !(1..=2).contains(&f.purpose)
+                || !(1..=9_007_199_254_740_991).contains(&f.epoch)
+                || owners.get(&f.public_key) != Some(&context)
+                || floors
+                    .insert(
+                        context,
+                        Floor {
+                            epoch: f.epoch,
+                            public_key: f.public_key,
+                            active: f.active,
+                        },
+                    )
+                    .is_some()
+            {
+                return Err(Refused);
+            }
+            if f.active {
+                active.push(Key {
+                    issuer_ref: f.issuer,
+                    purpose: if f.purpose == 1 {
+                        Purpose::Authentication
+                    } else {
+                        Purpose::Permit
+                    },
+                    epoch: f.epoch,
+                    public_key: f.public_key,
+                });
+            }
+        }
+        if owners.values().any(|context| !floors.contains_key(context)) {
+            return Err(Refused);
+        }
+        let mut rebuilt = Self::compile(1, &active, None)?;
+        rebuilt.revision = s.revision;
+        rebuilt.floors = floors;
+        rebuilt.key_owners = owners;
+        Ok(rebuilt)
+    }
     pub fn compile(
         revision: u64,
         desired: &[Key],

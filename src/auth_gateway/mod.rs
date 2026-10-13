@@ -6,6 +6,7 @@ pub mod lua;
 pub mod publication;
 pub mod receipt;
 pub mod receipt_binding;
+pub mod receipt_key_store;
 pub mod receipt_keys;
 pub mod relay;
 pub mod request_binding;

@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=26 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=27 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -56,6 +56,20 @@ floor를 유지해 더 높은 epoch로만 다시 등록합니다. 조회 시 iss
 현재 메모리 갱신 fence이며 이전 상태 없는 새 registry로 과거 floor를 증명하지 못합니다.
 문맥은 검증된 신원·결정에서 만들어야 합니다. 배포 전 DB 게시·재시작/복구 floor·원자적
 활성화·membership·replay 소비·실제 endpoint 연결이 필요합니다.
+
+미릴리스 `receipt_key_store`는 기존 소유자 `meta` table에 공개 registry·floor·이력을
+저장합니다. 네이티브 publication은 호출자 권한 fence·기대 revision·전체 설정을 받아
+쓰기 전에 컴파일하고 commit 직전에 권한을 다시 검사하며 registry와 참조 전용
+revision/actor/digest 감사를 원자적으로 저장합니다. 실패 시 설치할 registry를 반환하지
+않습니다. 성공 결과 활성화는 소유자 책임이며 runtime endpoint·자동 snapshot 설치는
+추가하지 않았습니다.
+
+load는 활성 항목·floor·공개 값 소유권을 복원·검증해 잘못된/중복/고아/약한/불일치
+자료와 128 KiB 초과 문서를 거부합니다. 신뢰된 최소 revision으로 오래되거나 사라진
+상태를 거부하며 일반 재시작에는 제거 이력이 유지됩니다. 오래된 DB 전체 복원은 외부
+최소 버전·authority epoch fence가 필요하며 DB가 자기 rollback을 증명하지 못합니다.
+registry/store 테스트 5건은 재시작·오래된 게시·권한 회수·감사 실패 rollback을 검증합니다.
+비공개 signing key를 저장하거나 운영 DB를 변경하지 않았습니다.
 
 미릴리스 소스는 네이티브 서비스 자격 검증 후 선택적인 제한된 Lua 사용 조건을
 적용합니다. [서비스 사용 조건 설정](../CONFIG.md#service-authentication-lua-eligibility-unreleased)을
