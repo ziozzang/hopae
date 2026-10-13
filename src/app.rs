@@ -260,6 +260,8 @@ impl Services {
         let mut key = [0u8; 32];
         self.rng.fill(&mut key);
         Some(Arc::new(crate::admin::AdminState {
+            profile_store: self.store.clone(),
+            profile_workers: Arc::new(tokio::sync::Semaphore::new(4)),
             cfg,
             directory: self.directory(),
             sessions: self.sessions(),

@@ -644,3 +644,34 @@ fn s304_a5_nothing_leaks_to_the_unauthorized() {
         assert!(j.get(k).is_some(), "{k} in {j}");
     }
 }
+
+#[test]
+fn authentication_profiles_read_is_authenticated_and_reference_only() {
+    let (_idp, h, u) = spawn_status();
+    let anonymous = admin(&h).get("/v1/authentication/profiles");
+    assert_ne!(anonymous.status, 200);
+    let response = admin(&h)
+        .with_handle(&u.a.handle)
+        .get("/v1/authentication/profiles");
+    assert_eq!(response.status, 200);
+    let document: Value = serde_json::from_str(&response.body).unwrap();
+    assert_eq!(document["revision"], 0);
+    assert!(document["configuration"].is_null());
+    let config: hopae::auth_gateway::runtime::Config =
+        serde_json::from_value(json!({"authority_id":"owned","profiles":[{
+        "service_id":"app","host":"app.example.test","ports":[443],"realm":"owned",
+        "api_keys":[{"token_env":"OWNED_REFERENCE_ONLY","subject":"worker"}]}]}))
+        .unwrap();
+    hopae::auth_gateway::publication::publish(&mut db(&h), 0, Some(config), "owned-operator")
+        .unwrap();
+    let response = admin(&h)
+        .with_handle(&u.a.handle)
+        .get("/v1/authentication/profiles");
+    assert_eq!(response.status, 200);
+    let document: Value = serde_json::from_str(&response.body).unwrap();
+    assert_eq!(document["revision"], 1);
+    assert_eq!(
+        document["configuration"]["profiles"][0]["api_keys"][0]["token_env"],
+        "OWNED_REFERENCE_ONLY"
+    );
+}

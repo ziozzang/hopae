@@ -29,6 +29,7 @@ pub mod delegation_wire;
 pub mod events;
 pub mod me;
 pub mod pages;
+pub mod profiles;
 pub mod seed;
 pub mod sessions;
 pub mod status;
@@ -108,6 +109,8 @@ impl AdminConfig {
 
 /// Shared state of the admin listener.
 pub struct AdminState {
+    pub profile_store: crate::store::sqlite::Store,
+    pub profile_workers: Arc<Semaphore>,
     pub cfg: AdminConfig,
     pub directory: Arc<dyn Directory>,
     pub sessions: Arc<dyn Sessions>,

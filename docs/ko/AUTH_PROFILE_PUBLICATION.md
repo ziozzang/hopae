@@ -1,6 +1,6 @@
 # 인증 프로필 게시
 
-<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=5 status=current -->
+<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=6 status=current -->
 
 [문서](README.md) · [English](../AUTH_PROFILE_PUBLICATION.md)
 
@@ -80,3 +80,10 @@ authority를 초기화하고 앱 범위를 검증하여 reader를 gateway router
 fixture의 삭제는 소유한 오프라인 DB 운영자 작업이며 아직 구현하지 않은 위임 관리
 API를 증명하지 않습니다. 운영의 오래된 bootstrap 비밀 참조를 제거하기 전 파일 중심
 CLI/preflight 동작에 대한 별도 이전 검토도 필요합니다.
+
+GET `/v1/authentication/profiles`를 기존 관리자 인증/위임 gate 뒤에 등록했습니다.
+DB의 참조 전용 문서·revision ETag·no-store를 반환하고 authority가 없으면 revision
+0입니다. 전용 blocking worker permit 4개는 HTTP 기한이 끝나도 DB 읽기가 완료될
+때까지 유지됩니다. 인증 시나리오에서 익명 거부와 소유한 저장 프로필 조회를 확인합니다.
+PUT은 기존 관리자 fence로 쓰기 트랜잭션 안에서 actor를 재검증해야 하므로 아직
+구현하지 않았습니다. Hangang 플러그인 UI와 이 endpoint 운영 배포 검증도 남아 있습니다.

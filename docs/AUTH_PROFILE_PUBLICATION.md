@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 5 -->
+<!-- doc-rev: 6 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
@@ -95,3 +95,12 @@ return 401. The fixture installs the tombstone as an owned offline database oper
 it does not prove a delegated management API, which remains unimplemented. Older
 file-oriented CLI/preflight semantics still require separate migration review before
 removing obsolete bootstrap secret references in an operational deployment.
+
+GET `/v1/authentication/profiles` is now registered behind the existing admin
+authentication/delegation gate. It returns the durable reference-only document,
+revision ETag and no-store, or revision 0 when no authority exists. Four dedicated
+blocking worker permits remain held until each database read finishes even if the
+HTTP deadline expires. The authenticated scenario checks anonymous rejection and
+inspection of an owned persisted profile. PUT remains pending: it must recheck the
+actor inside the write transaction using the existing administrator fence. The
+Hangang plugin UI and deployment of this endpoint are not yet qualified.
