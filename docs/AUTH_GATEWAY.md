@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 14 -->
+<!-- doc-rev: 15 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -361,3 +361,20 @@ application startup, safe revisioned rotation/rewrapping, external key storage,
 backup/retirement policy, enrollment HTTP flow and internal MFA qualification remain
 unfinished. Operators must generate high-entropy keys; structural validation does
 not prove entropy. Retiring a referenced key before rewrapping disables its factors.
+
+## Keyring integration into factor services
+
+Enrollment preparation now accepts the compiled keyring and encrypts only with its
+active key. Native TOTP verification performs one owner-state lookup and selects the
+exact retained key named by that envelope before decryption. Missing/retired keys
+produce uniform refusal before counter or enrollment mutation; no caller-selected
+single key, active-key retry, environment lookup or network fetch is used during
+verification. The keyring remains immutable for the duration of the service call.
+
+Real-store tests qualify retained-key verification after an active-key change,
+retirement refusal with unchanged pending state, enrollment preparation and concurrent
+single-use verification. Root configuration/startup loading, policy publication fencing
+for key retirement, envelope rewrapping, enrollment/step-up HTTP/UI and atomic
+challenge/session completion remain unfinished. Source changes are not in the current
+internal `owner-v5-d876909` image. Key rotation tests do not constitute deployed
+operator key-management or complete MFA lifecycle support.

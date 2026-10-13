@@ -2480,7 +2480,8 @@ async fn native_totp_verification_activates_once_and_consumes_concurrent_code_on
     let f = fx();
     let user = f.user(1).await;
     f.clock.set(Timestamp(59_000));
-    let key = crate::factor::seed_cipher::Key::new("key-1".into(), [7; 32]).unwrap();
+    let keys = test_totp_keyring();
+    let key = keys.active();
     let seed = crate::factor::totp::Seed::from_bytes(b"12345678901234567890").unwrap();
     let envelope = key
         .seal(&seed, user.user_id.as_str(), "native", &f.rng)
@@ -2499,7 +2500,7 @@ async fn native_totp_verification_activates_once_and_consumes_concurrent_code_on
     assert!(
         verify(
             &f.store,
-            &key,
+            &keys,
             f.clock.as_ref(),
             input(Purpose::ConsumeAuthentication),
             vec![]
@@ -2509,7 +2510,7 @@ async fn native_totp_verification_activates_once_and_consumes_concurrent_code_on
     );
     let receipt = verify(
         &f.store,
-        &key,
+        &keys,
         f.clock.as_ref(),
         input(Purpose::ConfirmEnrollment),
         vec![],
@@ -2520,7 +2521,7 @@ async fn native_totp_verification_activates_once_and_consumes_concurrent_code_on
     assert!(
         verify(
             &f.store,
-            &key,
+            &keys,
             f.clock.as_ref(),
             input(Purpose::ConsumeAuthentication),
             vec![]
@@ -2537,8 +2538,8 @@ async fn native_totp_verification_activates_once_and_consumes_concurrent_code_on
         purpose: Purpose::ConsumeAuthentication,
     };
     let (a, b) = tokio::join!(
-        verify(&f.store, &key, f.clock.as_ref(), next_input(), vec![]),
-        verify(&f.store, &key, f.clock.as_ref(), next_input(), vec![])
+        verify(&f.store, &keys, f.clock.as_ref(), next_input(), vec![]),
+        verify(&f.store, &keys, f.clock.as_ref(), next_input(), vec![])
     );
     assert_ne!(a.is_ok(), b.is_ok());
 }
@@ -2549,14 +2550,15 @@ async fn totp_prepare_returns_secret_only_after_pending_commit() {
     use crate::store::Factors;
     let f = fx();
     let user = f.user(1).await;
-    let key = crate::factor::seed_cipher::Key::new("key-1".into(), [7; 32]).unwrap();
+    let keys = test_totp_keyring();
+    let key = keys.active();
     let request = || Request {
         id: "prepared",
         user: &user.user_id,
         issuer: "Hangang",
         account: "Alice",
     };
-    let provisioning = prepare(&f.store, &key, &f.rng, request(), vec![])
+    let provisioning = prepare(&f.store, &keys, &f.rng, request(), vec![])
         .await
         .unwrap();
     assert!(provisioning.expose_uri().starts_with("otpauth://totp/"));
@@ -2573,7 +2575,7 @@ async fn totp_prepare_returns_secret_only_after_pending_commit() {
             .is_ok()
     );
     assert!(
-        prepare(&f.store, &key, &f.rng, request(), vec![])
+        prepare(&f.store, &keys, &f.rng, request(), vec![])
             .await
             .is_err()
     );
@@ -2666,4 +2668,85 @@ async fn expired_totp_pending_replacement_and_factor_audit_are_atomic() {
         assert_eq!(count_kind(name), 1);
     }
     assert_eq!(f.count("SELECT COUNT(*) FROM event_deliveries d JOIN events e USING(event_id) WHERE e.kind LIKE 'factor.%' AND d.state='pending'"),6);
+}
+
+fn test_totp_keyring() -> crate::factor::keyring::Keyring {
+    use crate::factor::keyring::{Configuration, Keyring, Reference};
+    Keyring::compile(
+        &Configuration {
+            active_key: "key-1".into(),
+            keys: vec![Reference {
+                id: "key-1".into(),
+                key_env: "OWNED_FACTOR_KEY".into(),
+            }],
+        },
+        &|_| Some(data_encoding::BASE64URL_NOPAD.encode(&[7; 32])),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn native_totp_verification_uses_retained_envelope_key_without_active_fallback() {
+    use crate::factor::{
+        keyring::{Configuration, Keyring, Reference},
+        service::{Purpose, Verification, verify},
+    };
+    use crate::store::Factors;
+    let f = fx();
+    let user = f.user(1).await;
+    f.clock.set(Timestamp(59_000));
+    let seed = crate::factor::totp::Seed::from_bytes(b"12345678901234567890").unwrap();
+    let old = test_totp_keyring();
+    let envelope = old
+        .active()
+        .seal(&seed, user.user_id.as_str(), "retained", &f.rng)
+        .unwrap();
+    f.store
+        .create_totp_pending("retained".into(), user.user_id.clone(), envelope, vec![])
+        .await
+        .unwrap();
+    let mut config = Configuration {
+        active_key: "new".into(),
+        keys: vec![
+            Reference {
+                id: "key-1".into(),
+                key_env: "OLD_KEY".into(),
+            },
+            Reference {
+                id: "new".into(),
+                key_env: "NEW_KEY".into(),
+            },
+        ],
+    };
+    let env = |name: &str| {
+        Some(data_encoding::BASE64URL_NOPAD.encode(&[if name == "OLD_KEY" { 7 } else { 8 }; 32]))
+    };
+    let rotated = Keyring::compile(&config, &env).unwrap();
+    config.keys.remove(0);
+    let retired = Keyring::compile(&config, &env).unwrap();
+    let code = Secret::new("287082".into());
+    let input = || Verification {
+        enrollment: "retained",
+        user: &user.user_id,
+        code: &code,
+        purpose: Purpose::ConfirmEnrollment,
+    };
+    assert!(
+        verify(&f.store, &retired, f.clock.as_ref(), input(), vec![])
+            .await
+            .is_err()
+    );
+    assert!(
+        !f.store
+            .totp_enrollment("retained", &user.user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .active
+    );
+    assert!(
+        verify(&f.store, &rotated, f.clock.as_ref(), input(), vec![])
+            .await
+            .is_ok()
+    );
 }

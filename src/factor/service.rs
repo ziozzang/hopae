@@ -1,6 +1,6 @@
 //! Native TOTP verification followed by revision-fenced owner consumption.
 //! This receipt is not a session assertion; challenge/session atomicity remains required.
-use super::{seed_cipher::Key, totp::Parameters};
+use super::{keyring::Keyring, totp::Parameters};
 use crate::{
     crypto::{Clock, Secret, Timestamp},
     event::types::Event,
@@ -56,7 +56,7 @@ pub struct Verification<'a> {
 /// Trusted service call, after HTTP admission/recent-authentication/challenge checks.
 pub async fn verify(
     store: &dyn Factors,
-    key: &Key,
+    keys: &Keyring,
     clock: &dyn Clock,
     input: Verification<'_>,
     events: Vec<Event>,
@@ -70,6 +70,7 @@ pub async fn verify(
     if row.active != expected_active {
         return Err(Error::Refused);
     }
+    let key = keys.for_envelope(&row.envelope).ok_or(Error::Refused)?;
     let seed = key
         .open(&row.envelope, input.user.as_str(), input.enrollment)
         .map_err(|_| Error::Refused)?;

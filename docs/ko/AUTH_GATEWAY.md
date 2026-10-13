@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=14 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=15 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -319,3 +319,18 @@ Active 키·환경·네트워크로 fallback하지 않습니다. 테스트 2건�
 정책·등록 HTTP 흐름·내부 MFA 검증은 남아 있습니다. 운영자는 충분히 무작위인
 키를 생성해야 하며 구조 검사가 entropy를 증명하지 않습니다. 재암호화 전에
 참조 키를 폐기하면 해당 요인이 비활성화됩니다.
+
+## 요인 서비스의 keyring 연결
+
+등록 준비는 컴파일한 keyring을 받아 active 키로만 암호화합니다. 네이티브
+TOTP 검증은 소유 상태를 한 번 조회하고 envelope가 지목한 정확한 유지 키를
+선택해 복호화합니다. 누락·폐기 키는 counter·등록 변경 전에 동일하게 거부하며
+호출자의 단일 키 선택·active 키 재시도·환경 조회·네트워크 fetch를 하지 않습니다.
+Keyring은 서비스 호출 동안 불변입니다.
+
+실제 저장소 테스트는 active 키 교체 후 유지 키 검증, pending 상태를 바꾸지 않는
+폐기 거부, 등록 준비·동시 single-use 검증을 확인합니다. Root 설정·앱 시작 로딩,
+키 폐기에 대한 정책 publication fencing, envelope 재암호화, 등록·step-up
+HTTP·UI와 challenge·세션 원자 완료는 미완성입니다. 현재 내부
+`owner-v5-d876909` 이미지에는 이번 소스 변경이 없습니다. 키 교체 테스트가
+운영 키 관리나 전체 MFA 수명주기를 완성했다는 의미는 아닙니다.

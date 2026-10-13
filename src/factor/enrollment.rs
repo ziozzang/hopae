@@ -1,6 +1,6 @@
 //! Enrollment preparation returns provisioning material only at creation.
 //! Recent authentication, HTTP disclosure controls and enrollment confirmation are caller responsibilities.
-use super::{seed_cipher::Key, totp::Seed};
+use super::{keyring::Keyring, totp::Seed};
 use crate::{
     crypto::Rng,
     event::types::Event,
@@ -52,7 +52,7 @@ pub struct Request<'a> {
 /// No existing seed/envelope is exposed; failure drops provisioning material.
 pub async fn prepare(
     store: &dyn Factors,
-    key: &Key,
+    keys: &Keyring,
     rng: &dyn Rng,
     request: Request<'_>,
     events: Vec<Event>,
@@ -64,7 +64,8 @@ pub async fn prepare(
     rng.fill(random.as_mut());
     let seed = Seed::from_bytes(random.as_ref()).ok_or(Error::Invalid)?;
     let provisioning = uri(&seed, request.issuer, request.account)?;
-    let envelope = key
+    let envelope = keys
+        .active()
         .seal(&seed, request.user.as_str(), request.id, rng)
         .map_err(|_| Error::Invalid)?;
     store
