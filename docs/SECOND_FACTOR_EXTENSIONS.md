@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -277,3 +277,27 @@ loopback candidate with a private owner-state copy and an owned first-factor
 session fixture. It does not authenticate a real Google user or measure TLS
 ingress behavior: CDP forwards the HTTPS browser origins to the candidate HTTP
 listeners, while native mTLS is qualified separately.
+
+## Internal runtime and Chromium evidence
+
+The corrected static candidate now passes actual Chromium enrollment, browser
+step-up/redirect/handoff and old-handle refusal. Its private state copy contains
+an owned first-factor session fixture; this does not prove real Google login.
+The proxy shim preserves separate Set-Cookie headers, browser Origin and fetch
+metadata, and never follows the application's 302 on behalf of the browser.
+The screenshot is captured before code entry and contains no setup seed.
+
+The internally deployed image is now `0.0.2-native-mfa-791719a` at schema v5.
+An optional `v1` TOTP keyring uses a newly generated private environment key.
+Existing provider selection and service assurance rules are unchanged; no test
+users/sessions were inserted into operational state. Before rollout, the image
+booted a consistent owner-state copy and passed HTTP/pooled-mTLS HOP1 service
+acceptance/guest/invalid-credential checks. After rollout, live service matrix
+rights/denials/credential stripping, module menus, independent Pumgye matrix,
+SSO entry/logout/origin isolation and native transport regressions passed.
+Consistent owner/delegation databases and original image/configuration/secret
+files are retained privately for rollback. Earlier deployed-image notes describe
+prior runtime stages. Production-user MFA, recovery, account/distributed
+admission, key retirement/rewrapping, navigation and full-stack performance are
+still unqualified or unfinished; do not treat optional runtime activation as
+completion of the authentication gateway or the full zero-trust backbone.

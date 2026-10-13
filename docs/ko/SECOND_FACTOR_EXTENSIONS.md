@@ -1,6 +1,6 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=6 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=7 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
@@ -246,3 +246,24 @@ origin 허용을 검사합니다. `tools/qualify_browser_totp.py`는 비공개 �
 브라우저의 폼 Origin·쿠키 교체·CSP 이동·핸드오프를 검증합니다. 실제 Google
 사용자 인증이나 TLS ingress 검증은 아니며 CDP가 HTTPS 브라우저 origin을
 후보 HTTP 리스너로 전달합니다. 네이티브 mTLS는 별도로 검증합니다.
+
+## 내부 런타임과 Chromium 증거
+
+수정한 정적 후보가 실제 Chromium 등록·브라우저 단계 상승과 이동·핸드오프·
+이전 핸들 거절을 통과했습니다. 비공개 상태 복사본에 자체 1차 인증 세션
+fixture를 사용했으며 실제 Google 로그인 증거는 아닙니다. 중계 shim은 각각의
+Set-Cookie·브라우저 Origin·fetch 메타데이터를 유지하고 브라우저 대신 앱의
+302를 따라가지 않습니다. 스크린샷은 코드 입력 전이며 설정 시드를 포함하지 않습니다.
+
+내부 배포 이미지는 이제 `0.0.2-native-mfa-791719a`, schema v5입니다.
+선택적 `v1` TOTP keyring에 새로 생성한 비공개 환경 키를 사용합니다.
+기존 제공자 선택·서비스 인증등급 규칙은 유지하며 운영 상태에 테스트 사용자·
+세션을 삽입하지 않았습니다. 배포 전 일관된 소유자 상태 복사본에서 부팅과
+HTTP·풀링 mTLS HOP1의 서비스 허용·guest·잘못된 자격 거절을 통과했습니다.
+배포 후 실제 서비스 매트릭스 권한·거절·자격 제거, 모듈 메뉴·독립 품계
+매트릭스, SSO 진입·로그아웃·origin 격리·네이티브 전송 회귀가 통과했습니다.
+일관된 소유자·위임 DB와 기존 이미지·설정·비밀 파일을 비공개 롤백 자료로
+보관합니다. 이전 배포 이미지 기록은 과거 런타임 단계입니다. 운영 사용자
+MFA·복구·계정 및 분산 시도 제한·키 폐기와 재암호화·메뉴·전체 스택 성능은
+여전히 미검증·미완료이며 선택적 런타임 활성화로 전체 인증 게이트웨이나
+제로트러스트 백본의 완료를 주장해서는 안 됩니다.
