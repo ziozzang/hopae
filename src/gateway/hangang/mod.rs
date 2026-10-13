@@ -10,6 +10,7 @@ use crate::verify::types::{Decision, VerifyInput};
 
 mod parse;
 mod render;
+pub mod service_identity;
 #[cfg(test)]
 mod tests;
 #[cfg(any(test, feature = "test-hooks"))]

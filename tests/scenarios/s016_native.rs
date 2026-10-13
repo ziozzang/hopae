@@ -393,3 +393,111 @@ fn native_remote_configuration_requires_complete_mtls_and_authenticated_callers(
     cfg.listen.native_gateway = None;
     assert!(cfg.validate().is_err());
 }
+
+#[tokio::test]
+async fn service_api_credential_http_native_parity_and_no_human_assurance() {
+    let fx = Fx::new("m1-basic");
+    let config:hopae::auth_gateway::runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"services","api_keys":[{"token_env":"OWNED_KEY","subject":"scheduler"}],"networks":["203.0.113.0/24"],"session_fallback":true}]})).unwrap();
+    let credential = "owned-service-credential-at-least-thirty-two-bytes";
+    let runtime =
+        hopae::auth_gateway::runtime::Runtime::compile(&config, &|_| Some(credential.into()))
+            .unwrap();
+    let keys = Arc::new(CallerKeys::new(
+        Some(Secret::new("native-test-key".into())),
+        None,
+        false,
+    ));
+    let state = GatewayState::new(
+        GatewayConfig::from_config(&fx.cfg),
+        fx.ctx.clone(),
+        keys.clone(),
+        32,
+        None,
+        None,
+    )
+    .with_authentication_gateway(runtime)
+    .unwrap();
+    let router = router(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (tx, rx) = watch::channel(false);
+    let task = tokio::spawn(native_gateway::serve(listener, router.clone(), keys, rx));
+    let mut socket = TcpStream::connect(address).await.unwrap();
+    assert_eq!(exchange(&mut socket, 0, b"native-test-key").await.1, [1]);
+    let user = fx.user("mixed@example.test", Some("mixed"), None).await;
+    let session = fx.session(&user).await;
+    let handle = fx.handle(&session, "app.example.test").await;
+    for (id, valid) in [(1, true), (2, false)] {
+        let mut headers = context("/private");
+        headers.push((
+            "cookie".into(),
+            format!("__Host-hopae={}", handle.expose()).into_bytes(),
+        ));
+        headers.push((
+            "authorization".into(),
+            format!(
+                "Bearer {}",
+                if valid {
+                    credential
+                } else {
+                    "invalid-service-credential-thirty-two-bytes"
+                }
+            )
+            .into_bytes(),
+        ));
+        let mut request = Request::builder()
+            .uri("/_hopae/verify")
+            .body(Body::empty())
+            .unwrap();
+        for (name, value) in &headers {
+            request.headers_mut().append(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_bytes(value).unwrap(),
+            );
+        }
+        request
+            .headers_mut()
+            .insert("x-hopae-gateway-key", "native-test-key".parse().unwrap());
+        let http = router.clone().oneshot(request).await.unwrap();
+        let expected = http.status().as_u16();
+        assert_eq!(expected, if valid { 200 } else { 401 });
+        let (_, payload) =
+            exchange(&mut socket, id, &wire::encode_request(&headers).unwrap()).await;
+        let native = wire::decode_reply(&payload).unwrap();
+        assert_eq!(native.status, expected);
+        if valid {
+            assert_eq!(http.headers()["x-hopae-aal"], "0");
+            assert_eq!(http.headers()["x-hopae-principal-kind"], "service");
+            assert!(
+                http.headers()["x-forwarded-user"]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("s_")
+            );
+            assert!(http.headers().get("x-forwarded-email").is_none());
+            assert!(
+                native
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "x-hopae-aal" && value == b"0")
+            );
+        }
+    }
+    // Only absence of the API credential selects the explicitly enabled session fallback.
+    let mut headers = context("/private");
+    headers.push((
+        "cookie".into(),
+        format!("__Host-hopae={}", handle.expose()).into_bytes(),
+    ));
+    let (_, payload) = exchange(&mut socket, 3, &wire::encode_request(&headers).unwrap()).await;
+    let human = wire::decode_reply(&payload).unwrap();
+    assert_eq!(human.status, 200);
+    assert!(
+        human
+            .headers
+            .iter()
+            .any(|(name, value)| name == "x-hopae-aal" && value == b"1")
+    );
+    tx.send(true).unwrap();
+    task.await.unwrap().unwrap();
+}

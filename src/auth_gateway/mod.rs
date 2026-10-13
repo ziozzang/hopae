@@ -1,6 +1,7 @@
 //! Authentication gateway contracts. Connectors and Hangang wiring are implemented separately.
 //! Evidence construction stays crate-private: request claims cannot authenticate themselves.
 pub mod breaker;
+pub mod runtime;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrincipalKind {
