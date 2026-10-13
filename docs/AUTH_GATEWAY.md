@@ -651,3 +651,15 @@ under the existing verification-only RSA exception and allowed rustls-pemfile
 unmaintained warning; this is not an unrestricted clean audit. Signed delegated
 projection GET/publish tests include replay, stale revision and native grant
 revocation. The immutable v0.0.3 release assets and deployed images are unchanged.
+
+## Console package 0.1.5 projection administration
+
+The Hopae Hangang package adds a Credential projection tab with a text-only
+service/audience/resource/action/AAL/credential-reference summary and JSON editor.
+Viewers cannot edit or publish. Save assigns the next configuration revision while
+submitting the observed owner revision; conflicts retain editor contents. Explicit
+null disables all plans. The manifest declares reference-only GET and mutation POST
+publication routes. Actual Chromium tests cover EN/admin and KO/viewer, hostile
+text, invalid JSON without publication, conflict retention, successful revision
+assignment/disable and the viewer guard; the existing profile view also passes.
+Package source tests do not prove production deployment or credential issuance.

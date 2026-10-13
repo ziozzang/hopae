@@ -1,11 +1,11 @@
 {
   "id": "hopae",
   "name": "Hopae",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "api_version": 1,
   "entry": "index.js",
   "assets": {
-    "index.js": "ac1c51f08f3ebac5fd901e1b41523c94446f8f69d5edc115dd43cb291423969c",
+    "index.js": "346ba9f7f7a8fb0391c85e3615f6962d0f42b2c40945e1d3f8768b15343fa2e8",
     "style.css": "5a557146b34acf8c7a9f8b33f47dea8cab6f8005eaebade246df1d7047f044ef"
   },
   "routes": [
@@ -26,6 +26,16 @@
     },
     {
       "path": "authentication/profiles/publish",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "authentication/projections",
+      "method": "GET",
+      "mutation": false
+    },
+    {
+      "path": "authentication/projections/publish",
       "method": "POST",
       "mutation": true
     },

@@ -9,7 +9,7 @@ export async function mount(host) {
   const logout=node('a',label('Sign out of Hopae','Hopae 로그아웃'));logout.href='/_hopae/logout?return=%2Fui%2F';logout.className='button button-quiet';logout.hidden=true;
   const tabs=node('div',undefined,'hopae-toolbar'), notice=node('p',undefined,'muted'), error=node('p',undefined,'error'), content=node('div'), pager=node('div',undefined,'hopae-toolbar');
   const previous=node('button',label('Previous','이전')), more=node('button',label('Next','다음')), refresh=node('button',label('Refresh','새로고침'));
-  for(const [key,en,kr] of [['status','Status','상태'],['users','Users','사용자'],['sessions','Sessions','세션'],['events','Events','이벤트'],['profiles','Authentication profiles','인증 프로필']]){
+  for(const [key,en,kr] of [['status','Status','상태'],['users','Users','사용자'],['sessions','Sessions','세션'],['events','Events','이벤트'],['profiles','Authentication profiles','인증 프로필'],['projections','Credential projection','자격 변환']]){
     const b=node('button',label(en,kr));b.dataset.tab=key;b.onclick=()=>{if(busy)return;view=key;cursor=null;history=[];load();};tabs.append(b);
   }
   refresh.onclick=()=>load();tabs.append(refresh);
@@ -42,10 +42,41 @@ export async function mount(host) {
     if(busy||disposed||paused)return;busy=true;refresh.disabled=true;error.textContent='';
     try{
       const {data:me}=await host.api('me');if(disposed||paused)return;canWrite=me.role==='admin';login.hidden=true;logout.hidden=false;
-      const {data}=await host.api(view==='profiles'?'authentication/profiles':view==='status'?'status':view+'/query',(view==='status'||view==='profiles')?{}:{method:'POST',json:{cursor,limit:50}});
+      const {data}=await host.api(view==='projections'?'authentication/projections':view==='profiles'?'authentication/profiles':view==='status'?'status':view+'/query',(view==='status'||view==='profiles'||view==='projections')?{}:{method:'POST',json:{cursor,limit:50}});
       if(disposed||paused)return;
       content.replaceChildren();
-      if(view==='profiles'){
+      if(view==='projections'){
+        const summary=node('div');
+        const summarize=(configuration)=>{
+          summary.replaceChildren();
+          if(configuration==null){summary.append(node('p',label('Credential projection is disabled.','자격 변환이 비활성 상태입니다.')));return;}
+          if(!Array.isArray(configuration.plans)){summary.append(node('p',label('No preview; the server validates the configuration.','미리보기가 없습니다. 서버가 설정을 검증합니다.')));return;}
+          const table=node('table'),head=node('tr'),body=node('tbody');
+          for(const title of [label('Service','서비스'),label('Audience','대상'),label('Resource','자원'),label('Action','행위'),label('Minimum AAL','최소 AAL'),label('Credential','자격 방식'),label('Reference','참조')])head.append(node('th',title));
+          const thead=node('thead');thead.append(head);table.append(thead);
+          for(const plan of configuration.plans){
+            if(!plan||typeof plan!=='object')continue;
+            const row=node('tr');
+            for(const value of [plan.service,plan.audience,plan.resource,plan.action,plan.minimum_aal,plan.credential?.type,plan.credential?.secret_ref])row.append(node('td',show(value)));
+            body.append(row);
+          }table.append(body);summary.append(table);
+        };
+        const editor=node('textarea');editor.rows=20;editor.maxLength=65536;editor.setAttribute('aria-label',label('Credential projection configuration','자격 변환 설정'));editor.value=JSON.stringify(data.configuration??null,null,2);editor.disabled=!canWrite;
+        summarize(data.configuration??null);
+        editor.oninput=()=>{try{summarize(JSON.parse(editor.value));}catch{summary.replaceChildren(node('p',label('Invalid JSON; preview unavailable.','JSON 오류로 미리보기를 표시할 수 없습니다.')));}};
+        const save=node('button',label('Save projection plans','변환 설정 저장'));save.disabled=!canWrite;
+        save.onclick=async()=>{if(busy||disposed||paused||!canWrite)return;busy=true;save.disabled=true;refresh.disabled=true;error.textContent='';let saved=false;
+          try{
+            const configuration=JSON.parse(editor.value);
+            if(configuration&&typeof configuration==='object'&&!Array.isArray(configuration))configuration.revision=data.revision+1;
+            await host.api('authentication/projections/publish',{method:'POST',json:{revision:data.revision,configuration}});saved=true;
+          }catch(e){if(!disposed&&!paused)error.textContent=e.message;}
+          finally{busy=false;if(!disposed&&!paused){save.disabled=!canWrite;refresh.disabled=false;}}
+          if(saved&&!disposed&&!paused)await load();
+        };
+        content.append(node('p',label('Revision: ','Revision: ')+show(data.revision)),node('p',label('Configure service credential conversion using declared references. Enter no passwords or token values. Set null to disable; saving replaces all plans.','선언된 참조로 서비스 자격 변환을 설정합니다. 비밀번호·토큰 값을 입력하지 마세요. null은 비활성화이며 저장하면 전체 설정을 교체합니다.')),node('p',label('Only declared credential references are accepted. Assurance requirements cannot be lowered. Saving these settings alone does not enable credential delivery.','등록된 자격 참조만 사용할 수 있고 최소 인증 수준을 낮출 수 없습니다. 설정 저장만으로 자격 전달이 활성화되지는 않습니다.')),summary,editor,save);next=null;
+      }
+      else if(view==='profiles'){
         const help=node('p',label('Edit service authentication profiles. Use declared credential references; enter no passwords or token values. Saving replaces the complete profile configuration.','서비스 인증 프로필을 편집합니다. 선언된 자격 정보 참조를 사용하고 비밀번호·토큰 값을 입력하지 마세요. 저장하면 프로필 설정 전체를 교체합니다.'));
         const routing=node('p',label('Active profiles come from the database; startup JSON only bootstraps an empty authority. Mixed native keys and relay require relay_token_prefix (for example partner:), which is removed once before forwarding. Keep it when retiring keys. Use a distinct relay issuer. Lua conditions restrict verified identities and grant no permissions.','활성 프로필은 DB가 소유하며 시작 JSON은 비어 있는 authority만 초기화합니다. 자체 key·relay 혼합에는 relay_token_prefix(예: partner:)가 필요하며 전달 시 하나를 제거합니다. key 회수 후에도 유지하고 다른 relay issuer를 사용하세요. Lua 조건은 검증된 신원을 제한하며 권한을 부여하지 않습니다.'));
         const summary=node('div');
@@ -88,7 +119,7 @@ export async function mount(host) {
       }
       else {content.append(table(Array.isArray(data.items)?data.items:[]));next=data.next_cursor??null;if(!data.items?.length)content.append(node('p',label('No records','조회 결과 없음')));}
       for(const tab of tabs.querySelectorAll('[data-tab]'))tab.classList.toggle('button-primary',tab.dataset.tab===view);
-      pager.hidden=view==='status'||view==='profiles';previous.disabled=!history.length;more.disabled=!next;
+      pager.hidden=view==='status'||view==='profiles'||view==='projections';previous.disabled=!history.length;more.disabled=!next;
     }catch(e){if(!disposed&&!paused){canWrite=false;login.hidden=false;content.querySelectorAll('button').forEach(b=>b.disabled=true);error.textContent=e.message;}}finally{busy=false;refresh.disabled=false;}
   }
   const timer=setInterval(()=>{if(view==='status')load();},30000);host.signal.addEventListener('abort',()=>{disposed=true;clearInterval(timer);root.replaceChildren();},{once:true});
