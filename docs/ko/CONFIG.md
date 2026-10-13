@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=25 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=26 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -325,7 +325,9 @@ verifier 자격·CA 내용·클라이언트는 상태 생성·마이그레이션
 원자적 소유자 완료를 사용합니다.
 
 선택적인 `eligibility_lua` 텍스트 스크립트는 네이티브 소유자 문맥으로 factor 사용을
-제한합니다. 미릴리스 소스 기능이며 태그 0.0.3의 artifact·배포에는 포함되지 않습니다.
+제한합니다. 미릴리스 소스 기능이며 태그 0.0.3의 artifact에는 포함되지 않습니다.
+내부 `0.0.3-lua-1341bae` 후보는 런타임을 포함하지만 운영 외부 factor·스크립트는
+설정하지 않았습니다.
 예를 들어 `return context.service == 'orders'`는 해당 서비스에서만
 검증을 진행합니다. 환경에는 서버 소유 식별자인 `context.service`, `context.connector`,
 `context.subject`만 있으며 브라우저 주장을 사용하지 않습니다. 표준 라이브러리·자격·

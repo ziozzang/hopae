@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 16 -->
+<!-- doc-rev: 17 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -12,7 +12,12 @@ boolean gate cannot create authentication evidence or replace HTTPS verification
 and atomic owner completion. Source/heap/instruction/time limits apply, and the
 script participates in revisioned authority bindings. General Lua connector
 orchestration, first-factor integration and credential translation remain open.
-The tagged 0.0.3 artifacts and internal deployment do not include this new gate.
+Tagged 0.0.3 artifacts do not include this new gate. The internal
+`0.0.3-lua-1341bae` candidate includes the runtime with production external
+factors/scripts unconfigured. Its optimized Linux private candidate passes actual
+Chromium Lua-conditioned external MFA/TOTP and HTTP/pooled mTLS parity;
+three native macOS Lua/HTTPS tests pass. Live internal gateway/console regressions
+pass with existing configuration and keys preserved and v6 rollback backups retained.
 
 Native TOTP enrollment and confirmation exist, including encrypted seeds,
 owner authorization and durable counter fencing. The profile uses six digits,

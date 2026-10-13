@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 25 -->
+<!-- doc-rev: 26 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -335,7 +335,9 @@ a configured TOTP keyring or a nonempty external registry enables document step-
 API requests still fail closed without elevated evidence. External factors use
 the native HTTPS/CSRF/browser-bound response form and atomic owner completion.
 An optional `eligibility_lua` text script can restrict a factor by native owner
-context in unreleased source (not in tagged 0.0.3 artifacts or deployment).
+context in unreleased source (not in tagged 0.0.3 artifacts). The internal
+`0.0.3-lua-1341bae` candidate includes the runtime; production external factors
+and scripts remain unconfigured.
 For example, `return context.service == 'orders'` allows verification
 only for that service. The environment contains only `context.service`,
 `context.connector` and `context.subject`; these are server-owned identifiers,

@@ -1,6 +1,6 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=16 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=17 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
@@ -11,7 +11,11 @@
 boolean gate는 인증 근거를 만들거나 HTTPS 검증·소유자의 원자적 완료를 대체하지
 못합니다. 소스·heap·명령 수·시간을 제한하며 스크립트는 버전 authority binding에
 포함됩니다. 범용 커넥터 조합·1차 인증 연결·자격 변환은 후속입니다. 태그 0.0.3의
-artifact와 내부 배포에는 이 새 gate가 포함되지 않습니다.
+artifact에는 이 새 gate가 포함되지 않습니다. 내부 `0.0.3-lua-1341bae` 후보는
+런타임을 포함하지만 운영 외부 factor·스크립트는 설정하지 않았습니다. 최적화 Linux
+비공개 후보의 실제 Chromium Lua 조건 외부 MFA·TOTP 및 HTTP·지속 mTLS 공통 동작이
+통과했고 macOS 네이티브 Lua·HTTPS 테스트 3건도 통과했습니다. 기존 설정·키와
+v6 복구 백업을 유지하며 내부 라이브 게이트웨이·콘솔 회귀도 통과했습니다.
 
 네이티브 TOTP 등록과 확인, 시드 암호화, 소유자 인가 및 영속 카운터 제어가
 구현되어 있습니다. 6자리, SHA-1, 30초 주기를 사용합니다. 수동 등록은
