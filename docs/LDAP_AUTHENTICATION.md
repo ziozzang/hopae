@@ -1,0 +1,83 @@
+# LDAP authentication provider
+
+<!-- doc-rev: 1 -->
+
+[Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
+
+## Status and integration point
+
+Proposed implementation contract, not an enabled provider. The current Provider
+trait models OAuth authorization redirects and callbacks, and Registry instantiates
+OIDC only. LDAP must use a credential submission adapter into the same transaction,
+identity resolution, session, handoff, reauthentication and revocation services.
+It must not emulate an OAuth callback or forward passwords through HOP1/API relay.
+Add an explicit direct-credential provider interface alongside the redirect interface;
+the chooser can display both without requiring LDAP to implement OAuth code exchange.
+
+## Authentication flow
+
+The browser selects a configured provider and submits username/password only to
+Hopae's HTTPS portal. Validate the transaction, browser binding, CSRF and return
+scope first. Reject empty username/password before any directory operation. Apply
+existing per-IP/account throttling, a bounded connector semaphore and one total
+lookup/TLS/bind deadline. Never retain, log, return or queue password material for
+asynchronous retry. Directory outages are unavailable, not invalid credentials,
+and cannot fall back to another provider without a new explicit login choice.
+
+A read-only directory identity performs a bounded subtree search with escaped
+filter values, fixed base DN and configured attributes. Require exactly one entry;
+zero matches, multiple matches and referrals cannot authenticate. Read an immutable
+configured identity attribute such as entryUUID or objectGUID for the namespaced
+subject; do not use the mutable DN, username or email as the permanent principal.
+DN renames preserve identity and a recreated username with a different immutable
+identifier does not inherit the former user's permissions.
+
+Verify the password by binding as the found DN on a separate TLS connection. Never
+reuse a user-bound connection across users or return it to the lookup pool. A failed
+bind, cancellation or protocol error destroys that connection. Successful lookup
+alone is not authentication. Require confidential authenticated TLS before either
+service credentials or user credentials are sent: explicit CA/name verification,
+no certificate bypass and no downgrade from required StartTLS to plaintext. StartTLS
+and LDAPS may be separate explicit configured modes, never opportunistic fallback.
+
+## Identity, session and mixed providers
+
+Successful bind produces a Human identity in the configured directory namespace
+with AAL 1 and a local authentication timestamp. It creates the ordinary Hopae
+session/handoff through the existing transaction service. LDAP does not claim an
+OIDC provider auth_time or MFA. Fresh reauthentication requires a new password bind;
+a cached search result or existing Hopae session cannot satisfy it. Email claims
+are non-authoritative by default. Account linking to OIDC/local/API identities
+requires a separate verified relationship and cannot be inferred from matching email.
+
+Pumgye owns service permissions; LDAP groups are evidence and require explicit
+mapping, not automatic administrator grants. Hopae combines providers, while
+Hangang continues to enforce service audience and rights using native transport.
+Directory-disabled/deleted identities must revoke local sessions according to a
+bounded reconciliation lease. Polling interval, webhook availability and unreachable
+directory behavior must be explicit; implementation cannot promise immediate remote
+revocation without a directory change feed. Password changes require an independently
+verified lifecycle signal or periodic session revalidation.
+
+## Configuration and release gates
+
+Configuration contains endpoint, TLS mode and CA/server name, base DN, immutable
+subject attribute, escaped username filter template, service-bind secret references,
+attribute allowlist, time/result limits and revocation lease. Hopae owns their DB
+publication; delegated administrators cannot introduce undeclared secret references
+or arbitrary private endpoints. Directory secrets never enter console responses.
+
+Before enabling kind=ldap, qualify the complete chooser/form/session/handoff flow
+against an owned OpenLDAP server with generated CA. Test empty passwords, bad name
+and missing trust roots, plaintext downgrade, invalid credentials, duplicate search
+results, referrals, filter/DN metacharacters, cancellation, cross-user connection
+reuse, username recreation, disabled accounts, password change, service permission
+absence, cross-provider linking and circuit-open recovery. Run actual Hangang/Hopae
+requests and qualify concurrent latency separately from local directory throughput.
+No production directory is assumed to be available for this qualification.
+
+## References
+
+- [OpenLDAP security considerations](https://www.openldap.org/doc/admin26/security.html): empty-password simple bind can be unauthenticated access.
+- [OpenLDAP TLS configuration](https://www.openldap.org/doc/admin26/tls.html): certificate verification and TLS modes.
+- [RFC 4513](https://datatracker.ietf.org/doc/html/rfc4513): LDAP authentication and TLS security mechanisms.

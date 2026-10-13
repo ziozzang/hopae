@@ -1,6 +1,6 @@
 # Documentation
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [한국어 목차](ko/README.md)
 
@@ -33,3 +33,5 @@ milestones land. The [roadmap](ROADMAP.md) describes the intended shape.
 - [Native Hangang integration](HANGANG_NATIVE.md) — HOP1 verification and delegated console.
 
 - [Authentication profile publication](AUTH_PROFILE_PUBLICATION.md) — proposed durable ownership and snapshot publication contract.
+
+- [LDAP authentication](LDAP_AUTHENTICATION.md) — proposed direct-credential provider and lifecycle contract.
