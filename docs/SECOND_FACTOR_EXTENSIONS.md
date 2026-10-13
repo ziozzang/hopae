@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 13 -->
+<!-- doc-rev: 14 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -497,3 +497,31 @@ browser client with real cookies and process boundaries, not Chromium or an
 operational organization's MFA account. Actual browser/fleet/performance rollout,
 service-specific factor eligibility, enrollment/recovery, account admission and
 Lua remain required qualification and implementation work. Internal v5 is unchanged.
+
+## Actual Chromium external MFA qualification — 2026-10-14
+
+The reusable browser tool accepts an optional configured factor identifier:
+`python3 tools/qualify_browser_totp.py PRIVATE_CANDIDATE_DIRECTORY owned-organization`.
+The external mode requires a unique configured loopback HTTPS verifier and its
+CA inside the private candidate directory. Both v5/v6 candidate prefixes are
+accepted; the independent private database/loopback-listener guards remain.
+Without a factor argument the tool qualifies TOTP, explicitly selecting it when
+an external chooser is present.
+
+Actual Chromium now passes external selection, response form submission to the
+owned HTTPS verifier, elevated cross-origin handoff and previous-handle refusal.
+The same schema-v6 candidate also passes encrypted TOTP enrollment, explicit
+TOTP choice alongside the external method, elevated handoff and old-handle
+refusal. Screenshots before response/code entry and sanitized phase reports are
+retained privately. The candidate was an online owner/delegation state copy;
+its first-factor sessions are owned fixtures, not real Google login. Browser
+HTTPS origins are mapped to loopback portal/gateway HTTP through CDP interception,
+retaining browser Origin/cookies/CSP and separate Set-Cookie headers. The external
+verifier TLS exchange is real. This does not qualify public portal TLS or fleet
+performance. The current candidate binary is a development build, not a release
+artifact. Candidate processes stopped and its copied environment file was removed.
+
+The live runtime still has schema v5 and its existing native-MFA image. No fixture
+user/session entered production. Release-build/migration/rollback qualification,
+operational rollout, organization/provider accounts, per-service eligibility,
+enrollment/recovery/account admission and Lua remain unfinished.

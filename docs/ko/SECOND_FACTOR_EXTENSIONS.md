@@ -1,6 +1,6 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=13 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=14 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
@@ -426,3 +426,25 @@ handoff·보호 요청과 이전 handle 거부를 검증합니다. 시간 테스
 자격 거부를 다룹니다. 실제 cookie·프로세스 경계의 HTTP 브라우저 클라이언트이며 Chromium이나
 운영 조직 MFA 계정 검증은 아닙니다. 실제 브라우저·fleet·성능·운영, 서비스별 factor 자격,
 등록·복구·계정 유입 제한·Lua는 후속입니다. 내부 v5 이미지는 유지합니다.
+
+## 실제 Chromium 외부 MFA 검증 — 2026-10-14
+
+재사용 브라우저 도구는 선택적인 설정 factor 식별자를 받습니다.
+`python3 tools/qualify_browser_totp.py PRIVATE_CANDIDATE_DIRECTORY owned-organization`.
+외부 모드는 고유하게 설정된 loopback HTTPS verifier와 비공개 후보 디렉터리 내부 CA가
+필수입니다. v5·v6 후보 prefix를 지원하고 독립 비공개 DB·loopback 리스너 검사도 유지합니다.
+factor 인자가 없으면 외부 chooser가 있는 경우 TOTP를 명시적으로 선택해 검증합니다.
+
+실제 Chromium으로 외부 선택·응답 폼·자체 HTTPS verifier·높은 등급의 Origin간 handoff·
+이전 handle 거부를 통과했습니다. 같은 schema v6 후보에서 암호화된 TOTP 등록·외부 방법과
+함께 표시되는 TOTP 선택·높은 등급 handoff·이전 handle 거부도 통과했습니다. 응답·코드 입력
+전 screenshot과 비밀을 포함하지 않는 단계 보고서를 비공개로 유지합니다. 후보는 온라인
+owner·delegation 상태 복사본이며 1차 session은 자체 fixture라 실제 Google 로그인 검증은
+아닙니다. CDP로 HTTPS 브라우저 Origin을 loopback portal·gateway HTTP에 연결하고
+브라우저 Origin·cookie·CSP·분리된 Set-Cookie를 유지합니다. 외부 verifier TLS는 실제
+통신입니다. public portal TLS나 fleet 성능 검증은 아니며 후보 바이너리는 개발 빌드입니다.
+후보 프로세스를 종료하고 복사한 환경 파일도 제거했습니다.
+
+실제 운영은 기존 네이티브 MFA 이미지·schema v5를 유지하고 fixture 사용자·session을
+추가하지 않았습니다. 릴리스 빌드·마이그레이션·rollback 검증, 운영 반영, 조직·provider 계정,
+서비스별 자격, 등록·복구·계정 유입 제한·Lua는 후속입니다.

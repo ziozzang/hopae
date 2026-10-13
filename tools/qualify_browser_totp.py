@@ -8,7 +8,9 @@ from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 os.umask(0o077)
 root=pathlib.Path(sys.argv[1]).resolve()
-if not root.name.startswith('hopae-v5-candidate-') or not root.is_dir():raise SystemExit('private candidate directory required')
+external_factor=sys.argv[2] if len(sys.argv)==3 else None
+if len(sys.argv)>3:raise SystemExit('candidate directory and optional external factor required')
+if not root.name.startswith(('hopae-v5-candidate-','hopae-v6-candidate-')) or not root.is_dir():raise SystemExit('private candidate directory required')
 database=root/'state/hopae.db'
 if database.is_symlink() or database.resolve()!=database or database.stat().st_nlink!=1:raise SystemExit('independent candidate database required')
 if root.stat().st_mode & 0o077:raise SystemExit('candidate directory must be private')
@@ -19,6 +21,15 @@ for listener in ['portal','gateway']:
  if not ipaddress.ip_address(cfg['listen'][listener].rsplit(':',1)[0]).is_loopback:raise SystemExit('loopback candidate listeners required')
 portal_endpoint='http://'+cfg['listen']['portal'];gateway_endpoint='http://'+cfg['listen']['gateway']
 portal=urlparse(cfg['portal']['public_url']).hostname;app='mfa-canary.example.test';name=cfg.get('cookie',{}).get('name','__Host-hopae' if cfg.get('cookie',{}).get('secure',True) else 'hopae');caller=env[cfg['gateway']['caller_key_env']]
+if external_factor:
+ selected=[v for v in cfg.get('external_verifiers',[]) if v['factor']==external_factor]
+ if len(selected)!=1:raise SystemExit('unique configured external factor required')
+ verifier=selected[0];endpoint=urlparse(verifier['url'])
+ try:loopback=ipaddress.ip_address(endpoint.hostname).is_loopback
+ except ValueError:loopback=False
+ ca=pathlib.Path(verifier.get('ca','')).resolve()
+ if endpoint.scheme!='https' or not loopback or not ca.is_relative_to(root) or not ca.is_file():raise SystemExit('owned loopback HTTPS verifier and candidate CA required')
+
 def token(n):return base64.urlsafe_b64encode(os.urandom(n)).decode().rstrip('=')
 class NoRedirect(urllib.request.HTTPRedirectHandler):
  def redirect_request(self,*args,**kwargs):return None
@@ -82,18 +93,36 @@ async def main():
    except Exception as e:errors.append(type(e).__name__);(root/'browser-diagnostics.json').write_text(json.dumps({'requests':diagnostics,'error_types':errors}));await cdp.send('Fetch.failRequest',{'requestId':event['requestId'],'errorReason':'Failed'})
   cdp.on('Fetch.requestPaused',lambda event:asyncio.create_task(safe_paused(event)))
   await cdp.send('Fetch.enable',{'patterns':[{'urlPattern':'https://'+portal+'/*'},{'urlPattern':'https://'+app+'/*'}]})
-  await page.goto('https://'+portal+'/security/totp');await page.locator('form button').click();await page.wait_for_selector('#totp-key')
-  setup=await page.locator('#totp-key').input_value();seed=base64.b32decode(setup+'='*((8-len(setup)%8)%8));await page.locator('#totp-code').fill(code_for(seed));await page.locator('form button').click();await page.wait_for_url('**/security/totp/confirm')
-  assert await page.locator('#totp-key').count()==0;phases.append('actual_chromium_enrollment')
-  initial_counter=int(time.time())//30
-  while int(time.time())//30==initial_counter:await asyncio.sleep(.2)
-  await page.goto('https://'+app+'/protected');await page.wait_for_selector('#stepup-code')
-  assert urlparse(page.url).path=='/stepup';await page.screenshot(path=str(root/'stepup-before-code.png'))
-  await page.locator('#stepup-code').fill(code_for(seed));await page.locator('form button').click();await page.wait_for_url('https://'+app+'/protected')
-  assert await page.locator('h1').inner_text()=='Owned protected resource: AAL 2';phases.append('actual_chromium_stepup_and_handoff')
+  if external_factor:
+   await page.goto('https://'+app+'/protected')
+   await page.wait_for_url('**/stepup?txn=*')
+   links=page.locator('a[href^="/stepup/external?"]')
+   chosen=links.filter(has_text=external_factor)
+   assert await chosen.count()==1
+   await chosen.click();await page.wait_for_selector('#external-response')
+   assert urlparse(page.url).path=='/stepup/external'
+   await page.screenshot(path=str(root/'external-stepup-before-response.png'))
+   phases.append('actual_chromium_external_selection_and_form')
+   await page.locator('#external-response').fill('approve')
+   await page.locator('form button').click()
+   await page.wait_for_url('https://'+app+'/protected')
+   assert await page.locator('h1').inner_text()=='Owned protected resource: AAL 2'
+   phases.append('actual_chromium_external_mfa_and_handoff')
+  else:
+   await page.goto('https://'+portal+'/security/totp');await page.locator('form button').click();await page.wait_for_selector('#totp-key')
+   setup=await page.locator('#totp-key').input_value();seed=base64.b32decode(setup+'='*((8-len(setup)%8)%8));await page.locator('#totp-code').fill(code_for(seed));await page.locator('form button').click();await page.wait_for_url('**/security/totp/confirm')
+   assert await page.locator('#totp-key').count()==0;phases.append('actual_chromium_enrollment')
+   initial_counter=int(time.time())//30
+   while int(time.time())//30==initial_counter:await asyncio.sleep(.2)
+   await page.goto('https://'+app+'/protected');
+   if await page.locator('#stepup-code').count()==0:await page.locator('a[href*="factor=totp"]').click()
+   await page.wait_for_selector('#stepup-code')
+   assert urlparse(page.url).path=='/stepup';await page.screenshot(path=str(root/'stepup-before-code.png'))
+   await page.locator('#stepup-code').fill(code_for(seed));await page.locator('form button').click();await page.wait_for_url('https://'+app+'/protected')
+   assert await page.locator('h1').inner_text()=='Owned protected resource: AAL 2';phases.append('actual_chromium_stepup_and_handoff')
   status,hs,_=fetch(gateway_endpoint+'/_hopae/verify',headers={'x-hopae-contract':'1','x-hopae-gateway-key':caller,'x-forwarded-host':app,'x-forwarded-proto':'https','x-forwarded-port':'443','x-forwarded-for':'127.0.0.1','x-original-url':'https://'+app+'/protected','x-original-method':'GET','x-original-uri':'/protected','accept':'application/json','cookie':name+'='+app_handle,'user-agent':ua})
   assert status==401;phases.append('previous_handle_refused')
   assert not errors
-  (root/'browser-report.json').write_text(json.dumps({'phases':phases,'first_factor':'owned session fixture on private owner-state copy; not real Google authentication','actual_chromium':True,'production_changed':False},indent=2)+'\n')
+  (root/'browser-report.json').write_text(json.dumps({'phases':phases,'first_factor':'owned session fixture on private owner-state copy; not real Google authentication','actual_chromium':True,'factor_mode':'external' if external_factor else 'totp','production_changed':False},indent=2)+'\n')
   await browser.close()
 asyncio.run(main())
