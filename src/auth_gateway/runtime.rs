@@ -94,6 +94,10 @@ impl Config {
             }
             if let Some(relay) = &p.api_relay {
                 relay.validate()?;
+                ensure!(
+                    !mixed || relay.issuer != format!("hopae:{}", self.authority_id),
+                    "mixed relay must use a distinct issuer namespace"
+                );
             }
             total += p.api_keys.len();
             ensure!(total <= 4096, "authentication credential capacity exceeded");
@@ -481,6 +485,14 @@ mod tests {
         });
         assert!(cfg.validate().is_err());
         cfg.profiles[0].relay_token_prefix = Some("partner:".into());
+        let mut ambiguous = cfg.clone();
+        ambiguous.profiles[0].api_relay.as_mut().unwrap().issuer = "hopae:owned".into();
+        assert!(
+            Runtime::compile(&ambiguous, &|_| panic!(
+                "ambiguous namespace before secrets"
+            ))
+            .is_err()
+        );
         let runtime = Runtime::compile(&cfg, &|_| Some(KEY.into())).unwrap();
         let ip = "192.0.2.8".parse().unwrap();
         let local = runtime

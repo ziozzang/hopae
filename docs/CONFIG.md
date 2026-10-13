@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 29 -->
+<!-- doc-rev: 30 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -396,7 +396,9 @@ profiles and prevents retired native keys being forwarded. Prefixes require a
 relay; mixed profiles without a prefix refuse startup. Existing single-connector
 profiles with no prefix retain their behavior and serialized configuration.
 Issuer/realm/subject/service/kind remain connector-verified, AAL 0, and separately
-namespaced; the routing marker grants no identity. The complete presented mixed
+namespaced. A mixed relay cannot reuse the native `hopae:<authority_id>` issuer;
+linking identities requires explicit authorization mapping, not issuer collision.
+The routing marker grants no identity. The complete presented mixed
 credential is capped at 4096 printable ASCII bytes. This is deterministic service
 credential routing/unwrapping, not general connector composition or human identity
 translation. The current `0.0.3-service-lua-5125ff7` image and tagged 0.0.3 assets
