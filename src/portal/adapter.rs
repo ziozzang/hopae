@@ -21,7 +21,14 @@ use crate::session::switch::{AccountSummary, SwitchChoice as SvcChoice, SwitchOu
 use crate::store::{Directory, Events};
 
 /// `PortalServices` over `session::Service` and `provider::Registry`.
+struct TotpDeps {
+    store: Arc<dyn crate::store::Factors>,
+    keys: Arc<crate::factor::keyring::Keyring>,
+    clock: Arc<dyn crate::crypto::Clock>,
+    rng: Arc<dyn crate::crypto::Rng>,
+}
 pub struct Adapter {
+    totp: Option<TotpDeps>,
     svc: Service,
     registry: Arc<Registry>,
     directory: Arc<dyn Directory>,
@@ -31,6 +38,28 @@ pub struct Adapter {
 }
 
 impl Adapter {
+    pub fn with_totp(
+        mut self,
+        store: Arc<dyn crate::store::Factors>,
+        keys: Arc<crate::factor::keyring::Keyring>,
+        clock: Arc<dyn crate::crypto::Clock>,
+        rng: Arc<dyn crate::crypto::Rng>,
+    ) -> Self {
+        self.totp = Some(TotpDeps {
+            store,
+            keys,
+            clock,
+            rng,
+        });
+        self
+    }
+    fn totp_refusal() -> Failure {
+        Failure {
+            kind: FailKind::Forbidden,
+            reason: reasons::INVALID_STATE,
+        }
+    }
+
     pub fn new(
         svc: Service,
         registry: Arc<Registry>,
@@ -40,6 +69,7 @@ impl Adapter {
         readiness: Readiness,
     ) -> Adapter {
         Adapter {
+            totp: None,
             svc,
             registry,
             directory,
@@ -147,6 +177,92 @@ fn account_label(a: &AccountSummary) -> String {
 
 #[async_trait]
 impl PortalServices for Adapter {
+    fn totp_enabled(&self) -> bool {
+        self.totp.is_some()
+    }
+    async fn totp_access(&self, ctx: &RequestCtx, cookies: &Cookies) -> Result<bool, Failure> {
+        let deps = self.totp.as_ref().ok_or_else(Self::totp_refusal)?;
+        if !ctx.https {
+            return Err(Self::totp_refusal());
+        }
+        let actor = self
+            .svc
+            .factor_actor(&Self::sctx(ctx), cookies.handle.as_ref())
+            .await
+            .map_err(|_| Self::totp_refusal())?;
+        deps.store
+            .has_active_totp(actor.user())
+            .await
+            .map_err(|_| Failure {
+                kind: FailKind::Unavailable,
+                reason: reasons::STORE_UNAVAILABLE,
+            })
+    }
+    async fn totp_prepare(
+        &self,
+        ctx: &RequestCtx,
+        cookies: &Cookies,
+    ) -> Result<TotpPrepared, Failure> {
+        if !ctx.https {
+            return Err(Self::totp_refusal());
+        }
+        let deps = self.totp.as_ref().ok_or_else(Self::totp_refusal)?;
+        let actor = self
+            .svc
+            .factor_actor(&Self::sctx(ctx), cookies.handle.as_ref())
+            .await
+            .map_err(|_| Self::totp_refusal())?;
+        let id = crate::crypto::random_id(deps.rng.as_ref(), "f_");
+        let account = actor.user().as_str().to_owned();
+        let material = crate::factor::enrollment::prepare_authorized(
+            deps.store.as_ref(),
+            &deps.keys,
+            deps.rng.as_ref(),
+            crate::factor::enrollment::AuthorizedRequest {
+                id: &id,
+                actor,
+                issuer: "Hopae",
+                account: &account,
+            },
+            vec![],
+        )
+        .await
+        .map_err(|_| Self::totp_refusal())?;
+        Ok(TotpPrepared {
+            enrollment: id,
+            material,
+        })
+    }
+    async fn totp_confirm(
+        &self,
+        ctx: &RequestCtx,
+        cookies: &Cookies,
+        enrollment: &str,
+        code: &Secret,
+    ) -> Result<(), Failure> {
+        if !ctx.https {
+            return Err(Self::totp_refusal());
+        }
+        let deps = self.totp.as_ref().ok_or_else(Self::totp_refusal)?;
+        let actor = self
+            .svc
+            .factor_actor(&Self::sctx(ctx), cookies.handle.as_ref())
+            .await
+            .map_err(|_| Self::totp_refusal())?;
+        crate::factor::service::confirm_authorized(
+            deps.store.as_ref(),
+            &deps.keys,
+            deps.clock.as_ref(),
+            enrollment,
+            actor,
+            code,
+            vec![],
+        )
+        .await
+        .map(|_| ())
+        .map_err(|_| Self::totp_refusal())
+    }
+
     async fn login_visit(&self, ctx: &RequestCtx, txn: &Secret, cookies: &Cookies) -> LoginVisit {
         let sctx = Self::sctx(ctx);
         match self

@@ -2780,6 +2780,7 @@ async fn factor_actor_fences_registration_after_session_or_authority_revocation(
             .unwrap()
             .unwrap();
         let actor = FactorActor {
+            request_id: "r_owned_factor".into(),
             view,
             authorized_at: f.now(),
             session_idle: Duration::from_secs(300),
@@ -2853,6 +2854,7 @@ async fn authorized_totp_confirmation_refuses_revoked_actor_and_active_removal_n
         .await
         .unwrap();
     let actor = |view| FactorActor {
+        request_id: "r_owned_factor".into(),
         view,
         authorized_at: f.now(),
         session_idle: Duration::from_secs(300),
@@ -3038,6 +3040,7 @@ async fn native_authorized_confirmation_verifies_real_code_before_activation() {
         .unwrap()
         .unwrap();
     let actor = || FactorActor {
+        request_id: "r_owned_factor".into(),
         view: view.clone(),
         authorized_at: f.now(),
         session_idle: Duration::from_secs(300),

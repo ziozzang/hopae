@@ -23,6 +23,8 @@ const DOMAIN_TAG: &[u8] = b"hopae-csrf-v1";
 /// What a token authorizes; a token for one purpose is refused for another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
+    TotpPrepare,
+    TotpConfirm,
     Login,
     Retry,
     Switch,
@@ -35,6 +37,8 @@ pub enum Purpose {
 impl Purpose {
     pub fn as_str(self) -> &'static str {
         match self {
+            Purpose::TotpPrepare => "totp_prepare",
+            Purpose::TotpConfirm => "totp_confirm",
             Purpose::Login => "login",
             Purpose::Retry => "retry",
             Purpose::Switch => "switch",

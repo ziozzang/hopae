@@ -810,6 +810,7 @@ pub struct TotpEnrollment {
 
 /// Short-lived, non-serializable authorization issued only by the native session service.
 pub struct FactorActor {
+    pub(crate) request_id: String,
     pub(crate) view: HandleView,
     pub(crate) authorized_at: Timestamp,
     pub(crate) session_idle: std::time::Duration,

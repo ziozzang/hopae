@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 19 -->
+<!-- doc-rev: 20 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -458,3 +458,32 @@ An additional native-service fixture verifies an actual RFC-derived OTP: wrong c
 leaves pending state unchanged, the correct code confirms under the owner fence, and
 repeated confirmation is refused. The fixture constructs the actor internally; it
 still does not qualify browser session issuance or deployed MFA.
+
+## Initial enrollment HTTP and portal integration
+
+With a configured keyring, `/security/totp` serves the native EN/KO owner enrollment
+page and status, with POST preparation/confirmation routes. Absent keyring returns
+404. HTTPS and a recent portal owner session are required. Distinct CSRF purposes are
+bound to the handle; Origin must match exactly. Bodies are bounded, required fields
+must be unique, confirmation accepts only a bounded enrollment ID and six ASCII digits,
+and CSRF-valid submissions use the existing process-local IP attempt budget.
+
+Preparation invokes the owner-fenced commit before showing a manual authenticator
+setup key. No seed appears in URL/query, audit, status or a subsequent GET. Completed
+refresh shows registration status. Responses use no-store, strict existing CSP and
+same-origin referrer policy: an actual Chromium form experiment confirmed no-referrer
+produces Origin null, while same-origin preserves the exact Origin needed by CSRF.
+The setup key remains only in the creation response and the authenticator app; QR,
+one-time browser-display guarantees and real mobile-app scan are not qualified.
+
+An actual owned OIDC process fixture logs in, prepares encrypted enrollment, calculates
+a code independently from the displayed Base32 seed and confirms through the real
+router/adapter/store. It verifies anonymous/plain-HTTP/missing-Origin/cross-purpose
+refusal, confirmation replay refusal, no setup key in logs or refresh, and unchanged
+AAL 1 sessions. Owner-fenced factor audit now carries the portal request ID.
+
+This does not enable OTP sign-in/step-up or atomic challenge/session elevation.
+Per-account/distributed admission, complete browser/UI qualification, recent-auth
+refresh UX, cancellation/removal/recovery, QR and Hangang navigation/embedding,
+key retirement and internal operational rollout remain required. Current deployed
+`owner-v5-d876909` has no keyring configured and predates these HTTP routes.

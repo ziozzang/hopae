@@ -184,6 +184,38 @@ pub struct PasswordSubmission<'a> {
 
 #[async_trait]
 pub trait PortalServices: Send + Sync + 'static {
+    fn totp_enabled(&self) -> bool {
+        false
+    }
+    async fn totp_access(&self, _ctx: &RequestCtx, _cookies: &Cookies) -> Result<bool, Failure> {
+        Err(Failure {
+            kind: FailKind::Forbidden,
+            reason: crate::event::types::reasons::INVALID_STATE,
+        })
+    }
+    async fn totp_prepare(
+        &self,
+        _ctx: &RequestCtx,
+        _cookies: &Cookies,
+    ) -> Result<TotpPrepared, Failure> {
+        Err(Failure {
+            kind: FailKind::Forbidden,
+            reason: crate::event::types::reasons::INVALID_STATE,
+        })
+    }
+    async fn totp_confirm(
+        &self,
+        _ctx: &RequestCtx,
+        _cookies: &Cookies,
+        _enrollment: &str,
+        _code: &Secret,
+    ) -> Result<(), Failure> {
+        Err(Failure {
+            kind: FailKind::Forbidden,
+            reason: crate::event::types::reasons::INVALID_STATE,
+        })
+    }
+
     /// `GET /login?txn=`: validate the transaction (unexpired, unconsumed, client
     /// IP policy), decide chooser, immediate provider redirect, SSO handoff or
     /// confirmation. The services record the portal binding digest when the
@@ -315,4 +347,10 @@ pub trait PortalServices: Send + Sync + 'static {
 
     /// `/healthz` body input.
     async fn health(&self) -> Health;
+}
+
+/// Provisioning material is shown only in the creation response.
+pub struct TotpPrepared {
+    pub enrollment: String,
+    pub material: crate::factor::enrollment::Provisioning,
 }

@@ -629,6 +629,7 @@ impl Service {
         }
         let snapshot = self.snapshot.load_full();
         Ok(crate::store::FactorActor {
+            request_id: ctx.request_id.clone(),
             view,
             authorized_at: now,
             session_idle: self.cfg.session.idle,

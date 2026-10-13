@@ -1068,3 +1068,147 @@ pub(crate) fn request_id_of(req: &Request) -> String {
 pub(crate) fn request_id_header() -> HeaderName {
     HeaderName::from_static("x-request-id")
 }
+
+fn totp_response(
+    st: &PortalState,
+    rq: &Rq,
+    enrollment: &str,
+    key: &str,
+    complete: bool,
+) -> Response {
+    let Some(handle) = rq.presented.handle.as_ref() else {
+        return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+    };
+    let purpose = if enrollment.is_empty() {
+        Purpose::TotpPrepare
+    } else {
+        Purpose::TotpConfirm
+    };
+    let csrf = token_for(st, handle.expose(), purpose);
+    let page = pages::TotpPage {
+        t: rq.t(),
+        request_id: rq.rid(),
+        csrf: &csrf,
+        enrollment,
+        manual_key: key,
+        complete,
+    };
+    let mut response = html_response(StatusCode::OK, page.render().unwrap_or_default());
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("same-origin"),
+    );
+    response
+}
+pub(crate) async fn totp_get(State(st): State<PortalState>, req: Request) -> Response {
+    let (parts, _) = req.into_parts();
+    let rq = match prepare(&st, &parts) {
+        Ok(rq) => rq,
+        Err(r) => return r,
+    };
+    if !st.services.totp_enabled() {
+        return error_response(rq.t(), rq.rid(), ErrorPage::NotFound);
+    }
+    let cookies = Cookies {
+        handle: rq.presented.handle.clone(),
+        bind: rq.presented.bind.clone(),
+    };
+    if !rq.ctx.https {
+        return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+    }
+    match st.services.totp_access(&rq.ctx, &cookies).await {
+        Ok(active) => totp_response(&st, &rq, "", "", active),
+        Err(f) => fail_response(&rq, f),
+    }
+}
+pub(crate) async fn totp_prepare_post(State(st): State<PortalState>, req: Request) -> Response {
+    totp_post(st, req, false).await
+}
+pub(crate) async fn totp_confirm_post(State(st): State<PortalState>, req: Request) -> Response {
+    totp_post(st, req, true).await
+}
+async fn totp_post(st: PortalState, req: Request, confirm: bool) -> Response {
+    let (parts, body) = req.into_parts();
+    let rq = match prepare(&st, &parts) {
+        Ok(rq) => rq,
+        Err(r) => return r,
+    };
+    if !st.services.totp_enabled() {
+        return error_response(rq.t(), rq.rid(), ErrorPage::NotFound);
+    }
+    if !rq.ctx.https || rq.presented.handle.is_none() {
+        return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+    }
+    let form = match read_form(&st, &rq, &parts, body).await {
+        Ok(form) => form,
+        Err(r) => return r,
+    };
+    let required = if confirm {
+        &["csrf", "enrollment", "code"][..]
+    } else {
+        &["csrf"][..]
+    };
+    if required
+        .iter()
+        .any(|name| form.0.0.iter().filter(|(k, _)| k == name).count() != 1)
+    {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let purpose = if confirm {
+        Purpose::TotpConfirm
+    } else {
+        Purpose::TotpPrepare
+    };
+    if let Err(r) = guard(
+        &st,
+        &rq,
+        &parts,
+        &form,
+        purpose,
+        rq.presented.handle.as_ref().map(|h| h.expose()),
+    )
+    .await
+    {
+        return r;
+    }
+    if !st.password_attempts.admit(rq.ctx.client_ip) {
+        let mut r = error_response(rq.t(), rq.rid(), ErrorPage::Unavailable);
+        *r.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+        r.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+        return r;
+    }
+    let cookies = Cookies {
+        handle: rq.presented.handle.clone(),
+        bind: rq.presented.bind.clone(),
+    };
+    if confirm {
+        let id = form.0.get("enrollment").unwrap_or("");
+        let code = form.0.get("code").unwrap_or("");
+        if !simple_id(id, 128) || code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+            return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+        }
+        match st
+            .services
+            .totp_confirm(&rq.ctx, &cookies, id, &Secret::new(code.into()))
+            .await
+        {
+            Ok(()) => totp_response(&st, &rq, "", "", true),
+            Err(f) => fail_response(&rq, f),
+        }
+    } else {
+        match st.services.totp_prepare(&rq.ctx, &cookies).await {
+            Ok(prepared) => totp_response(
+                &st,
+                &rq,
+                &prepared.enrollment,
+                prepared.material.setup_key(),
+                false,
+            ),
+            Err(f) => fail_response(&rq, f),
+        }
+    }
+}

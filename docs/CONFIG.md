@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 18 -->
+<!-- doc-rev: 19 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -302,5 +302,11 @@ be conventional and unique. Referenced material is 32 high-entropy bytes encoded
 reused material before opening state/listeners. Keys remain in memory for the process;
 configuration does not contain their values. Authenticated gateway callers are required.
 Retained IDs permit decryption of prior envelopes; retirement needs rewrapping first.
-This setting prepares key services only: it does not enable enrollment/OTP HTTP routes,
+This setting prepares key services and initial enrollment; it does not enable OTP
 step-up or MFA session issuance. See [authentication gateway](AUTH_GATEWAY.md).
+
+The keyring now also enables initial owner enrollment at `/security/totp`: only a
+recent authenticated HTTPS portal session can create and confirm a pending factor.
+With no keyring, these routes return 404. This is enrollment support, not OTP step-up
+or AAL-2 session issuance; sign-in requirements do not change when a factor is registered.
+The deployment must expose the portal through its existing trusted HTTPS ingress.

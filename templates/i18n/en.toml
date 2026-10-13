@@ -239,3 +239,12 @@
 "password.username" = "Username"
 "password.password" = "Password"
 "password.submit" = "Sign in"
+
+"totp.title" = "Register authenticator"
+"totp.complete" = "Authenticator registered. Your current sign-in requirements are unchanged."
+"totp.intro" = "A recent sign-in is required to register an authenticator."
+"totp.prepare" = "Create setup key"
+"totp.manual" = "Add a time-based account in your authenticator app using this setup key, then enter its six-digit code. This key is shown only in this response."
+"totp.key" = "Setup key"
+"totp.code" = "Authentication code"
+"totp.confirm" = "Confirm authenticator"

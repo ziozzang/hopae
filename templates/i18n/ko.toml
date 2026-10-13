@@ -238,3 +238,12 @@
 "password.username" = "사용자 이름"
 "password.password" = "비밀번호"
 "password.submit" = "로그인"
+
+"totp.title" = "인증 앱 등록"
+"totp.complete" = "인증 앱을 등록했습니다. 현재 로그인 요구 조건은 변경되지 않습니다."
+"totp.intro" = "인증 앱 등록에는 최근 로그인이 필요합니다."
+"totp.prepare" = "설정 키 생성"
+"totp.manual" = "인증 앱에서 시간 기반 계정을 추가하고 이 설정 키를 입력한 뒤 6자리 코드를 확인하세요. 이 키는 이번 응답에서만 표시합니다."
+"totp.key" = "설정 키"
+"totp.code" = "인증 코드"
+"totp.confirm" = "인증 앱 확인"

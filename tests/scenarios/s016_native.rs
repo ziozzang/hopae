@@ -1077,3 +1077,160 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         "provider disable during verification created a session"
     );
 }
+
+#[test]
+fn owned_oidc_portal_totp_enrollment_confirms_with_bound_csrf_without_elevating_session() {
+    use crate::support::*;
+    use hmac::{Hmac, Mac};
+    let idp = MockIdp::start("default");
+    let key = data_encoding::BASE64URL_NOPAD.encode(&[7; 32]);
+    let h = Hopae::spawn(
+        Fixture::with(
+            "m1-basic",
+            serde_json::json!({"totp_keyring":{"active_key":"v1","keys":[{"id":"v1","key_env":"OTP_KEY"}]}}),
+        ),
+        &idp,
+        &[("OTP_KEY", &key)],
+    );
+    let client = h.portal().with_ip("192.0.2.10");
+    let origin = format!("https://{}", h.portal_host());
+    let post = |path: &str, fields: &[(&str, &str)]| {
+        client.send(Req::post(path).header("origin", &origin).form(fields))
+    };
+
+    assert_eq!(client.get("/security/totp").status, 403);
+    let first =
+        h.verify(VerifyRequest::document("https://app.example.test/admin/x").ip("192.0.2.10"));
+    assert_eq!(first.status, 302);
+    let target = url::Url::parse(first.location().unwrap()).unwrap();
+    let txn = target
+        .query_pairs()
+        .find(|(k, _)| k == "txn")
+        .unwrap()
+        .1
+        .into_owned();
+    let page = client.get(&format!("/login?txn={txn}"));
+    fn field(body: &str, name: &str) -> String {
+        body.split(&format!("name=\"{name}\" value=\""))
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .expect("protected field absent")
+            .into()
+    }
+    let go = if page.status == 302 {
+        page
+    } else {
+        post(
+            "/login/mock",
+            &[("csrf", &field(&page.body, "csrf")), ("txn", &txn)],
+        )
+    };
+    assert_eq!(go.status, 302);
+    let callback = idp.follow_authorization(go.location().unwrap());
+    assert_eq!(client.get(&callback).status, 302);
+    let cookie = client
+        .jar()
+        .header_for(
+            &h.portal_host(),
+            "/security/totp",
+            SendContext {
+                secure_transport: true,
+                site: Site::Same,
+                safe_method: true,
+            },
+        )
+        .unwrap();
+    let plain = crate::support::client::send(
+        h.portal,
+        RawReq::new("GET", "/security/totp", &h.portal_host())
+            .header("x-forwarded-proto", "http")
+            .header("x-forwarded-for", "192.0.2.10")
+            .header("cookie", &cookie),
+    );
+    assert_eq!(plain.status, 403);
+    let visit = client.get("/security/totp");
+    assert_eq!(visit.status, 200);
+    let initial_csrf = field(&visit.body, "csrf");
+    assert_eq!(
+        client
+            .post_form("/security/totp/prepare", &[("csrf", &initial_csrf)])
+            .status,
+        403
+    );
+    let prepared = post("/security/totp/prepare", &[("csrf", &initial_csrf)]);
+    assert_eq!(prepared.status, 200);
+    assert_eq!(prepared.header("cache-control"), Some("no-store"));
+    assert_eq!(prepared.header("referrer-policy"), Some("same-origin"));
+    let enrollment = field(&prepared.body, "enrollment");
+    let confirm_csrf = field(&prepared.body, "csrf");
+    let setup = prepared
+        .body
+        .split("id=\"totp-key\" type=\"text\" readonly value=\"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("setup material absent");
+    let secret = data_encoding::BASE32_NOPAD
+        .decode(setup.as_bytes())
+        .unwrap();
+    let counter = (h.hooks.now_ms() as u64) / 30000;
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&secret).unwrap();
+    mac.update(&counter.to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let offset = usize::from(digest[digest.len() - 1] & 15);
+    let binary = u32::from_be_bytes(digest[offset..offset + 4].try_into().unwrap()) & 0x7fffffff;
+    let code = format!("{:06}", binary % 1000000);
+    assert_eq!(
+        post(
+            "/security/totp/confirm",
+            &[
+                ("csrf", &initial_csrf),
+                ("enrollment", &enrollment),
+                ("code", &code)
+            ]
+        )
+        .status,
+        403
+    );
+    let done = post(
+        "/security/totp/confirm",
+        &[
+            ("csrf", &confirm_csrf),
+            ("enrollment", &enrollment),
+            ("code", &code),
+        ],
+    );
+    assert_eq!(done.status, 200);
+    assert!(!done.body.contains(setup));
+    assert_eq!(
+        post(
+            "/security/totp/confirm",
+            &[
+                ("csrf", &confirm_csrf),
+                ("enrollment", &enrollment),
+                ("code", &code)
+            ]
+        )
+        .status,
+        403
+    );
+    let refresh = client.get("/security/totp");
+    assert_eq!(refresh.status, 200);
+    assert!(!refresh.body.contains(setup));
+    assert!(!refresh.body.contains("action=\"/security/totp/prepare\""));
+    assert!(!h.log().contains(setup));
+    let db = rusqlite::Connection::open(h.state_dir.path().join("state/hopae.db")).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM totp_enrollments WHERE state='active'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row("SELECT max(aal) FROM sessions", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}

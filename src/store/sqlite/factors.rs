@@ -10,6 +10,13 @@ use rusqlite::{OptionalExtension, params};
 
 #[async_trait]
 impl Factors for Store {
+    async fn has_active_totp(&self, user: &UserId) -> StoreResult<bool> {
+        let user = user.clone();
+        self.read("has_active_totp",move |conn| {
+            Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM totp_enrollments t JOIN users u ON u.user_id=t.user_id WHERE t.user_id=?1 AND t.state='active' AND u.status='active')",[user.as_str()],|row|row.get(0))?)
+        }).await
+    }
+
     async fn activate_totp_authorized(
         &self,
         id: &str,
@@ -157,10 +164,10 @@ impl Store {
             let expired: Option<String> = tx.query_row("SELECT enrollment_id FROM totp_enrollments WHERE user_id=?1 AND state='pending' AND pending_expires_at<=?2",params![user.as_str(),now],|row|row.get(0)).optional()?;
             if let Some(expired)=expired {
                 tx.execute("UPDATE totp_enrollments SET state='revoked',revision=revision+1,pending_expires_at=NULL,updated_at=?2 WHERE enrollment_id=?1",params![expired,now])?;
-                insert_events(&tx,&shared,&[factor_event(&shared,&user,&expired,EventKind::FactorEnrollmentExpired)])?;
+                insert_events(&tx,&shared,&[factor_event(&shared,&user,&expired,EventKind::FactorEnrollmentExpired,actor.as_ref().map(|a|a.request_id.as_str()).unwrap_or("r_totp_store"))])?;
             }
             tx.execute("INSERT INTO totp_enrollments(enrollment_id,user_id,envelope,revision,state,pending_expires_at,created_at,updated_at)VALUES(?1,?2,?3,1,'pending',?4,?5,?5)",params![id,user.as_str(),envelope,now.saturating_add(600),now])?;
-            insert_events(&tx,&shared,&[factor_event(&shared,&user,&id,EventKind::FactorEnrollmentPrepared)])?;
+            insert_events(&tx,&shared,&[factor_event(&shared,&user,&id,EventKind::FactorEnrollmentPrepared,actor.as_ref().map(|a|a.request_id.as_str()).unwrap_or("r_totp_store"))])?;
             insert_events(&tx,&shared,&events)?;commit(tx,&shared,None)
         }).await
     }
@@ -211,19 +218,25 @@ impl Store {
                 }
             }
             let kind=match operation { "activate"=>EventKind::FactorEnrollmentActivated,"consume"=>EventKind::FactorTotpConsumed,_=>EventKind::FactorEnrollmentRevoked };
-            insert_events(&tx,&shared,&[factor_event(&shared,&user,&id,kind)])?;
+            insert_events(&tx,&shared,&[factor_event(&shared,&user,&id,kind,actor.as_ref().map(|a|a.request_id.as_str()).unwrap_or("r_totp_store"))])?;
             insert_events(&tx,&shared,&events)?;commit(tx,&shared,None)?;Ok(true)
         }).await
     }
 }
 
-fn factor_event(shared: &super::Shared, user: &UserId, id: &str, kind: EventKind) -> Event {
+fn factor_event(
+    shared: &super::Shared,
+    user: &UserId,
+    id: &str,
+    kind: EventKind,
+    request_id: &str,
+) -> Event {
     EventBuilder::new(
         shared.clock.as_ref(),
         shared.rng().as_ref(),
         kind,
         Outcome::Success,
-        "r_totp_store",
+        request_id,
     )
     .user(user)
     .attr("enrollment_id", id)

@@ -347,6 +347,16 @@ pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
         services.emitter.clone(),
         services.readiness.clone(),
     );
+    let adapter = if let Some(keys) = &services.totp_keyring {
+        adapter.with_totp(
+            Arc::new(services.store.clone()),
+            keys.clone(),
+            services.clock.clone(),
+            services.rng.clone(),
+        )
+    } else {
+        adapter
+    };
     let portal_state = PortalState::new(
         PortalConfig::from_config(&services.config),
         Arc::new(adapter),

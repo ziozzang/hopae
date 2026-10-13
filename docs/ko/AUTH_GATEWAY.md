@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=19 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=20 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -408,3 +408,29 @@ OTP challenge·세션 승격 원자 처리·키 폐기 검사·Hangang 열린 st
 추가 네이티브 서비스 fixture는 실제 RFC 기반 OTP를 확인합니다. 잘못된 코드는
 pending을 유지하고 올바른 코드는 owner 검사 아래 확인되며 반복 확인은 거부합니다.
 Actor는 내부 fixture에서 구성하므로 브라우저 세션 발급·운영 MFA 검증은 아닙니다.
+
+## 초기 등록 HTTP·portal 연결
+
+Keyring 설정 시 `/security/totp`에 네이티브 영문·한국어 등록 화면·상태와 POST
+준비·확인 route를 제공합니다. Keyring이 없으면 404입니다. HTTPS·최근 본인 portal
+세션을 요구하며 준비·확인의 CSRF 목적을 구분해 handle에 묶습니다. Origin은
+정확히 일치해야 합니다. Body·등록 ID 길이를 제한하고 필수 필드는 하나씩만
+받으며 코드는 ASCII 6자리만 허용합니다. CSRF-valid 제출은 기존 프로세스별
+IP 시도 예산을 사용합니다.
+
+준비는 소유자 검사 commit 후에만 수동 인증 앱 설정 키를 표시합니다. URL·query·
+감사·상태·후속 GET에 seed를 넣지 않고 완료 후 새로고침은 등록 상태를 보여줍니다.
+No-store·기존 엄격 CSP·same-origin referrer 정책을 사용합니다. 실제 Chromium
+form 실험에서 no-referrer는 Origin null을 만들고 same-origin은 CSRF에 필요한
+정확한 Origin을 유지했습니다. 설정 키는 생성 응답·인증 앱에만 남으며 QR·
+브라우저의 한 번 표시 보장·실제 모바일 앱 scan은 아직 검증하지 않았습니다.
+
+소유한 OIDC 실제 프로세스 fixture가 로그인·암호화 등록 준비·표시 Base32에서
+독립 코드 계산·실제 router·adapter·저장소 확인을 수행합니다. 익명·평문 HTTP·
+Origin 누락·다른 CSRF 목적·반복 확인 거부, 로그·새로고침의 키 미노출,
+AAL 1 세션 유지를 검사합니다. 권한 확인 요인 감사도 portal request ID를 사용합니다.
+
+OTP 로그인·step-up·challenge와 세션 원자 승격은 활성화하지 않습니다.
+계정·분산 시도 제한·완전한 브라우저 UI 검증·최근 인증 갱신 UX·취소·해제·복구,
+QR·Hangang 메뉴·임베딩·키 폐기·내부 운영 배포는 남아 있습니다. 현재 내부
+`owner-v5-d876909`는 keyring을 설정하지 않았고 새 HTTP route 이전 버전입니다.

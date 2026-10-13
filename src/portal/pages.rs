@@ -290,3 +290,14 @@ mod tests {
         assert!(!STYLESHEET.contains("url(") && !STYLESHEET.contains("@import"));
     }
 }
+
+#[derive(Template)]
+#[template(path = "totp.html")]
+pub struct TotpPage<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub csrf: &'a str,
+    pub enrollment: &'a str,
+    pub manual_key: &'a str,
+    pub complete: bool,
+}

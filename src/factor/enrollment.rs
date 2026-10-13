@@ -15,6 +15,13 @@ impl Provisioning {
     pub fn expose_uri(&self) -> &str {
         &self.0
     }
+    /// Explicit plaintext disclosure only for the authenticated creation response.
+    pub fn setup_key(&self) -> &str {
+        self.0
+            .split_once("?secret=")
+            .and_then(|(_, q)| q.split('&').next())
+            .unwrap_or("")
+    }
 }
 impl std::fmt::Debug for Provisioning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

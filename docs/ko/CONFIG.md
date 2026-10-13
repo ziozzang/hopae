@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=18 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=19 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -293,5 +293,11 @@ Active ID는 1–16개 고유 키 중 하나여야 하며 환경 변수 이름�
 누락·잘못된·0·재사용 값은 상태·listener를 열기 전에 거부하고 키는 프로세스 메모리에
 유지합니다. 설정에 실제 값을 넣지 않습니다. 인증된 gateway caller가 필요합니다.
 유지 ID로 이전 envelope를 복호화하고 폐기 전에 재암호화해야 합니다.
-이 설정은 키 서비스만 준비하며 등록·OTP HTTP route, step-up·MFA 세션 발급을
+이 설정은 키 서비스·초기 등록을 준비하며 OTP step-up·MFA 세션 발급을
 활성화하지 않습니다. [인증 게이트웨이](AUTH_GATEWAY.md)를 참고하세요.
+
+Keyring은 이제 `/security/totp` 초기 소유자 등록도 활성화합니다. 최근 인증된
+HTTPS portal 세션만 pending 요인을 만들고 확인할 수 있습니다. Keyring이 없으면
+route는 404입니다. 등록 지원이며 OTP step-up·AAL-2 세션 발급은 아닙니다.
+요인 등록으로 로그인 요구 조건은 변경되지 않습니다. 기존 신뢰한 HTTPS ingress를
+통해 portal을 노출해야 합니다.
