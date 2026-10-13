@@ -636,3 +636,35 @@ config/key epoch 검사는 발급 guard의 책임입니다. 영속 signer/key �
 route에서 정확한 요청/서비스/대상을 가져오고 애플리케이션/경로별 인증 수준과
 실시간 소유자 상태를 재검사해야 합니다. 비공개 신원 seal은 원래 인증 metadata
 검증이지 권한 허용·요청 분류·분산 최신성 보장은 아닙니다.
+
+## 프로필 소유 서비스 receipt 발급과 회수 검사
+
+`Snapshot::authenticate_for_receipt`는 자체 key·설정된 relay 검증 후 비공개·
+Clone/serde 불가능한 ServiceAuthentication을 반환합니다. 버전은 요청 필드가
+아닌 소유자 snapshot에서 가져옵니다. `Issuer::issue_service`는 Service
+evidence만 받아 AAL 0을 고정하고 설정된 서비스/대상·evidence 만료/검증 시각에
+결합합니다. 프로필 버전을 신원 revision/자격 generation과 서비스 전용 신원
+epoch에 사용합니다. 기존 gateway 헤더와 canonical subject hash를 공유해
+자체/relay namespace 구분을 유지합니다. 실시간 signer guard는 현재 프로필/
+key 소유권·애플리케이션/경로 인증 수준·네트워크를 재검사해야 하며 자료 교체 시
+소유자 프로필 generation도 갱신해야 합니다. workload/network 발급은 미지원입니다.
+
+새 게시 fence는 DB 게시 전 reader를 unavailable로 만들고 commit/install
+구간을 포함해 유지한 뒤 미리 할당한 불변 snapshot을 활성화합니다. 실패한
+게시에서는 이전 상태를 교체하지 않고 availability를 복원합니다. gateway
+서비스 인증은 작업 전 availability·작업 후 현재 snapshot 동일성을 검사하며
+이전 relay 결과는 신원 헤더·session fallback 없이 거부합니다. 요청마다 DB를
+조회하지 않고 atomic 상태·Arc 동일성을 검사합니다. 영속/분산 최신성은 signer
+guard가 별도로 검사해야 합니다.
+
+발급 테스트 3건은 자체/혼합 relay 서명·Service/AAL0·만료 한계·namespace
+구분·거짓 MFA 응답 거부·범위/종류 거부·회수·마지막 guard·역행을 검증합니다.
+게시 테스트는 transaction fence·실패 후 복원을 확인하고 제어된 HTTP/네이티브
+adapter 테스트는 원격 verifier 대기 중 프로필을 회수해 신원 헤더 없는 503을
+요구합니다. 인증 gateway 테스트 58건·네이티브 human 발급 회귀·fmt/clippy/
+경계 검사가 통과했습니다. 전체 운영 반영 검증은 별도입니다.
+
+이 갱신의 전체 네이티브 gates는 904건 통과·42건 제외이며 fmt/clippy/경계/
+문서/시나리오 커버리지·기존 제한된 의존성 감사 정책(검증 전용 RSA 예외·
+rustls-pemfile 유지보수 중단 경고)도 통과했습니다. receipt RPC 활성화는
+남아 있으며 gateway 회수 fence는 기존 서비스 인증에도 독립적으로 적용됩니다.

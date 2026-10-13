@@ -4,7 +4,6 @@ use axum::{
     body::Body,
     http::{HeaderMap, HeaderValue, Response, StatusCode},
 };
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy)]
 pub struct InvalidBearer;
@@ -27,25 +26,9 @@ pub fn bearer(headers: &HeaderMap) -> Result<Option<&str>, InvalidBearer> {
     Ok(Some(token))
 }
 pub fn stable_subject(subject: &Subject) -> String {
-    let mut digest = Sha256::new();
-    digest.update([match subject.kind {
-        crate::auth_gateway::PrincipalKind::Human => 0,
-        crate::auth_gateway::PrincipalKind::Service => 1,
-        crate::auth_gateway::PrincipalKind::Workload => 2,
-        crate::auth_gateway::PrincipalKind::Network => 3,
-    }]);
-    for value in [&subject.issuer, &subject.realm, &subject.subject] {
-        digest.update((value.len() as u64).to_be_bytes());
-        digest.update(value.as_bytes());
-    }
-    let digest = digest.finalize();
-    let mut output = String::from("s_");
-    for byte in &digest[..24] {
-        use std::fmt::Write;
-        write!(&mut output, "{byte:02x}").expect("string writer");
-    }
-    output
+    crate::auth_gateway::stable_subject(subject)
 }
+
 pub fn response(evidence: Option<&VerifiedEvidence>, request_id: &str) -> Response<Body> {
     let mut response = Response::builder()
         .status(if evidence.is_some() {

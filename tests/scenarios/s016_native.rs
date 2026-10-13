@@ -6,7 +6,7 @@ use axum::{
 };
 use hopae::{
     app::CallerKeys,
-    crypto::Secret,
+    crypto::{Clock, Secret},
     gateway::{hangang::GatewayConfig, native_codec as wire},
     http::{
         gateway::{GatewayState, router},
@@ -2067,4 +2067,107 @@ fn owned_oidc_external_https_browser_form_elevates_with_bound_handoff_and_refuse
         !h.log()
             .contains("owned-verifier-key-at-least-thirty-two-bytes")
     );
+}
+
+#[tokio::test]
+async fn profile_revocation_during_remote_auth_refuses_http_and_native_allow() {
+    for native in [false, true] {
+        let mut fx = Fx::new("m1-basic");
+        fx.ctx.limits.budget = Duration::from_secs(2);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = listener.local_addr().unwrap();
+        let e = entered.clone();
+        let r = release.clone();
+        let expires = fx.clock.now().0 as u64 + 1000;
+        let verifier=axum::Router::new().route("/verify",axum::routing::post(move||{let e=e.clone();let r=r.clone();async move{e.notify_one();r.notified().await;axum::Json(serde_json::json!({"active":true,"subject":"owned-worker","service_id":"app","expires_at":expires}))}}));
+        let verifier_task =
+            tokio::spawn(async move { axum::serve(listener, verifier).await.unwrap() });
+        let config:hopae::auth_gateway::runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"partner","api_relay":{"url":format!("http://{remote}/verify"),"issuer":"https://partner.example.test","timeout_ms":500,"allow_private_endpoints":true}}]})).unwrap();
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .unwrap();
+        let mut owner = hopae::auth_gateway::authority::Authority::load(
+            &mut db,
+            Some(config),
+            &|_| None,
+            &|_| Ok(()),
+        )
+        .unwrap();
+        let keys = Arc::new(CallerKeys::new(
+            Some(Secret::new("native-test-key".into())),
+            None,
+            false,
+        ));
+        let state = GatewayState::new(
+            GatewayConfig::from_config(&fx.cfg),
+            fx.ctx.clone(),
+            keys.clone(),
+            32,
+            None,
+            None,
+        )
+        .with_authentication_authority(owner.reader())
+        .unwrap();
+        let router = router(state);
+        let mut headers = context("/private");
+        headers.push((
+            "authorization".into(),
+            b"Bearer owned-external-credential".to_vec(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = watch::channel(false);
+        let transport = tokio::spawn(native_gateway::serve(listener, router.clone(), keys, rx));
+        let pending = if native {
+            let payload = wire::encode_request(&headers).unwrap();
+            tokio::spawn(async move {
+                let mut socket = TcpStream::connect(address).await.unwrap();
+                assert_eq!(exchange(&mut socket, 0, b"native-test-key").await.1, [1]);
+                let reply =
+                    wire::decode_reply(&exchange(&mut socket, 1, &payload).await.1).unwrap();
+                assert!(
+                    !reply
+                        .headers
+                        .iter()
+                        .any(|(name, _)| name == "x-forwarded-user")
+                );
+                reply.status
+            })
+        } else {
+            let mut req = Request::builder()
+                .uri("/_hopae/verify")
+                .body(Body::empty())
+                .unwrap();
+            for (name, value) in headers {
+                req.headers_mut().insert(
+                    axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                    axum::http::HeaderValue::from_bytes(&value).unwrap(),
+                );
+            }
+            req.headers_mut()
+                .insert("x-hopae-gateway-key", "native-test-key".parse().unwrap());
+            tokio::spawn(async move {
+                let response = router.oneshot(req).await.unwrap();
+                assert!(!response.headers().contains_key("x-forwarded-user"));
+                response.status().as_u16()
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        owner
+            .publish(&mut db, 1, None, "operator", &|_| None, &|_| Ok(()))
+            .unwrap();
+        release.notify_one();
+        assert_eq!(
+            pending.await.unwrap(),
+            503,
+            "native={native}: retired profile emitted an allow"
+        );
+        tx.send(true).unwrap();
+        transport.await.unwrap().unwrap();
+        verifier_task.abort();
+    }
 }

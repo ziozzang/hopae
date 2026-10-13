@@ -74,6 +74,7 @@ impl GatewayState {
             .ok_or_else(|| anyhow::anyhow!("authentication gateway state is already shared"))?
             .authentication_gateway = Some(Arc::new(arc_swap::ArcSwap::from_pointee(
             crate::auth_gateway::authority::Snapshot {
+                publication: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 revision: 0,
                 runtime: Some(runtime),
             },
@@ -194,6 +195,16 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
         .authentication_gateway
         .as_ref()
         .map(|reader| reader.load_full());
+    if authority
+        .as_ref()
+        .is_some_and(|snapshot| !snapshot.available())
+        && matches!(
+            input.canonical_path.reserved(),
+            crate::verify::types::Reserved::No
+        )
+    {
+        return hangang::service_identity::unavailable(&request_id);
+    }
     // A presented service credential never falls back after its profile was removed.
     if let Some(snapshot) = &authority
         && matches!(
@@ -236,6 +247,22 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
                 .unwrap_or(Err(crate::auth_gateway::runtime::Error::Unavailable)),
                 Err(_) => Err(crate::auth_gateway::runtime::Error::Invalid),
             };
+            let current = st
+                .authentication_gateway
+                .as_ref()
+                .map(|reader| reader.load_full());
+            let result =
+                if current
+                    .as_ref()
+                    .zip(authority.as_ref())
+                    .is_some_and(|(current, captured)| {
+                        current.available() && Arc::ptr_eq(current, captured)
+                    })
+                {
+                    result
+                } else {
+                    Err(crate::auth_gateway::runtime::Error::Unavailable)
+                };
             let unavailable = matches!(
                 result,
                 Err(crate::auth_gateway::runtime::Error::Unavailable)

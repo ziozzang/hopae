@@ -716,3 +716,38 @@ The authenticated adapter must derive exact request/service/audience from native
 route context and recheck application/path assurance as well as live owner state.
 The private identity seal proves original authentication metadata, not a permission
 grant, request classification or distributed freshness.
+
+## Profile-owned service receipt issuance and revocation fence
+
+`Snapshot::authenticate_for_receipt` returns a private, non-Clone/non-serde
+ServiceAuthentication after native key or configured relay verification. Revision
+comes from the owner snapshot, not a request field. `Issuer::issue_service` accepts
+only Service evidence, fixes AAL 0, binds the configured service/audience and clips
+validity to evidence expiry/verification age. Profile revision supplies identity
+revision/credential generation and a service-separated identity epoch. Canonical
+subject hashing is shared with ordinary gateway headers, preserving local/relay
+namespace separation. Live signer guards must recheck current profile/key ownership,
+application/path assurance and network state; material rotation must also advance
+the authoritative profile generation. Workload/network issuance remains unsupported.
+
+A new publication fence marks all readers unavailable before DB publication, keeps
+them unavailable through commit/install, then activates the preallocated immutable
+snapshot. Failed publication restores availability without replacing old state.
+Gateway service authentication checks availability before work and current snapshot
+identity after work; in-flight old relay results fail closed without user headers or
+session fallback. These checks use atomic state/Arc identity, not per-request DB
+queries. Signer guards still own durable/distributed freshness checks.
+
+Three issuer tests validate native/mixed-relay signatures, Service/AAL0 and expiry
+ceilings, namespace distinction, false MFA response rejection, scope/kind refusal,
+revocation, final guard and rollback. A publication test covers the transaction
+fence and failed-write restoration. Controlled HTTP/native adapter tests revoke a
+profile while a remote verifier is paused and require 503 without identity headers.
+All 58 authentication-gateway tests, the native human issuer regression and
+fmt/clippy/boundary checks pass. Full rollout qualification remains separate.
+
+Full native gates for this update pass 904 tests (42 ignored), with fmt/clippy/
+boundary/docs/scenario coverage and the existing scoped dependency audit policy
+(verification-only RSA exception, rustls-pemfile unmaintained warning). Receipt RPC
+activation is still pending; the gateway revocation fence applies to existing
+service authentication independently of receipt transport.

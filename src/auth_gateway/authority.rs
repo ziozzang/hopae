@@ -5,8 +5,60 @@ use rusqlite::Connection;
 use std::sync::Arc;
 
 pub struct Snapshot {
+    pub(crate) publication: Arc<std::sync::atomic::AtomicBool>,
     pub revision: u64,
     pub runtime: Option<runtime::Runtime>,
+}
+/// Native profile-owned authentication. No caller-supplied revision or assurance.
+pub struct ServiceAuthentication {
+    pub(crate) evidence: super::VerifiedEvidence,
+    pub(crate) revision: u64,
+    pub(crate) verified_ms: u64,
+}
+impl ServiceAuthentication {
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+}
+impl Snapshot {
+    pub fn available(&self) -> bool {
+        !self.publication.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub async fn authenticate_for_receipt(
+        &self,
+        host: &str,
+        port: u16,
+        token: Option<&str>,
+        ip: std::net::IpAddr,
+        now: u64,
+    ) -> Result<ServiceAuthentication, runtime::Error> {
+        if !(1..=9_007_199_254_740_991).contains(&self.revision) {
+            return Err(runtime::Error::Unavailable);
+        }
+        if !self.available() {
+            return Err(runtime::Error::Unavailable);
+        }
+        let runtime = self.runtime.as_ref().ok_or(runtime::Error::Unavailable)?;
+        let begun = std::time::Instant::now();
+        let evidence = runtime
+            .authenticate_async(host, port, token, ip, now)
+            .await?;
+        let verified_ms = runtime
+            .observed_time
+            .load(std::sync::atomic::Ordering::Acquire)
+            .max(now.saturating_add(begun.elapsed().as_millis().min(u64::MAX as u128) as u64));
+        if !self.available() {
+            return Err(runtime::Error::Unavailable);
+        }
+        if evidence.expires_at <= verified_ms {
+            return Err(runtime::Error::Expired);
+        }
+        Ok(ServiceAuthentication {
+            evidence,
+            revision: self.revision,
+            verified_ms,
+        })
+    }
 }
 pub struct Authorization<'a> {
     pub actor: &'a str,
@@ -41,7 +93,11 @@ impl Authority {
             .unwrap_or_default();
         Ok(Self {
             observed_time,
-            snapshot: Arc::new(ArcSwap::from_pointee(Snapshot { revision, runtime })),
+            snapshot: Arc::new(ArcSwap::from_pointee(Snapshot {
+                publication: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                revision,
+                runtime,
+            })),
         })
     }
     fn compile(
@@ -103,17 +159,34 @@ impl Authority {
         if let Some(runtime) = &mut runtime {
             runtime.observed_time = self.observed_time.clone();
         }
-        let document = publication::publish_guarded(
+        let prepared = Arc::new(Snapshot {
+            publication: previous.publication.clone(),
+            revision: expected.checked_add(1).ok_or(publication::Error::Invalid)?,
+            runtime,
+        });
+        previous
+            .publication
+            .store(true, std::sync::atomic::Ordering::Release);
+        let result = publication::publish_guarded(
             connection,
             expected,
             configuration,
             authorization.actor,
             authorization.guard,
-        )?;
-        self.snapshot.store(Arc::new(Snapshot {
-            revision: document.revision,
-            runtime,
-        }));
+        );
+        let document = match result {
+            Ok(document) => document,
+            Err(error) => {
+                previous
+                    .publication
+                    .store(false, std::sync::atomic::Ordering::Release);
+                return Err(error);
+            }
+        };
+        self.snapshot.store(prepared);
+        previous
+            .publication
+            .store(false, std::sync::atomic::Ordering::Release);
         Ok(document)
     }
     pub fn reader(&self) -> Arc<ArcSwap<Snapshot>> {
@@ -212,5 +285,66 @@ mod tests {
         );
         assert!(matches!(result, Err(publication::Error::Invalid)));
         assert!(publication::read(&db).unwrap().is_none());
+    }
+    #[test]
+    fn publication_fence_covers_transaction_and_failed_write_restores_old_reader() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .unwrap();
+        let mut owner = Authority::load(
+            &mut db,
+            Some(config()),
+            &|_| Some("owned-credential-at-least-thirty-two-bytes".into()),
+            &|_| Ok(()),
+        )
+        .unwrap();
+        let old = owner.snapshot();
+        let calls = std::cell::Cell::new(0);
+        assert!(
+            owner
+                .publish_authorized(
+                    &mut db,
+                    1,
+                    None,
+                    Authorization {
+                        actor: "operator",
+                        guard: &|_| {
+                            assert!(!old.available());
+                            calls.set(calls.get() + 1);
+                            if calls.get() == 2 {
+                                Err(publication::Error::Denied)
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    },
+                    &|_| None,
+                    &|_| Ok(())
+                )
+                .is_err()
+        );
+        assert_eq!(calls.get(), 2);
+        assert!(old.available());
+        assert!(Arc::ptr_eq(&old, &owner.snapshot()));
+        assert_eq!(publication::read(&db).unwrap().unwrap().revision, 1);
+        owner
+            .publish_authorized(
+                &mut db,
+                1,
+                None,
+                Authorization {
+                    actor: "operator",
+                    guard: &|_| {
+                        assert!(!old.available());
+                        Ok(())
+                    },
+                },
+                &|_| None,
+                &|_| Ok(()),
+            )
+            .unwrap();
+        assert!(owner.snapshot().available());
+        assert!(!Arc::ptr_eq(&old, &owner.snapshot()));
+        assert_eq!(owner.snapshot().revision, 2);
     }
 }
