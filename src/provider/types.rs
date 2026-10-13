@@ -135,6 +135,8 @@ pub struct ReauthRequest {
 /// Each variant maps to one reason code (see [`ProviderError::reason`]).
 #[derive(thiserror::Error, Debug)]
 pub enum ProviderError {
+    #[error("invalid_credentials")]
+    InvalidCredentials,
     #[error("invalid_state")]
     InvalidState,
     #[error("invalid_nonce")]
@@ -173,6 +175,7 @@ impl ProviderError {
     /// The stable reason code for events and failure pages.
     pub fn reason(&self) -> Reason {
         match self {
+            ProviderError::InvalidCredentials => reasons::INVALID_CREDENTIALS,
             ProviderError::InvalidState => reasons::INVALID_STATE,
             ProviderError::InvalidNonce => reasons::INVALID_NONCE,
             ProviderError::InvalidAudience => reasons::INVALID_AUDIENCE,
@@ -253,6 +256,7 @@ mod tests {
     #[test]
     fn every_error_reason_matches_its_display_code() {
         let all = [
+            ProviderError::InvalidCredentials,
             ProviderError::InvalidState,
             ProviderError::InvalidNonce,
             ProviderError::InvalidAudience,

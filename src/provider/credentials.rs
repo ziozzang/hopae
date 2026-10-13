@@ -65,10 +65,14 @@ pub trait CredentialProvider: Send + Sync {
 /// Verified direct authentication; assurance and freshness provenance are fixed.
 pub struct PasswordAuthentication {
     provider: ProviderId,
+    kind: CredentialKind,
     identity: ProviderIdentity,
     authenticated_at: crate::crypto::Timestamp,
 }
 impl PasswordAuthentication {
+    pub fn kind(&self) -> CredentialKind {
+        self.kind
+    }
     pub fn provider(&self) -> &ProviderId {
         &self.provider
     }
@@ -129,6 +133,7 @@ pub async fn authenticate_password(
     }
     Ok(PasswordAuthentication {
         provider: id,
+        kind,
         identity,
         authenticated_at,
     })

@@ -626,7 +626,7 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         credentials::{CredentialError, CredentialKind, CredentialProvider, PasswordInput},
     };
     use hopae::session::service::{
-        Deps, ProviderLookup, RequestCtx, Service, ServiceConfig, SessionError,
+        Deps, PasswordCompletion, ProviderLookup, RequestCtx, Service, ServiceConfig, SessionError,
     };
     use hopae::store::{
         Sessions,
@@ -634,6 +634,9 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
     };
     struct Direct {
         id: ProviderId,
+        calls: std::sync::atomic::AtomicUsize,
+        store: hopae::store::Store,
+        disable: std::sync::atomic::AtomicBool,
     }
     #[async_trait::async_trait]
     impl CredentialProvider for Direct {
@@ -648,9 +651,32 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         }
         async fn verify_password(
             &self,
-            _: PasswordInput<'_>,
+            input: PasswordInput<'_>,
         ) -> Result<hopae::provider::ProviderIdentity, CredentialError> {
-            panic!("challenge preparation must not authenticate")
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if input.password().expose() != "owned-correct-value" {
+                return Err(CredentialError::Invalid);
+            }
+            if self.disable.load(std::sync::atomic::Ordering::SeqCst) {
+                self.store
+                    .conn()
+                    .execute(
+                        "UPDATE providers SET enabled=0 WHERE provider_id='directory'",
+                        [],
+                    )
+                    .unwrap();
+            }
+            Ok(hopae::provider::ProviderIdentity {
+                subject: "t:entryuuid:owned-user".into(),
+                email: None,
+                email_verified: false,
+                email_authoritative: false,
+                name: None,
+                username: None,
+                picture: None,
+                raw_claims: serde_json::json!({}),
+                auth_time: None,
+            })
         }
     }
     struct Lookup {
@@ -678,6 +704,12 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         Arc::new(hopae::event::prune::PruneTrigger::new(1000)),
         false,
     );
+    let direct = Arc::new(Direct {
+        id: ProviderId::new("directory"),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        store: fx.store.clone(),
+        disable: std::sync::atomic::AtomicBool::new(false),
+    });
     let service = Service::new(Deps {
         directory: fx.ctx.directory.clone(),
         sessions: fx.ctx.sessions.clone(),
@@ -687,9 +719,7 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         rng: fx.rng.clone(),
         snapshot: fx.snapshot.clone(),
         providers: Arc::new(Lookup {
-            provider: Arc::new(Direct {
-                id: ProviderId::new("directory"),
-            }),
+            provider: direct.clone(),
         }),
         config: ServiceConfig::from_config(&fx.cfg).unwrap(),
     });
@@ -697,32 +727,30 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
     let cookie = random_token(fx.rng.as_ref(), 16);
     let now = fx.clock.now();
     let ip = "192.0.2.10".parse().unwrap();
+    let transaction = NewTransaction {
+        txn_sha256: token.digest(),
+        created_at: now,
+        expires_at: now.add(Duration::from_secs(60)),
+        app_id: hopae::policy::types::AppId::new("app"),
+        return_target: "https://app.example.test/".parse().unwrap(),
+        bind_sha256: Some(sha256(b"owned-app")),
+        portal_bind_sha256: None,
+        retry_bind_sha256: None,
+        client_ip: ip,
+        ua_sha256: None,
+        provider_id: None,
+        state_sha256: None,
+        nonce: None,
+        pkce_verifier: None,
+        portal_session_id: None,
+        purpose: TxnPurpose::Login,
+        conflicting_handle_sha256: None,
+        pending_identity: None,
+        recovery_depth: 0,
+        reauth_max_age: None,
+    };
     fx.store
-        .create_transaction(
-            NewTransaction {
-                txn_sha256: token.digest(),
-                created_at: now,
-                expires_at: now.add(Duration::from_secs(60)),
-                app_id: hopae::policy::types::AppId::new("app"),
-                return_target: "https://app.example.test/".parse().unwrap(),
-                bind_sha256: Some(sha256(b"owned-app")),
-                portal_bind_sha256: None,
-                retry_bind_sha256: None,
-                client_ip: ip,
-                ua_sha256: None,
-                provider_id: None,
-                state_sha256: None,
-                nonce: None,
-                pkce_verifier: None,
-                portal_session_id: None,
-                purpose: TxnPurpose::Login,
-                conflicting_handle_sha256: None,
-                pending_identity: None,
-                recovery_depth: 0,
-                reauth_max_age: None,
-            },
-            vec![],
-        )
+        .create_transaction(transaction.clone(), vec![])
         .await
         .unwrap();
     let ctx = RequestCtx {
@@ -785,4 +813,116 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
             .await,
         Err(SessionError::AlreadyBound)
     ));
+    assert_eq!(direct.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let wrong = Secret::new("owned-wrong-value".into());
+    assert!(
+        service
+            .complete_password(
+                &ctx,
+                PasswordCompletion {
+                    provider_id: &id,
+                    challenge: &challenge,
+                    input: PasswordInput::new("worker", &wrong).unwrap(),
+                    portal_cookie: Some(&cookie),
+                    portal_handle: None
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        fx.store
+            .transaction(&token.digest())
+            .await
+            .unwrap()
+            .unwrap()
+            .consumed_at
+            .is_none()
+    );
+    let password = Secret::new("owned-correct-value".into());
+    let result = service
+        .complete_password(
+            &ctx,
+            PasswordCompletion {
+                provider_id: &id,
+                challenge: &challenge,
+                input: PasswordInput::new("worker", &password).unwrap(),
+                portal_cookie: Some(&cookie),
+                portal_handle: None,
+            },
+        )
+        .await
+        .unwrap();
+    let hopae::session::service::CallbackOutcome::LoggedIn { session_id, .. } = result else {
+        panic!("direct authentication did not issue a session")
+    };
+    let session = fx.store.session(&session_id).await.unwrap().unwrap();
+    assert_eq!(
+        session.auth_time_source,
+        hopae::store::types::AuthTimeSource::HopaeCompletion
+    );
+    assert_eq!(session.provider_id, id);
+    assert_eq!(session.aal, hopae::session::types::Aal::One);
+    assert!(
+        service
+            .complete_password(
+                &ctx,
+                PasswordCompletion {
+                    provider_id: &id,
+                    challenge: &challenge,
+                    input: PasswordInput::new("worker", &password).unwrap(),
+                    portal_cookie: Some(&cookie),
+                    portal_handle: None
+                }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        direct.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "replayed challenge called the credential backend"
+    );
+    let next_token = random_token(fx.rng.as_ref(), 16);
+    fx.store
+        .create_transaction(
+            NewTransaction {
+                txn_sha256: next_token.digest(),
+                ..transaction
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+    let next_challenge = service
+        .begin_password(&ctx, &next_token, &id, Some(&cookie))
+        .await
+        .unwrap();
+    direct
+        .disable
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        service
+            .complete_password(
+                &ctx,
+                PasswordCompletion {
+                    provider_id: &id,
+                    challenge: &next_challenge,
+                    input: PasswordInput::new("worker", &password).unwrap(),
+                    portal_cookie: Some(&cookie),
+                    portal_handle: None
+                }
+            )
+            .await
+            .is_err()
+    );
+    let sessions: i64 = fx
+        .store
+        .conn()
+        .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        sessions, 1,
+        "provider disable during verification created a session"
+    );
 }

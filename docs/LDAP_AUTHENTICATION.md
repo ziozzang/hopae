@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 13 -->
+<!-- doc-rev: 14 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -256,3 +256,21 @@ An owned real-store scenario verifies missing-cookie and disabled-provider rejec
 no binding on rejection, successful challenge lookup, absent OAuth fields and
 second-bind conflict. Library and native regressions pass. Portal CSRF/form routing
 and credential completion/session issuance still need connection before activation.
+
+## Direct credential session completion
+
+The session service now completes a password challenge without an OAuth callback.
+It checks challenge shape, single-use status, expiry, purpose, provider identity,
+absent OAuth fields, portal/app binding and client IP before credential verification.
+It validates the direct result, rechecks live provider kind/configuration afterward,
+and uses common identity/session/handoff completion with AAL 1 and local time.
+Invalid credentials are a typed invalid_credentials failure; no session is created
+and the challenge can be retried under the portal's required throttling policy.
+
+An owned real-store test connector covers invalid credential retry, successful
+session/handoff issuance, local authentication provenance, AAL 1, replay rejection
+without another backend call, and provider disable during verification without a
+second session. These are service-level tests with a controlled connector, not a
+full real-LDAP browser login. Existing library/native regressions and Clippy pass.
+Portal form/CSRF/throttling wiring, configured-connector epoch fencing, remote LDAP
+revocation and operational activation remain required.

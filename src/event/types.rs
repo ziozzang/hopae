@@ -320,6 +320,7 @@ pub mod reasons {
         PROVIDER_DISABLED = "provider_disabled",
         PROVIDER_MISMATCH = "provider_mismatch",
         EMAIL_DOMAIN_NOT_ALLOWED = "email_domain_not_allowed",
+        INVALID_CREDENTIALS = "invalid_credentials",
         PROVIDER_UNAVAILABLE = "provider_unavailable",
         PROVIDER_ERROR = "provider_error",
         PROVIDER_TIMEOUT = "provider_timeout",

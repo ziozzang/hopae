@@ -47,6 +47,14 @@ use crate::store::types::{
 use crate::store::{Directory, Events, Sessions, StoreError};
 use crate::verify::lifetimes::{self, LifetimeVerdict};
 
+pub struct PasswordCompletion<'a> {
+    pub provider_id: &'a ProviderId,
+    pub challenge: &'a Secret,
+    pub input: crate::provider::credentials::PasswordInput<'a>,
+    pub portal_cookie: Option<&'a Secret>,
+    pub portal_handle: Option<&'a Secret>,
+}
+
 /// Internal boundary after provider authentication and transaction validation.
 struct CompletedIdentity {
     txn: TransactionRow,
@@ -782,6 +790,16 @@ impl Service {
                 )
                 .await);
         };
+        if provider.id() != provider_id {
+            return Err(self
+                .refuse(
+                    ctx,
+                    Some(&row),
+                    Some(provider_id),
+                    reasons::PROVIDER_MISMATCH,
+                )
+                .await);
+        }
         let kind = match provider.kind() {
             crate::provider::credentials::CredentialKind::Ldap => ProviderKind::Ldap,
             crate::provider::credentials::CredentialKind::LocalPassword => ProviderKind::Password,
@@ -1138,6 +1156,186 @@ impl Service {
     }
 
     // ---- callback -------------------------------------------------------
+
+    /// Complete a direct challenge after portal CSRF/throttling checks, never via OAuth callback.
+    pub async fn complete_password(
+        &self,
+        ctx: &RequestCtx,
+        completion: PasswordCompletion<'_>,
+    ) -> Result<CallbackOutcome, SessionError> {
+        let PasswordCompletion {
+            provider_id,
+            challenge,
+            input,
+            portal_cookie,
+            portal_handle,
+        } = completion;
+        if challenge.expose().len() != 43
+            || !challenge
+                .expose()
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        {
+            return Err(self
+                .refuse(ctx, None, Some(provider_id), reasons::INVALID_STATE)
+                .await);
+        }
+        let Some(txn) = self
+            .sessions
+            .transaction_by_state(&challenge.digest())
+            .await?
+        else {
+            return Err(self
+                .refuse(ctx, None, Some(provider_id), reasons::INVALID_STATE)
+                .await);
+        };
+        if txn.consumed_at.is_some() {
+            return Err(self
+                .refuse(ctx, Some(&txn), Some(provider_id), reasons::TXN_CONSUMED)
+                .await);
+        }
+        if txn.expires_at <= self.clock.now() {
+            return Err(self
+                .refuse(ctx, Some(&txn), Some(provider_id), reasons::TXN_EXPIRED)
+                .await);
+        }
+        if txn.purpose != TxnPurpose::Login {
+            return Err(wrong_purpose(txn.purpose));
+        }
+        if txn.provider_id.as_ref() != Some(provider_id)
+            || txn.nonce.is_some()
+            || txn.pkce_verifier.is_some()
+        {
+            return Err(self
+                .refuse_consuming(ctx, &txn, reasons::PROVIDER_MISMATCH)
+                .await);
+        }
+        let (Some(expected), Some(app_bind)) = (txn.portal_bind_sha256, txn.bind_sha256) else {
+            return Err(self
+                .refuse_consuming(ctx, &txn, reasons::INVALID_STATE)
+                .await);
+        };
+        let Some(cookie) = portal_cookie.filter(|cookie| is_well_formed_bind(cookie.expose()))
+        else {
+            return Err(self
+                .refuse_consuming(ctx, &txn, reasons::PORTAL_BIND_MISMATCH)
+                .await);
+        };
+        if !ct_eq(&cookie.digest().0, &expected.0) {
+            return Err(self
+                .refuse_consuming(ctx, &txn, reasons::PORTAL_BIND_MISMATCH)
+                .await);
+        }
+        if !self.txn_ip_ok(&txn, ctx) {
+            return Err(self.refuse_consuming(ctx, &txn, reasons::TXN_BINDING).await);
+        }
+        let Some(provider) = self.providers.credential(provider_id) else {
+            return Err(self
+                .refuse(
+                    ctx,
+                    Some(&txn),
+                    Some(provider_id),
+                    reasons::PROVIDER_UNAVAILABLE,
+                )
+                .await);
+        };
+        if provider.id() != provider_id {
+            return Err(self
+                .refuse_consuming(ctx, &txn, reasons::PROVIDER_MISMATCH)
+                .await);
+        }
+        let credential_kind = provider.kind();
+        let kind = match credential_kind {
+            crate::provider::credentials::CredentialKind::Ldap => ProviderKind::Ldap,
+            crate::provider::credentials::CredentialKind::LocalPassword => ProviderKind::Password,
+        };
+        let before = self.directory.providers().await?.into_iter().find(|row| {
+            &row.provider_id == provider_id
+                && row.kind == kind
+                && row.enabled
+                && row.deleted_at.is_none()
+        });
+        let Some(before) = before else {
+            return Err(self
+                .refuse(
+                    ctx,
+                    Some(&txn),
+                    Some(provider_id),
+                    reasons::PROVIDER_DISABLED,
+                )
+                .await);
+        };
+        let verified = match crate::provider::credentials::authenticate_password(
+            provider.as_ref(),
+            input,
+            self.clock.as_ref(),
+        )
+        .await
+        {
+            Ok(verified) => verified,
+            Err(error) => {
+                let error = match error {
+                    crate::provider::credentials::CredentialError::Invalid => {
+                        ProviderError::InvalidCredentials
+                    }
+                    crate::provider::credentials::CredentialError::Unavailable => {
+                        ProviderError::ProviderUnavailable
+                    }
+                    crate::provider::credentials::CredentialError::Disabled => {
+                        ProviderError::ProviderDisabled
+                    }
+                };
+                return Err(self.refuse_provider(ctx, &txn, provider_id, error).await);
+            }
+        };
+        if verified.provider() != provider_id || verified.kind() != credential_kind {
+            return Err(self
+                .refuse_consuming(ctx, &txn, reasons::PROVIDER_MISMATCH)
+                .await);
+        }
+        let row = self.directory.providers().await?.into_iter().find(|row| {
+            &row.provider_id == provider_id
+                && row.kind == kind
+                && row.enabled
+                && row.deleted_at.is_none()
+        });
+        let Some(row) = row.filter(|row| row.config == before.config) else {
+            return Err(self
+                .refuse(
+                    ctx,
+                    Some(&txn),
+                    Some(provider_id),
+                    reasons::PROVIDER_DISABLED,
+                )
+                .await);
+        };
+        let authentication = (verified.authenticated_at(), verified.auth_time_source());
+        let ident = crate::provider::ProviderIdentity {
+            subject: verified.identity().subject.clone(),
+            email: verified.identity().email.clone(),
+            email_verified: false,
+            email_authoritative: false,
+            name: verified.identity().name.clone(),
+            username: verified.identity().username.clone(),
+            picture: verified.identity().picture.clone(),
+            raw_claims: serde_json::json!({}),
+            auth_time: None,
+        };
+        self.finish_provider_identity(
+            ctx,
+            CompletedIdentity {
+                txn,
+                provider_id: provider_id.clone(),
+                kind,
+                identity: ident,
+                row,
+                authentication,
+                app_bind,
+            },
+            portal_handle,
+        )
+        .await
+    }
 
     /// `GET /callback/<provider>`: validate the assertion and create the
     /// session (ADR-0004, ADR-0011). Every refusal is uniform to the user; the

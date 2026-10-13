@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=13 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=14 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -220,3 +220,18 @@ OAuth 필드가 NULL인 임의 challenge digest와 불변 portal 바인딩을 �
 challenge 조회·OAuth 필드 부재·두 번째 바인딩 충돌을 검증했습니다. 라이브러리와
 네이티브 회귀 검사를 통과했습니다. 활성화 전 portal CSRF/form route와 자격 완료·
 세션 발급 연결이 필요합니다.
+
+## 직접 자격 세션 완료
+
+OAuth callback 없이 비밀번호 challenge를 완료하는 세션 경로를 추가했습니다.
+자격 검증 전에 challenge 형식·일회 상태·만료·목적·provider ID·OAuth 필드 부재·
+portal/app 바인딩·client IP를 확인합니다. 직접 인증 결과를 검증하고 이후 살아 있는
+provider 종류/설정을 재검사하여 공통 신원·세션·handoff 완료를 AAL 1·로컬 시간으로
+수행합니다. 잘못된 자격은 invalid_credentials 오류이며 세션을 만들지 않고 portal의
+필수 throttling 정책 아래 challenge 재시도가 가능합니다.
+
+실제 소유한 store와 제어된 테스트 커넥터로 잘못된 자격 재시도·세션/handoff 발급·
+로컬 인증 시간·AAL 1·backend 재호출 없는 replay 거부·검증 중 provider 비활성화 시
+추가 세션 미생성을 확인했습니다. 서비스 수준 테스트이며 실제 LDAP 브라우저 로그인
+전체 흐름은 아닙니다. 라이브러리/네이티브 회귀와 Clippy를 통과했습니다. portal의
+form/CSRF/throttling 연결·설정 커넥터 epoch fence·원격 LDAP 회수·운영 활성화는 남았습니다.
