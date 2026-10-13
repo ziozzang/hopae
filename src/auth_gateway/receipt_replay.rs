@@ -104,6 +104,10 @@ pub fn consume<T>(
     put(&tx, CLOCK, &now.to_string())?;
     let result = operation(&tx)?;
     guard(&tx)?;
+    let final_registry = receipt_key_store::load(&tx, checked.revision())?.ok_or(Refused)?;
+    if final_registry.revision() != checked.revision() {
+        return Err(Refused);
+    }
     let final_now =
         clock().max(now.saturating_add(begun.elapsed().as_millis().min(u64::MAX as u128) as u64));
     if final_now >= claims.expires_ms {
@@ -237,6 +241,33 @@ mod tests {
             .is_err()
         );
         assert_eq!(checks.get(), 2);
+        assert!(value(&db, "issued-fixture").unwrap().is_none());
+        assert!(value(&db, COUNT).unwrap().is_none());
+        consume(&mut db, &checked, &|| 101, &|_| Ok(()), |_| Ok(())).unwrap();
+    }
+
+    #[test]
+    fn registry_change_inside_owner_work_cannot_commit_old_receipt() {
+        let mut db = Connection::open_in_memory().unwrap();
+        let (_owner, checked) = fixture(&mut db);
+        let original = value(&db, "projection_receipt_registry_v1")
+            .unwrap()
+            .unwrap();
+        assert!(
+            consume(&mut db, &checked, &|| 101, &|_| Ok(()), |tx| {
+                let mut changed: serde_json::Value = serde_json::from_str(&original).unwrap();
+                changed["revision"] = serde_json::json!(2);
+                put(tx, "projection_receipt_registry_v1", &changed.to_string())?;
+                put(tx, "issued-fixture", "must-rollback")
+            })
+            .is_err()
+        );
+        assert_eq!(
+            value(&db, "projection_receipt_registry_v1")
+                .unwrap()
+                .unwrap(),
+            original
+        );
         assert!(value(&db, "issued-fixture").unwrap().is_none());
         assert!(value(&db, COUNT).unwrap().is_none());
         consume(&mut db, &checked, &|| 101, &|_| Ok(()), |_| Ok(())).unwrap();

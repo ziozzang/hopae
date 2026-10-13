@@ -531,3 +531,5 @@ keyring 설정·결합 챌린지와 CSRF·영속 설정 세대 검사·원자 �
 소유자 meta의 nonce ID·정렬된 만료 인덱스를 사용해 호출마다 최대 128개 만료 쌍을 정리하며 counter 생성 후 전체 ledger를 scan하지 않습니다. 활성 100만 개 한계·인덱스 불일치는 거부합니다. clock floor는 정리 후 시계 역행 재사용을 막지만 DB 전체 복원에는 외부 epoch/최소 버전 fence가 필요합니다. receipt 테스트 12건은 중복 소비·작업 취소·작업 중 만료·정리/시계 역행·오래된 registry를 포함합니다. 운영에 활성화하거나 자격을 발급하지 않으며 전체 스택 성능 검증이 아닙니다.
 
 receipt 동시성 검증은 독립 SQLite 연결 8개를 소비 전에 동기화해 정확히 한 호출만 commit하고 별도로 증가한 소유자 작업 counter도 1이며 DB 재연결 후 같은 receipt를 거부하는 것을 확인합니다. 마지막 권한 검사가 실패하면 nonce·작업을 취소하고 이후 허용된 재시도는 성공합니다. receipt 테스트 14건이 통과했으며 단일 소비 transaction 검증이지 다중 node membership·자격 endpoint 활성화·10k/100k 처리량 검증은 아닙니다.
+
+호출자 작업과 마지막 권한 검사 이후, 만료 검사와 commit 직전에 DB registry revision을 다시 확인합니다. 작업 안에서 registry를 변경하는 회귀 테스트는 registry·nonce·관련 작업이 함께 rollback되고 정상 재시도는 성공함을 확인합니다. receipt 테스트 15건이 통과했습니다. 자격 endpoint 연결 전 소스 라이브러리 단계입니다.
