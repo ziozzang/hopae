@@ -11,6 +11,7 @@ pub mod cookies;
 pub mod handlers;
 pub mod i18n;
 pub mod pages;
+pub mod password_attempts;
 pub mod ports;
 #[cfg(test)]
 mod tests;
@@ -70,6 +71,7 @@ pub struct PortalState {
     pub rng: Arc<dyn Rng>,
     pub(crate) csrf_key: CsrfKey,
     pub(crate) in_flight: Arc<Semaphore>,
+    pub(crate) password_attempts: Arc<password_attempts::PasswordAttempts>,
 }
 
 impl PortalState {
@@ -89,6 +91,7 @@ impl PortalState {
             rng,
             csrf_key,
             in_flight,
+            password_attempts: Arc::new(password_attempts::PasswordAttempts::default()),
         }
     }
 }

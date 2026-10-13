@@ -461,6 +461,88 @@ pub(crate) async fn login_post(
     }
 }
 
+pub(crate) async fn password_post(
+    State(st): State<PortalState>,
+    Path(provider): Path<String>,
+    req: Request,
+) -> Response {
+    let (parts, body) = req.into_parts();
+    let rq = match prepare(&st, &parts) {
+        Ok(rq) => rq,
+        Err(response) => return response,
+    };
+    if !rq.ctx.https {
+        return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+    }
+    let form = match read_form(&st, &rq, &parts, body).await {
+        Ok(form) => form,
+        Err(response) => return response,
+    };
+    for name in ["csrf", "challenge", "username", "password"] {
+        if form.0.0.iter().filter(|(key, _)| key == name).count() != 1 {
+            return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+        }
+    }
+    let binding = rq
+        .presented
+        .bind
+        .as_ref()
+        .map(|cookie| cookie.expose().to_owned());
+    if let Err(response) = guard(&st, &rq, &parts, &form, Purpose::Login, binding.as_deref()).await
+    {
+        return response;
+    }
+    if !st.password_attempts.admit(rq.ctx.client_ip) {
+        let mut response = error_response(rq.t(), rq.rid(), ErrorPage::Unavailable);
+        *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+        return response;
+    }
+    let (Some(challenge), Some(username), Some(password)) = (
+        form.0.get("challenge"),
+        form.0.get("username"),
+        form.0.get("password"),
+    ) else {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    };
+    if !simple_id(&provider, 64)
+        || challenge.len() > 128
+        || username.len() > 256
+        || password.len() > 4096
+    {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let provider = ProviderId::new(provider);
+    let challenge = Secret::new(challenge.to_owned());
+    let password = Secret::new(password.to_owned());
+    let cookies = Cookies {
+        bind: rq.presented.bind.clone(),
+        handle: rq.presented.handle.clone(),
+    };
+    match st
+        .services
+        .password(
+            &rq.ctx,
+            super::ports::PasswordSubmission {
+                provider: &provider,
+                challenge: &challenge,
+                username,
+                password: &password,
+            },
+            &cookies,
+        )
+        .await
+    {
+        super::ports::CallbackOutcome::Redirect(redirect) => {
+            redirect_response(&st, &rq, &redirect, &[])
+        }
+        super::ports::CallbackOutcome::Failed(failure) => fail_response(&rq, failure),
+        _ => error_response(rq.t(), rq.rid(), ErrorPage::Failed),
+    }
+}
+
 pub(crate) async fn retry_post(State(st): State<PortalState>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
     let rq = match prepare(&st, &parts) {

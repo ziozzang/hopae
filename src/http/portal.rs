@@ -26,6 +26,7 @@ pub fn router(state: PortalState) -> Router {
         .route("/login/retry", post(handlers::retry_post))
         .route("/login/continue", post(handlers::continue_post))
         .route("/login/{provider}", post(handlers::login_post))
+        .route("/login/{provider}/password", post(handlers::password_post))
         .route("/callback/{provider}", get(handlers::callback_get))
         .route(
             "/switch",

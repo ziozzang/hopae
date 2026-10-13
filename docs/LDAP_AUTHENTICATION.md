@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 17 -->
+<!-- doc-rev: 18 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -305,3 +305,25 @@ serialization implementation. Its contract requires HTTP origin/CSRF and attempt
 throttling before invocation. The real-store service scenario now exercises this
 adapter and verifies a handoff response. Portal tests and Clippy pass. HTTP route,
 HTTPS enforcement, CSRF/throttle handler and chooser wiring are not enabled yet.
+
+## Password HTTP endpoint and attempt admission
+
+POST `/login/{provider}/password` now prepares trusted request context, requires
+HTTPS and the existing Login Origin/CSRF guard, rejects duplicate/missing credential
+fields and applies bounded password admission before calling PortalServices.password.
+It accepts bounded form data only and emits the existing handoff response or generic
+failure. The password field is never put in a URL or response by the handler.
+
+Admission permits ten CSRF-valid submissions per canonical IP per monotonic minute,
+with at most 4096 IP windows. IPv4-mapped IPv6 cannot obtain a second quota. Active
+windows are not evicted on saturation; expired windows release capacity, and poison
+fails closed. Excess attempts return 429 with Retry-After 60. This state is process-local,
+not persistent or shared across replicas; per-account and cluster-wide controls remain
+required before broad deployment. The ordinary session-verification path does not
+use this limiter.
+
+Real-router tests with a controlled service verify plaintext, missing Origin and
+ambiguous fields are refused without a credential call; only ten submissions reach
+the service. Portal tests pass (61 cases). The chooser and initial password form are
+still not wired, LDAP configuration activation remains gated, and this endpoint is
+not yet deployed internally. End-to-end real-directory/browser qualification remains.

@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=17 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=18 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -263,3 +263,21 @@ Debug·serialization 구현이 없고 호출 전 HTTP Origin/CSRF·시도 제한
 실제 store 서비스 시나리오에서 adapter를 통과한 handoff 응답을 확인했습니다.
 portal 검사와 Clippy가 통과했습니다. HTTP route·HTTPS 집행·CSRF/throttle handler·
 선택 화면 연결은 아직 활성화하지 않았습니다.
+
+## 비밀번호 HTTP endpoint·시도 제한
+
+POST `/login/{provider}/password`는 신뢰된 요청 문맥을 준비하고 HTTPS와 기존 Login
+Origin/CSRF guard를 요구하며 중복/누락 자격 필드를 거부하고 제한된 시도 admission
+후 PortalServices.password를 호출합니다. 제한된 form만 받아 기존 handoff 응답이나
+일반 실패를 반환합니다. handler는 비밀번호를 URL이나 응답에 넣지 않습니다.
+
+정규 IP당 단조 시간 1분에 CSRF-valid 제출 10회를 허용하며 최대 4096개 IP window를
+유지합니다. IPv4-mapped IPv6는 별도 quota를 얻지 못합니다. 포화 시 활성 window를
+내보내지 않고 만료 항목만 정리하며 lock 손상은 차단합니다. 초과는 Retry-After 60의
+429입니다. 프로세스 로컬 상태이며 영속/replica 공유 제한은 아닙니다. 넓은 배포 전
+계정별·cluster 전체 제어가 필요합니다. 일반 세션 검증에는 이 limiter를 사용하지 않습니다.
+
+실제 router와 제어된 서비스로 평문·Origin 누락·모호한 필드가 자격 호출 전에 거부되고
+제출 10개만 서비스에 도달함을 검증했습니다. portal 61건이 통과했습니다. 선택기와
+최초 비밀번호 form은 아직 연결하지 않았고 LDAP 설정 활성화 제한도 유지합니다.
+내부 배포 및 실제 디렉토리/브라우저 전체 흐름 검증은 남아 있습니다.

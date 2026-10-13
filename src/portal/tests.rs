@@ -167,6 +167,15 @@ impl PortalServices for Fake {
         self.rec(format!("begin:{}:{}", txn.expose(), p), Some(ctx), Some(c));
         self.begin.lock().unwrap().clone()
     }
+    async fn password(
+        &self,
+        ctx: &RequestCtx,
+        _submission: PasswordSubmission<'_>,
+        cookies: &Cookies,
+    ) -> CallbackOutcome {
+        self.rec("password", Some(ctx), Some(cookies));
+        CallbackOutcome::Failed(fail(FailKind::Failed))
+    }
     async fn callback(
         &self,
         ctx: &RequestCtx,
@@ -1612,4 +1621,100 @@ async fn client_ip_comes_from_trusted_proxies_only() {
         )
         .await;
     assert_eq!(e2.fake.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn password_http_requires_tls_csrf_unique_fields_and_bounded_attempts() {
+    let mut e = env().await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        crate::gateway::forwarding::X_FORWARDED_PROTO.clone(),
+        reqwest::header::HeaderValue::from_static("https"),
+    );
+    e.http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .default_headers(headers)
+        .build()
+        .unwrap();
+    let cookie = portal_cookie(BIND);
+    let token = e.token(BIND, Purpose::Login);
+    let fields = [
+        ("csrf", token.as_str()),
+        ("challenge", "owned-challenge"),
+        ("username", "worker"),
+        ("password", "owned-value"),
+    ];
+    assert_eq!(
+        e.post("/login/directory/password", &fields, Some(&cookie), None)
+            .await
+            .status,
+        403
+    );
+    let mut duplicate = fields.to_vec();
+    duplicate.push(("password", "other"));
+    assert_eq!(
+        e.post(
+            "/login/directory/password",
+            &duplicate,
+            Some(&cookie),
+            Some(ORIGIN)
+        )
+        .await
+        .status,
+        400
+    );
+    let mut ser = url::form_urlencoded::Serializer::new(String::new());
+    for (name, value) in fields {
+        ser.append_pair(name, value);
+    }
+    let plaintext = e
+        .send(
+            e.http
+                .post(e.url("/login/directory/password"))
+                .header(
+                    crate::gateway::forwarding::X_FORWARDED_PROTO.clone(),
+                    "http",
+                )
+                .header("origin", ORIGIN)
+                .header("cookie", &cookie)
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(ser.finish()),
+        )
+        .await;
+    assert_eq!(plaintext.status, 403);
+    assert!(
+        e.fake.calls().is_empty(),
+        "rejected HTTP input reached the credential service"
+    );
+    for _ in 0..10 {
+        assert_eq!(
+            e.post(
+                "/login/directory/password",
+                &fields,
+                Some(&cookie),
+                Some(ORIGIN)
+            )
+            .await
+            .status,
+            400
+        );
+    }
+    let limited = e
+        .post(
+            "/login/directory/password",
+            &fields,
+            Some(&cookie),
+            Some(ORIGIN),
+        )
+        .await;
+    assert_eq!(limited.status, 429);
+    assert_eq!(limited.headers.get("retry-after").unwrap(), "60");
+    assert_eq!(
+        e.fake
+            .calls()
+            .iter()
+            .filter(|call| call.as_str() == "password")
+            .count(),
+        10
+    );
 }
