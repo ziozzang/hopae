@@ -33,6 +33,6 @@ def main():
                 diagnostic=(result.stdout+result.stderr).decode(errors='replace').replace(bind,'[REDACTED]').replace(user,'[REDACTED]')
                 Path('/tmp/hopae-owned-ldap-test-failure.log').write_text(diagnostic)
                 raise RuntimeError('owned LDAP credential test failed; sanitized diagnostic in /tmp/hopae-owned-ldap-test-failure.log')
-            print('PASS: real owned OpenLDAP over verified TLS; stable immutable identity, repeated independent user binds, invalid/missing/injected credentials and wrong CA rejection. Portal/session/runtime activation is not qualified.')
+            print('PASS: real owned OpenLDAP over verified TLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection and backend-circuit classification. Portal/session/runtime activation is not qualified.')
         finally:subprocess.run(['docker','rm','-f',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 if __name__=='__main__':main()

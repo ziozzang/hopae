@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 3 -->
+<!-- doc-rev: 4 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -118,3 +118,16 @@ then `python3 tools/owned_ldap_smoke.py`. The fixture runs the explicitly ignore
 connector integration test; ordinary unit tests do not require Docker. This qualifies
 the connector slice, not the portal chooser/form, session issuance, revocation,
 circuit lifecycle, complete performance or an operational LDAP provider deployment.
+
+## Connector circuit
+
+LDAP now uses the same shared monotonic, generation-bound admission lease as the
+API verifier relay. Three consecutive backend failures open the circuit for 30
+seconds; recovery permits one half-open probe. Cancellation records a failure via
+lease drop. Invalid user credentials and missing/ambiguous user results remain
+healthy directory responses, while TLS/connect/search failures, service-bind errors
+and malformed results are unavailable. Semaphore saturation rejects immediately
+without treating capacity pressure as directory failure. The owned OpenLDAP test
+checks ordinary credential denial leaves the circuit closed and three wrong-CA
+failures open it. Circuits remain process-local; provider registry publication,
+persistent quarantine and administrative recovery are not implemented by this slice.

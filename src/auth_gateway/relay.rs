@@ -1,55 +1,10 @@
 //! Fixed verifier endpoints. Client credentials are never logged or reflected.
+use super::breaker::Circuit;
 use super::{PrincipalKind, Subject, VerifiedEvidence, runtime::Error};
 use crate::provider::oidc::http::{EndpointPolicy, Fetcher};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
-struct Circuit {
-    started: std::time::Instant,
-    state: std::sync::Mutex<super::breaker::Breaker>,
-}
-impl Circuit {
-    fn now(&self) -> u64 {
-        self.started.elapsed().as_millis().min(u64::MAX as u128) as u64
-    }
-    fn admit(self: &Arc<Self>) -> Result<Lease, Error> {
-        let permit = self
-            .state
-            .lock()
-            .map_err(|_| Error::Unavailable)?
-            .admit(self.now())
-            .ok_or(Error::Unavailable)?;
-        Ok(Lease {
-            circuit: self.clone(),
-            permit: Some(permit),
-        })
-    }
-}
-struct Lease {
-    circuit: Arc<Circuit>,
-    permit: Option<super::breaker::Permit>,
-}
-impl Lease {
-    fn finish(mut self, failed: bool) {
-        self.record(failed);
-    }
-    fn record(&mut self, failed: bool) {
-        if let Some(permit) = self.permit.take()
-            && let Ok(mut circuit) = self.circuit.state.lock()
-        {
-            if failed {
-                circuit.backend_failure(permit, self.circuit.now());
-            } else {
-                circuit.healthy(permit);
-            }
-        }
-    }
-}
-impl Drop for Lease {
-    fn drop(&mut self) {
-        self.record(true);
-    }
-}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -141,12 +96,7 @@ impl Connector {
             fetcher: Fetcher::new(config.allow_private_endpoints),
             key,
             capacity: Arc::new(tokio::sync::Semaphore::new(64)),
-            circuit: Arc::new(Circuit {
-                started: std::time::Instant::now(),
-                state: std::sync::Mutex::new(
-                    super::breaker::Breaker::new(3, 30_000).expect("constant circuit bounds"),
-                ),
-            }),
+            circuit: Circuit::new(3, 30_000).expect("constant circuit bounds"),
         })
     }
     pub(crate) fn same_binding(&self, other: &Self) -> bool {
@@ -167,7 +117,7 @@ impl Connector {
             .capacity
             .try_acquire()
             .map_err(|_| Error::Unavailable)?;
-        let lease = self.circuit.admit()?;
+        let lease = self.circuit.admit().ok_or(Error::Unavailable)?;
         let result = self.exchange(service, realm, token, ip, now).await;
         lease.finish(matches!(result, Err(Error::Unavailable)));
         result

@@ -108,9 +108,74 @@ impl Breaker {
         self.probe = false;
     }
 }
+/// Monotonic shared endpoint circuit with cancellation-safe admission leases.
+pub struct Circuit {
+    started: std::time::Instant,
+    state: std::sync::Mutex<Breaker>,
+}
+impl Circuit {
+    pub fn new(threshold: u16, retry_ms: u64) -> Option<std::sync::Arc<Self>> {
+        Some(std::sync::Arc::new(Self {
+            started: std::time::Instant::now(),
+            state: std::sync::Mutex::new(Breaker::new(threshold, retry_ms)?),
+        }))
+    }
+    fn now(&self) -> u64 {
+        self.started.elapsed().as_millis().min(u64::MAX as u128) as u64
+    }
+    pub fn state(&self) -> Option<State> {
+        self.state.lock().ok().map(|breaker| breaker.state())
+    }
+    pub fn admit(self: &std::sync::Arc<Self>) -> Option<CircuitLease> {
+        let permit = self.state.lock().ok()?.admit(self.now())?;
+        Some(CircuitLease {
+            circuit: self.clone(),
+            permit: Some(permit),
+        })
+    }
+}
+pub struct CircuitLease {
+    circuit: std::sync::Arc<Circuit>,
+    permit: Option<Permit>,
+}
+impl CircuitLease {
+    /// A rejected credential is a healthy backend response; only backend faults are failures.
+    pub fn finish(mut self, failed: bool) {
+        self.record(failed);
+    }
+    fn record(&mut self, failed: bool) {
+        if let Some(permit) = self.permit.take()
+            && let Ok(mut breaker) = self.circuit.state.lock()
+        {
+            if failed {
+                breaker.backend_failure(permit, self.circuit.now());
+            } else {
+                breaker.healthy(permit);
+            }
+        }
+    }
+}
+impl Drop for CircuitLease {
+    fn drop(&mut self) {
+        self.record(true);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shared_circuit_credential_denial_is_healthy_and_cancellation_opens() {
+        let circuit = Circuit::new(3, 30_000).unwrap();
+        for _ in 0..10 {
+            circuit.admit().unwrap().finish(false);
+        }
+        assert_eq!(circuit.state(), Some(State::Closed));
+        for _ in 0..3 {
+            drop(circuit.admit().unwrap());
+        }
+        assert_eq!(circuit.state(), Some(State::Open));
+        assert!(circuit.admit().is_none());
+    }
     #[test]
     fn abandoned_probe_expires_and_cannot_close_a_new_generation() {
         let mut b = Breaker::new(1, 100).unwrap();

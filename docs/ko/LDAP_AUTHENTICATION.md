@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=3 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=4 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -99,3 +99,15 @@ tests/fixtures/ldap` 후 `python3 tools/owned_ldap_smoke.py`로 재현합니다.
 명시적 ignored connector 통합 테스트를 실행하며 일반 unit test는 Docker를 요구하지
 않습니다. 커넥터 일부 검증이며 portal 선택/form·세션 발급·회수·circuit 수명주기·
 전체 성능·운영 LDAP provider 배포를 증명하지 않습니다.
+
+## 커넥터 circuit
+
+LDAP는 API verifier relay와 같은 공유 단조 시간·generation admission lease를
+사용합니다. 연속 backend 실패 3회면 30초간 circuit을 열고 회복에는 half-open
+probe 하나만 허용합니다. 취소는 lease drop으로 실패를 기록합니다. 잘못된 사용자
+자격과 미등록/모호한 검색 결과는 정상 디렉토리 응답으로 다루며 TLS/연결/검색 장애·
+서비스 bind 오류·손상 결과는 unavailable입니다. semaphore 포화는 즉시 거부하며
+용량 압박을 디렉토리 실패로 계산하지 않습니다. 실제 OpenLDAP 테스트로 일반 자격
+거부는 circuit을 닫힌 상태로 유지하고 잘못된 CA 실패 3회는 여는 것을 확인합니다.
+프로세스 로컬 circuit이며 provider registry 게시·영속 quarantine·관리 회복은
+이 구현에 포함하지 않습니다.

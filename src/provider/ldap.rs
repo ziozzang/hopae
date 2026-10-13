@@ -81,6 +81,7 @@ pub struct LdapProvider {
     bind_password: Secret,
     tls: Arc<rustls::ClientConfig>,
     capacity: tokio::sync::Semaphore,
+    circuit: Arc<crate::auth_gateway::breaker::Circuit>,
 }
 struct Connection {
     ldap: Ldap,
@@ -134,6 +135,8 @@ impl LdapProvider {
             bind_password: Secret::new(password),
             tls: Arc::new(tls),
             capacity: tokio::sync::Semaphore::new(64),
+            circuit: crate::auth_gateway::breaker::Circuit::new(3, 30_000)
+                .expect("constant circuit bounds"),
         })
     }
     async fn connect(&self) -> Result<Connection, CredentialError> {
@@ -264,12 +267,15 @@ impl CredentialProvider for LdapProvider {
             .capacity
             .try_acquire()
             .map_err(|_| CredentialError::Unavailable)?;
-        tokio::time::timeout(
+        let lease = self.circuit.admit().ok_or(CredentialError::Unavailable)?;
+        let result = tokio::time::timeout(
             Duration::from_millis(self.config.timeout_ms),
             self.verify(input),
         )
         .await
-        .map_err(|_| CredentialError::Unavailable)?
+        .unwrap_or(Err(CredentialError::Unavailable));
+        lease.finish(matches!(result, Err(CredentialError::Unavailable)));
+        result
     }
 }
 #[cfg(test)]
@@ -332,16 +338,27 @@ mod tests {
                 .await,
             Err(CredentialError::Invalid)
         ));
+        assert_eq!(
+            provider.circuit.state(),
+            Some(crate::auth_gateway::breaker::State::Closed)
+        );
         let mut wrong_ca = config;
         wrong_ca.ca = std::env::var("OWNED_LDAP_WRONG_CA").unwrap().into();
         let untrusted =
             LdapProvider::compile(ProviderId::new("untrusted"), wrong_ca, &env).unwrap();
-        assert!(matches!(
-            untrusted
-                .verify_password(PasswordInput::new("alice", &password).unwrap())
-                .await,
-            Err(CredentialError::Unavailable)
-        ));
+        for _ in 0..3 {
+            assert!(matches!(
+                untrusted
+                    .verify_password(PasswordInput::new("alice", &password).unwrap())
+                    .await,
+                Err(CredentialError::Unavailable)
+            ));
+        }
+        assert_eq!(
+            untrusted.circuit.state(),
+            Some(crate::auth_gateway::breaker::State::Open)
+        );
+        assert!(untrusted.circuit.admit().is_none());
     }
     #[test]
     fn ldap_configuration_rejects_plaintext_and_filter_injection() {
