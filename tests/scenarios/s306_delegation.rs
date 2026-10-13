@@ -64,7 +64,9 @@ fn delegated_console_keeps_native_grants_and_signed_actor_audit() {
     let idp = MockIdp::start("auth_time_present");
     let fixture = Fixture::with(
         "m4-admin",
-        json!({"admin":{"hangang_delegation":{"key_env":"HOPAE_TEST_DELEGATION_KEY","sessions_file":mappings}}}),
+        json!({"admin":{"hangang_delegation":{"key_env":"HOPAE_TEST_DELEGATION_KEY","sessions_file":mappings}},
+            "authentication_gateway":{"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"owned","session_fallback":true,
+                "api_relay":{"url":format!("{}/verify",idp.issuer.as_str().trim_end_matches('/')),"issuer":"owned","allow_private_endpoints":true}}]}}),
     );
     let h = Hopae::spawn(fixture, &idp, &[("HOPAE_TEST_DELEGATION_KEY", KEY)]);
     let actor = kit::login_on(
@@ -91,6 +93,45 @@ fn delegated_console_keeps_native_grants_and_signed_actor_audit() {
     let data = json!([{"actor_id":7,"actor_name":"operator","user_id":actor.user_id,"handle":actor.handle,"client_ip":kit::UA_IP}]);
     std::fs::write(&mappings, data.to_string()).unwrap();
     assert_eq!(signed(&h, "/v1/users", "", "operator", 7, 1).status, 200);
+    let profiles = signed(&h, "/v1/authentication/profiles", "", "operator", 7, 101);
+    assert_eq!(profiles.status, 200);
+    assert_eq!(profiles.json()["revision"], 1);
+    let publication = r#"{"revision":1,"configuration":null}"#;
+    let result = signed(
+        &h,
+        "/v1/authentication/profiles/publish",
+        publication,
+        "operator",
+        7,
+        102,
+    );
+    assert_eq!(result.status, 200, "{result:?}");
+    assert_eq!(result.json()["revision"], 2);
+    assert_eq!(
+        signed(
+            &h,
+            "/v1/authentication/profiles/publish",
+            publication,
+            "operator",
+            7,
+            103
+        )
+        .status,
+        409
+    );
+    assert_eq!(
+        signed(
+            &h,
+            "/v1/authentication/profiles/publish",
+            publication,
+            "operator",
+            7,
+            102
+        )
+        .status,
+        403
+    );
+
     assert_eq!(
         signed(&h, "/v1/users/query", r#"{"limit":1}"#, "operator", 7, 10).status,
         200

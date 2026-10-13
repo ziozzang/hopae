@@ -9,7 +9,7 @@ export async function mount(host) {
   const logout=node('a',label('Sign out of Hopae','Hopae 로그아웃'));logout.href='/_hopae/logout?return=%2Fui%2F';logout.className='button button-quiet';logout.hidden=true;
   const tabs=node('div',undefined,'hopae-toolbar'), notice=node('p',undefined,'muted'), error=node('p',undefined,'error'), content=node('div'), pager=node('div',undefined,'hopae-toolbar');
   const previous=node('button',label('Previous','이전')), more=node('button',label('Next','다음')), refresh=node('button',label('Refresh','새로고침'));
-  for(const [key,en,kr] of [['status','Status','상태'],['users','Users','사용자'],['sessions','Sessions','세션'],['events','Events','이벤트']]){
+  for(const [key,en,kr] of [['status','Status','상태'],['users','Users','사용자'],['sessions','Sessions','세션'],['events','Events','이벤트'],['profiles','Authentication profiles','인증 프로필']]){
     const b=node('button',label(en,kr));b.dataset.tab=key;b.onclick=()=>{if(busy)return;view=key;cursor=null;history=[];load();};tabs.append(b);
   }
   refresh.onclick=()=>load();tabs.append(refresh);
@@ -42,10 +42,22 @@ export async function mount(host) {
     if(busy||disposed||paused)return;busy=true;refresh.disabled=true;error.textContent='';
     try{
       const {data:me}=await host.api('me');if(disposed||paused)return;canWrite=me.role==='admin';login.hidden=true;logout.hidden=false;
-      const {data}=await host.api(view==='status'?'status':view+'/query',view==='status'?{}:{method:'POST',json:{cursor,limit:50}});
+      const {data}=await host.api(view==='profiles'?'authentication/profiles':view==='status'?'status':view+'/query',(view==='status'||view==='profiles')?{}:{method:'POST',json:{cursor,limit:50}});
       if(disposed||paused)return;
       content.replaceChildren();
-      if(view==='status'){
+      if(view==='profiles'){
+        const help=node('p',label('Edit service authentication profiles. Use declared credential references; enter no passwords or token values. Saving replaces the complete profile configuration.','서비스 인증 프로필을 편집합니다. 선언된 자격 정보 참조를 사용하고 비밀번호·토큰 값을 입력하지 마세요. 저장하면 프로필 설정 전체를 교체합니다.'));
+        const editor=node('textarea');editor.rows=20;editor.maxLength=65536;editor.setAttribute('aria-label',label('Authentication profile configuration','인증 프로필 설정'));editor.value=JSON.stringify(data.configuration??null,null,2);editor.disabled=!canWrite;
+        const save=node('button',label('Save profiles','프로필 저장'));save.disabled=!canWrite;
+        save.onclick=async()=>{if(busy||disposed||paused||!canWrite)return;busy=true;save.disabled=true;refresh.disabled=true;error.textContent='';let saved=false;
+          try{const configuration=JSON.parse(editor.value);await host.api('authentication/profiles/publish',{method:'POST',json:{revision:data.revision,configuration}});saved=true;}
+          catch(e){if(!disposed&&!paused)error.textContent=e.message;}
+          finally{busy=false;if(!disposed&&!paused){save.disabled=!canWrite;refresh.disabled=false;}}
+          if(saved&&!disposed&&!paused)await load();
+        };
+        content.append(node('p',label('Revision: ','Revision: ')+show(data.revision)),help,editor,save);next=null;
+      }
+      else if(view==='status'){
         const grid=node('div',undefined,'hopae-metrics');
         for(const [name,value] of [[label('Users','사용자'),data.store?.users],[label('Live sessions','활성 세션'),data.store?.live_sessions],[label('Events','이벤트'),data.store?.events],[label('Providers','프로바이더'),data.providers?.length]]){
           const card=node('div',undefined,'panel hopae-metric');card.append(node('span',name,'muted'),node('strong',show(value)));grid.append(card);
@@ -56,7 +68,7 @@ export async function mount(host) {
       }
       else {content.append(table(Array.isArray(data.items)?data.items:[]));next=data.next_cursor??null;if(!data.items?.length)content.append(node('p',label('No records','조회 결과 없음')));}
       for(const tab of tabs.querySelectorAll('[data-tab]'))tab.classList.toggle('button-primary',tab.dataset.tab===view);
-      pager.hidden=view==='status';previous.disabled=!history.length;more.disabled=!next;
+      pager.hidden=view==='status'||view==='profiles';previous.disabled=!history.length;more.disabled=!next;
     }catch(e){if(!disposed&&!paused){canWrite=false;login.hidden=false;content.querySelectorAll('button').forEach(b=>b.disabled=true);error.textContent=e.message;}}finally{busy=false;refresh.disabled=false;}
   }
   const timer=setInterval(()=>{if(view==='status')load();},30000);host.signal.addEventListener('abort',()=>{disposed=true;clearInterval(timer);root.replaceChildren();},{once:true});

@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
@@ -120,3 +120,14 @@ The Hangang delegation middleware still restricts its endpoint allowlist, so thi
 new write path is currently the authenticated native Hopae admin API; integrated
 console write controls and deployment remain pending. No stream revocation or
 complete authentication-lifecycle claim follows from these request-level checks.
+
+The delegation adapter now accepts GET profile inspection and signed POST
+`/v1/authentication/profiles/publish` with required `revision` and `configuration`.
+After verifying the original body digest and nonce it constructs the internal PUT
+body and If-Match from those authenticated fields, then applies the normal admin
+gate and transactional actor fence. Replay and stale revision scenarios pass.
+Hopae console package 0.1.3 adds the profile tab and reference-only JSON editor,
+using the loaded revision for save and disabling viewer writes. An owned browser
+component fixture checks rendering, submitted revision/configuration, viewer denial
+and abort cleanup with a mocked host API. Actual deployed broker/UI publication
+qualification and stream revocation remain pending.

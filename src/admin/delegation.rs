@@ -309,11 +309,34 @@ pub async fn middleware(
     if wire::digest(&bytes) != assertion.body_sha256 {
         return denied();
     }
+    let mut profile_publication: Option<(u64, Vec<u8>)> = None;
     let translated = match (method.as_str(), original_path.as_str()) {
-        ("GET", "/v1/status" | "/v1/me" | "/v1/users" | "/v1/sessions" | "/v1/events")
-            if bytes.is_empty() =>
-        {
-            original_path.clone()
+        (
+            "GET",
+            "/v1/status"
+            | "/v1/me"
+            | "/v1/users"
+            | "/v1/sessions"
+            | "/v1/events"
+            | "/v1/authentication/profiles",
+        ) if bytes.is_empty() => original_path.clone(),
+        ("POST", "/v1/authentication/profiles/publish") => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Publication {
+                revision: u64,
+                configuration: serde_json::Value,
+            }
+            let Ok(publication) = serde_json::from_slice::<Publication>(&bytes) else {
+                return denied();
+            };
+            let Ok(body) =
+                serde_json::to_vec(&serde_json::json!({"configuration":publication.configuration}))
+            else {
+                return denied();
+            };
+            profile_publication = Some((publication.revision, body));
+            "/v1/authentication/profiles".to_owned()
         }
         ("POST", path @ ("/v1/users/query" | "/v1/sessions/query" | "/v1/events/query")) => {
             #[derive(Deserialize)]
@@ -380,13 +403,17 @@ pub async fn middleware(
     let listing = original_path.ends_with("/query");
     req = Request::from_parts(
         parts,
-        if method == Method::POST && !listing {
+        if let Some((_, body)) = &profile_publication {
+            Body::from(body.clone())
+        } else if method == Method::POST && !listing {
             Body::from("{}")
         } else {
             Body::empty()
         },
     );
-    if listing {
+    if profile_publication.is_some() {
+        *req.method_mut() = Method::PUT;
+    } else if listing {
         *req.method_mut() = Method::GET;
     }
     *req.uri_mut() = match translated.parse::<Uri>() {
@@ -424,6 +451,12 @@ pub async fn middleware(
             value.set_sensitive(true);
         }
         h.insert(name, value);
+    }
+    if let Some((revision, _)) = profile_publication {
+        let Ok(value) = HeaderValue::from_str(&format!("\"{revision}\"")) else {
+            return denied();
+        };
+        h.insert(header::IF_MATCH, value);
     }
     if let Some(ua) = &user_agent {
         let Ok(v) = HeaderValue::from_str(ua) else {

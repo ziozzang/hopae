@@ -1,6 +1,6 @@
 # 인증 프로필 게시
 
-<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=7 status=current -->
+<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=8 status=current -->
 
 [문서](README.md) · [English](../AUTH_PROFILE_PUBLICATION.md)
 
@@ -100,3 +100,12 @@ commit 직전 actor 거부 시 상태와 감사 동시 롤백을 검증합니다
 middleware의 endpoint 허용 목록 연결은 남아 있으므로 새 쓰기는 현재 인증된 호패
 자체 admin API 경로입니다. 통합 콘솔 쓰기·배포는 남아 있고 stream 회수나 전체
 인증 수명주기 완성을 주장하지 않습니다.
+
+위임 adapter는 프로필 GET 조회와 필수 `revision`·`configuration`의 서명된 POST
+`/v1/authentication/profiles/publish`를 받습니다. 원본 본문 digest와 nonce를
+검증한 뒤 인증된 필드로 내부 PUT 본문과 If-Match를 만들고 기존 관리자 gate·
+트랜잭션 actor fence를 적용합니다. 재사용·오래된 revision 시나리오를 통과했습니다.
+호패 콘솔 패키지 0.1.3에 프로필 탭·참조 전용 JSON 편집기를 추가하고 읽은 revision으로
+저장하며 viewer 쓰기를 비활성화합니다. 소유한 브라우저 컴포넌트 fixture는 mock host
+API로 표시·revision/설정 제출·viewer 거부·abort 정리를 확인합니다. 실제 배포된
+broker/UI 게시 검증과 stream 회수는 남아 있습니다.
