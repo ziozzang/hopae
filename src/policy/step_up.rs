@@ -54,7 +54,10 @@ pub fn evaluate(
             let second_factors = factors.iter().filter(|f| {
                 matches!(
                     f.kind,
-                    FactorKind::Totp | FactorKind::Webauthn | FactorKind::Recovery
+                    FactorKind::Totp
+                        | FactorKind::Webauthn
+                        | FactorKind::Recovery
+                        | FactorKind::External
                 )
             });
             let mut latest = None;

@@ -155,6 +155,7 @@ fn travels_with_state(kind: EventKind) -> bool {
     matches!(
         kind,
         EventKind::SessionCreated
+            | EventKind::FactorExternalConsumed
             | EventKind::SessionHandoff
             | EventKind::SessionTerminated
             | EventKind::HandleRevoked

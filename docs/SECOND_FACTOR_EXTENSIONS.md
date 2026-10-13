@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 8 -->
+<!-- doc-rev: 9 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -19,6 +19,12 @@ signature verifier or a replay store. No external factor HTTP route or Lua
 factor runtime is enabled by this module. Existing external service API verifier
 relays in [Authentication gateway](AUTH_GATEWAY.md) continue to issue service
 identity at AAL 0; they cannot count as human second-factor evidence.
+
+The native `external_transport` and `external_service` modules now provide an
+HTTPS-authenticated receipt and schema-v6 atomic owner completion. External MFA
+still has no enabled root configuration, portal form or Lua runtime. Earlier
+sections below record implementation stages; the latest owner section supersedes
+their statement that durable external completion is absent.
 
 ## Native authority and extension boundary
 
@@ -341,3 +347,61 @@ header and chunked body limits with a server holding the stream open, body and
 exchange deadlines, capacity rejection, cancellation, circuit refusal/recovery,
 clock rollback and resolved secret/CA binding changes. These tests do not prove
 browser external MFA, durable replay fencing or distributed session elevation.
+
+## Native external proof consumption and elevation — 2026-10-14
+
+The HTTPS connector now returns a private, nonserializable, noncloneable
+`VerifiedProof`, carrying the exact verified context and immutable authority.
+Raw proof IDs are hashed before leaving the transport. A generic JSON parser
+result cannot be passed to owner completion. The receipt has both wall expiry
+and a monotonic deadline bounded by the exchange's five-second budget; owner
+queueing and write time cannot extend it when the wall clock stops advancing.
+
+`external_service::elevate_authorized` first binds the pending native transaction
+to the live actor, portal cookie digest, initiating portal handle, credential
+generation, configured factor/revision/binding and current configuration epoch.
+Only then does it call the fixed verifier with owner-derived user/session/service
+and a transaction digest instead of the browser's transaction bearer token.
+The owner repeats these checks after the exchange, inside its write transaction.
+It refuses disabled/changed authority, primary-provider or user changes, stale
+actor/handle/generation, wrong service/target/browser binding and expired proof.
+Expiry and clock rollback are checked again immediately before commit.
+
+Schema v6 adds approved external factor authority records, an indexed factor to
+session mapping, a permanent hashed proof ledger and a capacity counter/trigger.
+Proof uniqueness is scoped to factor authority and its configuration revision,
+including different users, sessions and challenges. One owner transaction consumes
+the proof and challenge, appends a native `external` factor, sets AAL 2, advances
+credential generation, revokes every old handle/outstanding code, issues a new
+portal handle and exact-target elevated handoff, and writes required
+`factor.external_consumed`/revocation/handoff events with outbox rows. Audit or
+capacity failure rolls back the entire completion. Primary authentication time
+is preserved. Only a native operator-approved independent second-factor verifier
+may be published; an AAL 0 service API relay is not such an authority.
+
+Publication retains at most 64 factor identifiers, including disable tombstones.
+A revision or previously published global epoch cannot decrease; resolved secret/CA or verifier setting changes cannot
+reuse the same revision. The identical authority may follow a newer global
+configuration epoch without erasing its proof history. Revision/material changes
+or disable atomically terminate sessions elevated by that factor and revoke their
+handles/codes, using the factor/session index rather than scanning every session's
+JSON. Existing native TOTP enrollment removal accepts recent native external MFA.
+
+The proof ledger retains consumed hashes across owner reopen and ordinary session
+cleanup. No automatic proof pruning exists. Its hard capacity is 1,000,000 rows;
+full capacity denies new completion rather than forgetting replay history. Safe
+archival/retirement and operational capacity telemetry remain required lifecycle
+work. Startup precheck validates exact v6 constraints/guard and counter consistency
+read-only. A v5 binary cannot open v6 state; rollback requires the consistent
+pre-upgrade owner/delegation backup and matching configuration/keys. The internal
+runtime remains schema v5; this source change has not migrated it.
+
+Owned TLS-to-owner tests cover successful elevated handoff, previous credential
+revocation, concurrent and cross-session proof reuse, owner reopen persistence,
+factor disable, context/generation/browser/application errors, provider/user/
+authority/configuration changes, wall/monotonic expiry, capacity and audit rollback.
+Foundation tests refuse missing structures/guards and counter corruption. These
+are native service and SQLite-owner tests, not actual browser external MFA or
+proof of replay protection across independent follower databases. Root snapshot
+publication, service-scoped factor choice/enrollment, browser UI/CSRF/rate limits,
+process-wide admission, Lua orchestration and fleet qualification remain open.

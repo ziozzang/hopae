@@ -91,6 +91,7 @@ pub enum EventKind {
     FactorEnrollmentActivated,
     FactorEnrollmentExpired,
     FactorTotpConsumed,
+    FactorExternalConsumed,
     FactorEnrollmentRevoked,
 
     SessionHandoff,
@@ -119,7 +120,7 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 30] = [
+    pub const ALL: [EventKind; 31] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -128,6 +129,7 @@ impl EventKind {
         EventKind::FactorEnrollmentActivated,
         EventKind::FactorEnrollmentExpired,
         EventKind::FactorTotpConsumed,
+        EventKind::FactorExternalConsumed,
         EventKind::FactorEnrollmentRevoked,
         EventKind::SessionHandoff,
         EventKind::HandoffRejected,
@@ -175,6 +177,7 @@ impl EventKind {
             EventKind::FactorEnrollmentActivated => "factor.enrollment_activated",
             EventKind::FactorEnrollmentExpired => "factor.enrollment_expired",
             EventKind::FactorTotpConsumed => "factor.totp_consumed",
+            EventKind::FactorExternalConsumed => "factor.external_consumed",
             EventKind::FactorEnrollmentRevoked => "factor.enrollment_revoked",
 
             EventKind::SessionHandoff => "session.handoff",
@@ -392,6 +395,7 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "aal",
     "actor",
     "enrollment_id",
+    "factor_id",
     "actor_session",
     "delegated_issuer",
     "delegated_actor",
@@ -594,15 +598,19 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 25);
+        assert_eq!(required, 26);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 30);
+        assert_eq!(EventKind::ALL.len(), 31);
         for (kind, name) in [
+            (
+                EventKind::FactorExternalConsumed,
+                "factor.external_consumed",
+            ),
             (EventKind::AdminGrant, "admin.grant"),
             (EventKind::AdminRevoke, "admin.revoke"),
             (EventKind::AdminUserDisable, "admin.user_disable"),

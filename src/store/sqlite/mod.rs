@@ -58,6 +58,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         "0005_totp_enrollments",
         include_str!("../migrations/0005_totp_enrollments.sql"),
     ),
+    (
+        6,
+        "0006_external_factor_proofs",
+        include_str!("../migrations/0006_external_factor_proofs.sql"),
+    ),
 ];
 
 /// The schema version this binary migrates to (the last embedded migration).
@@ -778,6 +783,66 @@ pub fn validate_foundation(conn: &Connection, version: u32) -> Result<(), StoreE
             if !normalized.ends_with(&format!("wherestate='{state}'")) {
                 return Err(corrupt("index predicate"));
             }
+        }
+    }
+    if version >= 6 {
+        // Exact schema comparison includes constraints, primary-key scope and
+        // the capacity trigger. No repair or business write during precheck.
+        let normalize = |sql: &str| -> String {
+            sql.to_ascii_lowercase()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .trim_end_matches(';')
+                .to_owned()
+        };
+        let migration = include_str!("../migrations/0006_external_factor_proofs.sql");
+        for (kind, name) in [
+            ("table", "external_factor_authorities"),
+            ("table", "external_factor_proofs"),
+            ("table", "external_factor_sessions"),
+            ("table", "external_factor_budget"),
+            ("trigger", "external_factor_proof_budget"),
+        ] {
+            let start = migration
+                .find(&format!("CREATE {} {name}", kind.to_ascii_uppercase()))
+                .expect("embedded external factor schema");
+            let expected = if kind == "trigger" {
+                &migration[start..]
+            } else {
+                migration[start..]
+                    .split(';')
+                    .next()
+                    .expect("embedded table")
+            };
+            let actual: Option<String> = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type=?1 AND name=?2",
+                    [kind, name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if actual.as_deref().map(normalize) != Some(normalize(expected)) {
+                return Err(StoreError::Corrupt(
+                    "schema v6 invalid external factor structure".into(),
+                ));
+            }
+        }
+        let count: i64 =
+            conn.query_row("SELECT count(*) FROM external_factor_proofs", [], |r| {
+                r.get(0)
+            })?;
+        let used: Option<i64> = conn
+            .query_row(
+                "SELECT used FROM external_factor_budget WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if used != Some(count) || count > 1_000_000 {
+            return Err(StoreError::Corrupt(
+                "schema v6 invalid external proof capacity".into(),
+            ));
         }
     }
     Ok(())

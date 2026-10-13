@@ -1,6 +1,6 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=8 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=9 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
@@ -18,6 +18,11 @@
 아닙니다. 이 모듈로 외부 요소 HTTP 라우트나 Lua 런타임이 활성화되지는
 않습니다. [인증 게이트웨이](AUTH_GATEWAY.md)의 기존 외부 서비스 API
 검증 릴레이는 AAL 0 서비스 신원을 발급하며 사람의 2차 인증 근거가 아닙니다.
+
+네이티브 `external_transport`와 `external_service`가 HTTPS 인증 receipt와 schema v6
+소유자의 원자적 완료를 제공합니다. 외부 MFA의 root 설정·portal 폼·Lua 런타임은 아직
+활성화되지 않았습니다. 아래 기록은 단계별 구현 상태이며 최신 소유자 구현 절이
+영속 외부 완료가 없다는 과거 문구를 대체합니다.
 
 ## 네이티브 권한과 확장 경계
 
@@ -300,3 +305,50 @@ HTTP 200의 정확한 문맥에 결합된 타입 JSON 응답만 유효한 factor
 서버가 stream을 유지하는 header·chunked 크기 상한, 본문·교환 기한, 동시성 거부,
 취소, 서킷 거부·복구, 시계 역행과 비밀·CA 값 변경 binding을 검증합니다. 이 결과는
 브라우저 외부 MFA, 영속 재사용 방지나 분산 세션 등급 상승의 검증은 아닙니다.
+
+## 네이티브 외부 증명 소비와 등급 상승 — 2026-10-14
+
+HTTPS connector는 정확한 검증 문맥과 불변 authority를 가진 비공개·직렬화 불가·
+복제 불가 `VerifiedProof`를 반환합니다. 원본 proof ID는 전송 계층에서 나가기 전에
+해시합니다. 일반 JSON 파서 결과를 소유자 완료에 전달할 수 없습니다. receipt는
+벽시계 만료와 교환의 5초 예산에 제한된 단조 기한을 함께 가집니다. 벽시계가 멈춰도
+소유자 대기·쓰기 시간이 증명의 수명을 늘리지 않습니다.
+
+`external_service::elevate_authorized`가 대기 중인 네이티브 transaction을 현재 actor,
+portal cookie 해시, 최초 portal handle, 자격 세대, factor·revision·binding과 현재
+설정 epoch에 결합한 뒤 고정 verifier를 호출합니다. 사용자·session·서비스는 소유자에서
+도출하며 브라우저 transaction bearer token 대신 transaction 해시를 전달합니다.
+교환 후 소유자 쓰기 transaction에서 다시 검사하여 비활성·변경 authority, 1차 provider·
+사용자 변경, 오래된 actor·handle·generation, 다른 서비스·target·브라우저 binding,
+만료 증명을 거부합니다. commit 직전에도 만료와 시계 역행을 검사합니다.
+
+schema v6은 승인된 외부 factor authority, factor별 session 인덱스, 영속 proof 해시
+원장과 용량 counter·trigger를 추가합니다. factor authority와 설정 revision 내 proof
+고유성을 사용자·session·challenge를 넘어 적용합니다. 한 소유자 transaction에서 proof와
+challenge 소비, 네이티브 `external` factor 추가, AAL 2와 자격 세대 증가, 이전 모든
+handle·미사용 code 회수, 새 portal handle·정확한 target의 elevated handoff 발급,
+필수 `factor.external_consumed`·회수·handoff 감사와 outbox를 처리합니다. 감사나 용량
+실패는 완료 전체를 롤백합니다. 1차 인증 시간은 유지합니다. 네이티브 운영자가 승인한
+독립적인 2차 verifier만 게시할 수 있으며 AAL 0 서비스 API relay는 해당 authority가 아닙니다.
+
+disable tombstone을 포함하여 factor 식별자는 최대 64개 유지합니다. revision과 이전에 게시한 전역 epoch는 낮출
+수 없고 해석된 비밀·CA·verifier 설정이 바뀌면 같은 revision을 재사용할 수 없습니다.
+동일 authority는 proof 이력을 지우지 않고 새 전역 설정 epoch를 따를 수 있습니다.
+revision·실제 값 변경이나 disable은 해당 factor로 등급이 올라간 session을 종료하고
+handle·code를 원자적으로 회수합니다. 모든 session JSON을 스캔하지 않고 factor/session
+인덱스를 사용합니다. 기존 네이티브 TOTP 등록 제거는 최근의 네이티브 외부 MFA도 인정합니다.
+
+소유자 재개방과 일반 session 정리 이후에도 소비된 해시를 유지하며 자동 proof 삭제는
+없습니다. 원장 상한은 1,000,000행이고, 가득 차면 재사용 이력을 버리지 않고 새 완료를
+거부합니다. 안전한 보관·퇴역과 운영 용량 telemetry는 후속 lifecycle 작업입니다.
+시작 precheck는 정확한 v6 제약·guard와 counter 일관성을 읽기 전용으로 검증합니다.
+v5 바이너리는 v6 상태를 열 수 없으며 rollback에는 일관된 이전 owner·delegation 백업과
+설정·키가 필요합니다. 내부 런타임은 schema v5를 유지하며 이번 소스로 마이그레이션하지 않았습니다.
+
+자체 TLS와 소유자를 연결한 테스트가 elevated handoff, 이전 자격 회수, 동시·session간
+proof 재사용, 재개방 후 영속성, factor disable, 문맥·세대·브라우저·앱 오류,
+provider·사용자·authority·설정 변경, 벽시계·단조 만료, 용량·감사 롤백을 검증합니다.
+foundation 테스트는 구조·guard 누락과 counter 손상을 거부합니다. 네이티브 서비스와
+SQLite 소유자 검증이며 실제 브라우저 외부 MFA나 독립 follower DB 간 재사용 방지 검증은
+아닙니다. root snapshot 게시, 서비스별 factor 선택·등록, 브라우저 UI·CSRF·유입 제한,
+프로세스 전체 유입 제한, Lua 연결과 fleet 검증은 남아 있습니다.

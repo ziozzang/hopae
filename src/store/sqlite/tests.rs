@@ -3772,3 +3772,585 @@ async fn native_totp_stepup_configuration_epoch_is_fenced_at_binding_and_commit(
         }
     }
 }
+
+async fn external_stepup_fixture(
+    f: &Fx,
+    n: u32,
+) -> (Sess, TransactionRow, HandleView, HandleRow, HandoffCodeRow) {
+    f.clock.set(Timestamp(59_000));
+    let user = f.user(n).await;
+    f.store.conn().execute("INSERT OR IGNORE INTO providers(provider_id,kind,display_name,enabled,managed_by,created_at,updated_at)VALUES('mock','oidc','Owned',1,'api',0,0)",[]).unwrap();
+    f.store
+        .conn()
+        .execute(
+            "INSERT OR IGNORE INTO meta(key,value) VALUES('config_generation','1')",
+            [],
+        )
+        .unwrap();
+    let session = f.session(&user, vec![]).await;
+    let old = f.code(&session).await;
+    let mut txn = new_txn(f, &random_token(&f.rng, 32), "192.0.2.10");
+    txn.purpose = TxnPurpose::Stepup;
+    txn.portal_session_id = Some(session.row.session_id.clone());
+    txn.conflicting_handle_sha256 = None;
+    txn.return_target = old.row.return_target.clone();
+    txn.bind_sha256 = Some(old.row.bind_sha256);
+    txn.recovery_depth = 0;
+    let digest = txn.txn_sha256;
+    f.store.create_transaction(txn, vec![]).await.unwrap();
+    let txn = f.store.transaction(&digest).await.unwrap().unwrap();
+    let view = f
+        .store
+        .lookup_handle(&session.portal_digest, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut handle = f.handle_row(&session.row.session_id, PORTAL_HOST, &handle_value(&f.rng));
+    handle.issued_aal = Aal::Two;
+    let mut code = old.row;
+    code.code_sha256 = random_token(&f.rng, 32).digest();
+    code.issued_aal = Aal::Two;
+    code.cred_gen += 1;
+    (session, txn, view, handle, code)
+}
+fn external_stepup_input<'a>(
+    f: &Fx,
+    txn: &TransactionRow,
+    view: HandleView,
+    handle: HandleRow,
+    code: HandoffCodeRow,
+    response: &'a Secret,
+) -> crate::factor::external_service::StepUp<'a> {
+    crate::factor::external_service::StepUp {
+        actor: stepup_actor(f, view),
+        response,
+        transaction: txn.txn_sha256,
+        portal_binding: sha256(b"owned-portal-cookie"),
+        config_generation: 1,
+        portal_handle: handle,
+        handoff: code,
+        events: vec![],
+    }
+}
+async fn owned_external_receipt(
+    f: &Fx,
+    connector: &crate::factor::external_transport::Connector,
+    txn: &TransactionRow,
+    view: &HandleView,
+) -> crate::factor::external_transport::VerifiedProof {
+    use crate::store::Factors;
+    f.store
+        .bind_external_stepup(BindExternalStepUp {
+            actor: stepup_actor(f, view.clone()),
+            transaction: txn.txn_sha256,
+            portal_binding: sha256(b"owned-portal-cookie"),
+            authority: connector.authority(),
+            config_generation: 1,
+        })
+        .await
+        .unwrap();
+    let challenge = txn.txn_sha256.to_hex();
+    let authority = connector.authority();
+    let expected = crate::factor::external::Expected {
+        challenge: &challenge,
+        user: view.session.user_id.as_str(),
+        session: view.session.session_id.as_str(),
+        service: txn.app_id.as_str(),
+        factor: &authority.factor,
+        configuration_revision: authority.revision,
+        credential_generation: view.session.cred_gen,
+        started_at: f.now(),
+        challenge_expires_at: txn.expires_at,
+    };
+    let crate::factor::external_transport::Verification::Verified(proof) = connector
+        .verify(&expected, &Secret::new("accept".into()), f.clock.as_ref())
+        .await
+        .unwrap()
+    else {
+        panic!("owned TLS verifier proof")
+    };
+    *proof
+}
+#[tokio::test]
+async fn owned_external_https_mfa_atomically_elevates_and_revokes_on_authority_disable() {
+    use crate::factor::external_service::{
+        disable_authorized_configuration, elevate_authorized, publish_authorized_configuration,
+    };
+    let f = fx();
+    let (session, txn, view, handle, code) = external_stepup_fixture(&f, 101).await;
+    let fixture =
+        crate::factor::external_transport::tests::Fixture::with_clock(f.clock.clone()).await;
+    let connector = fixture.connector();
+    publish_authorized_configuration(&f.store, &connector, 1)
+        .await
+        .unwrap();
+    let response = Secret::new("accept".into());
+    elevate_authorized(
+        &f.store,
+        &connector,
+        f.clock.as_ref(),
+        external_stepup_input(&f, &txn, view, handle.clone(), code.clone(), &response),
+    )
+    .await
+    .unwrap();
+    let elevated = f
+        .store
+        .lookup_handle(&handle.handle_sha256, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(elevated.session.aal, Aal::Two);
+    assert_eq!(elevated.handle.issued_aal, Aal::Two);
+    assert_eq!(elevated.session.cred_gen, 2);
+    assert_eq!(elevated.session.auth_time, session.row.auth_time);
+    assert_eq!(
+        elevated.session.factors.last().unwrap().kind,
+        FactorKind::External
+    );
+    assert_eq!(
+        elevated
+            .session
+            .factors
+            .last()
+            .unwrap()
+            .provider
+            .as_ref()
+            .unwrap()
+            .as_str(),
+        "external:partner-push"
+    );
+    assert_eq!(f.count("SELECT count(*) FROM external_factor_proofs"), 1);
+    assert_eq!(f.count("SELECT used FROM external_factor_budget"), 1);
+    assert_eq!(
+        f.count("SELECT count(*) FROM events WHERE kind='factor.external_consumed'"),
+        1
+    );
+    assert_eq!(f.count("SELECT count(*) FROM event_deliveries WHERE event_id IN(SELECT event_id FROM events WHERE kind='factor.external_consumed')"),1);
+    assert!(
+        f.store
+            .transaction(&txn.txn_sha256)
+            .await
+            .unwrap()
+            .unwrap()
+            .consumed_at
+            .is_some()
+    );
+    assert!(
+        f.store
+            .lookup_handle(&session.portal_digest, &host(PORTAL_HOST))
+            .await
+            .unwrap()
+            .unwrap()
+            .handle
+            .revoked_at
+            .is_some()
+    );
+    assert_eq!(
+        f.count("SELECT count(*) FROM handoff_codes WHERE consumed_reason='elevation'"),
+        1
+    );
+    assert_eq!(
+        f.count("SELECT count(*) FROM events WHERE attrs LIKE '%owned-proof%'"),
+        0
+    );
+    assert_eq!(super::precheck(&f._dir.path().join("hopae.db")).unwrap(), 6);
+    disable_authorized_configuration(&f.store, "partner-push", 8, 1)
+        .await
+        .unwrap();
+    let disabled = f
+        .store
+        .lookup_handle(&handle.handle_sha256, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(disabled.session.terminated_at.is_some());
+    assert!(disabled.handle.revoked_at.is_some());
+    assert_eq!(
+        f.count("SELECT count(*) FROM handoff_codes WHERE consumed_reason='factor_revoked'"),
+        1
+    );
+    assert_eq!(f.count("SELECT count(*) FROM external_factor_proofs"), 1);
+    assert!(
+        publish_authorized_configuration(&f.store, &connector, 1)
+            .await
+            .is_err()
+    );
+}
+#[tokio::test]
+async fn owned_external_https_proof_is_single_use_across_sessions_and_concurrent_completions() {
+    use crate::factor::external_service::{elevate_authorized, publish_authorized_configuration};
+    let f = fx();
+    let (_, txn1, view1, handle1, code1) = external_stepup_fixture(&f, 102).await;
+    let (_, txn2, view2, handle2, code2) = external_stepup_fixture(&f, 103).await;
+    let fixture =
+        crate::factor::external_transport::tests::Fixture::with_clock(f.clock.clone()).await;
+    let connector = fixture.connector();
+    publish_authorized_configuration(&f.store, &connector, 1)
+        .await
+        .unwrap();
+    let response = Secret::new("accept".into());
+    let (one, two) = tokio::join!(
+        elevate_authorized(
+            &f.store,
+            &connector,
+            f.clock.as_ref(),
+            external_stepup_input(&f, &txn1, view1, handle1, code1, &response)
+        ),
+        elevate_authorized(
+            &f.store,
+            &connector,
+            f.clock.as_ref(),
+            external_stepup_input(&f, &txn2, view2, handle2, code2, &response)
+        )
+    );
+    assert_ne!(one.is_ok(), two.is_ok());
+    assert_eq!(f.count("SELECT count(*) FROM external_factor_proofs"), 1);
+    assert_eq!(f.count("SELECT used FROM external_factor_budget"), 1);
+    assert_eq!(
+        f.count(
+            "SELECT count(*) FROM login_txns WHERE purpose='stepup' AND consumed_at IS NOT NULL"
+        ),
+        1
+    );
+    assert_eq!(f.count("SELECT count(*) FROM sessions WHERE aal=2"), 1);
+    assert_eq!(
+        f.count("SELECT count(*) FROM events WHERE kind='factor.external_consumed'"),
+        1
+    );
+}
+#[tokio::test]
+async fn owned_external_https_completion_refusals_rollback_proof_challenge_and_credentials() {
+    use crate::factor::external_service::{
+        disable_authorized_configuration, publish_authorized_configuration,
+    };
+    use crate::store::Factors;
+    for case in [
+        "audit",
+        "provider_disable",
+        "user_disable",
+        "factor_disable",
+        "config_change",
+        "config_aba",
+        "expired_proof",
+        "wrong_target",
+        "wrong_portal_bind",
+        "wrong_handle",
+        "wrong_generation",
+        "capacity",
+        "monotonic_expiry",
+        "cross_user",
+        "cross_service",
+        "cross_challenge",
+        "proof_generation",
+        "proof_binding",
+        "future_proof",
+        "factor_revision",
+        "provider_configuration",
+        "user_revision",
+        "app_binding",
+        "revoked_handle",
+    ] {
+        let f = fx();
+        let (session, txn, view, mut handle, mut code) = external_stepup_fixture(&f, 104).await;
+        let fixture =
+            crate::factor::external_transport::tests::Fixture::with_clock(f.clock.clone()).await;
+        let connector = fixture.connector();
+        publish_authorized_configuration(&f.store, &connector, 1)
+            .await
+            .unwrap();
+        let mut proof = owned_external_receipt(&f, &connector, &txn, &view).await;
+        let mut portal_binding = sha256(b"owned-portal-cookie");
+        let mut events = vec![];
+        match case {
+            "audit" => {
+                let event = f.event(EventKind::SessionHandoff);
+                events.extend([event.clone(), event]);
+            }
+            "provider_disable" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE providers SET enabled=0", [])
+                    .unwrap();
+            }
+            "user_disable" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE users SET status='disabled'", [])
+                    .unwrap();
+            }
+            "factor_disable" => {
+                disable_authorized_configuration(&f.store, "partner-push", 8, 1)
+                    .await
+                    .unwrap();
+            }
+            "config_change" => {
+                f.store
+                    .conn()
+                    .execute(
+                        "UPDATE meta SET value='2' WHERE key='config_generation'",
+                        [],
+                    )
+                    .unwrap();
+            }
+            "config_aba" => {
+                f.store
+                    .conn()
+                    .execute(
+                        "UPDATE meta SET value='2' WHERE key='config_generation'",
+                        [],
+                    )
+                    .unwrap();
+                publish_authorized_configuration(&f.store, &connector, 2)
+                    .await
+                    .unwrap();
+                f.store
+                    .conn()
+                    .execute(
+                        "UPDATE meta SET value='1' WHERE key='config_generation'",
+                        [],
+                    )
+                    .unwrap();
+                assert!(
+                    publish_authorized_configuration(&f.store, &connector, 1)
+                        .await
+                        .is_err()
+                );
+            }
+            "expired_proof" => {
+                f.clock.advance(Duration::from_secs(2));
+            }
+            "wrong_target" => {
+                code.return_target = url::Url::parse("https://app.example.test/other").unwrap();
+            }
+            "wrong_portal_bind" => {
+                portal_binding = sha256(b"other-cookie");
+            }
+            "wrong_handle" => {
+                handle.host = host(APP_HOST);
+            }
+            "wrong_generation" => {
+                code.cred_gen += 1;
+            }
+            "capacity" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE external_factor_budget SET used=1000000", [])
+                    .unwrap();
+            }
+            "monotonic_expiry" => {
+                proof.deadline = std::time::Instant::now() - Duration::from_millis(1);
+            }
+            "cross_user" => {
+                proof.user = "other-user".into();
+            }
+            "cross_service" => {
+                proof.service = "other-service".into();
+            }
+            "cross_challenge" => {
+                proof.challenge = "other-challenge".into();
+            }
+            "proof_generation" => {
+                proof.credential_generation += 1;
+            }
+            "proof_binding" => {
+                proof.authority.binding = [0; 32];
+            }
+            "future_proof" => {
+                proof.verified_at = f.now().add(Duration::from_millis(1));
+            }
+            "factor_revision" => {
+                let authority = connector.authority();
+                f.store
+                    .publish_external_factor(ExternalFactorPublication {
+                        factor: authority.factor,
+                        revision: authority.revision + 1,
+                        binding: Some(authority.binding),
+                        config_generation: 1,
+                    })
+                    .await
+                    .unwrap();
+            }
+            "provider_configuration" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE providers SET config='{\"changed\":true}'", [])
+                    .unwrap();
+            }
+            "user_revision" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE users SET authz_version=authz_version+1", [])
+                    .unwrap();
+            }
+            "app_binding" => {
+                code.bind_sha256 = sha256(b"other-app-cookie");
+            }
+            "revoked_handle" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE session_handles SET revoked_at=59", [])
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            f.store
+                .elevate_external(ExternalElevation {
+                    actor: stepup_actor(&f, view),
+                    proof,
+                    transaction: txn.txn_sha256,
+                    portal_binding,
+                    config_generation: 1,
+                    portal_handle: handle,
+                    handoff: code,
+                    events,
+                })
+                .await
+                .is_err(),
+            "{case}"
+        );
+        assert_eq!(
+            f.count("SELECT count(*) FROM external_factor_proofs"),
+            0,
+            "{case}"
+        );
+        assert_eq!(
+            f.count("SELECT count(*) FROM sessions WHERE aal=2"),
+            0,
+            "{case}"
+        );
+        assert_eq!(
+            f.count("SELECT count(*) FROM events WHERE kind='factor.external_consumed'"),
+            0,
+            "{case}"
+        );
+        assert!(
+            f.store
+                .transaction(&txn.txn_sha256)
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed_at
+                .is_none(),
+            "{case}"
+        );
+        let original = f
+            .store
+            .lookup_handle(&session.portal_digest, &host(PORTAL_HOST))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(original.session.cred_gen, 1, "{case}");
+    }
+}
+
+#[tokio::test]
+async fn owned_external_https_handoff_and_replay_fence_survive_owner_reopen() {
+    use crate::factor::external_service::{elevate_authorized, publish_authorized_configuration};
+    let f = fx();
+    let (_, txn, view, handle, code) = external_stepup_fixture(&f, 105).await;
+    let fixture =
+        crate::factor::external_transport::tests::Fixture::with_clock(f.clock.clone()).await;
+    let connector = fixture.connector();
+    publish_authorized_configuration(&f.store, &connector, 1)
+        .await
+        .unwrap();
+    let response = Secret::new("accept".into());
+    elevate_authorized(
+        &f.store,
+        &connector,
+        f.clock.as_ref(),
+        external_stepup_input(&f, &txn, view, handle, code.clone(), &response),
+    )
+    .await
+    .unwrap();
+    let mut app_handle = f.handle_row(&code.session_id, APP_HOST, &handle_value(&f.rng));
+    app_handle.issued_aal = Aal::Two;
+    let redeemed = f
+        .redeem(RedeemRequest {
+            code_sha256: code.code_sha256,
+            host: code.host.clone(),
+            path: code.return_target.path().to_owned(),
+            client_ip: code.client_ip,
+            presented_bind_sha256: Some(code.bind_sha256),
+            presented_handle: None,
+            new_handle: app_handle,
+            now: f.now(),
+            max_recoveries: 3,
+            session_policy: Default::default(),
+            app_lifetimes: Default::default(),
+            expiry_events: vec![],
+        })
+        .await;
+    let RedeemOutcome::Minted {
+        issued_aal,
+        session,
+    } = redeemed
+    else {
+        panic!("elevated handoff")
+    };
+    assert_eq!(issued_aal, Aal::Two);
+    assert_eq!(session.aal, Aal::Two);
+    let Fx {
+        store,
+        clock,
+        hooks,
+        rng,
+        _dir,
+    } = f;
+    drop(store);
+    let store = Store::open(
+        &_dir.path().join("hopae.db"),
+        clock.clone(),
+        vec!["log".into()],
+        Some(hooks.clone()),
+    )
+    .unwrap();
+    store.set_rng(Arc::new(SeededRng::new(199)));
+    let f = Fx {
+        store,
+        clock,
+        hooks,
+        rng,
+        _dir,
+    };
+    assert_eq!(f.count("SELECT count(*) FROM external_factor_proofs"), 1);
+    let (_, txn, view, handle, code) = external_stepup_fixture(&f, 106).await;
+    let result = elevate_authorized(
+        &f.store,
+        &connector,
+        f.clock.as_ref(),
+        external_stepup_input(&f, &txn, view, handle, code, &response),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(f.count("SELECT count(*) FROM external_factor_proofs"), 1);
+    assert_eq!(f.count("SELECT count(*) FROM sessions WHERE aal=2"), 1);
+    assert!(
+        f.store
+            .transaction(&txn.txn_sha256)
+            .await
+            .unwrap()
+            .unwrap()
+            .consumed_at
+            .is_none()
+    );
+}
+#[test]
+fn v6_external_mfa_foundation_refuses_missing_guard_or_counter_corruption_read_only() {
+    for sql in [
+        "DROP TRIGGER external_factor_proof_budget",
+        "DROP TABLE external_factor_sessions",
+        "UPDATE external_factor_budget SET used=1",
+    ] {
+        let f = fx();
+        f.store.conn().execute_batch(sql).unwrap();
+        assert!(
+            matches!(
+                super::precheck(&f._dir.path().join("hopae.db")),
+                Err(StoreError::Corrupt(_))
+            ),
+            "{sql}"
+        );
+    }
+}

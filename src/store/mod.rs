@@ -471,6 +471,9 @@ pub trait Events: Send + Sync {
 /// Owner storage primitives; callers still validate recent authentication/challenges.
 #[async_trait]
 pub trait Factors: Send + Sync {
+    async fn publish_external_factor(&self, request: ExternalFactorPublication) -> StoreResult<()>;
+    async fn bind_external_stepup(&self, request: BindExternalStepUp) -> StoreResult<()>;
+    async fn elevate_external(&self, request: ExternalElevation) -> StoreResult<()>;
     async fn bind_totp_stepup(&self, request: BindTotpStepUp) -> StoreResult<TotpChallengeBinding>;
     async fn elevate_totp(&self, request: TotpElevation) -> StoreResult<()>;
     async fn has_active_totp(&self, user: &UserId) -> StoreResult<bool>;

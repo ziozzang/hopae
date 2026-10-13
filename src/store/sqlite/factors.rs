@@ -10,6 +10,67 @@ use rusqlite::{OptionalExtension, params};
 
 #[async_trait]
 impl Factors for Store {
+    async fn publish_external_factor(
+        &self,
+        request: crate::store::ExternalFactorPublication,
+    ) -> StoreResult<()> {
+        self.write("publish_external_factor", move |env| {
+            let shared=env.shared.clone(); let tx=env.begin()?;
+            require_stepup_generation(&tx,Some(request.config_generation))?;
+            let revision=i64::try_from(request.revision).ok().filter(|v|*v>0)
+                .ok_or(StoreError::Conflict("invalid external factor revision"))?;
+            if request.factor.is_empty() || request.factor.len()>128 || !request.factor.bytes().all(|b|b.is_ascii_alphanumeric()||b"_.:-".contains(&b)) {
+                return Err(StoreError::Conflict("invalid external factor id"));
+            }
+            let old:Option<(i64,Option<Vec<u8>>,i64)>=tx.query_row("SELECT revision,binding,config_generation FROM external_factor_authorities WHERE factor=?1",[&request.factor],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            if let Some((old_revision,old_binding,old_generation))=old {
+                if u64::try_from(old_generation).ok().is_none_or(|g|g>request.config_generation) {
+                    return Err(StoreError::Conflict("external factor configuration epoch decreased"));
+                }
+                if revision<old_revision || (revision==old_revision && old_binding.as_deref()!=request.binding.as_ref().map(|b|b.as_slice())) {
+                    return Err(StoreError::Conflict("external factor revision changed"));
+                }
+                if revision==old_revision && old_generation as u64==request.config_generation {return commit(tx,&shared,None);}
+                if revision!=old_revision || old_binding.as_deref()!=request.binding.as_ref().map(|b|b.as_slice()) {
+                    let sessions:Vec<(String,String)>=tx.prepare("SELECT s.session_id,s.user_id FROM external_factor_sessions e JOIN sessions s ON s.session_id=e.session_id WHERE e.factor=?1 AND s.terminated_at IS NULL")?.query_map([&request.factor],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<Result<_,_>>()?;
+                    for (sid,user) in sessions {
+                        let sid=crate::session::types::SessionId::new(sid);let user=UserId::new(user);
+                        let event=EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::SessionTerminated,Outcome::Success,"r_external_factor_publication").user(&user).session(&sid).reason(crate::event::types::reasons::FACTOR_REVOKED).attr("factor_id",request.factor.as_str()).build();
+                        super::sessions::terminate_in(&tx,&shared,&sid,crate::event::types::reasons::FACTOR_REVOKED,shared.clock.now(),&[event])?;
+                    }
+                }
+            } else {
+                let count:i64=tx.query_row("SELECT count(*) FROM external_factor_authorities",[],|r|r.get(0))?;
+                if count>=64 {return Err(StoreError::Conflict("external factor capacity"));}
+            }
+            tx.execute("INSERT INTO external_factor_authorities(factor,revision,binding,config_generation) VALUES(?1,?2,?3,?4) ON CONFLICT(factor) DO UPDATE SET revision=excluded.revision,binding=excluded.binding,config_generation=excluded.config_generation",params![request.factor,revision,request.binding.as_ref().map(|b|b.as_slice()),i64::try_from(request.config_generation).map_err(|_|StoreError::Conflict("invalid configuration generation"))?])?;
+            let event=EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::ConfigLoaded,Outcome::Success,"r_external_factor_publication").attr("factor_id",request.factor.as_str()).build();
+            insert_events(&tx,&shared,&[event])?; commit(tx,&shared,None)
+        }).await
+    }
+    async fn bind_external_stepup(
+        &self,
+        request: crate::store::BindExternalStepUp,
+    ) -> StoreResult<()> {
+        self.write("bind_external_stepup", move |env| {
+            let shared=env.shared.clone();let now=shared.clock.now();let tx=env.begin()?;
+            let actor=&request.actor;let view=&actor.view;
+            require_actor(&tx,&shared,actor.user().as_str(),actor)?;
+            require_external_authority(&tx,&request.authority,request.config_generation)?;
+            let context=external_context(view.session.cred_gen,&request.authority,request.config_generation)?;
+            let params=params![&request.transaction.0[..],&request.portal_binding.0[..],&view.handle.handle_sha256.0[..],context,view.session.session_id.as_str(),actor.client_ip.to_string(),now.secs()];
+            let changed=tx.execute("UPDATE login_txns SET portal_bind_sha256=?2,conflicting_handle_sha256=?3,pending_identity=?4 WHERE txn_sha256=?1 AND purpose='stepup' AND portal_session_id=?5 AND client_ip=?6 AND bind_sha256 IS NOT NULL AND consumed_at IS NULL AND created_at<=?7 AND expires_at>?7 AND portal_bind_sha256 IS NULL AND conflicting_handle_sha256 IS NULL AND pending_identity IS NULL AND provider_id IS NULL AND state_sha256 IS NULL AND nonce IS NULL AND pkce_verifier IS NULL AND reauth_max_age IS NULL",params)?;
+            if changed!=1 {
+                let identical:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM login_txns WHERE txn_sha256=?1 AND purpose='stepup' AND portal_session_id=?5 AND client_ip=?6 AND bind_sha256 IS NOT NULL AND consumed_at IS NULL AND created_at<=?7 AND expires_at>?7 AND portal_bind_sha256=?2 AND conflicting_handle_sha256=?3 AND pending_identity=?4 AND provider_id IS NULL AND state_sha256 IS NULL AND nonce IS NULL AND pkce_verifier IS NULL AND reauth_max_age IS NULL)",params,|r|r.get(0))?;
+                if !identical {return Err(StoreError::Conflict("external challenge unavailable"));}
+            } else {
+                let event=EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::LoginStarted,Outcome::Info,&actor.request_id).user(actor.user()).session(&view.session.session_id).reason(crate::event::types::reasons::STEP_UP_REQUIRED).attr("factor_id",request.authority.factor.as_str()).build();
+                insert_events(&tx,&shared,&[event])?;
+            }
+            commit(tx,&shared,None)
+        }).await
+    }
+
     async fn bind_totp_stepup(
         &self,
         request: crate::store::BindTotpStepUp,
@@ -38,6 +99,85 @@ impl Factors for Store {
             let binding=crate::store::TotpChallengeBinding{enrollment,revision:u64::try_from(revision).map_err(|_|StoreError::Corrupt("factor revision".into()))?};
             commit(tx,&shared,None)?;
             Ok(binding)
+        }).await
+    }
+
+    async fn elevate_external(&self, request: crate::store::ExternalElevation) -> StoreResult<()> {
+        self.write("elevate_external", move |env| {
+            use crate::{session::types::{Aal, FactorEntry, FactorKind}, event::types::reasons};
+            let shared = env.shared.clone();
+            let now = shared.clock.now();
+            let tx = env.begin()?;
+            let actor = &request.actor;
+            let view = &actor.view;
+            let user = actor.user();
+            let sid = &view.session.session_id;
+            require_actor(&tx, &shared, user.as_str(), actor)?;
+            let proof=&request.proof;
+            require_external_authority(&tx,&proof.authority,request.config_generation)?;
+            if proof.user!=user.as_str() || proof.session!=sid.as_str()
+                || proof.challenge!=request.transaction.to_hex()
+                || proof.credential_generation!=view.session.cred_gen
+                || proof.verified_at>now || proof.expires_at<=now
+                || proof.deadline<=std::time::Instant::now()
+                || now.since(proof.verified_at)>std::time::Duration::from_secs(5)
+                || proof.expires_at>proof.verified_at.add(std::time::Duration::from_secs(5)) {
+                return Err(StoreError::Conflict("external proof context unavailable"));
+            }
+            let generation = view.session.cred_gen.checked_add(1).and_then(|n| i64::try_from(n).ok()).ok_or(StoreError::Conflict("credential generation exhausted"))?;
+            let handle = &request.portal_handle;
+            let code = &request.handoff;
+            if handle.session_id != *sid || handle.host != view.handle.host
+                || handle.handle_sha256 == view.handle.handle_sha256
+                || handle.issued_aal != Aal::Two || handle.created_at.secs() != now.secs()
+                || handle.last_seen_at.secs() != now.secs()
+                || handle.absolute_expires_at.secs() <= now.secs()
+                || handle.absolute_expires_at > view.handle.absolute_expires_at.min(view.session.absolute_expires_at)
+                || handle.revoked_at.is_some() || handle.revoked_reason.is_some()
+                || code.client_ip != actor.client_ip
+                || code.session_id != *sid || code.issued_aal != Aal::Two
+                || i64::try_from(code.cred_gen).ok() != Some(generation)
+                || code.created_at.secs() != now.secs() || code.expires_at.secs() <= now.secs()
+                || code.expires_at > now.add(std::time::Duration::from_secs(60)).min(view.session.absolute_expires_at)
+                || code.consumed_at.is_some() || code.consumed_reason.is_some()
+                || code.return_target.scheme() != "https" || code.return_target.host_str() != Some(code.host.as_str())
+                || !code.return_target.username().is_empty() || code.return_target.password().is_some()
+                || code.return_target.fragment().is_some()
+            {
+                return Err(StoreError::Conflict("invalid elevated credentials"));
+            }
+            // A native step-up challenge is bound to the initiating portal handle.
+            // The existing conflicting-handle column has this purpose for stepup only.
+            let consumed = tx.execute(
+                "UPDATE login_txns SET consumed_at=?2,consumed_reason='elevation' WHERE txn_sha256=?1 AND purpose='stepup' AND portal_session_id=?3 AND conflicting_handle_sha256=?4 AND bind_sha256=?5 AND return_target=?6 AND client_ip=?7 AND recovery_depth=?8 AND consumed_at IS NULL AND created_at<=?2 AND expires_at>?2 AND reauth_max_age IS NULL AND provider_id IS NULL AND state_sha256 IS NULL AND nonce IS NULL AND pkce_verifier IS NULL AND portal_bind_sha256=?9 AND pending_identity=?10 AND app_id=?11",
+                params![&request.transaction.0[..],now.secs(),sid.as_str(),&view.handle.handle_sha256.0[..],&code.bind_sha256.0[..],code.return_target.as_str(),code.client_ip.to_string(),i64::from(code.recovery_depth),&request.portal_binding.0[..],external_context(view.session.cred_gen,&proof.authority,request.config_generation)?,proof.service],
+            )?;
+            if consumed != 1 { return Err(StoreError::Conflict("step-up challenge unavailable")); }
+            let revision=i64::try_from(proof.authority.revision).map_err(|_|StoreError::Conflict("invalid factor revision"))?;
+            let inserted=tx.execute("INSERT INTO external_factor_proofs(factor,revision,proof_sha256,consumed_at_ms) SELECT ?1,?2,?3,?4 WHERE NOT EXISTS(SELECT 1 FROM external_factor_proofs WHERE factor=?1 AND revision=?2 AND proof_sha256=?3)",params![proof.authority.factor,revision,&proof.proof.0[..],now.0])?;
+            if inserted!=1 {return Err(StoreError::Conflict("external proof already consumed"));}
+            let mut factors = view.session.factors.clone();
+            factors.push(FactorEntry { kind: FactorKind::External, provider: Some(crate::provider::types::ProviderId::new(format!("external:{}",proof.authority.factor))), at: now });
+            tx.execute("INSERT INTO external_factor_sessions(factor,session_id,revision) VALUES(?1,?2,?3) ON CONFLICT(factor,session_id) DO UPDATE SET revision=excluded.revision",params![proof.authority.factor,sid.as_str(),revision])?;
+            // An external second factor does not replace primary authentication time.
+            tx.execute("UPDATE sessions SET aal=2,factors=?2,cred_gen=?3 WHERE session_id=?1",params![sid.as_str(),super::rows::json_str(&factors)?,generation])?;
+            let mut events = request.events;
+            let live:Vec<String> = tx.prepare("SELECT host FROM session_handles WHERE session_id=?1 AND revoked_at IS NULL ORDER BY host,handle_sha256")?.query_map([sid.as_str()],|r|r.get(0))?.collect::<Result<_,_>>()?;
+            for host in live {
+                events.push(EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::HandleRevoked,Outcome::Success,&actor.request_id).user(user).session(sid).reason(reasons::ELEVATION).attr("host",host).build());
+            }
+            super::sessions::revoke_session_handles(&tx,sid,reasons::ELEVATION.0,now)?;
+            super::sessions::consume_session_codes(&tx,sid,reasons::ELEVATION.0,now)?;
+            super::sessions::insert_handle(&tx,handle)?;
+            super::sessions::insert_handoff_code(&tx,code)?;
+            events.push(EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::FactorExternalConsumed,Outcome::Success,&actor.request_id).user(user).session(sid).reason(reasons::ELEVATION).attr("factor_id",proof.authority.factor.as_str()).build());
+            events.push(EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::SessionHandoff,Outcome::Success,&actor.request_id).user(user).session(sid).reason(reasons::ELEVATION).attr("host",code.host.as_str()).build());
+            insert_events(&tx,&shared,&events)?;
+            let final_now=shared.clock.now();
+            if proof.deadline<=std::time::Instant::now() || proof.expires_at<=final_now || final_now<proof.verified_at {
+                return Err(StoreError::Conflict("external proof expired before commit"));
+            }
+            commit(tx,&shared,None)
         }).await
     }
 
@@ -294,7 +434,7 @@ impl Store {
                 require_actor(&tx,&shared,user.as_str(),actor)?;
                 if operation=="revoke" {
                     let active:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM totp_enrollments WHERE enrollment_id=?1 AND user_id=?2 AND state='active')",params![id,user.as_str()],|row|row.get(0))?;
-                    let recent_mfa=actor.view.session.factors.iter().any(|factor| matches!(factor.kind,crate::session::types::FactorKind::Totp|crate::session::types::FactorKind::Webauthn) && factor.at<=shared.clock.now() && shared.clock.now().since(factor.at)<=std::time::Duration::from_secs(300));
+                    let recent_mfa=actor.view.session.factors.iter().any(|factor| matches!(factor.kind,crate::session::types::FactorKind::Totp|crate::session::types::FactorKind::Webauthn|crate::session::types::FactorKind::External) && factor.at<=shared.clock.now() && shared.clock.now().since(factor.at)<=std::time::Duration::from_secs(300));
                     if active && (actor.view.session.aal < crate::session::types::Aal::Two || actor.view.handle.issued_aal < crate::session::types::Aal::Two || !recent_mfa) {
                         return Err(StoreError::Conflict("active factor removal requires step-up"));
                     }
@@ -402,4 +542,31 @@ fn require_stepup_generation(
         }
     }
     Ok(())
+}
+
+fn require_external_authority(
+    tx: &rusqlite::Transaction<'_>,
+    authority: &crate::factor::external_transport::Authority,
+    generation: u64,
+) -> StoreResult<()> {
+    require_stepup_generation(tx, Some(generation))?;
+    let revision = i64::try_from(authority.revision)
+        .map_err(|_| StoreError::Conflict("invalid factor revision"))?;
+    let generation = i64::try_from(generation)
+        .map_err(|_| StoreError::Conflict("invalid configuration generation"))?;
+    let active:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM external_factor_authorities WHERE factor=?1 AND revision=?2 AND binding=?3 AND config_generation=?4)",params![authority.factor,revision,&authority.binding[..],generation],|r|r.get(0))?;
+    if !active {
+        return Err(StoreError::Conflict("external factor disabled or changed"));
+    }
+    Ok(())
+}
+fn external_context(
+    generation: u64,
+    authority: &crate::factor::external_transport::Authority,
+    configuration: u64,
+) -> StoreResult<String> {
+    if i64::try_from(generation).is_err() {
+        return Err(StoreError::Conflict("invalid credential generation"));
+    }
+    Ok(serde_json::json!({"kind":"external","credential_generation":generation,"factor":authority.factor,"revision":authority.revision,"binding":crate::crypto::Digest(authority.binding).to_hex(),"config_generation":configuration}).to_string())
 }

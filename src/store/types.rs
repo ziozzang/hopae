@@ -865,3 +865,28 @@ impl TotpChallengeBinding {
         self.revision
     }
 }
+
+/// Native snapshot publication; a missing binding is a durable disable tombstone.
+pub struct ExternalFactorPublication {
+    pub(crate) factor: String,
+    pub(crate) revision: u64,
+    pub(crate) binding: Option<[u8; 32]>,
+    pub(crate) config_generation: u64,
+}
+pub struct BindExternalStepUp {
+    pub(crate) actor: FactorActor,
+    pub(crate) transaction: Digest,
+    pub(crate) portal_binding: Digest,
+    pub(crate) authority: crate::factor::external_transport::Authority,
+    pub(crate) config_generation: u64,
+}
+pub struct ExternalElevation {
+    pub(crate) actor: FactorActor,
+    pub(crate) proof: crate::factor::external_transport::VerifiedProof,
+    pub(crate) transaction: Digest,
+    pub(crate) portal_binding: Digest,
+    pub(crate) config_generation: u64,
+    pub(crate) portal_handle: HandleRow,
+    pub(crate) handoff: HandoffCodeRow,
+    pub(crate) events: Vec<crate::event::types::Event>,
+}

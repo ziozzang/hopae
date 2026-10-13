@@ -43,6 +43,7 @@ pub enum FactorKind {
     EmailLink,
     Password,
     Totp,
+    External,
     Webauthn,
     Recovery,
 }
@@ -55,6 +56,7 @@ impl FactorKind {
             FactorKind::EmailLink => "email_link",
             FactorKind::Password => "password",
             FactorKind::Totp => "totp",
+            FactorKind::External => "external",
             FactorKind::Webauthn => "webauthn",
             FactorKind::Recovery => "recovery",
         }

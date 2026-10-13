@@ -42,6 +42,7 @@ impl Config {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
                 && self.configuration_revision != 0
+                && self.configuration_revision <= i64::MAX as u64
                 && (1..=1000).contains(&self.timeout_ms),
             "invalid external factor binding or deadline"
         );
@@ -64,6 +65,38 @@ impl Config {
 pub enum Error {
     InvalidContext,
     Unavailable,
+}
+
+/// A transport-authenticated receipt; only this connector can create one.
+/// Owner storage must check all bindings and consume its proof exactly once.
+/// It cannot be serialized or cloned and grants no session authority by itself.
+pub struct VerifiedProof {
+    pub(crate) authority: Authority,
+    pub(crate) challenge: String,
+    pub(crate) user: String,
+    pub(crate) session: String,
+    pub(crate) service: String,
+    pub(crate) credential_generation: u64,
+    pub(crate) proof: crate::crypto::Digest,
+    pub(crate) verified_at: crate::crypto::Timestamp,
+    pub(crate) expires_at: crate::crypto::Timestamp,
+    pub(crate) deadline: std::time::Instant,
+}
+impl std::fmt::Debug for VerifiedProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VerifiedProof(<redacted>)")
+    }
+}
+#[derive(Clone)]
+pub(crate) struct Authority {
+    pub(crate) factor: String,
+    pub(crate) revision: u64,
+    pub(crate) binding: [u8; 32],
+}
+#[derive(Debug)]
+pub enum Verification {
+    Rejected,
+    Verified(Box<VerifiedProof>),
 }
 
 pub struct Connector {
@@ -143,6 +176,14 @@ impl Connector {
         self.binding == other.binding
     }
 
+    pub(crate) fn authority(&self) -> Authority {
+        Authority {
+            factor: self.factor.clone(),
+            revision: self.revision,
+            binding: self.binding,
+        }
+    }
+
     /// `expected` is prepared by the owner, never decoded from browser assertions.
     /// No cache, retry, weaker-provider fallback, or assurance assignment occurs here.
     pub async fn verify(
@@ -150,7 +191,7 @@ impl Connector {
         expected: &Expected<'_>,
         response: &Secret,
         clock: &dyn Clock,
-    ) -> Result<Decision, Error> {
+    ) -> Result<Verification, Error> {
         let now = clock.now();
         if expected.factor != self.factor
             || expected.configuration_revision != self.revision
@@ -208,6 +249,7 @@ impl Connector {
                 return Err(Error::Unavailable);
             }
             let received = clock.now();
+            let received_instant = std::time::Instant::now();
             if received < now {
                 return Err(Error::Unavailable);
             }
@@ -215,8 +257,37 @@ impl Connector {
             let elapsed = now
                 .since(expected.started_at)
                 .saturating_add(started.elapsed());
-            super::external::validate(&reply.body, expected, received, elapsed)
-                .map_err(|_| Error::Unavailable)
+            match super::external::validate(&reply.body, expected, received, elapsed)
+                .map_err(|_| Error::Unavailable)?
+            {
+                Decision::Rejected => Ok(Verification::Rejected),
+                Decision::Verified(evidence) => {
+                    let expiry_deadline = received_instant
+                        .checked_add(evidence.expires_at().since(received))
+                        .ok_or(Error::Unavailable)?;
+                    let exchange_deadline = started
+                        .checked_add(
+                            Duration::from_secs(5).saturating_sub(now.since(expected.started_at)),
+                        )
+                        .ok_or(Error::Unavailable)?;
+                    let deadline = expiry_deadline.min(exchange_deadline);
+                    if deadline <= std::time::Instant::now() {
+                        return Err(Error::Unavailable);
+                    }
+                    Ok(Verification::Verified(Box::new(VerifiedProof {
+                        authority: self.authority(),
+                        challenge: expected.challenge.to_owned(),
+                        user: expected.user.to_owned(),
+                        session: expected.session.to_owned(),
+                        service: expected.service.to_owned(),
+                        credential_generation: expected.credential_generation,
+                        proof: crate::crypto::sha256(evidence.proof_id().as_bytes()),
+                        verified_at: received,
+                        expires_at: evidence.expires_at(),
+                        deadline,
+                    })))
+                }
+            }
         })
         .await
         .unwrap_or(Err(Error::Unavailable));
@@ -226,13 +297,13 @@ impl Connector {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::crypto::{SystemClock, Timestamp};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    struct Fixture {
+    pub(crate) struct Fixture {
         directory: tempfile::TempDir,
         url: String,
         server: tokio::task::JoinHandle<()>,
@@ -246,6 +317,9 @@ mod tests {
     }
     impl Fixture {
         async fn new() -> Self {
+            Self::with_clock(Arc::new(SystemClock)).await
+        }
+        pub(crate) async fn with_clock(clock: Arc<dyn Clock>) -> Self {
             let directory = tempfile::tempdir().unwrap();
             let run = |args: &[&str]| {
                 let output = std::process::Command::new("openssl")
@@ -330,6 +404,7 @@ mod tests {
                     connected.fetch_add(1, Ordering::SeqCst);
                     let tls = tls.clone();
                     let count = count.clone();
+                    let clock = clock.clone();
                     tokio::spawn(async move {
                         let Ok(mut socket) = tls.accept(socket).await else {
                             return;
@@ -388,8 +463,7 @@ mod tests {
                                 .remove("challenge_expires_at");
                             reply["active"] = (action != "reject").into();
                             reply["proof_id"] = "owned-proof".into();
-                            reply["expires_at"] =
-                                SystemClock.now().add(Duration::from_secs(1)).0.into();
+                            reply["expires_at"] = clock.now().add(Duration::from_secs(1)).0.into();
                             match action {
                                 "cross" => reply["user"] = "other-user".into(),
                                 "role" => reply["aal"] = 2.into(),
@@ -475,7 +549,7 @@ mod tests {
                 ca: Some(self.directory.path().join("ca.pem")),
             }
         }
-        fn connector(&self) -> Connector {
+        pub(crate) fn connector(&self) -> Connector {
             Connector::compile(&self.config(), &|_| {
                 Some("owned-factor-verifier-key-at-least-thirty-two".into())
             })
@@ -496,7 +570,7 @@ mod tests {
             challenge_expires_at: now.add(Duration::from_secs(5)),
         }
     }
-    async fn call(connector: &Connector, action: &str) -> Result<Decision, Error> {
+    async fn call(connector: &Connector, action: &str) -> Result<Verification, Error> {
         connector
             .verify(&expected(), &Secret::new(action.to_owned()), &SystemClock)
             .await
@@ -506,13 +580,13 @@ mod tests {
         let fixture = Fixture::new().await;
         let connector = fixture.connector();
         for _ in 0..5 {
-            let Decision::Verified(proof) = call(&connector, "accept").await.unwrap() else {
+            let Verification::Verified(proof) = call(&connector, "accept").await.unwrap() else {
                 panic!("expected proof")
             };
-            assert_eq!(proof.proof_id(), "owned-proof");
+            assert_eq!(proof.proof, crate::crypto::sha256(b"owned-proof"));
             assert!(matches!(
                 call(&connector, "reject").await,
-                Ok(Decision::Rejected)
+                Ok(Verification::Rejected)
             ));
         }
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 10);
@@ -647,7 +721,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(110)).await;
         assert!(matches!(
             call(&recovering, "reject").await,
-            Ok(Decision::Rejected)
+            Ok(Verification::Rejected)
         ));
         assert_eq!(
             recovering.circuit.state(),
