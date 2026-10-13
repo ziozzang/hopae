@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 30 -->
+<!-- doc-rev: 31 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -359,6 +359,13 @@ remain implementation work.
 
 ## Service authentication Lua eligibility (unreleased)
 
+`authentication_gateway` in the startup JSON bootstraps an empty authority only.
+Once the DB contains an authentication-profile document (including a disable
+tombstone), the DB/PAP document takes precedence. Editing startup JSON and
+restarting does not replace it. Publish changes through the authenticated owner
+API. Offline qualification uses the native owner transaction on an independent
+`profile-publication-candidate.db`; never modify live state through that tool.
+
 `authentication_gateway.profiles[].eligibility_lua` optionally applies the same
 bounded boolean runtime after native API-key or external API-relay authentication.
 For example, `return context.subject == 'scheduler' and context.service == 'orders'`.
@@ -376,7 +383,11 @@ limits match external-factor eligibility above. General credential translation,
 connector orchestration and human first-factor hooks remain unfinished. Tagged
 0.0.3 artifacts do not contain this later service-profile extension. Internal
 `0.0.3-service-lua-5125ff7` includes it with production scripts unconfigured.
-Optimized private-candidate HTTP/pooled mTLS and Chromium MFA/TOTP checks pass;
+Earlier JSON-only private candidates tested the durable profiles, not the proposed
+service Lua policy, because their DB copy already contained an authority document.
+The corrected offline-publication candidate checks the stored desired document
+before startup and verifies an upstream-approved identity denied by Lua over both
+HTTP and pooled mTLS. Mixed/native/relay and Chromium MFA/TOTP checks pass;
 native macOS runtime tests and live internal regressions also pass. Existing
 configuration/keys and consistent v6 rollback backups are preserved.
 

@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=30 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=31 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -344,6 +344,12 @@ true도 인증된 HTTPS proof 검증과 네이티브 소유자의 원자적 완�
 
 ## 서비스 인증 Lua 사용 조건 (미릴리스)
 
+시작 JSON의 `authentication_gateway`는 비어 있는 authority만 초기화합니다. DB에
+인증 profile 문서(비활성 tombstone 포함)가 있으면 DB·PAP 문서가 우선하며 시작 JSON을
+고치고 재시작해도 덮어쓰지 않습니다. 인증된 소유자 API로 변경을 게시하세요. 오프라인
+검증은 독립 `profile-publication-candidate.db`에 네이티브 소유자 transaction을
+사용하며 해당 도구로 라이브 상태를 수정하지 않습니다.
+
 선택적인 `authentication_gateway.profiles[].eligibility_lua`는 네이티브 API key 또는
 외부 API relay 인증 후 같은 제한된 boolean 런타임을 적용합니다. 예시는
 `return context.subject == 'scheduler' and context.service == 'orders'`입니다.
@@ -358,7 +364,10 @@ relay 전송·스크립트 실행으로 신선도를 연장하지 않습니다. 
 참조 해석 전에 문법을 검사하고 실행 제한은 위 외부 factor와 같습니다. 범용 자격
 변환·커넥터 조합·사람의 1차 인증 hook은 후속입니다. 태그 0.0.3 asset에는 이 후속
 서비스 profile 확장이 없습니다. 내부 `0.0.3-service-lua-5125ff7`은 기능을 포함하지만
-운영 스크립트는 설정하지 않았습니다. 최적화 비공개 후보의 HTTP·지속 mTLS·Chromium
+운영 스크립트는 설정하지 않았습니다. 이전 JSON만 바꾼 후보는 DB 복사본의 authority
+문서가 우선해 제안한 서비스 Lua 대신 저장된 profile을 검증했습니다. 수정한 오프라인
+publication 후보는 시작 전 저장된 문서 일치를 검사하고 upstream이 승인한 신원을
+Lua가 HTTP·지속 mTLS에서 거부하는 것까지 검증했습니다. 혼합·자체·relay·Chromium
 MFA·TOTP, macOS 네이티브 runtime 및 내부 라이브 회귀가 통과했습니다. 기존 설정·키와
 일관된 v6 복구 백업을 유지합니다.
 
