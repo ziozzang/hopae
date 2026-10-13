@@ -47,6 +47,17 @@ use crate::store::types::{
 use crate::store::{Directory, Events, Sessions, StoreError};
 use crate::verify::lifetimes::{self, LifetimeVerdict};
 
+/// Internal boundary after provider authentication and transaction validation.
+struct CompletedIdentity {
+    txn: TransactionRow,
+    provider_id: ProviderId,
+    kind: ProviderKind,
+    identity: crate::provider::ProviderIdentity,
+    row: crate::store::types::ProviderRow,
+    authentication: (crate::crypto::Timestamp, AuthTimeSource),
+    app_bind: Digest,
+}
+
 /// `consumed_reason` of a transaction that completed a login (text column).
 pub(crate) const CONSUMED_COMPLETED: Reason = Reason("completed");
 /// `consumed_reason` of a transaction that ended in single sign-on.
@@ -1182,6 +1193,41 @@ impl Service {
             Ok(v) => v,
             Err(reason) => return Err(self.refuse_consuming(ctx, &txn, reason).await),
         };
+        self.finish_provider_identity(
+            ctx,
+            CompletedIdentity {
+                txn,
+                provider_id: provider_id.clone(),
+                kind: provider.kind(),
+                identity: ident,
+                row,
+                authentication: (auth_time, auth_source),
+                app_bind,
+            },
+            portal_handle,
+        )
+        .await
+    }
+
+    /// Common identity/session/handoff completion; callers must validate their own
+    /// transaction binding and authenticate through the appropriate provider interface.
+    async fn finish_provider_identity(
+        &self,
+        ctx: &RequestCtx,
+        completed: CompletedIdentity,
+        portal_handle: Option<&Secret>,
+    ) -> Result<CallbackOutcome, SessionError> {
+        let CompletedIdentity {
+            txn,
+            provider_id,
+            kind,
+            identity: ident,
+            row,
+            authentication: (auth_time, auth_source),
+            app_bind,
+        } = completed;
+        let provider_id = &provider_id;
+        let now = self.clock.now();
         let mut resolution = self.identity.resolve(&ident, &row).await?;
         let ectx = self.event_ctx(ctx, Some(&txn));
 
@@ -1337,7 +1383,7 @@ impl Service {
             .create_session(
                 ctx,
                 &txn,
-                provider.kind(),
+                kind,
                 provider_id,
                 &user,
                 (auth_time, auth_source),

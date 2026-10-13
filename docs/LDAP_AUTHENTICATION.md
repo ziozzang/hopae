@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 10 -->
+<!-- doc-rev: 11 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -213,3 +213,19 @@ over both TLS modes. LDAP reauthentication capabilities remain Unsupported/None,
 even if its ID matches an OIDC preset or stored config claims max_age. The CLI's
 LDAP portal activation gate remains: selector/form/transaction/session integration
 and operational deployment are still required.
+
+## Shared session completion preparation
+
+The session service now separates provider authentication from its common identity,
+session and handoff completion stage. Existing OIDC callbacks use this private
+stage after state/binding checks, provider verification and freshness validation.
+The stage preserves identity conflict handling, single-use transaction consumption,
+provider fences, reauthentication and handoff issuance. Direct credential callers
+still need their own authenticated transaction binding and portal route; this
+refactor alone does not create a LDAP login endpoint.
+
+All-target gates passed on the final source, including 413 library tests, 365
+scenario cases and the existing OIDC callback/disable-race checks. The explicitly
+ignored LDAP fixture and 40 scenario cases remain separate qualification work.
+An obsolete successful-upgrade assertion was updated to the current schema version;
+malformed v3 databases still retain version 3 and are refused before migration.

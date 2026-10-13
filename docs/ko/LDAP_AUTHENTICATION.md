@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=10 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=11 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -183,3 +183,16 @@ Registry는 직접 자격 provider와 redirect provider를 분리합니다. 저�
 검증합니다. ID가 OIDC preset과 같거나 저장 설정에 max_age가 있어도 LDAP 재인증
 capability는 Unsupported/None입니다. CLI의 LDAP portal 활성화 제한은 유지하며
 선택/form/transaction/세션 연결과 운영 배포가 필요합니다.
+
+## 공통 세션 완료 단계 준비
+
+세션 서비스의 provider 인증과 공통 신원·세션·handoff 완료 단계를 분리했습니다.
+기존 OIDC callback은 state/binding·provider 검증·freshness 검사 후 이 private
+단계를 사용합니다. 신원 충돌 처리·일회 transaction 소비·provider fence·재인증·
+handoff 발급을 유지합니다. 직접 자격 경로에는 별도 인증된 transaction 바인딩과
+portal route가 필요하며 이 분리만으로 LDAP 로그인 endpoint가 생기지 않습니다.
+
+최종 소스의 전체 target gate가 통과했습니다. 라이브러리 413건·시나리오 365건과
+기존 OIDC callback/비활성 경쟁 검사를 포함합니다. 명시적 ignored LDAP fixture와
+시나리오 40건은 별도 검증 범위입니다. 정상 업그레이드의 오래된 버전 기대값은 현재
+스키마로 바꾸었고 손상된 v3 DB는 이전 전에 거부하며 버전 3을 유지합니다.

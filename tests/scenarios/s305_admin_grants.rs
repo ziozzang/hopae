@@ -992,7 +992,10 @@ fn s305_9_schema_v3_only_on_validated_foundation_and_no_backup_before() {
     v2_db(&d.db());
     std::fs::write(d.bak(), b"old backup content").unwrap();
     assert_eq!(d.start_and_stop(), Some(0));
-    assert_eq!(version_of(&d.db()), 3);
+    assert_eq!(
+        version_of(&d.db()),
+        i64::from(hopae::store::sqlite::LATEST_SCHEMA_VERSION)
+    );
     let bak = std::fs::read(d.bak()).unwrap();
     assert_ne!(bak, b"old backup content", "the backup was replaced");
     assert_eq!(version_of(&d.bak()), 2, "the new backup holds version 2");
