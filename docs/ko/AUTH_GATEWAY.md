@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=17 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=18 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -361,3 +361,25 @@ partial 여부·정확한 owner 열·pending 또는 active 조건을 검사합�
 존재·고유성·owner 열·조건을 손상시킵니다. 각 손상은 거부하고 정상 v5는 통과합니다.
 전체 앱·복구 검증, 요인 HTTP·UI, challenge·세션 원자 완료와 이후 변경의
 내부 배포는 아직 남아 있습니다.
+
+## 등록 준비의 네이티브 소유자 권한 확인
+
+세션 서비스는 portal handle의 사용자·수명·binding, AAL 1 이상, 5분 이내
+인증·현재 사용자 권한 버전·live provider row를 확인한 뒤 FactorActor를
+발급할 수 있습니다. 직렬화하지 않고 Debug를 가리며 원문 cookie 없이
+5초 쓰기 lease를 갖습니다. 권한 확인 등록 서비스는 actor에서 seed owner를
+가져와 호출자가 다른 user를 지정하지 못하게 합니다.
+
+Pending 쓰기 트랜잭션은 lease 시간·시계 역행, 정확한 session·handle·host,
+자격 세대·인증 시간·권한 버전, 활성 user·provider, 미회수 handle·session,
+AAL·절대·idle 수명을 다시 검사합니다. 기존 active 요인이 있으면 초기 등록을
+거부하며 교체에는 별도 step-up이 필요합니다. 검사한 commit 후에만 URI를
+반환합니다. 기존 검사 없는 저장소·준비 primitive는 신뢰한 내부·운영자 API로
+남으며 최종 사용자 HTTP handler에서 사용하면 안 됩니다.
+
+실제 저장소 회귀는 내부 actor를 fixture에서 구성하고 정상 등록과 조회 후
+회수·세대·버전 변경, provider 삭제, 오래된 인증·수명, lease 만료,
+active 요인 등 12개 변경을 검사합니다. 쓰기 경계 검증이며 브라우저 actor
+발급·전송 검증은 아닙니다. HTTPS·CSRF/Origin·시도 제한·요청 감사 연결,
+확인·해제 검사·키 폐기 배포·challenge와 세션 원자 완료의 HTTP·서비스
+통합은 남아 있습니다. 등록 route·MFA 세션 승격은 활성화하지 않았습니다.

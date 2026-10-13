@@ -607,6 +607,35 @@ impl Service {
         }
     }
 
+    /// Factor enrollment authorization, refreshed for each HTTPS/CSRF-checked request.
+    pub async fn factor_actor(
+        &self,
+        ctx: &RequestCtx,
+        handle: Option<&Secret>,
+    ) -> Result<crate::store::FactorActor, SessionError> {
+        let view = self
+            .portal_session(ctx, handle)
+            .await?
+            .ok_or(SessionError::Refused(reasons::INVALID_STATE))?;
+        let now = self.clock.now();
+        if view.session.aal < Aal::One
+            || view.handle.issued_aal < Aal::One
+            || view.session.auth_time > now
+            || now.since(view.session.auth_time) > Duration::from_secs(300)
+            || view.session.authz_version_at_auth != view.user.authz_version
+            || !self.provider_row_live(&view.session.provider_id).await?
+        {
+            return Err(SessionError::Refused(reasons::INVALID_STATE));
+        }
+        let snapshot = self.snapshot.load_full();
+        Ok(crate::store::FactorActor {
+            view,
+            authorized_at: now,
+            session_idle: self.cfg.session.idle,
+            handle_idle: snapshot.default_app.session.idle,
+        })
+    }
+
     /// Record portal activity on the handle and its session, coalesced like
     /// verify's touches (at most one write per `touch_coalesce`). Best effort:
     /// a lost touch only makes the next visit retry it.

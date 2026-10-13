@@ -807,3 +807,22 @@ pub struct TotpEnrollment {
     pub last_counter: Option<u64>,
     pub envelope: crate::factor::seed_cipher::Envelope,
 }
+
+/// Short-lived, non-serializable authorization issued only by the native session service.
+pub struct FactorActor {
+    pub(crate) view: HandleView,
+    pub(crate) authorized_at: Timestamp,
+    pub(crate) session_idle: std::time::Duration,
+    pub(crate) handle_idle: std::time::Duration,
+}
+impl FactorActor {
+    pub fn user(&self) -> &UserId {
+        &self.view.session.user_id
+    }
+}
+
+impl std::fmt::Debug for FactorActor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FactorActor(<redacted>)")
+    }
+}

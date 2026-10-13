@@ -32,6 +32,16 @@ impl Factors for Store {
         }).await
     }
 
+    async fn create_totp_pending_authorized(
+        &self,
+        id: String,
+        actor: crate::store::FactorActor,
+        envelope: crate::factor::seed_cipher::Envelope,
+        events: Vec<Event>,
+    ) -> StoreResult<()> {
+        self.create_pending_with_actor(id, actor.user().clone(), envelope, events, Some(actor))
+            .await
+    }
     async fn create_totp_pending(
         &self,
         id: String,
@@ -39,31 +49,8 @@ impl Factors for Store {
         envelope: crate::factor::seed_cipher::Envelope,
         events: Vec<Event>,
     ) -> StoreResult<()> {
-        if id.is_empty()
-            || id.len() > 128
-            || !id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
-        {
-            return Err(StoreError::Conflict("invalid enrollment id"));
-        }
-        let envelope = serde_json::to_string(&envelope)
-            .map_err(|_| StoreError::Corrupt("totp envelope".into()))?;
-        crate::factor::seed_cipher::Envelope::from_json(&envelope)
-            .map_err(|_| StoreError::Corrupt("totp envelope".into()))?;
-        self.write("create_totp_pending",move |env| {
-            let shared=env.shared.clone();let now=shared.clock.now().secs();let tx=env.begin()?;
-            let active: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM users WHERE user_id=?1 AND status='active')",[user.as_str()],|r|r.get(0))?;
-            if !active { return Err(StoreError::Conflict("user unavailable")); }
-            let expired: Option<String> = tx.query_row("SELECT enrollment_id FROM totp_enrollments WHERE user_id=?1 AND state='pending' AND pending_expires_at<=?2",params![user.as_str(),now],|row|row.get(0)).optional()?;
-            if let Some(expired)=expired {
-                tx.execute("UPDATE totp_enrollments SET state='revoked',revision=revision+1,pending_expires_at=NULL,updated_at=?2 WHERE enrollment_id=?1",params![expired,now])?;
-                insert_events(&tx,&shared,&[factor_event(&shared,&user,&expired,EventKind::FactorEnrollmentExpired)])?;
-            }
-            tx.execute("INSERT INTO totp_enrollments(enrollment_id,user_id,envelope,revision,state,pending_expires_at,created_at,updated_at)VALUES(?1,?2,?3,1,'pending',?4,?5,?5)",params![id,user.as_str(),envelope,now.saturating_add(600),now])?;
-            insert_events(&tx,&shared,&[factor_event(&shared,&user,&id,EventKind::FactorEnrollmentPrepared)])?;
-            insert_events(&tx,&shared,&events)?;commit(tx,&shared,None)
-        }).await
+        self.create_pending_with_actor(id, user, envelope, events, None)
+            .await
     }
     async fn activate_totp(
         &self,
@@ -99,6 +86,46 @@ impl Factors for Store {
     }
 }
 impl Store {
+    async fn create_pending_with_actor(
+        &self,
+        id: String,
+        user: UserId,
+        envelope: crate::factor::seed_cipher::Envelope,
+        events: Vec<Event>,
+        actor: Option<crate::store::FactorActor>,
+    ) -> StoreResult<()> {
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+        {
+            return Err(StoreError::Conflict("invalid enrollment id"));
+        }
+        let envelope = serde_json::to_string(&envelope)
+            .map_err(|_| StoreError::Corrupt("totp envelope".into()))?;
+        crate::factor::seed_cipher::Envelope::from_json(&envelope)
+            .map_err(|_| StoreError::Corrupt("totp envelope".into()))?;
+        self.write("create_totp_pending",move |env| {
+            let shared=env.shared.clone();let now=shared.clock.now().secs();let tx=env.begin()?;
+            let active: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM users WHERE user_id=?1 AND status='active')",[user.as_str()],|r|r.get(0))?;
+            if !active { return Err(StoreError::Conflict("user unavailable")); }
+            if let Some(actor)=&actor {
+                require_actor(&tx,&shared,user.as_str(),actor)?;
+                let enrolled:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM totp_enrollments WHERE user_id=?1 AND state='active')",[user.as_str()],|row|row.get(0))?;
+                if enrolled { return Err(StoreError::Conflict("active factor requires replacement flow")); }
+            }
+
+            let expired: Option<String> = tx.query_row("SELECT enrollment_id FROM totp_enrollments WHERE user_id=?1 AND state='pending' AND pending_expires_at<=?2",params![user.as_str(),now],|row|row.get(0)).optional()?;
+            if let Some(expired)=expired {
+                tx.execute("UPDATE totp_enrollments SET state='revoked',revision=revision+1,pending_expires_at=NULL,updated_at=?2 WHERE enrollment_id=?1",params![expired,now])?;
+                insert_events(&tx,&shared,&[factor_event(&shared,&user,&expired,EventKind::FactorEnrollmentExpired)])?;
+            }
+            tx.execute("INSERT INTO totp_enrollments(enrollment_id,user_id,envelope,revision,state,pending_expires_at,created_at,updated_at)VALUES(?1,?2,?3,1,'pending',?4,?5,?5)",params![id,user.as_str(),envelope,now.saturating_add(600),now])?;
+            insert_events(&tx,&shared,&[factor_event(&shared,&user,&id,EventKind::FactorEnrollmentPrepared)])?;
+            insert_events(&tx,&shared,&events)?;commit(tx,&shared,None)
+        }).await
+    }
     async fn mutate_totp(
         &self,
         id: &str,
@@ -142,4 +169,27 @@ fn factor_event(shared: &super::Shared, user: &UserId, id: &str, kind: EventKind
     .user(user)
     .attr("enrollment_id", id)
     .build()
+}
+
+fn require_actor(
+    tx: &rusqlite::Transaction<'_>,
+    shared: &super::Shared,
+    user: &str,
+    actor: &crate::store::FactorActor,
+) -> StoreResult<()> {
+    let now = shared.clock.now();
+    if now < actor.authorized_at
+        || now.since(actor.authorized_at) > std::time::Duration::from_secs(5)
+    {
+        return Err(StoreError::Conflict("factor authorization expired"));
+    }
+    let view = &actor.view;
+    let live:bool=tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sessions s JOIN session_handles h ON h.session_id=s.session_id JOIN users u ON u.user_id=s.user_id JOIN providers p ON p.provider_id=s.provider_id WHERE s.session_id=?1 AND s.user_id=?2 AND h.handle_sha256=?3 AND h.host=?4 AND s.cred_gen=?5 AND s.auth_time=?6 AND s.authz_version_at_auth=u.authz_version AND u.status='active' AND s.terminated_at IS NULL AND h.revoked_at IS NULL AND p.enabled=1 AND p.deleted_at IS NULL AND s.aal>=1 AND h.issued_aal>=1 AND s.absolute_expires_at>?7 AND h.absolute_expires_at>?7 AND s.last_seen_at>?8 AND h.last_seen_at>?9 AND s.auth_time>=?10 AND s.auth_time<=?7)",
+        params![view.session.session_id.as_str(),user,&view.handle.handle_sha256.0[..],view.handle.host.as_str(),view.session.cred_gen as i64,view.session.auth_time.secs(),now.secs(),now.secs().saturating_sub(actor.session_idle.as_secs() as i64),now.secs().saturating_sub(actor.handle_idle.as_secs() as i64),now.secs().saturating_sub(300)],|r|r.get(0),
+    )?;
+    if !live {
+        return Err(StoreError::Conflict("factor authorization revoked"));
+    }
+    Ok(())
 }

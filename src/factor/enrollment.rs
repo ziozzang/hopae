@@ -79,6 +79,38 @@ pub async fn prepare(
         .map_err(Error::Store)?;
     Ok(provisioning)
 }
+/// Native end-user preparation; the actor is issued by the session service.
+pub struct AuthorizedRequest<'a> {
+    pub id: &'a str,
+    pub actor: crate::store::FactorActor,
+    pub issuer: &'a str,
+    pub account: &'a str,
+}
+pub async fn prepare_authorized(
+    store: &dyn Factors,
+    keys: &Keyring,
+    rng: &dyn Rng,
+    request: AuthorizedRequest<'_>,
+    events: Vec<Event>,
+) -> Result<Provisioning, Error> {
+    if !label(request.issuer) || !label(request.account) {
+        return Err(Error::Invalid);
+    }
+    let mut random = Zeroizing::new([0u8; 20]);
+    rng.fill(random.as_mut());
+    let seed = Seed::from_bytes(random.as_ref()).ok_or(Error::Invalid)?;
+    let provisioning = uri(&seed, request.issuer, request.account)?;
+    let envelope = keys
+        .active()
+        .seal(&seed, request.actor.user().as_str(), request.id, rng)
+        .map_err(|_| Error::Invalid)?;
+    store
+        .create_totp_pending_authorized(request.id.to_owned(), request.actor, envelope, events)
+        .await
+        .map_err(Error::Store)?;
+    Ok(provisioning)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

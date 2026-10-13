@@ -2750,3 +2750,86 @@ async fn native_totp_verification_uses_retained_envelope_key_without_active_fall
             .is_ok()
     );
 }
+
+#[tokio::test]
+async fn factor_actor_fences_registration_after_session_or_authority_revocation() {
+    use crate::store::Factors;
+    for change in [
+        "",
+        "UPDATE sessions SET cred_gen=cred_gen+1",
+        "UPDATE sessions SET terminated_at=1",
+        "UPDATE session_handles SET revoked_at=1",
+        "UPDATE users SET status='disabled'",
+        "UPDATE users SET authz_version=authz_version+1",
+        "UPDATE providers SET enabled=0",
+        "UPDATE sessions SET auth_time=0",
+        "UPDATE sessions SET last_seen_at=0",
+        "UPDATE session_handles SET absolute_expires_at=0",
+        "DELETE FROM providers",
+        "lease-expiry",
+        "active-factor",
+    ] {
+        let f = fx();
+        let user = f.user(1).await;
+        let session = f.session(&user, vec![]).await;
+        f.store.conn().execute("INSERT INTO providers(provider_id,kind,display_name,enabled,managed_by,created_at,updated_at)VALUES('mock','oidc','Owned',1,'api',0,0)",[]).unwrap();
+        let view = f
+            .store
+            .lookup_handle(&session.portal_digest, &host(PORTAL_HOST))
+            .await
+            .unwrap()
+            .unwrap();
+        let actor = FactorActor {
+            view,
+            authorized_at: f.now(),
+            session_idle: Duration::from_secs(300),
+            handle_idle: Duration::from_secs(300),
+        };
+        assert_eq!(format!("{actor:?}"), "FactorActor(<redacted>)");
+        let keys = test_totp_keyring();
+        if change == "active-factor" {
+            let seed = crate::factor::totp::Seed::from_bytes(&[9; 20]).unwrap();
+            let envelope = keys
+                .active()
+                .seal(&seed, user.user_id.as_str(), "existing", &f.rng)
+                .unwrap();
+            f.store
+                .create_totp_pending("existing".into(), user.user_id.clone(), envelope, vec![])
+                .await
+                .unwrap();
+            assert!(
+                f.store
+                    .activate_totp("existing", &user.user_id, 1, 10, vec![])
+                    .await
+                    .unwrap()
+            );
+        } else if change == "lease-expiry" {
+            f.clock.advance(Duration::from_secs(6));
+        } else if !change.is_empty() {
+            f.store.conn().execute_batch(change).unwrap();
+        }
+        let before = f.count("SELECT COUNT(*) FROM totp_enrollments");
+        let result = crate::factor::enrollment::prepare_authorized(
+            &f.store,
+            &keys,
+            &f.rng,
+            crate::factor::enrollment::AuthorizedRequest {
+                id: "fenced",
+                actor,
+                issuer: "Hangang",
+                account: "Owned",
+            },
+            vec![],
+        )
+        .await;
+        assert_eq!(
+            result.is_ok(),
+            change.is_empty(),
+            "unexpected registration after {change}"
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM totp_enrollments"),
+            before + i64::from(change.is_empty())
+        );
+    }
+}

@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 17 -->
+<!-- doc-rev: 18 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -406,3 +406,27 @@ A regression migrates fresh in-memory databases and damages the table, counter c
 index presence, uniqueness, owner column or predicate. Every damaged case is refused;
 normal v5 passes. Full application/recovery qualification, factor HTTP/UI, atomic
 challenge/session completion and internal rollout of these later changes remain open.
+
+## Native owner authorization for enrollment preparation
+
+The session service can issue a non-serializable, redacted FactorActor after validating
+the portal handle's user/lifetime/binding, AAL 1 or above, authentication no older than
+five minutes, current user authorization version and live provider row. It contains
+no raw cookie and grants a five-second write lease. The authorized preparation service
+derives the seed owner from this actor; the caller cannot supply a different user.
+
+The pending-enrollment transaction rechecks lease time (including rollback), exact
+session/handle/host, credential generation, authentication time, authorization version,
+active user/provider, non-revoked handle/session, AAL and absolute/idle lifetime.
+An existing active factor refuses initial enrollment; replacement needs its own
+step-up flow. Provisioning material is returned only after this fenced commit.
+The older unfenced storage/preparation primitives remain trusted internal/operator
+APIs and must not be used by end-user HTTP handlers.
+
+A real-store regression constructs an internal actor and tests normal preparation
+against twelve post-read changes including revocation, generation/version changes,
+provider deletion, stale authentication/lifetime, lease expiry and an active factor.
+The test covers the write fence, not browser actor issuance or transport. HTTPS,
+CSRF/Origin, bounded admission, request/audit correlation, confirmation/removal fencing,
+key-retirement publication and atomic challenge/session completion still need their
+HTTP/service integration. No enrollment route or MFA session elevation is enabled.
