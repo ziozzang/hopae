@@ -24,6 +24,7 @@ const DOMAIN_TAG: &[u8] = b"hopae-csrf-v1";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
     TotpStepUp,
+    ExternalStepUp,
     TotpPrepare,
     TotpConfirm,
     Login,
@@ -39,6 +40,7 @@ impl Purpose {
     pub fn as_str(self) -> &'static str {
         match self {
             Purpose::TotpStepUp => "totp_stepup",
+            Purpose::ExternalStepUp => "external_stepup",
             Purpose::TotpPrepare => "totp_prepare",
             Purpose::TotpConfirm => "totp_confirm",
             Purpose::Login => "login",

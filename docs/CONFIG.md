@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 23 -->
+<!-- doc-rev: 24 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -330,6 +330,8 @@ Removal plus restart disables the old authority; retain or increase revision as
 required by [the factor lifecycle](SECOND_FACTOR_EXTENSIONS.md).
 
 This config publishes verifier authority and its native connection registry.
-External browser challenge/response forms and Lua orchestration are not enabled;
-existing native TOTP step-up rules keep their current behavior. The setting does
-not itself make an external factor available in the login/step-up chooser.
+Configured external factors now appear in the native step-up chooser. Either
+a configured TOTP keyring or a nonempty external registry enables document step-up;
+API requests still fail closed without elevated evidence. External factors use
+the native HTTPS/CSRF/browser-bound response form and atomic owner completion.
+Lua orchestration and external enrollment/recovery remain unimplemented.

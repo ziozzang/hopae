@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("stepup.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t.get("stepup.title") }}</h1>
+<p>{{ t.get("external.choose") }}</p>
+{% if totp %}<p><a href="/stepup?txn={{ transaction }}&amp;factor=totp">{{ t.get("external.totp") }}</a></p>{% endif %}
+{% for choice in choices %}<p><a href="{{ choice.location }}">{{ choice.label }}</a></p>{% endfor %}
+{% endblock %}

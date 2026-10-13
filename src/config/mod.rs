@@ -1458,7 +1458,7 @@ impl Config {
     /// The numbers the verify engine needs.
     pub fn verify_limits(&self) -> VerifyLimits {
         VerifyLimits {
-            stepup_enabled: self.totp_keyring.is_some(),
+            stepup_enabled: self.totp_keyring.is_some() || !self.external_verifiers.is_empty(),
             max_recoveries: self.handoff.max_recoveries,
             txn_per_ip_per_minute: self.txn.per_ip_per_minute,
             txn_max_rows: self.txn.max_rows,
@@ -1570,7 +1570,10 @@ impl Config {
                     .to_string(),
             );
         }
-        if self.admin_enabled() && self.admin.require_aal == Some(2) && self.totp_keyring.is_none()
+        if self.admin_enabled()
+            && self.admin.require_aal == Some(2)
+            && self.totp_keyring.is_none()
+            && self.external_verifiers.is_empty()
         {
             w.push(
                 "admin.require_aal: no second factor exists yet; every console request will be refused"

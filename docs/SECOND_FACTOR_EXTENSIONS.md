@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 12 -->
+<!-- doc-rev: 13 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -22,7 +22,7 @@ identity at AAL 0; they cannot count as human second-factor evidence.
 
 The native `external_transport` and `external_service` modules now provide an
 HTTPS-authenticated receipt and schema-v6 atomic owner completion. Root configuration now compiles and publishes verifiers at startup;
-external portal forms and Lua runtime remain unavailable. Earlier
+external portal forms are now implemented; Lua runtime remains unavailable. Earlier
 sections below record implementation stages; the latest owner section supersedes
 their statement that durable external completion is absent.
 
@@ -459,3 +459,41 @@ remain unqualified. Internal deployment remains the existing schema-v5 image.
 Individual authority publication uses required `factor.authority_published`;
 whole-registry publication uses `factor.registry_published`. Both commit with
 owner state and are refused by standalone event append.
+
+## Native external browser response path — 2026-10-14
+
+A configured external registry now enables native document step-up alongside
+TOTP. `/stepup?txn=...` validates the HTTPS live portal session/transaction before
+showing approved factor identifiers and the optional TOTP method. Selecting an
+external method visits `/stepup/external?txn=...&factor=...`, which binds that
+factor to the owner challenge. The selection cannot switch an already bound
+challenge to a different factor. TOTP remains selectable explicitly; no weaker
+provider fallback is attempted after external failure.
+
+The external form POST requires exactly transaction, factor, CSRF and response.
+Its separate CSRF purpose is bound to transaction/portal-cookie/handle/factor,
+with the same exact-Origin, HTTPS, request-body and shared process IP admission
+controls as native password/TOTP paths. Responses are nonempty and at most
+4096 bytes. Browser input cannot choose URLs, identities, role or AAL fields.
+The form CSP allows only the current validated application origin for handoff.
+Neither responses nor verifier credentials are logged or echoed.
+
+The adapter verifies using owner-derived context, then mints fresh replacement
+credentials through the shared TOTP/external issuance helper and commits the
+opaque receipt atomically. Credential creation time must not be future or more
+than five seconds old; handle activity and handoff creation times agree. This
+avoids artificial failure when asynchronous verification crosses a wall-second
+boundary while retaining actor, proof wall/monotonic and pre-commit fences.
+Verifier requests now include server-owned `verification_started_at` milliseconds
+in addition to challenge expiry so implementations can respect the short proof
+window; the strict response schema is unchanged.
+
+The owned OIDC/HTTPS runtime test exercises real first-factor login, chooser,
+external form, Origin/CSRF and extra-field refusal before backend calls,
+context-valid rejection, cross-user and assurance injection refusal, successful
+AAL-2 handoff, protected request and previous-handle refusal. Timing tests cover
+second boundaries and stale/future credential rejection. This uses an HTTP
+browser client with real cookies and process boundaries, not Chromium or an
+operational organization's MFA account. Actual browser/fleet/performance rollout,
+service-specific factor eligibility, enrollment/recovery, account admission and
+Lua remain required qualification and implementation work. Internal v5 is unchanged.

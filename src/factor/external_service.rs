@@ -69,6 +69,49 @@ pub async fn elevate_authorized<S: Factors + Sessions + ?Sized>(
     clock: &dyn Clock,
     input: StepUp<'_>,
 ) -> Result<(), Error> {
+    let proof = verify_authorized(
+        store,
+        connector,
+        clock,
+        VerificationRequest {
+            actor: &input.actor,
+            response: input.response,
+            transaction: input.transaction,
+            portal_binding: input.portal_binding,
+            config_generation: input.config_generation,
+        },
+    )
+    .await?;
+    store
+        .elevate_external(crate::store::ExternalElevation {
+            actor: input.actor,
+            proof,
+            transaction: input.transaction,
+            portal_binding: input.portal_binding,
+            config_generation: input.config_generation,
+            portal_handle: input.portal_handle,
+            handoff: input.handoff,
+            events: input.events,
+        })
+        .await
+        .map_err(Error::Store)
+}
+
+pub struct VerificationRequest<'a> {
+    pub actor: &'a crate::store::FactorActor,
+    pub response: &'a Secret,
+    pub transaction: Digest,
+    pub portal_binding: Digest,
+    pub config_generation: u64,
+}
+/// Prepare and verify before minting replacement credentials. Completion must
+/// still consume this receipt in the owner transaction; verification grants nothing.
+pub async fn verify_authorized<S: Factors + Sessions + ?Sized>(
+    store: &S,
+    connector: &Connector,
+    clock: &dyn Clock,
+    input: VerificationRequest<'_>,
+) -> Result<super::external_transport::VerifiedProof, Error> {
     // Recheck authorization before contacting the verifier, then again inside
     // the final owner transaction after the untrusted asynchronous exchange.
     store
@@ -119,17 +162,5 @@ pub async fn elevate_authorized<S: Factors + Sessions + ?Sized>(
         Verification::Rejected => return Err(Error::Refused),
         Verification::Verified(proof) => *proof,
     };
-    store
-        .elevate_external(crate::store::ExternalElevation {
-            actor: input.actor,
-            proof,
-            transaction: input.transaction,
-            portal_binding: input.portal_binding,
-            config_generation: input.config_generation,
-            portal_handle: input.portal_handle,
-            handoff: input.handoff,
-            events: input.events,
-        })
-        .await
-        .map_err(Error::Store)
+    Ok(proof)
 }

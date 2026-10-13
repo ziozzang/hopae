@@ -1227,7 +1227,7 @@ pub(crate) async fn stepup_get(State(st): State<PortalState>, req: Request) -> R
         Ok(rq) => rq,
         Err(r) => return r,
     };
-    if !st.services.totp_enabled() {
+    if !st.services.totp_enabled() && st.services.external_factor_ids().is_empty() {
         return error_response(rq.t(), rq.rid(), ErrorPage::NotFound);
     }
     if !rq.ctx.https || rq.presented.handle.is_none() {
@@ -1251,6 +1251,48 @@ pub(crate) async fn stepup_get(State(st): State<PortalState>, req: Request) -> R
         handle: rq.presented.handle.clone(),
         bind: Some(bind.clone()),
     };
+    let factors: Vec<_> = url::form_urlencoded::parse(raw.as_bytes())
+        .filter(|(k, _)| k == "factor")
+        .collect();
+    if factors.len() > 1 || factors.first().is_some_and(|(_, v)| v != "totp") {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let ids = st.services.external_factor_ids();
+    if factors.is_empty() && !ids.is_empty() {
+        if let Err(f) = st
+            .services
+            .stepup_options(&rq.ctx, &cookies, &Secret::new(transaction.clone()))
+            .await
+        {
+            return fail_response(&rq, f);
+        }
+        let choices: Vec<_> = ids
+            .into_iter()
+            .map(|id| {
+                let query = url::form_urlencoded::Serializer::new(String::new())
+                    .append_pair("txn", &transaction)
+                    .append_pair("factor", &id)
+                    .finish();
+                pages::ExternalChoice {
+                    label: id,
+                    location: format!("/stepup/external?{query}"),
+                }
+            })
+            .collect();
+        return render_page_status(
+            &rq,
+            StatusCode::OK,
+            pages::StepUpChoicesPage {
+                t: rq.t(),
+                request_id: rq.rid(),
+                transaction: &transaction,
+                totp: st.services.totp_enabled(),
+                choices: &choices,
+            },
+            &[portal_cookie_header(&st, &bind)],
+            &[],
+        );
+    }
     let entry = match st
         .services
         .stepup_visit(&rq.ctx, &cookies, &Secret::new(transaction.clone()))
@@ -1333,6 +1375,166 @@ pub(crate) async fn stepup_post(State(st): State<PortalState>, req: Request) -> 
         .await
     {
         Ok(redirect) => redirect_response(&st, &rq, &redirect, &[]),
+        Err(f) => fail_response(&rq, f),
+    }
+}
+
+fn external_csrf_binding(
+    rq: &Rq,
+    transaction: &str,
+    factor: &str,
+) -> Option<zeroize::Zeroizing<String>> {
+    Some(zeroize::Zeroizing::new(format!(
+        "{}:{}",
+        stepup_csrf_binding(rq, transaction)?.as_str(),
+        factor
+    )))
+}
+pub(crate) async fn external_stepup_get(State(st): State<PortalState>, req: Request) -> Response {
+    let (parts, _) = req.into_parts();
+    let mut rq = match prepare(&st, &parts) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if st.services.external_factor_ids().is_empty() {
+        return error_response(rq.t(), rq.rid(), ErrorPage::NotFound);
+    }
+    if !rq.ctx.https || rq.presented.handle.is_none() {
+        return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+    }
+    let raw = parts.uri.query().unwrap_or("");
+    if raw.len() > 512 {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let pairs: Vec<_> = url::form_urlencoded::parse(raw.as_bytes()).collect();
+    if pairs.len() != 2
+        || ["txn", "factor"]
+            .iter()
+            .any(|name| pairs.iter().filter(|(key, _)| key == name).count() != 1)
+    {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let txn = pairs.iter().find(|(k, _)| k == "txn").unwrap().1.as_ref();
+    let factor = pairs
+        .iter()
+        .find(|(k, _)| k == "factor")
+        .unwrap()
+        .1
+        .as_ref();
+    if !crate::crypto::is_well_formed_bind(txn)
+        || !st
+            .services
+            .external_factor_ids()
+            .iter()
+            .any(|id| id == factor)
+    {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let bind = effective_bind(&st, &rq);
+    rq.presented.bind = Some(bind.clone());
+    let cookies = Cookies {
+        handle: rq.presented.handle.clone(),
+        bind: Some(bind.clone()),
+    };
+    let entry = match st
+        .services
+        .external_stepup_visit(&rq.ctx, &cookies, &Secret::new(txn.into()), factor)
+        .await
+    {
+        Ok(e) => e,
+        Err(f) => return fail_response(&rq, f),
+    };
+    let binding = external_csrf_binding(&rq, txn, factor).expect("validated cookies");
+    let csrf = token_for(&st, &binding, Purpose::ExternalStepUp);
+    render_page_status(
+        &rq,
+        StatusCode::OK,
+        pages::ExternalStepUpPage {
+            t: rq.t(),
+            request_id: rq.rid(),
+            transaction: txn,
+            factor,
+            csrf: &csrf,
+        },
+        &[portal_cookie_header(&st, &bind)],
+        &[entry.form_origin],
+    )
+}
+pub(crate) async fn external_stepup_post(State(st): State<PortalState>, req: Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let rq = match prepare(&st, &parts) {
+        Ok(r) => r,
+        Err(r) => return r,
+    };
+    if st.services.external_factor_ids().is_empty() {
+        return error_response(rq.t(), rq.rid(), ErrorPage::NotFound);
+    }
+    if !rq.ctx.https {
+        return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+    }
+    let form = match read_form(&st, &rq, &parts, body).await {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    if form.0.0.len() != 4
+        || ["txn", "csrf", "factor", "response"]
+            .iter()
+            .any(|name| form.0.0.iter().filter(|(key, _)| key == name).count() != 1)
+    {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let txn = form.0.get("txn").unwrap_or("");
+    let factor = form.0.get("factor").unwrap_or("");
+    let response = form.0.get("response").unwrap_or("");
+    if !crate::crypto::is_well_formed_bind(txn)
+        || !st
+            .services
+            .external_factor_ids()
+            .iter()
+            .any(|id| id == factor)
+        || response.is_empty()
+        || response.len() > 4096
+    {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let Some(binding) = external_csrf_binding(&rq, txn, factor) else {
+        return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+    };
+    if let Err(r) = guard(
+        &st,
+        &rq,
+        &parts,
+        &form,
+        Purpose::ExternalStepUp,
+        Some(&binding),
+    )
+    .await
+    {
+        return r;
+    }
+    if !st.password_attempts.admit(rq.ctx.client_ip) {
+        let mut r = error_response(rq.t(), rq.rid(), ErrorPage::Unavailable);
+        *r.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+        r.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+        return r;
+    }
+    let cookies = Cookies {
+        handle: rq.presented.handle.clone(),
+        bind: rq.presented.bind.clone(),
+    };
+    match st
+        .services
+        .external_stepup_complete(
+            &rq.ctx,
+            &cookies,
+            &Secret::new(txn.into()),
+            factor,
+            &Secret::new(response.into()),
+        )
+        .await
+    {
+        Ok(r) => redirect_response(&st, &rq, &r, &[]),
         Err(f) => fail_response(&rq, f),
     }
 }

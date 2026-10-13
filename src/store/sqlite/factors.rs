@@ -144,15 +144,15 @@ impl Factors for Store {
             let code = &request.handoff;
             if handle.session_id != *sid || handle.host != view.handle.host
                 || handle.handle_sha256 == view.handle.handle_sha256
-                || handle.issued_aal != Aal::Two || handle.created_at.secs() != now.secs()
-                || handle.last_seen_at.secs() != now.secs()
+                || handle.issued_aal != Aal::Two || handle.created_at > now || now.since(handle.created_at)>std::time::Duration::from_secs(5)
+                || handle.last_seen_at != handle.created_at
                 || handle.absolute_expires_at.secs() <= now.secs()
                 || handle.absolute_expires_at > view.handle.absolute_expires_at.min(view.session.absolute_expires_at)
                 || handle.revoked_at.is_some() || handle.revoked_reason.is_some()
                 || code.client_ip != actor.client_ip
                 || code.session_id != *sid || code.issued_aal != Aal::Two
                 || i64::try_from(code.cred_gen).ok() != Some(generation)
-                || code.created_at.secs() != now.secs() || code.expires_at.secs() <= now.secs()
+                || code.created_at != handle.created_at || code.expires_at.secs() <= now.secs()
                 || code.expires_at > now.add(std::time::Duration::from_secs(60)).min(view.session.absolute_expires_at)
                 || code.consumed_at.is_some() || code.consumed_reason.is_some()
                 || code.return_target.scheme() != "https" || code.return_target.host_str() != Some(code.host.as_str())

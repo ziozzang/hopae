@@ -255,3 +255,7 @@
 "stepup.enrollment" = "Set up an authenticator before continuing. After setup, return to this page and use a new code."
 "stepup.setup" = "Set up authenticator"
 "stepup.continue" = "Continue after setup"
+"external.choose" = "Choose a verification method."
+"external.totp" = "Authenticator code"
+"external.intro" = "Enter the response supplied by your verification service."
+"external.response" = "Verification response"

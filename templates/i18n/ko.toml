@@ -254,3 +254,7 @@
 "stepup.enrollment" = "계속하려면 인증 앱을 등록하십시오. 등록 후 이 페이지로 돌아와 새 코드를 사용하십시오."
 "stepup.setup" = "인증 앱 등록"
 "stepup.continue" = "등록 후 계속"
+"external.choose" = "인증 방법을 선택하세요."
+"external.totp" = "인증 앱 코드"
+"external.intro" = "인증 서비스에서 제공한 응답을 입력하세요."
+"external.response" = "인증 응답"

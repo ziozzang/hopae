@@ -358,6 +358,12 @@ pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
     } else {
         adapter
     };
+    let adapter = adapter.with_external(
+        Arc::new(services.store.clone()),
+        services.external_verifiers.clone(),
+        services.clock.clone(),
+        services.rng.clone(),
+    );
     let portal_state = PortalState::new(
         PortalConfig::from_config(&services.config),
         Arc::new(adapter),

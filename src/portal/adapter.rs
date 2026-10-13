@@ -27,7 +27,14 @@ struct TotpDeps {
     clock: Arc<dyn crate::crypto::Clock>,
     rng: Arc<dyn crate::crypto::Rng>,
 }
+struct ExternalDeps {
+    store: Arc<crate::store::Store>,
+    registry: Arc<crate::factor::external_registry::Registry>,
+    clock: Arc<dyn crate::crypto::Clock>,
+    rng: Arc<dyn crate::crypto::Rng>,
+}
 pub struct Adapter {
+    external: Option<ExternalDeps>,
     totp: Option<TotpDeps>,
     svc: Service,
     registry: Arc<Registry>,
@@ -37,7 +44,89 @@ pub struct Adapter {
     readiness: Readiness,
 }
 
+struct PreparedCredentials {
+    now: crate::crypto::Timestamp,
+    handle: Secret,
+    handoff: Secret,
+    expiry: crate::crypto::Timestamp,
+    portal_handle: crate::store::HandleRow,
+    handoff_row: crate::store::HandoffCodeRow,
+}
 impl Adapter {
+    fn prepare_stepup(
+        actor: &crate::store::FactorActor,
+        row: &crate::store::TransactionRow,
+        ctx: &RequestCtx,
+        clock: &dyn crate::crypto::Clock,
+        rng: &dyn crate::crypto::Rng,
+    ) -> Result<PreparedCredentials, Failure> {
+        let now = clock.now();
+        let handle = crate::crypto::handle_value(rng);
+        let handoff = crate::crypto::random_token(rng, 32);
+        let expiry = actor
+            .view
+            .handle
+            .absolute_expires_at
+            .min(actor.view.session.absolute_expires_at);
+        let portal_handle = crate::store::HandleRow {
+            handle_sha256: handle.digest(),
+            session_id: actor.view.session.session_id.clone(),
+            host: actor.view.handle.host.clone(),
+            issued_aal: crate::session::Aal::Two,
+            created_at: now,
+            last_seen_at: now,
+            absolute_expires_at: expiry,
+            revoked_at: None,
+            revoked_reason: None,
+        };
+        let handoff_row = crate::store::HandoffCodeRow {
+            code_sha256: handoff.digest(),
+            session_id: actor.view.session.session_id.clone(),
+            host: crate::policy::types::Host::parse(row.return_target.host_str().unwrap_or(""))
+                .map_err(|_| Self::totp_refusal())?,
+            return_target: row.return_target.clone(),
+            client_ip: ctx.client_ip,
+            bind_sha256: row.bind_sha256.ok_or_else(Self::totp_refusal)?,
+            issued_aal: crate::session::Aal::Two,
+            cred_gen: actor
+                .view
+                .session
+                .cred_gen
+                .checked_add(1)
+                .ok_or_else(Self::totp_refusal)?,
+            recovery_depth: row.recovery_depth,
+            created_at: now,
+            expires_at: now
+                .add(std::time::Duration::from_secs(60))
+                .min(actor.view.session.absolute_expires_at),
+            consumed_at: None,
+            consumed_reason: None,
+        };
+        Ok(PreparedCredentials {
+            now,
+            handle,
+            handoff,
+            expiry,
+            portal_handle,
+            handoff_row,
+        })
+    }
+
+    pub fn with_external(
+        mut self,
+        store: Arc<crate::store::Store>,
+        registry: Arc<crate::factor::external_registry::Registry>,
+        clock: Arc<dyn crate::crypto::Clock>,
+        rng: Arc<dyn crate::crypto::Rng>,
+    ) -> Self {
+        self.external = Some(ExternalDeps {
+            store,
+            registry,
+            clock,
+            rng,
+        });
+        self
+    }
     pub fn with_totp(
         mut self,
         store: Arc<dyn crate::store::Factors>,
@@ -92,6 +181,7 @@ impl Adapter {
         readiness: Readiness,
     ) -> Adapter {
         Adapter {
+            external: None,
             totp: None,
             svc,
             registry,
@@ -200,6 +290,138 @@ fn account_label(a: &AccountSummary) -> String {
 
 #[async_trait]
 impl PortalServices for Adapter {
+    fn external_factor_ids(&self) -> Vec<String> {
+        self.external
+            .as_ref()
+            .map(|deps| deps.registry.iter().map(|(id, _)| id.to_owned()).collect())
+            .unwrap_or_default()
+    }
+    async fn stepup_options(
+        &self,
+        ctx: &RequestCtx,
+        cookies: &Cookies,
+        transaction: &Secret,
+    ) -> Result<StepUpEntry, Failure> {
+        if !ctx.https || cookies.bind.is_none() {
+            return Err(Self::totp_refusal());
+        }
+        let (_, row, _) = self
+            .svc
+            .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
+            .await
+            .map_err(Self::factor_session_error)?;
+        Ok(StepUpEntry {
+            enrolled: false,
+            form_origin: row.return_target.origin(),
+        })
+    }
+    async fn external_stepup_visit(
+        &self,
+        ctx: &RequestCtx,
+        cookies: &Cookies,
+        transaction: &Secret,
+        factor: &str,
+    ) -> Result<StepUpEntry, Failure> {
+        use crate::store::Factors;
+        if !ctx.https {
+            return Err(Self::totp_refusal());
+        }
+        let deps = self.external.as_ref().ok_or_else(Self::totp_refusal)?;
+        let connector = deps.registry.get(factor).ok_or_else(Self::totp_refusal)?;
+        let portal = cookies.bind.as_ref().ok_or_else(Self::totp_refusal)?;
+        let (actor, row, generation) = self
+            .svc
+            .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
+            .await
+            .map_err(Self::factor_session_error)?;
+        deps.store
+            .bind_external_stepup(crate::store::BindExternalStepUp {
+                actor,
+                transaction: transaction.digest(),
+                portal_binding: portal.digest(),
+                authority: connector.authority(),
+                config_generation: generation,
+            })
+            .await
+            .map_err(Self::factor_store_error)?;
+        Ok(StepUpEntry {
+            enrolled: true,
+            form_origin: row.return_target.origin(),
+        })
+    }
+    async fn external_stepup_complete(
+        &self,
+        ctx: &RequestCtx,
+        cookies: &Cookies,
+        transaction: &Secret,
+        factor: &str,
+        response: &Secret,
+    ) -> Result<Redirect, Failure> {
+        if !ctx.https {
+            return Err(Self::totp_refusal());
+        }
+        let deps = self.external.as_ref().ok_or_else(Self::totp_refusal)?;
+        let connector = deps.registry.get(factor).ok_or_else(Self::totp_refusal)?;
+        let portal = cookies.bind.as_ref().ok_or_else(Self::totp_refusal)?;
+        let (actor, row, generation) = self
+            .svc
+            .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
+            .await
+            .map_err(Self::factor_session_error)?;
+        let proof = crate::factor::external_service::verify_authorized(
+            deps.store.as_ref(),
+            connector,
+            deps.clock.as_ref(),
+            crate::factor::external_service::VerificationRequest {
+                actor: &actor,
+                response,
+                transaction: transaction.digest(),
+                portal_binding: portal.digest(),
+                config_generation: generation,
+            },
+        )
+        .await
+        .map_err(|error| match error {
+            crate::factor::external_service::Error::Store(error) => Self::factor_store_error(error),
+            crate::factor::external_service::Error::Unavailable => Failure {
+                kind: FailKind::Unavailable,
+                reason: reasons::PROVIDER_UNAVAILABLE,
+            },
+            _ => Self::totp_refusal(),
+        })?;
+        let PreparedCredentials {
+            now,
+            handle,
+            handoff,
+            expiry,
+            portal_handle,
+            handoff_row,
+        } = Self::prepare_stepup(&actor, &row, ctx, deps.clock.as_ref(), deps.rng.as_ref())?;
+        use crate::store::Factors;
+        deps.store
+            .elevate_external(crate::store::ExternalElevation {
+                actor,
+                proof,
+                transaction: transaction.digest(),
+                portal_binding: portal.digest(),
+                config_generation: generation,
+                portal_handle,
+                handoff: handoff_row,
+                events: vec![],
+            })
+            .await
+            .map_err(Self::factor_store_error)?;
+        Ok(Redirect {
+            location: crate::session::handoff::landing_location(
+                &row.return_target,
+                handoff.expose(),
+            ),
+            set_handle: Some(HandleCookie {
+                value: handle,
+                max_age: expiry.since(now),
+            }),
+        })
+    }
     async fn stepup_visit(
         &self,
         ctx: &RequestCtx,
@@ -265,48 +487,14 @@ impl PortalServices for Adapter {
             .and_then(|v| v.as_str())
             .ok_or_else(Self::totp_refusal)?
             .to_owned();
-        let now = deps.clock.now();
-        let handle = crate::crypto::handle_value(deps.rng.as_ref());
-        let handoff = crate::crypto::random_token(deps.rng.as_ref(), 32);
-        let expiry = actor
-            .view
-            .handle
-            .absolute_expires_at
-            .min(actor.view.session.absolute_expires_at);
-        let portal_handle = crate::store::HandleRow {
-            handle_sha256: handle.digest(),
-            session_id: actor.view.session.session_id.clone(),
-            host: actor.view.handle.host.clone(),
-            issued_aal: crate::session::Aal::Two,
-            created_at: now,
-            last_seen_at: now,
-            absolute_expires_at: expiry,
-            revoked_at: None,
-            revoked_reason: None,
-        };
-        let handoff_row = crate::store::HandoffCodeRow {
-            code_sha256: handoff.digest(),
-            session_id: actor.view.session.session_id.clone(),
-            host: crate::policy::types::Host::parse(row.return_target.host_str().unwrap_or(""))
-                .map_err(|_| Self::totp_refusal())?,
-            return_target: row.return_target.clone(),
-            client_ip: ctx.client_ip,
-            bind_sha256: row.bind_sha256.ok_or_else(Self::totp_refusal)?,
-            issued_aal: crate::session::Aal::Two,
-            cred_gen: actor
-                .view
-                .session
-                .cred_gen
-                .checked_add(1)
-                .ok_or_else(Self::totp_refusal)?,
-            recovery_depth: row.recovery_depth,
-            created_at: now,
-            expires_at: now
-                .add(std::time::Duration::from_secs(60))
-                .min(actor.view.session.absolute_expires_at),
-            consumed_at: None,
-            consumed_reason: None,
-        };
+        let PreparedCredentials {
+            now,
+            handle,
+            handoff,
+            expiry,
+            portal_handle,
+            handoff_row,
+        } = Self::prepare_stepup(&actor, &row, ctx, deps.clock.as_ref(), deps.rng.as_ref())?;
         crate::factor::service::elevate_authorized(
             deps.store.as_ref(),
             &deps.keys,

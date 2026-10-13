@@ -1737,3 +1737,327 @@ fn configured_external_verifier_bootstrap_publishes_and_removal_restart_disables
         2
     );
 }
+
+#[test]
+fn owned_oidc_external_https_browser_form_elevates_with_bound_handoff_and_refuses_bad_csrf() {
+    use crate::support::*;
+    struct Verifier {
+        child: std::process::Child,
+        dir: tempfile::TempDir,
+        url: String,
+    }
+    impl Drop for Verifier {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let openssl = |args: &[&str]| {
+        assert!(
+            std::process::Command::new("openssl")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    };
+    openssl(&[
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-days",
+        "1",
+        "-subj",
+        "/CN=Owned MFA CA",
+        "-keyout",
+        "ca.key",
+        "-out",
+        "ca.pem",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+    ]);
+    openssl(&[
+        "req",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-subj",
+        "/CN=localhost",
+        "-keyout",
+        "server.key",
+        "-out",
+        "server.csr",
+    ]);
+    std::fs::write(dir.path().join("extensions"),"basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n").unwrap();
+    openssl(&[
+        "x509",
+        "-req",
+        "-in",
+        "server.csr",
+        "-CA",
+        "ca.pem",
+        "-CAkey",
+        "ca.key",
+        "-CAcreateserial",
+        "-days",
+        "1",
+        "-extfile",
+        "extensions",
+        "-out",
+        "server.pem",
+    ]);
+    let child = std::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tools/owned_external_mfa_verifier.py"
+        ))
+        .arg(dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut verifier = Verifier {
+        child,
+        dir,
+        url: String::new(),
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !verifier.dir.path().join("ready").exists() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let port = std::fs::read_to_string(verifier.dir.path().join("ready")).unwrap();
+    verifier.url = format!("https://127.0.0.1:{port}/verify");
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(
+        Fixture::with(
+            "m1-basic",
+            serde_json::json!({"external_verifiers":[{"factor":"organization","configuration_revision":1,"url":verifier.url,"verifier_key_env":"OWNED_FACTOR_KEY","timeout_ms":1000,"allow_private_endpoints":true,"ca":verifier.dir.path().join("ca.pem")}],"apps":[{"app_id":"app","hosts":["app.example.test"],"ports":[443],"step_up":[{"path_prefix":"/admin","require":{"aal":2,"max_age":300}}]}]}),
+        ),
+        &idp,
+        &[(
+            "OWNED_FACTOR_KEY",
+            "owned-verifier-key-at-least-thirty-two-bytes",
+        )],
+    );
+    let client = h.portal().with_ip("192.0.2.10");
+    let origin = format!("https://{}", h.portal_host());
+    fn field(body: &str, name: &str) -> String {
+        body.split(&format!("name=\"{name}\" value=\""))
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap()
+            .into()
+    }
+    fn cookie(r: &Response, name: &str) -> String {
+        r.set_cookies()
+            .iter()
+            .find_map(|c| {
+                c.strip_prefix(&format!("{name}="))
+                    .map(|s| s.split(';').next().unwrap().to_owned())
+            })
+            .unwrap()
+    }
+    let first =
+        h.verify(VerifyRequest::document("https://app.example.test/private").ip("192.0.2.10"));
+    assert_eq!(first.status, 302);
+    let target = url::Url::parse(first.location().unwrap()).unwrap();
+    let txn = target
+        .query_pairs()
+        .find(|(k, _)| k == "txn")
+        .unwrap()
+        .1
+        .into_owned();
+    let login = client.get(&format!("/login?txn={txn}"));
+    let go = if login.status == 302 {
+        login
+    } else {
+        client.send(
+            Req::post("/login/mock")
+                .header("origin", &origin)
+                .form(&[("csrf", &field(&login.body, "csrf")), ("txn", &txn)]),
+        )
+    };
+    let callback = idp.follow_authorization(go.location().unwrap());
+    let handoff = client.get(&callback);
+    assert_eq!(handoff.status, 302);
+    let bind = first
+        .set_cookies()
+        .iter()
+        .find_map(|c| {
+            c.split_once('=')
+                .filter(|(n, _)| *n != h.cookie_name())
+                .map(|(n, v)| (n.to_owned(), v.split(';').next().unwrap().to_owned()))
+        })
+        .unwrap();
+    let redeemed = h.verify(
+        VerifyRequest::document(handoff.location().unwrap())
+            .ip("192.0.2.10")
+            .cookie(&bind.0, &bind.1),
+    );
+    assert_eq!(redeemed.status, 302);
+    let old = cookie(&redeemed, &h.cookie_name());
+    let required = h.verify(
+        VerifyRequest::document("https://app.example.test/admin/x")
+            .ip("192.0.2.10")
+            .cookie(&h.cookie_name(), &old)
+            .cookie(&bind.0, &bind.1),
+    );
+    assert_eq!(
+        required.status,
+        302,
+        "reason={:?}",
+        required.header("x-hopae-reason")
+    );
+    let target = url::Url::parse(required.location().unwrap()).unwrap();
+    let txn = target
+        .query_pairs()
+        .find(|(k, _)| k == "txn")
+        .unwrap()
+        .1
+        .into_owned();
+    let chooser = client.get(&format!("/stepup?txn={txn}"));
+    assert_eq!(chooser.status, 200);
+    assert!(chooser.body.contains("factor=organization"));
+    assert!(!chooser.body.contains("factor=totp"));
+    let form = client.get(&format!("/stepup/external?txn={txn}&factor=organization"));
+    assert_eq!(form.status, 200);
+    assert!(
+        form.header("content-security-policy")
+            .unwrap()
+            .contains("https://app.example.test")
+    );
+    let csrf = field(&form.body, "csrf");
+    let fields = [
+        ("txn", txn.as_str()),
+        ("factor", "organization"),
+        ("csrf", csrf.as_str()),
+        ("response", "approve"),
+    ];
+    assert_eq!(client.post_form("/stepup/external", &fields).status, 403);
+    assert_eq!(
+        client
+            .send(
+                Req::post("/stepup/external")
+                    .header("origin", "https://other.example.test")
+                    .form(&fields)
+            )
+            .status,
+        403
+    );
+    let calls = || {
+        std::fs::read_to_string(verifier.dir.path().join("calls"))
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0)
+    };
+    assert_eq!(calls(), 0);
+    assert_eq!(
+        client
+            .send(
+                Req::post("/stepup/external")
+                    .header("origin", &origin)
+                    .form(&[
+                        ("txn", txn.as_str()),
+                        ("factor", "organization"),
+                        ("csrf", csrf.as_str()),
+                        ("response", "approve"),
+                        ("aal", "2")
+                    ])
+            )
+            .status,
+        400
+    );
+    assert_eq!(
+        client
+            .send(
+                Req::post("/stepup/external")
+                    .header("origin", &origin)
+                    .form(&[
+                        ("txn", txn.as_str()),
+                        ("factor", "organization"),
+                        ("csrf", "invalid"),
+                        ("response", "approve")
+                    ])
+            )
+            .status,
+        403
+    );
+    assert_eq!(calls(), 0);
+    let denied = client.send(
+        Req::post("/stepup/external")
+            .header("origin", &origin)
+            .form(&[
+                ("txn", txn.as_str()),
+                ("factor", "organization"),
+                ("csrf", csrf.as_str()),
+                ("response", "reject"),
+            ]),
+    );
+    assert_eq!(denied.status, 403);
+    assert_eq!(calls(), 1);
+    for response in ["cross", "aal"] {
+        assert_eq!(
+            client
+                .send(
+                    Req::post("/stepup/external")
+                        .header("origin", &origin)
+                        .form(&[
+                            ("txn", txn.as_str()),
+                            ("factor", "organization"),
+                            ("csrf", csrf.as_str()),
+                            ("response", response)
+                        ])
+                )
+                .status,
+            503
+        );
+    }
+    let done = client.send(
+        Req::post("/stepup/external")
+            .header("origin", &origin)
+            .form(&fields),
+    );
+    assert_eq!(done.status, 302, "external completion status");
+    assert_eq!(calls(), 4);
+    let elevated = h.verify(
+        VerifyRequest::document(done.location().unwrap())
+            .ip("192.0.2.10")
+            .cookie(&bind.0, &bind.1),
+    );
+    assert_eq!(elevated.status, 302);
+    let new = cookie(&elevated, &h.cookie_name());
+    let accepted = h.verify(
+        VerifyRequest::document("https://app.example.test/admin/x")
+            .ip("192.0.2.10")
+            .cookie(&h.cookie_name(), &new)
+            .cookie(&bind.0, &bind.1),
+    );
+    assert_eq!(accepted.status, 200);
+    assert_eq!(accepted.header("x-hopae-aal"), Some("2"));
+    assert_eq!(
+        h.verify(
+            VerifyRequest::other("https://app.example.test/private")
+                .ip("192.0.2.10")
+                .cookie(&h.cookie_name(), &old)
+        )
+        .status,
+        401
+    );
+    let db = rusqlite::Connection::open(h.state_dir.path().join("state/hopae.db")).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM external_factor_proofs", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert!(
+        !h.log()
+            .contains("owned-verifier-key-at-least-thirty-two-bytes")
+    );
+}

@@ -311,3 +311,26 @@ pub struct StepUpPage<'a> {
     pub transaction: &'a str,
     pub csrf: &'a str,
 }
+
+pub struct ExternalChoice {
+    pub label: String,
+    pub location: String,
+}
+#[derive(Template)]
+#[template(path = "stepup_choices.html")]
+pub struct StepUpChoicesPage<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub transaction: &'a str,
+    pub totp: bool,
+    pub choices: &'a [ExternalChoice],
+}
+#[derive(Template)]
+#[template(path = "stepup_external.html")]
+pub struct ExternalStepUpPage<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub transaction: &'a str,
+    pub factor: &'a str,
+    pub csrf: &'a str,
+}

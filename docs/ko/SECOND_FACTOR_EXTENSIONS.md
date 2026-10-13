@@ -1,6 +1,6 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=12 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=13 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
@@ -20,8 +20,8 @@
 검증 릴레이는 AAL 0 서비스 신원을 발급하며 사람의 2차 인증 근거가 아닙니다.
 
 네이티브 `external_transport`와 `external_service`가 HTTPS 인증 receipt와 schema v6
-소유자의 원자적 완료를 제공합니다. root 설정은 시작 시 verifier를 컴파일·게시합니다. 외부 portal 폼·Lua 런타임은
-아직 활성화하지 않았습니다. 아래 기록은 단계별 구현 상태이며 최신 소유자 구현 절이
+소유자의 원자적 완료를 제공합니다. root 설정은 시작 시 verifier를 컴파일·게시합니다. 외부 portal 폼은
+구현되었으며 Lua 런타임은 아직 활성화하지 않았습니다. 아래 기록은 단계별 구현 상태이며 최신 소유자 구현 절이
 영속 외부 완료가 없다는 과거 문구를 대체합니다.
 
 ## 네이티브 권한과 확장 경계
@@ -398,3 +398,31 @@ factor 선택·Lua는 활성화하지 않습니다. 분산 follower 전파 검�
 개별 authority 게시의 필수 이벤트는 `factor.authority_published`, 전체 registry는
 `factor.registry_published`입니다. 둘 다 소유자 상태와 함께 commit하며 독립 이벤트
 append로 삽입할 수 없습니다.
+
+## 네이티브 외부 브라우저 응답 경로 — 2026-10-14
+
+설정된 외부 registry가 TOTP와 함께 문서 step-up을 활성화합니다. `/stepup?txn=...`는
+HTTPS의 현재 portal session·transaction을 검증한 뒤 승인된 factor와 선택적인 TOTP를
+표시합니다. 외부 선택은 `/stepup/external?txn=...&factor=...`에서 소유자 challenge에
+해당 factor를 결합합니다. 이미 결합한 challenge를 다른 factor로 전환할 수 없으며
+TOTP도 명시적으로 선택합니다. 외부 실패 후 더 약한 provider로 자동 fallback하지 않습니다.
+
+외부 POST는 transaction·factor·CSRF·response 네 필드만 허용합니다. 별도 CSRF purpose를
+transaction·portal cookie·handle·factor에 바인딩하고 기존 비밀번호·TOTP의 정확한 Origin,
+HTTPS, 본문 상한과 프로세스 공유 IP 제한을 적용합니다. response는 비어 있지 않은
+4096바이트 이하이며 브라우저가 URL·신원·role·AAL을 선택할 수 없습니다. 폼 CSP는 현재
+검증된 앱 Origin만 handoff에 허용하며 response·verifier 자격은 출력·로그에 넣지 않습니다.
+
+adapter가 소유자 문맥으로 먼저 검증하고 TOTP·외부 공통 발급 helper로 새 자격을 생성한 뒤
+불투명 receipt를 원자적으로 commit합니다. 생성 시각은 미래이거나 5초보다 오래될 수 없고
+handle 활동·handoff 생성 시각도 일치해야 합니다. 비동기 검증의 초 경계로 인한 불필요한
+실패를 피하면서 actor·proof 벽시계·단조·commit 직전 검사도 유지합니다. verifier 요청에
+서버 소유 밀리초 `verification_started_at`를 challenge 만료와 함께 전달하여 짧은 proof
+수명을 구현할 수 있게 합니다. 엄격한 응답 schema는 유지합니다.
+
+자체 OIDC·HTTPS 실제 런타임 테스트는 1차 로그인, chooser, 외부 폼, backend 호출 전
+Origin·CSRF·추가 필드 거부, 문맥에 맞는 거절, 사용자 교차·등급 주입 거부, AAL 2
+handoff·보호 요청과 이전 handle 거부를 검증합니다. 시간 테스트는 초 경계와 오래된·미래
+자격 거부를 다룹니다. 실제 cookie·프로세스 경계의 HTTP 브라우저 클라이언트이며 Chromium이나
+운영 조직 MFA 계정 검증은 아닙니다. 실제 브라우저·fleet·성능·운영, 서비스별 factor 자격,
+등록·복구·계정 유입 제한·Lua는 후속입니다. 내부 v5 이미지는 유지합니다.

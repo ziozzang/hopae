@@ -230,6 +230,7 @@ impl Connector {
                     "configuration_revision":expected.configuration_revision,
                     "credential_generation":expected.credential_generation,
                     "challenge_expires_at":expected.challenge_expires_at,
+                    "verification_started_at":expected.started_at,
                     "response":response.expose()
                 }));
             let reply = self
@@ -461,6 +462,10 @@ pub(crate) mod tests {
                                 .as_object_mut()
                                 .unwrap()
                                 .remove("challenge_expires_at");
+                            reply
+                                .as_object_mut()
+                                .unwrap()
+                                .remove("verification_started_at");
                             reply["active"] = (action != "reject").into();
                             reply["proof_id"] = "owned-proof".into();
                             reply["expires_at"] = clock.now().add(Duration::from_secs(1)).0.into();

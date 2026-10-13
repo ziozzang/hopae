@@ -185,6 +185,46 @@ pub struct PasswordSubmission<'a> {
 
 #[async_trait]
 pub trait PortalServices: Send + Sync + 'static {
+    fn external_factor_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+    async fn stepup_options(
+        &self,
+        _ctx: &RequestCtx,
+        _cookies: &Cookies,
+        _transaction: &Secret,
+    ) -> Result<StepUpEntry, Failure> {
+        Err(Failure {
+            kind: FailKind::Forbidden,
+            reason: crate::event::types::reasons::INVALID_STATE,
+        })
+    }
+    async fn external_stepup_visit(
+        &self,
+        _ctx: &RequestCtx,
+        _cookies: &Cookies,
+        _transaction: &Secret,
+        _factor: &str,
+    ) -> Result<StepUpEntry, Failure> {
+        Err(Failure {
+            kind: FailKind::Forbidden,
+            reason: crate::event::types::reasons::INVALID_STATE,
+        })
+    }
+    async fn external_stepup_complete(
+        &self,
+        _ctx: &RequestCtx,
+        _cookies: &Cookies,
+        _transaction: &Secret,
+        _factor: &str,
+        _response: &Secret,
+    ) -> Result<Redirect, Failure> {
+        Err(Failure {
+            kind: FailKind::Forbidden,
+            reason: crate::event::types::reasons::INVALID_STATE,
+        })
+    }
+
     async fn stepup_visit(
         &self,
         _ctx: &RequestCtx,

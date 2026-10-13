@@ -4570,3 +4570,51 @@ async fn external_snapshot_single_publication_fences_stale_batch_and_invalid_epo
         1
     );
 }
+
+#[tokio::test]
+async fn external_completion_tolerates_second_boundary_but_refuses_stale_or_future_minted_credentials()
+ {
+    use crate::factor::external_service::publish_authorized_configuration;
+    use crate::store::Factors;
+    for case in ["boundary", "future", "stale"] {
+        let f = fx();
+        let (_, txn, view, mut handle, mut code) = external_stepup_fixture(&f, 112).await;
+        f.clock.set(Timestamp(59_999));
+        let fixture =
+            crate::factor::external_transport::tests::Fixture::with_clock(f.clock.clone()).await;
+        let connector = fixture.connector();
+        publish_authorized_configuration(&f.store, &connector, 1)
+            .await
+            .unwrap();
+        let proof = owned_external_receipt(&f, &connector, &txn, &view).await;
+        f.clock.set(Timestamp(60_001));
+        if case == "future" {
+            handle.created_at = Timestamp(60_002);
+            handle.last_seen_at = handle.created_at;
+            code.created_at = handle.created_at;
+        }
+        if case == "stale" {
+            handle.created_at = Timestamp(54_000);
+            handle.last_seen_at = handle.created_at;
+            code.created_at = handle.created_at;
+        }
+        let result = f
+            .store
+            .elevate_external(ExternalElevation {
+                actor: stepup_actor(&f, view),
+                proof,
+                transaction: txn.txn_sha256,
+                portal_binding: sha256(b"owned-portal-cookie"),
+                config_generation: 1,
+                portal_handle: handle,
+                handoff: code,
+                events: vec![],
+            })
+            .await;
+        assert_eq!(result.is_ok(), case == "boundary", "{case}");
+        assert_eq!(
+            f.count("SELECT count(*) FROM external_factor_proofs"),
+            i64::from(case == "boundary")
+        );
+    }
+}

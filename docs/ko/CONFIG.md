@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=23 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=24 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -319,6 +319,7 @@ verifier 자격·CA 내용·클라이언트는 상태 생성·마이그레이션
 충돌은 시작을 거부합니다. 설정 제거 후 재시작하면 이전 authority가 비활성화되며 revision은
 [인증 요소 lifecycle](SECOND_FACTOR_EXTENSIONS.md)에 맞춰 유지·증가해야 합니다.
 
-이 설정은 verifier authority와 네이티브 연결 registry를 게시합니다. 외부 브라우저
-challenge·응답 폼과 Lua는 활성화하지 않았고 기존 네이티브 TOTP 규칙은 현재 동작을
-유지합니다. 설정만으로 외부 요소가 로그인·step-up chooser에 표시되지는 않습니다.
+이 설정은 verifier authority와 네이티브 연결 registry를 게시합니다. 설정된 외부 요소는 네이티브 step-up chooser에 표시됩니다. TOTP keyring이나
+비어 있지 않은 외부 registry가 문서 단계 상승을 활성화하며 API 요청은 높은 인증등급
+근거가 없으면 계속 거부합니다. 외부 요소도 네이티브 HTTPS·CSRF·브라우저 바인딩 폼과
+원자적 소유자 완료를 사용합니다. Lua·외부 등록·복구는 아직 미구현입니다.
