@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=5 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=6 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -152,3 +152,20 @@ user binding·요인 출처·보증 수준이 없고 단독으로 세션을 만�
 등록 endpoint·저장 seed 암호화·복구·영속 동시 재사용 CAS·MFA 세션·관리자 통합,
 외부 요인·Lua adapter는 이번 계산 변경에 포함되지 않습니다. 이 수명주기 요구를
 완료해야 TOTP 인증 지원을 달성한 것으로 판단합니다.
+
+## Seed envelope 소스 상태
+
+`src/factor/seed_cipher.rs`에 XChaCha20-Poly1305 envelope를 추가했습니다.
+기존 운영 CSPRNG로 생성한 새 24-byte nonce, 버전 외부 32-byte 키,
+목적·key ID·내부 user·등록 ID를 길이 구분한 associated data를 사용합니다.
+Envelope 필드는 비공개이며 제한된 JSON 파싱은 1024-byte 초과 문서,
+미지원 버전·잘못된 암호문 길이를 거부합니다. Key·복호화 평문 버퍼는 소유
+메모리를 지우고 Debug는 key·envelope 내용을 가립니다. 평문 seed·키를
+직렬화하지 않으며 복호화 실패는 하나의 타입 오류로 반환합니다.
+
+집중 테스트는 왕복, 다른 user·등록·key로 대체, 암호문·nonce·버전 변조,
+새 nonce, 제한된 식별자·입력을 확인합니다. 아직 DB·등록 UI에 연결되지
+않았습니다. 운영 키 로딩·keyring 교체·백업·폐기, pending 등록,
+재사용 CAS·복구·세션 통합은 필수로 남습니다. 유효한 과거 암호문의 재사용은
+막지 않으므로 소유 DB가 등록 revision·회수를 검사해야 합니다.
+암호 API 참고: [RustCrypto chacha20poly1305](https://docs.rs/chacha20poly1305/0.10.1/chacha20poly1305/).

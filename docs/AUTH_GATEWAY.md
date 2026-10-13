@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 5 -->
+<!-- doc-rev: 6 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -178,3 +178,21 @@ No enrollment endpoint, seed encryption at rest, recovery, durable concurrent re
 CAS, MFA session/console integration or external factor/Lua adapter is implemented
 by this arithmetic change. Those lifecycle requirements remain mandatory before
 claiming TOTP authentication support.
+
+## Seed envelope source status
+
+`src/factor/seed_cipher.rs` adds XChaCha20-Poly1305 envelopes with a fresh 24-byte
+nonce from the existing production CSPRNG, a versioned external 32-byte key, and
+length-delimited associated data binding the purpose, key ID, internal user and
+enrollment ID. Envelope fields are private; bounded JSON parsing rejects documents
+over 1024 bytes, unsupported versions and invalid ciphertext lengths. Key and
+plaintext buffers use zeroizing ownership and Debug redacts key/envelope contents.
+No plaintext seed or key is serialized. All decryption failures use one typed error.
+
+Focused tests check round trips, cross-user/enrollment/key substitution, ciphertext,
+nonce and version tampering, fresh nonces and bounded identifiers/input. This module
+is not connected to the database or enrollment UI yet. Production key loading,
+keyring rotation/backup/retirement, pending enrollment, replay CAS, recovery and
+session integration remain required. It does not prevent replay of a valid older
+ciphertext; the owner database must enforce enrollment revision and revocation.
+Cipher API reference: [RustCrypto chacha20poly1305](https://docs.rs/chacha20poly1305/0.10.1/chacha20poly1305/).

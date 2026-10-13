@@ -7,6 +7,9 @@ use zeroize::Zeroizing;
 
 pub struct Seed(Zeroizing<Vec<u8>>);
 impl Seed {
+    pub(super) fn bytes(&self) -> &[u8] {
+        &self.0
+    }
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         (20..=128)
             .contains(&bytes.len())

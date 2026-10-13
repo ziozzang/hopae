@@ -26,6 +26,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 base64 = "0.22"
 bytes = "1"
 cookie = "0.18"
+chacha20poly1305 = { version = "0.10.1", default-features = false, features = ["alloc"] }
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"
 form_urlencoded = "1"
