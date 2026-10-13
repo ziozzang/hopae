@@ -1,8 +1,13 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=21 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=22 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
+
+미릴리스 소스는 네이티브 서비스 자격 검증 후 선택적인 제한된 Lua 사용 조건을
+적용합니다. [서비스 사용 조건 설정](../CONFIG.md#service-authentication-lua-eligibility-unreleased)을
+참고하세요. 스크립트는 자격 인증·신원 변환·인증등급 변경·품계 권한 판단을 대체하지
+못하며 아래는 네이티브 커넥터 설명입니다.
 
 런타임 connector는 선택적인 IP 조건과 함께 자체 서비스 API 키를 인증하거나 고정된
 외부 검증 서버에 Bearer credential을 릴레이합니다.

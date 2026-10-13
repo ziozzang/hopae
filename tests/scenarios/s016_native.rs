@@ -608,10 +608,11 @@ async fn external_api_verifier_http_native_parity_and_outage_classification() {
         let credential=headers["authorization"].to_str().unwrap();
         if credential.contains("unavailable"){return (StatusCode::BAD_GATEWAY,Json(serde_json::json!({"active":false})));}
         if credential.contains("invalid"){return (StatusCode::UNAUTHORIZED,Json(serde_json::json!({"active":false})));}
-        (StatusCode::OK,Json(serde_json::json!({"active":true,"subject":"partner-worker","service_id":"app","expires_at":expires})))
+        let subject=if credential.contains("blocked"){"unapproved-worker"}else{"partner-worker"};
+        (StatusCode::OK,Json(serde_json::json!({"active":true,"subject":subject,"service_id":"app","expires_at":expires})))
     }));
     let verifier_task = tokio::spawn(async move { axum::serve(verifier, app).await.unwrap() });
-    let config:hopae::auth_gateway::runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"partner","api_relay":{"url":format!("http://{address}/verify"),"issuer":"https://partner.example.test","timeout_ms":100,"allow_private_endpoints":true},"networks":["203.0.113.0/24"]}]})).unwrap();
+    let config:hopae::auth_gateway::runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"partner","eligibility_lua":"return context.subject == 'partner-worker' and context.service == 'app' and context.connector == 'api-relay'","api_relay":{"url":format!("http://{address}/verify"),"issuer":"https://partner.example.test","timeout_ms":100,"allow_private_endpoints":true},"networks":["203.0.113.0/24"]}]})).unwrap();
     let runtime = hopae::auth_gateway::runtime::Runtime::compile(&config, &|_| None).unwrap();
     let keys = Arc::new(CallerKeys::new(
         Some(Secret::new("native-test-key".into())),
@@ -639,6 +640,7 @@ async fn external_api_verifier_http_native_parity_and_outage_classification() {
         (1, "valid-partner-token-at-least-sixteen", 200),
         (2, "invalid-partner-token-at-least-sixteen", 401),
         (3, "unavailable-partner-token-at-least-sixteen", 503),
+        (4, "blocked-partner-token-at-least-sixteen", 401),
     ] {
         let mut headers = context("/private");
         headers.push((

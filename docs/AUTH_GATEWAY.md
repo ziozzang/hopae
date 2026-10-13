@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 21 -->
+<!-- doc-rev: 22 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -9,6 +9,11 @@ to a fixed external verifier, with optional IP conditions. It is opt-in through 
 routes keep their behavior when this configuration is absent. The same caller
 key, bounded concurrency and forwarded-request validation apply before API
 credentials are read, over both HTTP and HOP1.
+
+Unreleased source applies optional bounded Lua eligibility after native
+verification. See [service eligibility configuration](CONFIG.md#service-authentication-lua-eligibility-unreleased).
+Scripts cannot authenticate a credential, translate identity, change assurance or
+replace Pumgye authorization.
 
 ```json
 {"authentication_gateway":{"authority_id":"example","profiles":[{"service_id":"orders","host":"orders.example.test","ports":[443],"realm":"partner","api_keys":[{"token_env":"HOPAE_ORDERS_API_KEY","subject":"scheduler"}],"networks":["192.0.2.0/24"],"session_fallback":false}]}}

@@ -26,6 +26,8 @@ pub struct Profile {
     pub networks: Vec<String>,
     #[serde(default)]
     pub session_fallback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eligibility_lua: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +54,11 @@ impl Config {
         let mut scopes = std::collections::HashSet::new();
         let mut total = 0;
         for p in &self.profiles {
+            if let Some(source) = &p.eligibility_lua {
+                super::lua::Policy::compile(source).map_err(|_| {
+                    anyhow::anyhow!("invalid service authentication eligibility script")
+                })?;
+            }
             ensure!(
                 identifier(&p.service_id) && identifier(&p.realm),
                 "invalid authentication service/realm"
@@ -179,6 +186,8 @@ struct Prepared {
     networks: Networks,
     session_fallback: bool,
     relay: Option<std::sync::Arc<super::relay::Connector>>,
+    eligibility: Option<super::lua::Policy>,
+    eligibility_capacity: tokio::sync::Semaphore,
 }
 pub struct Runtime {
     profiles: HashMap<String, HashMap<u16, std::sync::Arc<Prepared>>>,
@@ -256,6 +265,15 @@ impl Runtime {
                 networks: Networks::compile(&p.networks, &mut budget)?,
                 session_fallback: p.session_fallback,
                 relay,
+                eligibility: p
+                    .eligibility_lua
+                    .as_deref()
+                    .map(super::lua::Policy::compile)
+                    .transpose()
+                    .map_err(|_| {
+                        anyhow::anyhow!("invalid service authentication eligibility script")
+                    })?,
+                eligibility_capacity: tokio::sync::Semaphore::new(64),
             });
             for port in &p.ports {
                 profiles
@@ -305,9 +323,14 @@ impl Runtime {
             let now = self
                 .observed_time
                 .load(std::sync::atomic::Ordering::Acquire);
-            relay
+            let started = std::time::Instant::now();
+            let evidence = relay
                 .authenticate(&profile.service_id, &profile.realm, token, ip, now)
-                .await
+                .await?;
+            profile.restrict(
+                evidence,
+                now.saturating_add(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+            )
         } else {
             self.authenticate(host, port, token, ip, now)
         }
@@ -342,14 +365,44 @@ impl Runtime {
         if !p.networks.permits(ip) {
             return Err(Error::NetworkDenied);
         }
-        Ok(VerifiedEvidence {
-            subject: key.subject.clone(),
-            service: Some(p.service_id.clone()),
-            connector: format!("api-key:{}", p.service_id),
-            expires_at: now
-                .saturating_add(1000)
-                .min(key.expires_at.unwrap_or(u64::MAX)),
-        })
+        p.restrict(
+            VerifiedEvidence {
+                subject: key.subject.clone(),
+                service: Some(p.service_id.clone()),
+                connector: format!("api-key:{}", p.service_id),
+                expires_at: now
+                    .saturating_add(1000)
+                    .min(key.expires_at.unwrap_or(u64::MAX)),
+            },
+            now,
+        )
+    }
+}
+
+impl Prepared {
+    fn restrict(&self, evidence: VerifiedEvidence, now: u64) -> Result<VerifiedEvidence, Error> {
+        let Some(policy) = &self.eligibility else {
+            return Ok(evidence);
+        };
+        let _permit = self
+            .eligibility_capacity
+            .try_acquire()
+            .map_err(|_| Error::Unavailable)?;
+        let started = std::time::Instant::now();
+        let permitted = policy
+            .permits(super::lua::Context {
+                service: &self.service_id,
+                connector: &evidence.connector,
+                subject: &evidence.subject.subject,
+            })
+            .map_err(|_| Error::Unavailable)?;
+        if !permitted {
+            return Err(Error::Invalid);
+        }
+        if evidence.expires_at <= now.saturating_add(started.elapsed().as_millis() as u64) {
+            return Err(Error::Expired);
+        }
+        Ok(evidence)
     }
 }
 
@@ -360,6 +413,98 @@ mod tests {
         serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"api.example.test","ports":[443],"realm":"partner","api_keys":[{"token_env":"OWNED_API_TOKEN","subject":"scheduler","expires_at":5000}],"networks":["192.0.2.0/24","2001:db8::/32"]}]})).unwrap()
     }
     const KEY: &str = "owned-service-key-at-least-thirty-two-bytes";
+    #[tokio::test]
+    async fn service_lua_filters_only_verified_identity_and_preserves_scope() {
+        let ip = "192.0.2.8".parse().unwrap();
+        let mut cfg = config();
+        cfg.profiles[0].eligibility_lua =
+            Some("return context.subject == 'scheduler' and context.service == 'orders'".into());
+        let runtime = Runtime::compile(&cfg, &|_| Some(KEY.into())).unwrap();
+        for evidence in [
+            runtime
+                .authenticate("api.example.test", 443, Some(KEY), ip, 1)
+                .unwrap(),
+            runtime
+                .authenticate_async("api.example.test", 443, Some(KEY), ip, 1)
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(evidence.subject().kind, PrincipalKind::Service);
+            assert_eq!(evidence.subject().issuer, "hopae:owned");
+            assert_eq!(evidence.subject().realm, "partner");
+            assert_eq!(evidence.subject().subject, "scheduler");
+            assert_eq!(evidence.service(), Some("orders"));
+            assert_eq!(evidence.expires_at, 1001);
+        }
+        for (script, expected) in [
+            ("return false", Error::Invalid),
+            ("while true do end", Error::Unavailable),
+            ("return 'true'", Error::Unavailable),
+        ] {
+            cfg.profiles[0].eligibility_lua = Some(script.into());
+            let runtime = Runtime::compile(&cfg, &|_| Some(KEY.into())).unwrap();
+            assert_eq!(
+                runtime
+                    .authenticate("api.example.test", 443, Some(KEY), ip, 1)
+                    .unwrap_err(),
+                expected
+            );
+            // Invalid credentials and network constraints are evaluated before Lua.
+            assert_eq!(
+                runtime
+                    .authenticate(
+                        "api.example.test",
+                        443,
+                        Some("invalid-key-at-least-thirty-two-bytes"),
+                        ip,
+                        1
+                    )
+                    .unwrap_err(),
+                Error::Invalid
+            );
+            assert_eq!(
+                runtime
+                    .authenticate(
+                        "api.example.test",
+                        443,
+                        Some(KEY),
+                        "203.0.113.1".parse().unwrap(),
+                        1
+                    )
+                    .unwrap_err(),
+                Error::NetworkDenied
+            );
+        }
+    }
+    #[test]
+    fn service_lua_capacity_expiry_and_startup_fail_closed() {
+        let mut cfg = config();
+        cfg.profiles[0].eligibility_lua = Some("return true".into());
+        let runtime = Runtime::compile(&cfg, &|_| Some(KEY.into())).unwrap();
+        let profile = &runtime.profiles["api.example.test"][&443];
+        let ip = "192.0.2.8".parse().unwrap();
+        let evidence = runtime
+            .authenticate("api.example.test", 443, Some(KEY), ip, 1)
+            .unwrap();
+        assert_eq!(
+            profile.restrict(evidence, 1001).unwrap_err(),
+            Error::Expired
+        );
+        let _held = profile.eligibility_capacity.try_acquire_many(64).unwrap();
+        assert_eq!(
+            runtime
+                .authenticate("api.example.test", 443, Some(KEY), ip, 1)
+                .unwrap_err(),
+            Error::Unavailable
+        );
+        cfg.profiles[0].eligibility_lua = Some("return (".into());
+        assert!(Runtime::compile(&cfg, &|_| panic!("invalid syntax before secrets")).is_err());
+        assert!(
+            !serde_json::to_string(&config())
+                .unwrap()
+                .contains("eligibility_lua")
+        );
+    }
     #[tokio::test]
     async fn unchanged_verifier_keeps_open_circuit_across_publication() {
         use std::sync::{

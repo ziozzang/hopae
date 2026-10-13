@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 26 -->
+<!-- doc-rev: 27 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -356,3 +356,23 @@ affected factor sessions through the existing publication path. With no script,
 serialized binding material is unchanged. This adds eligibility execution, not
 general Lua connector orchestration, credential translation or recovery; those
 remain implementation work.
+
+## Service authentication Lua eligibility (unreleased)
+
+`authentication_gateway.profiles[].eligibility_lua` optionally applies the same
+bounded boolean runtime after native API-key or external API-relay authentication.
+For example, `return context.subject == 'scheduler' and context.service == 'orders'`.
+Context contains the verified subject, native service and connector identifier;
+no bearer token or caller-supplied identity is exposed. Invalid/expired credentials
+and disallowed networks are refused before script execution. False denies the
+verified credential; errors or the 64-evaluation profile capacity limit fail closed.
+True preserves issuer/realm/subject/principal kind, service scope and absolute
+evidence expiry. Relay transport and script execution cannot extend freshness.
+Service identity remains AAL 0 and Pumgye retains authorization ownership.
+
+Omitting the option preserves serialized configuration and the indexed native
+path without VM execution. Syntax is validated before secret resolution. Script
+limits match external-factor eligibility above. General credential translation,
+connector orchestration and human first-factor hooks remain unfinished. Tagged
+0.0.3 artifacts and the `0.0.3-lua-1341bae` internal image do not contain this
+later service-profile extension.

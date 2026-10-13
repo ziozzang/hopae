@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=26 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=27 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -341,3 +341,20 @@ true도 인증된 HTTPS proof 검증과 네이티브 소유자의 원자적 완�
 설정 revision을 높여야 하며 기존 publication 경로로 관련 factor session을 회수합니다.
 스크립트가 없으면 직렬화한 binding은 유지합니다. 현재는 사용 조건 실행이며 범용 Lua
 커넥터 조합·자격 변환·복구는 구현해야 합니다.
+
+## 서비스 인증 Lua 사용 조건 (미릴리스)
+
+선택적인 `authentication_gateway.profiles[].eligibility_lua`는 네이티브 API key 또는
+외부 API relay 인증 후 같은 제한된 boolean 런타임을 적용합니다. 예시는
+`return context.subject == 'scheduler' and context.service == 'orders'`입니다.
+문맥에는 검증된 사용자·네이티브 서비스·커넥터 식별자만 제공하며 bearer token과 호출자가
+주장하는 신원은 전달하지 않습니다. 잘못되거나 만료된 자격·금지된 네트워크는 스크립트
+전에 거부합니다. false는 검증된 자격을 거부하고 오류·profile 동시 실행 64개 제한도
+거부합니다. true는 issuer·realm·subject·신원 종류·서비스 범위·절대 만료를 유지하며
+relay 전송·스크립트 실행으로 신선도를 연장하지 않습니다. 서비스 신원은 AAL 0이고
+품계가 권한을 소유합니다.
+
+옵션을 생략하면 직렬화 설정과 인덱스 경로를 유지하며 VM을 실행하지 않습니다. 비밀
+참조 해석 전에 문법을 검사하고 실행 제한은 위 외부 factor와 같습니다. 범용 자격
+변환·커넥터 조합·사람의 1차 인증 hook은 후속입니다. 태그 0.0.3 asset 및 내부
+`0.0.3-lua-1341bae` 이미지에는 이 후속 서비스 profile 확장이 없습니다.
