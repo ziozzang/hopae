@@ -5,6 +5,7 @@ pub mod breaker;
 pub mod lua;
 pub mod publication;
 pub mod receipt;
+pub mod receipt_authority;
 pub mod receipt_binding;
 pub mod receipt_key_store;
 pub mod receipt_keys;

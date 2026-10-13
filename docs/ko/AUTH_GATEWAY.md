@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=27 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=28 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -70,6 +70,16 @@ load는 활성 항목·floor·공개 값 소유권을 복원·검증해 잘못�
 최소 버전·authority epoch fence가 필요하며 DB가 자기 rollback을 증명하지 못합니다.
 registry/store 테스트 5건은 재시작·오래된 게시·권한 회수·감사 실패 rollback을 검증합니다.
 비공개 signing key를 저장하거나 운영 DB를 변경하지 않았습니다.
+
+미릴리스 `receipt_authority`는 DB 게시와 공유 불변 verifier를 ArcSwap으로 연결합니다.
+유지하는 단일 mutable 소유자가 commit/설치 순서를 직렬화하고 registry Arc는 commit
+전에 할당해 이후 await·실패 가능한 소유자 작업 없이 설치합니다. 실패한 게시에는 이전
+snapshot을 유지합니다. 검증 결과는 캡처한 registry revision을 가진 non-Clone receipt이며
+로컬 pointer 현재 상태 검사로 이후 게시 전 결과를 거부합니다. 이는 보조 검사입니다.
+nonce 소비·발급 transaction에서 commit/설치 사이 구간을 포함해 DB revision을 다시
+확인해야 합니다. 독립 writer·분산 follower·시작/API 연결은 후속입니다. receipt 테스트
+11건에 서명된 실시간 제거·공유 verifier 갱신·재시작 거부를 포함하며 배포 요청 경로에는
+이 라이브러리 소유자를 활성화하지 않았습니다.
 
 미릴리스 소스는 네이티브 서비스 자격 검증 후 선택적인 제한된 Lua 사용 조건을
 적용합니다. [서비스 사용 조건 설정](../CONFIG.md#service-authentication-lua-eligibility-unreleased)을

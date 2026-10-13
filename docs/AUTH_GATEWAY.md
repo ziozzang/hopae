@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 27 -->
+<!-- doc-rev: 28 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -86,6 +86,18 @@ Ordinary restart retains removals. Restoring an older whole DB still requires an
 external minimum/authority-epoch fence: the DB cannot prove its own rollback.
 Five registry/store tests cover restart, stale publication, actor revocation and
 failed audit rollback. No private signing key is stored or production DB modified.
+
+Unreleased `receipt_authority` connects durable publication to shared immutable
+verifiers with ArcSwap. One retained mutable owner serializes commit/install order;
+the registry Arc is allocated before commit, then installed without an await or
+fallible owner operation. Failed publication leaves the previous snapshot intact.
+Verification returns a non-Clone checked receipt with its captured registry revision.
+A local pointer-current check rejects tags captured before a later publication.
+It is advisory: nonce consumption and issuance must recheck the DB revision in
+their transaction, including the commit-to-install interval. Independent writers,
+distributed followers and startup/API wiring still require integration.
+Eleven receipt tests include signed live removal, shared verifier update and
+restart rejection. This library owner is not activated in deployed request paths.
 
 Runtime connectors authenticate local service API keys or relay a Bearer credential
 to a fixed external verifier, with optional IP conditions. It is opt-in through `authentication_gateway`; existing OIDC/session

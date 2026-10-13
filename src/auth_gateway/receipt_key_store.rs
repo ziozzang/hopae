@@ -21,7 +21,7 @@ pub fn publish(
     desired: &[Key],
     actor: &str,
     guard: &dyn Fn(&Connection) -> Result<(), Refused>,
-) -> Result<Registry, Refused> {
+) -> Result<std::sync::Arc<Registry>, Refused> {
     if actor.is_empty() || actor.len() > 128 || actor.chars().any(char::is_control) {
         return Err(Refused);
     }
@@ -51,6 +51,7 @@ pub fn publish(
         )
         .map_err(|_| Refused)?;
     guard(&transaction)?;
+    let next = std::sync::Arc::new(next);
     transaction.commit().map_err(|_| Refused)?;
     Ok(next)
 }
