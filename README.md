@@ -1,23 +1,23 @@
 # Hopae
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [Documentation](docs/README.md) · [Roadmap](docs/ROADMAP.md) · [Release notes](CHANGELOG.md) · [한국어](README.ko.md)
 
 **A single-binary identity provider for zero-trust gateways, written in Rust.**
 
 Hopae (`호패`) is named after the Joseon-era state-issued identity tag. It signs
-people in through OAuth/OIDC providers or email, keeps their sessions, and
+people in through OAuth/OIDC or LDAP providers, keeps their sessions, and
 answers a gateway's "who is this request from?" question so that the gateway
 can inject verified identity into upstream requests. It is packaged around the
 [Hangang](https://github.com/ziozzang/hangang) gateway's external
 authentication check, and it stays usable behind any gateway that can forward
 such a check.
 
-> **Status: milestone M1 (vertical slice) plus the M4-min management console
-> (available), unreleased.** Version 0.1.0 is not cut yet. What works today is
-> described under [What works today](#what-works-today); everything under
-> [Not yet](#not-yet) is design only. See the [roadmap](docs/ROADMAP.md).
+> **Status: v0.0.3 release preparation; native zero-trust gateway integration.**
+> OIDC/LDAP login, service API authentication, mTLS HOP1, delegated management,
+> TOTP and external MFA browser step-up are implemented. Internal v6 dogfooding
+> is active. Remaining scope is listed below and in the roadmap.
 
 ## How it fits
 
@@ -46,7 +46,9 @@ it.
 - **Gateway integration** — the verify endpoint (`/_hopae/verify`) of the [gateway contract](docs/GATEWAY_CONTRACT.md): caller-key authentication with rotation, fail-closed answers, identity headers for the gateway to inject, and cross-domain single sign-on between registered hosts through a browser-bound handoff.
 - **Operations** — `hopae --check` preflight (prints the route fragment and redirect URIs to register), single-instance lock, backup before a schema migration, graceful shutdown, structured event log with transactional audit events, `/healthz`. See [operations](docs/OPERATIONS.md).
 - **Management console (M4-min)** — an optional third listener, reached through its own protected gateway route, with pages and a JSON API to list and search users, disable and enable a user, end one or all sessions, browse the login history and the audit trail, and read the status of applications, providers, store and build. Administrators are granted with `hopae admin grant` or `admin.users[]`; console freshness is a provider-verified reauthentication where the provider supports it and Hopae login age otherwise (Google). See [administration](docs/ADMIN.md).
-- **Native TOTP (main source)** — encrypted enrollment and bound browser step-up, atomic credential rotation and elevated handoff, current configuration-generation checks, and unchanged AAL 0 for service credentials. Requires a configured keyring and explicit assurance rules. [Second factors](docs/SECOND_FACTOR_EXTENSIONS.md). Internal MFA rollout, recovery/key lifecycle and external MFA API/Lua adapters remain open.
+- **Second factors** — encrypted TOTP enrollment and approved HTTPS external MFA, browser choice/response forms, durable single-use proof consumption, credential rotation and elevated handoff. Service credentials remain AAL 0. [Second factors](docs/SECOND_FACTOR_EXTENSIONS.md) records exact qualification and open lifecycle work.
+- **LDAP** — direct credential login alongside OIDC, LDAPS/mandatory StartTLS, immutable directory identity and password reauthentication. [LDAP](docs/LDAP_AUTHENTICATION.md).
+
 - **Packaging** — a static binary and a hardened Docker Compose template in [`deploy/`](deploy/).
 
 Production use needs a gateway that sends the caller key (Hangang change HC-3);
@@ -57,8 +59,8 @@ turned off. See the compatibility matrix in the contract.
 
 Everything here is planned, not shipped; see the [roadmap](docs/ROADMAP.md).
 
-- Other providers (Kakao, Naver, email magic link, email and password), additional second factors and external MFA API/Lua adapters.
-- Blacklists and throttling beyond the per-IP bounds, shared state for several instances (PostgreSQL, Redis/Valkey), complete provider/application management, recovery and internal MFA qualification.
+- Other providers (Kakao, Naver, email magic link, email and password), additional factor types, full lifecycle and Lua adapters.
+- Blacklists and throttling beyond the per-IP bounds, shared state for several instances (PostgreSQL, Redis/Valkey), complete provider/application management, recovery, fleet and production-user MFA qualification.
 - Lua hooks, webhooks, Prometheus metrics, configuration reload, signed self-update.
 
 ## Quick start

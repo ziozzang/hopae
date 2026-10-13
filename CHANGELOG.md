@@ -8,6 +8,28 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ## Unreleased
 
+## 0.0.3 — 2026-10-14
+
+### Added
+
+- Native encrypted TOTP enrollment and browser step-up, external HTTPS MFA verifier configuration/chooser/forms, atomic proof consumption, elevated handoff and prior credential revocation.
+- Mixed OIDC/LDAP login and password reauthentication with owned LDAPS/mandatory-StartTLS qualification and bounded malformed-response handling.
+- Authenticated persistent mTLS HOP1, service API key/HTTPS relay profiles with circuit breaking and DB-owned delegated administration; service credentials remain AAL 0.
+- Signed release manifests and a published Ed25519 verification key. Automatic self-update remains unimplemented.
+
+### Security and migration
+
+- Schema v6 adds encrypted factor state, immutable verifier authorities, indexed session revocation and durable scoped proof hashes. Existing schema-v5 tables are preserved; backups must include owner/delegation state, configuration and keys.
+- A v5 binary refuses v6 state. Downgrade requires the consistent pre-upgrade backup; never point an old binary at an upgraded database.
+- The native internal v6 deployment preserves existing keys and assurance rules. Owned Chromium, static-candidate HTTP/mTLS and upgrade/restore qualification pass; production Google/organization MFA and distributed/full-stack throughput are not claimed.
+
+### Validation and remaining scope
+
+- 856 serial tests pass, 42 ignored; scoped dependency audit, owned OIDC/LDAP/HTTPS and actual Chromium TOTP/external MFA qualification pass.
+- Lua, local human passwords, general credential translation, enrollment/recovery/account limits, memory followers, existing-stream revocation and full-stack 10k/100k performance remain unfinished.
+
+## Earlier implementation history
+
 ### Added
 
 - HOP1 authenticated persistent loopback verification and native Hangang pool support, retaining the same provider/session engine.

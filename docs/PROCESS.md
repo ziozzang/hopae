@@ -260,7 +260,9 @@ provides; it is appended last.
 
 ## Release and signing
 
-Self-update verifies an Ed25519-signed manifest over the exact release artifact,
+The release process signs an Ed25519 manifest over the exact release artifact.
+Hopae automatic self-update is not implemented yet; manifest verification is
+performed during artifact staging. The planned updater uses this envelope,
 in the same style as Hangang's signed updates and Sugyeol's GitHub release
 discovery. The verification key is published in `release-public-key.txt`; the
 signing seed is held offline by the maintainer and never enters the repository,
@@ -278,7 +280,7 @@ Release checklist:
 - [ ] Release assets prepared: raw executable per target, `<binary>-<target>.manifest.json` (signed envelope: version, target, artifact URL, SHA-256, size), `SHA256SUMS`.
 - [ ] Manifest signed offline with the seed matching `release-public-key.txt`; signatures verified with the public key before upload.
 - [ ] Executables uploaded first, manifests last; release marked stable (never draft or pre-release for an update-eligible release).
-- [ ] `hopae --check-update` from the previous version reports the new version with signed assets present.
+- [ ] Signatures and artifact hashes verified against `release-public-key.txt`; automatic self-update is a separate future feature, not a claim of this release.
 - [ ] Deployment follows G9.
 
 ## Security rules
@@ -328,3 +330,9 @@ having passed:
 - [ ] No internal name, secret or generated artifact is in the diff.
 
 Passing `make gates` with nothing else above is not done; it is ready for review.
+
+Hopae artifact staging supports `tools/prepare_release.py --target TARGET --output OUTPUT
+--signer OFFLINE_SIGNER --seed PRIVATE_SEED_FILE`. The seed must match the repository
+public key. The signer uses the same exact-byte payload/base64-envelope scheme as
+Sumunjang; staging independently verifies the signature, payload and artifact hash.
+The private seed remains outside the repository and server deployment.

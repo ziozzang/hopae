@@ -321,3 +321,9 @@ Threat-Model: updated
 - [ ] diff에 내부 이름, 비밀 정보, 생성된 산출물이 없다.
 
 위 항목 없이 `make gates`만 통과한 것은 완료가 아니라 검토 준비 상태입니다.
+
+호패 artifact는 `tools/prepare_release.py --target TARGET --output OUTPUT --signer
+OFFLINE_SIGNER --seed PRIVATE_SEED_FILE`로 서명 준비합니다. 비공개 시드는 저장소 공개
+키와 일치해야 하고 서버·저장소에 넣지 않습니다. 수문장의 정확한 payload bytes·base64
+서명 envelope와 같은 방식을 쓰며 별도로 서명·payload·artifact 해시를 검증합니다.
+호패 자동 self-update는 아직 미구현이므로 이번 서명 artifact로 지원을 주장하지 않습니다.
