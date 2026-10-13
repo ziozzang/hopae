@@ -599,3 +599,40 @@ bootstrap readback·기존 서비스 HTTP/pooled mTLS·실제 Chromium 외부 MF
 registry 백업을 유지합니다. Rust 소스는 898건 통과·42건 제외로 검증한 갱신과
 동일합니다. 관리자 경로 dogfooding이며 자격 발급·처리량 검증은 아닙니다.
 불변 태그 릴리스 자산은 유지합니다.
+
+## 네이티브 세션 receipt 발급 소스
+
+검증 엔진은 성공한 human 신원에 비공개 seal을 결합합니다. 검증된 서비스·
+user/session/provider ID·인증 시각·만료·AAL·user/session/config generation·
+검증 시각을 domain 분리·길이 prefix SHA-256으로 결합합니다. 공개 생성자·
+serde/Clone 경로가 없으며 발급에 쓰는 공개 신원 필드를 바꾸면 seal 검사가
+실패합니다. email/groups/display는 receipt claim이 아닙니다. 기존 gateway
+응답 wire 동작은 유지합니다.
+
+미릴리스 `receipt_issuer::Issuer`는 인증 전용 Ed25519 signer·고정 issuer/key/
+신원 epoch·공개키 pin·선언된 서비스/대상 쌍 최대 128개·네이티브 clock/RNG를
+보유합니다. 미선언 대상은 소유자 검사/서명 전에 거부합니다. 컴파일된 scope를
+빌려 조회하고 발급 출력은 불변 signer metadata를 Arc로 공유해 scope 목록을
+복사하지 않습니다. 소비한 seed buffer와
+signer 자료는 zeroize합니다. 네이티브 seal·실시간 소유자 검사를 거쳐 검증된
+신원에서 principal/AAL/revision을 가져오고 nonce를 생성한 뒤 마지막 소유자/
+시각 검사를 반복합니다. lease는 신원 만료·검증 후 1초보다 길지 않고 config
+generation을 신원 epoch에 포함합니다. monotonic 작업 시간과 프로세스 내
+clock watermark로 만료/시계 역행을 검사합니다. 출력은 Clone/Debug/직렬화가
+불가능하며 일반 auth 응답 헤더에 자동으로 들어가지 않습니다.
+
+실제 SQLite 검증 엔진 시나리오에서 receiver key registry로 서명을 확인하고
+서비스/user/session/provider/인증 시각/만료/AAL/generation 변경·공개키 pin
+불일치·마지막 소유자 거절·작업 중 만료·시계 역행을 거부합니다. 소스의 서명
+연결이며 RPC 발급 활성화는 아닙니다. 실시간 session/handle/user/provider/
+config/key epoch 검사는 발급 guard의 책임입니다. 영속 signer/key 게시·
+재시작/분산 시각 floor·service/workload 발급·인증된 전송 연결은 남아 있습니다.
+
+검증: 전체 target gates는 899건 통과·42건 제외이며 마지막 불변 metadata
+공유 개선 후 실제 발급 시나리오와 전체 target fmt/clippy/경계 검사도
+통과했습니다. 문서/시나리오 커버리지 검사가 통과하며 의존성 감사는 기존
+검증 전용 RSA 예외·rustls-pemfile 허용 경고를 적용합니다. 이 소스는 배포하지
+않았고 내부 이미지는 projection-1319351입니다. 인증된 adapter는 네이티브
+route에서 정확한 요청/서비스/대상을 가져오고 애플리케이션/경로별 인증 수준과
+실시간 소유자 상태를 재검사해야 합니다. 비공개 신원 seal은 원래 인증 metadata
+검증이지 권한 허용·요청 분류·분산 최신성 보장은 아닙니다.

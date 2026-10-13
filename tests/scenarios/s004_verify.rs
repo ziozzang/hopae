@@ -1655,3 +1655,168 @@ async fn primary_freshness_rule_starts_reauthentication_without_an_otp_loop() {
         ));
     }
 }
+
+#[tokio::test]
+async fn native_session_receipt_uses_engine_seal_and_refuses_modified_claims() {
+    use hopae::auth_gateway::{
+        receipt::Purpose,
+        receipt_issuer::{Configuration, Issuer, Request, Scope},
+        receipt_keys::{Key, Registry},
+    };
+    use hopae::crypto::Clock;
+    let f = Fx::new("m1-basic");
+    let (_, _, handle) = precondition(&f).await;
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let public_key = key.verifying_key().to_bytes();
+    let configuration = Configuration {
+        issuer_ref: "hopae-owned".into(),
+        key_epoch: 1,
+        identity_authority_epoch: "identity-epoch-1".into(),
+        public_key,
+        scopes: vec![Scope {
+            service: "app".into(),
+            audience: "app-api".into(),
+        }],
+    };
+    let issuer = Issuer::new(
+        configuration.clone(),
+        zeroize::Zeroizing::new([7; 32]),
+        f.clock.clone(),
+        f.rng.clone(),
+    )
+    .unwrap();
+    let registry = Registry::compile(
+        1,
+        &[Key {
+            issuer_ref: "hopae-owned".into(),
+            purpose: Purpose::Authentication,
+            epoch: 1,
+            public_key,
+        }],
+        None,
+    )
+    .unwrap();
+    let mut wrong_pin = configuration;
+    wrong_pin.public_key = [3; 32];
+    assert!(
+        Issuer::new(
+            wrong_pin,
+            zeroize::Zeroizing::new([7; 32]),
+            f.clock.clone(),
+            f.rng.clone()
+        )
+        .is_err()
+    );
+    let request = || Request {
+        service: "app",
+        audience: "app-api",
+        request_sha256: [4; 32],
+    };
+    let (identity, _) = allow(f.decide(f.req(APP_URL).cookie(&handle).ua("UA1")).await);
+    let issued = issuer
+        .issue_session(&identity, request(), &|| Ok(()))
+        .unwrap();
+    let verified = registry
+        .verify(
+            &issued.context(),
+            None,
+            issued.bytes(),
+            f.clock.now().0 as u64,
+        )
+        .unwrap();
+    assert_eq!(
+        verified.claims().expires_ms - verified.claims().issued_ms,
+        1000
+    );
+    assert_eq!(
+        issued.context().identity.subject_ref,
+        identity.user_id.as_str()
+    );
+    assert_eq!(issued.context().identity.aal, 1);
+    assert_eq!(issued.context().identity.revision, 3);
+    assert_eq!(issued.context().identity.credential_generation, 2);
+    assert_eq!(
+        issued.context().identity_authority_epoch,
+        "identity-epoch-1:5"
+    );
+    let second = issuer
+        .issue_session(&identity, request(), &|| Ok(()))
+        .unwrap();
+    assert_ne!(issued.bytes(), second.bytes());
+    assert!(
+        issuer
+            .issue_session(
+                &identity,
+                Request {
+                    service: "another-service",
+                    ..request()
+                },
+                &|| panic!("wrong service reached live guard")
+            )
+            .is_err()
+    );
+    assert!(
+        issuer
+            .issue_session(
+                &identity,
+                Request {
+                    audience: "undeclared-api",
+                    ..request()
+                },
+                &|| panic!("undeclared audience reached guard")
+            )
+            .is_err()
+    );
+    for field in 0..9 {
+        let (mut changed, _) = allow(f.decide(f.req(APP_URL).cookie(&handle).ua("UA1")).await);
+        match field {
+            0 => changed.user_id = hopae::identity::types::UserId::new("another-user"),
+            1 => changed.session_id = hopae::session::types::SessionId::new("another-session"),
+            2 => changed.provider_id = hopae::provider::types::ProviderId::new("another-provider"),
+            3 => changed.auth_time.0 += 1,
+            4 => changed.expires_at.0 += 1,
+            5 => changed.aal = hopae::session::types::Aal::Two,
+            6 => changed.generations.user += 1,
+            7 => changed.generations.session += 1,
+            _ => changed.generations.config += 1,
+        }
+        assert!(
+            issuer
+                .issue_session(&changed, request(), &|| panic!(
+                    "changed identity reached live guard"
+                ))
+                .is_err()
+        );
+    }
+    let checks = std::cell::Cell::new(0);
+    assert!(
+        issuer
+            .issue_session(&identity, request(), &|| {
+                checks.set(checks.get() + 1);
+                if checks.get() == 2 {
+                    Err(hopae::auth_gateway::receipt_keys::Refused)
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+    );
+    assert_eq!(checks.get(), 2);
+    let base = f.clock.now();
+    assert!(
+        issuer
+            .issue_session(&identity, request(), &|| {
+                f.clock.set(hopae::crypto::Timestamp(base.0 + 1000));
+                Ok(())
+            })
+            .is_err()
+    );
+    f.clock.set(base);
+    assert!(
+        issuer
+            .issue_session(&identity, request(), &|| panic!(
+                "expired proof revived after clock rollback"
+            ))
+            .is_err()
+    );
+}

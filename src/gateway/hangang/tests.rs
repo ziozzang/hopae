@@ -602,6 +602,7 @@ fn user_agent_is_truncated_to_one_kib() {
 
 fn identity() -> Identity {
     Identity {
+        receipt_seal: None,
         user_id: UserId::new("u_1"),
         email: Some(NormalizedEmail::parse("a@example.test").unwrap()),
         preferred_username: Some("alice".into()),

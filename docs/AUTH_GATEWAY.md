@@ -675,3 +675,44 @@ Consistent stopped owner/delegation backups, previous image and plugin registry
 backup are retained. Rust source matches the 898-pass/42-ignored qualified update.
 This is administration dogfooding, not credential issuance or throughput proof;
 immutable tagged release assets remain unchanged.
+
+## Native session receipt issuer source
+
+The verify engine now attaches a private seal to successful human identity output.
+It hashes the verified service, user/session/provider IDs, auth time, expiry, AAL,
+user/session/config generations and verification time using a domain-separated
+length-prefixed SHA-256 transcript. There is no public constructor or serde/Clone
+path for this seal. Public identity fields used for issuance cannot be changed
+without failing the seal check. Email/groups/display fields are not receipt claims.
+Ordinary gateway replies retain their existing wire behavior.
+
+Unreleased `receipt_issuer::Issuer` holds an authentication-only Ed25519 signer,
+fixed issuer/key/identity epochs, a pinned public key, up to 128 declared
+service/audience pairs and native clock/RNG resources. Undeclared audiences fail
+before owner checks/signing. Scope lookup borrows compiled keys, and issued results
+share immutable signer metadata through Arc rather than copying the scope list.
+The consumed seed buffer and signer material use zeroization. Issue checks the
+native seal and live owner guard, derives principal/AAL/revisions from the verified
+identity, generates a native nonce and repeats owner/time checks before returning.
+The lease ends no later than the identity deadline or one second after verification;
+config generation is included in identity epoch. Monotonic operation duration and a
+process-local clock watermark fence expiry/rollback. Output is non-Clone/non-Debug/
+non-serializable and never automatically enters ordinary auth-response headers.
+
+A real SQLite verify-engine scenario validates signatures through the receiver key
+registry and refuses changed service/user/session/provider/auth-time/expiry/AAL/
+generations, mismatched public pin, final owner refusal, work-time expiry and clock
+rollback. This is source signing integration, not active RPC issuance. Native live
+session/handle/user/provider/config/key-epoch fences remain the issuer guard's
+responsibility; durable signer/key publication, restart/distributed time floors,
+service/workload issuance and authenticated transport still need integration.
+
+Qualification: all-target gates pass 899 tests (42 ignored), followed by the real
+issuer scenario and all-target fmt/clippy/boundary checks after the final immutable
+metadata-sharing refinement. Docs/scenario coverage passes. Dependency audit uses
+the existing verification-only RSA exception and allowed rustls-pemfile warning.
+This source is not deployed; current internal image remains projection-1319351.
+The authenticated adapter must derive exact request/service/audience from native
+route context and recheck application/path assurance as well as live owner state.
+The private identity seal proves original authentication metadata, not a permission
+grant, request classification or distributed freshness.

@@ -152,6 +152,7 @@ pub struct VerifyInput {
 }
 
 pub struct Identity {
+    pub(crate) receipt_seal: Option<crate::auth_gateway::receipt_issuer::SessionSeal>,
     pub user_id: UserId,
     pub email: Option<NormalizedEmail>,
     pub preferred_username: Option<String>,

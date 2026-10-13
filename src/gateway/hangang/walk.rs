@@ -45,6 +45,7 @@ fn env() -> RenderEnv {
 
 fn identity() -> Identity {
     Identity {
+        receipt_seal: None,
         user_id: UserId::new("u_1"),
         email: NormalizedEmail::parse("a@example.test").ok(),
         preferred_username: Some("alice".into()),

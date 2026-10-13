@@ -536,26 +536,30 @@ fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed) -> Decision {
     touch(cx, app, &view);
 
     let cache = cacheability(cx, app, expires_at, path_dependent);
-    Decision::Allow {
-        identity: Identity {
-            user_id: view.session.user_id.clone(),
-            email: snapshot.email,
-            preferred_username: snapshot.username.or(snapshot.display_name),
-            groups: snapshot.groups,
-            session_id: view.session.session_id.clone(),
-            provider_id: view.session.provider_id.clone(),
-            auth_time: view.session.auth_time,
-            expires_at,
-            aal: view.handle.issued_aal,
-            factors: view.session.factors.clone(),
-            generations: Generations {
-                session: view.session.cred_gen,
-                user: view.user.authz_version,
-                config: cx.snapshot.generation,
-            },
+    let mut identity = Identity {
+        receipt_seal: None,
+        user_id: view.session.user_id.clone(),
+        email: snapshot.email,
+        preferred_username: snapshot.username.or(snapshot.display_name),
+        groups: snapshot.groups,
+        session_id: view.session.session_id.clone(),
+        provider_id: view.session.provider_id.clone(),
+        auth_time: view.session.auth_time,
+        expires_at,
+        aal: view.handle.issued_aal,
+        factors: view.session.factors.clone(),
+        generations: Generations {
+            session: view.session.cred_gen,
+            user: view.user.authz_version,
+            config: cx.snapshot.generation,
         },
-        cache,
-    }
+    };
+    identity.receipt_seal = Some(crate::auth_gateway::receipt_issuer::SessionSeal::new(
+        &identity,
+        app.app_id.as_str(),
+        cx.now,
+    ));
+    Decision::Allow { identity, cache }
 }
 
 fn binding_attrs(
