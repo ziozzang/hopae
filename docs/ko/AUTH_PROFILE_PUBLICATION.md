@@ -1,6 +1,6 @@
 # 인증 프로필 게시
 
-<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=2 status=current -->
+<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=3 status=current -->
 
 [문서](README.md) · [English](../AUTH_PROFILE_PUBLICATION.md)
 
@@ -59,3 +59,9 @@ PUT은 If-Match를 요구하며 충돌은 409, 잘못된 후보는 422, 저장 �
 API·컴파일 런타임 교체·stream 회수는 아직 연결하지 않았으며 활성화 검증이 필요합니다.
 운영 호출자는 게시 전에 컴파일·권한 검증을 하고 commit 후 런타임 설치 또는 차단을
 수행해야 합니다.
+
+`auth_gateway::authority` worker 기초 계층은 영속화 전에 컴파일하고 commit 직후
+revision 런타임을 ArcSwap으로 설치합니다. 공유 reader handle은 DB 잠금을 피합니다.
+시작 시 삭제 상태를 포함한 DB 상태가 bootstrap 설정보다 우선하며 앱 범위 거부나
+비밀 참조 누락은 DB를 변경하지 않습니다. 요청/관리자 연결과 stream generation 집행은
+남아 있습니다. 기존 스냅샷 보유자는 호출자가 수명을 집행할 때까지 이전 스냅샷을 유지합니다.

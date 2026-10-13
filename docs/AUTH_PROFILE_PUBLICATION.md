@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 3 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
@@ -69,3 +69,11 @@ An audit collision rolls the authority update back. This primitive does not yet
 connect the startup loader, management API, compiled runtime swap or stream
 revocation; those activation gates remain required. Production callers must compile
 and authorize before publishing, and install or fence the runtime after commit.
+
+The `auth_gateway::authority` worker primitive now compiles before persistence and
+installs the revisioned runtime with ArcSwap immediately after commit. Its shared
+reader handle avoids database locking. Startup prefers durable state, including
+a disabled tombstone, over bootstrap configuration; a failed scope check or missing
+secret leaves durable state unchanged. Request/admin wiring and stream-generation
+enforcement remain pending; existing snapshot holders intentionally retain the old
+snapshot until their caller enforces its lifetime.

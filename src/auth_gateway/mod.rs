@@ -1,5 +1,6 @@
 //! Authentication gateway contracts. Connectors and Hangang wiring are implemented separately.
 //! Evidence construction stays crate-private: request claims cannot authenticate themselves.
+pub mod authority;
 pub mod breaker;
 pub mod publication;
 pub mod relay;
