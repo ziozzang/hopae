@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=20 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=21 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -124,7 +124,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `apps[].on_authz_change` | `refresh`, `terminate` | `refresh` | 인가 데이터가 바뀔 때 살아 있는 세션에 일어나는 일. |
 | `apps[].verify_cache_seconds` | 정수 | `0` | 게이트웨이가 허용을 캐시할 수 있는 최대 시간. 최대 `30`. `hopae --check`는 애플리케이션마다 값을 출력하고 **`false`이면 경고합니다**: `sec-fetch-site: same-origin`은 애플리케이션 자신의 출처 문서가 탐색을 시작했음을 증명할 뿐이므로, 애플리케이션 안의 탐색 가젯(자신의 쿼리에서 가져온 URL을 `location`에 대입하는 페이지, 예: `/continue?next=/_hopae/logout`)이 클릭 없이 사용자의 세션을 끝낼 수 있습니다. 이를 받아들이는 경우가 아니면 `true`를 유지하십시오. |
 | `apps[].logout_confirm` | 불리언 | `true`(`default` 애플리케이션이 설정했다면 그 값을 상속) | `true`: 애플리케이션 호스트의 `/_hopae/logout`은 포털의 확인 페이지로 리디렉션합니다. `false`: 유효한 핸들을 제시한 `sec-fetch-site: same-origin` 문서 탐색은 즉시 세션을 끝내고 포털의 로그아웃 완료 페이지로 리디렉션되며, 그 밖의 모든 요청은 여전히 확인을 거칩니다. 어느 쪽이든 포털은 보호된 대상으로 리디렉션하는 대신 "다시 로그인" 링크를 표시합니다([ADR-0015](../adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md), [게이트웨이 계약](GATEWAY_CONTRACT.md#애플리케이션-호스트-진입점)). `--check`가 보고합니다. |
-| `apps[].step_up[]` | `{path_prefix, require: {aal, max_age}}` 배열 | 없음 | 실제 적용되는 세션 인증등급 규칙입니다(`aal`은 1 또는 2, `path_prefix`는 `/`로 시작, `max_age`는 양의 초). AAL 2는 실제 2차 인증 근거가 필요하며 근거 확인 시각으로 신선도를 검사합니다. `no-store`를 강제합니다. AAL 0 서비스 자격은 일치하는 규칙을 충족할 수 없습니다. 브라우저 단계 상승 완료는 아직 활성화되지 않았습니다. |
+| `apps[].step_up[]` | `{path_prefix, require: {aal, max_age}}` 배열 | 없음 | 실제 적용되는 세션 인증등급 규칙입니다(`aal`은 1 또는 2, `path_prefix`는 `/`로 시작, `max_age`는 양의 초). AAL 2는 실제 2차 인증 근거가 필요하며 근거 확인 시각으로 신선도를 검사합니다. `no-store`를 강제합니다. AAL 0 서비스 자격은 일치하는 규칙을 충족할 수 없습니다. TOTP keyring이 설정되면 문서 요청이 네이티브 OTP 단계 상승을 시작하고, 없으면 거절합니다. |
 
 #### 제공자
 
@@ -179,7 +179,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `admin.binding.ua` | `strict`, `off` | `off` | User-Agent 바인딩. |
 | `admin.binding.on_mismatch` | `terminate_session`, `drop_handle` | `terminate_session` | 바인딩 불일치 시 동작. |
 | `admin.max_auth_age` | 기간 | `12h` | 콘솔 세션의 신선도 한도. `30m` 이상: 더 작은 값은 설정 오류(`admin.max_auth_age must be at least 30m`)이며, 한도가 재인증 콜백과 뒤따르는 콘솔 verify 사이에 600초의 여유를 지키기 때문입니다. 콘솔의 모든 verify에서 하나의 술어로 평가: `auth_time ≤ now + 60초` 그리고 `now − auth_time < N`. `reauth` 능력이 `max_age`인 제공자에서는 세션이 제공자가 검증한 `auth_time`을 가져야 하고 오래되면 세션 자신의 제공자가 수행하는 재인증으로 보내며, `unsupported` 제공자(`google` 프리셋)에서는 한도가 Hopae 로그인 경과 시간뿐임([ADR-0016](../adr/0016-management-console-minimum.md) 결정 15, [관리](ADMIN.md#신선도와-재인증)). |
-| `admin.require_aal` | `1`, `2` | `1` | 콘솔 핸들의 최소 보증 수준. `2`는 호스트 전체에 대한 암묵적 애플리케이션의 단계 상승 규칙도 설정하며, 아직 두 번째 인증 요소가 없으므로 모든 콘솔 요청이 거부된다고 `--check`가 경고함. |
+| `admin.require_aal` | `1`, `2` | `1` | 콘솔 핸들의 최소 보증 수준. `2`는 호스트 전체의 암묵적 애플리케이션에 단계 상승 규칙도 설정합니다. TOTP keyring이 없으면 콘솔 요청이 거부된다고 `--check`가 경고합니다. |
 | `admin.untrusted_peers` | `refuse`, `as_client` | `refuse` | `trusted_proxies` 밖의 TCP 피어를 관리 리스너가 어떻게 다루는지: `refuse`는 쿠키를 읽기 전에 `403 untrusted_peer`로 답함(집계, 속도 제한된 경고). `as_client`는 포털처럼 피어를 클라이언트로 취급. |
 | `admin.query_budget_ms` | 정수, 100부터 30000 | `2000` | 콘솔 저장소 작업 하나(목록, 검색, 변경)의 마감. 마감은 저장소 작업에 전달되어 SQLite 안에서 문장을 중단하고 롤백한 뒤 `503`으로 답함. |
 | `admin.users[]` | `{user_id?, email?, role?, note?}` 배열 | `[]` | 시작 시와 `hopae admin import`로 파일에서 심는 관리자 부여. 각 항목은 `user_id`(`u_` 다음에 문자, 숫자, `_`, `-`, 최대 64자)와 `email`(유효한 주소) 중 적어도 하나가 필요하고, `role`은 `admin`(기본) 또는 `viewer`, `note`는 최대 256자이며 알 수 없는 키는 거부됨. 이메일만 있는 항목은 검증된 주소를 정확히 한 사용자가 가지고 권위적일 때만 적용됨. 결함 있는 항목은 시작할 때 경고(건너뜀, 시작 실패 아님)이고 `--check --strict`에서는 오류. `managed_by`와 묘비를 가진 제공자 규칙으로 가져옴([관리](ADMIN.md#설정-파일의-부여)). |
@@ -220,7 +220,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 - JSON만 지원하며 주석은 허용하지 않습니다.
 - 1.0 이전에는 마이너 릴리스에서 키의 이름이 바뀌거나 삭제될 수 있습니다. 그런 변경은 각각 CHANGELOG의 `Changed` 아래에 이전 안내와 함께 기록합니다.
 - M6 이전에는 다시 로드가 없습니다.
-- `apps[].step_up`을 실제 적용합니다. 미충족 세션 규칙은 `step_up_required`로 처리합니다. 브라우저 완료 연결 전 문서 탐색은 403, API·세션 요청은 핸들을 지우지 않고 401을 반환합니다. 네이티브 OTP 완료는 서비스·저장소 primitive로 구현되어 있습니다. `admin.require_aal = 2`는 실제 2차 인증 근거가 필요하며 등록만으로 충족되지 않습니다.
+- `apps[].step_up`을 실제 적용합니다. 미충족 세션 규칙은 `step_up_required`로 처리합니다. keyring이 설정되면 결합된 브라우저 챌린지를 시작하고, 없으면 문서는 403을 반환합니다. API·세션 요청은 핸들을 지우지 않고 401을 반환합니다. `admin.require_aal = 2`는 실제 2차 인증 근거가 필요하며 등록만으로 충족되지 않습니다.
 - 제공자 설정 `preset`, `userinfo`, `id_token_typ`, `reauth`, `reauth_prompt`는 파일로 지정할 수 없습니다(제공자 절 참고).
 - `apps[].max_auth_age`는 키가 아닙니다. 신선도 한도를 가진 것은 암묵적 콘솔 애플리케이션뿐이며 그 한도는 `admin.max_auth_age`입니다.
 
@@ -293,11 +293,13 @@ Active ID는 1–16개 고유 키 중 하나여야 하며 환경 변수 이름�
 누락·잘못된·0·재사용 값은 상태·listener를 열기 전에 거부하고 키는 프로세스 메모리에
 유지합니다. 설정에 실제 값을 넣지 않습니다. 인증된 gateway caller가 필요합니다.
 유지 ID로 이전 envelope를 복호화하고 폐기 전에 재암호화해야 합니다.
-이 설정은 키 서비스·초기 등록을 준비하며 OTP step-up·MFA 세션 발급을
-활성화하지 않습니다. [인증 게이트웨이](AUTH_GATEWAY.md)를 참고하세요.
+이 설정은 암호화 등록과 네이티브 브라우저 OTP 단계 상승을 활성화합니다. [인증 게이트웨이](AUTH_GATEWAY.md)를 참고하세요.
 
 Keyring은 이제 `/security/totp` 초기 소유자 등록도 활성화합니다. 최근 인증된
 HTTPS portal 세션만 pending 요인을 만들고 확인할 수 있습니다. Keyring이 없으면
-route는 404입니다. 등록 지원이며 OTP step-up·AAL-2 세션 발급은 아닙니다.
-요인 등록으로 로그인 요구 조건은 변경되지 않습니다. 기존 신뢰한 HTTPS ingress를
+route는 404입니다. 등록만으로 AAL이 올라가지는 않습니다. 인증등급 규칙이 일치하면 `/stepup`을
+시작하고, 유효한 새 OTP가 자격을 원자적으로 교체하며 AAL 2를 발급합니다.
+규칙은 명시적이며 등록으로 변경되지 않습니다. 기존 신뢰한 HTTPS ingress를
 통해 portal을 노출해야 합니다.
+
+AAL 1의 1차 인증 신선도 규칙은 keyring 없이도 제공자 재인증으로 처리합니다.

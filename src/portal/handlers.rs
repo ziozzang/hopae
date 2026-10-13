@@ -1212,3 +1212,125 @@ async fn totp_post(st: PortalState, req: Request, confirm: bool) -> Response {
         }
     }
 }
+
+fn stepup_csrf_binding(rq: &Rq, transaction: &str) -> Option<zeroize::Zeroizing<String>> {
+    Some(zeroize::Zeroizing::new(format!(
+        "{}:{}:{}",
+        transaction,
+        rq.presented.bind.as_ref()?.expose(),
+        rq.presented.handle.as_ref()?.expose()
+    )))
+}
+pub(crate) async fn stepup_get(State(st): State<PortalState>, req: Request) -> Response {
+    let (parts, _) = req.into_parts();
+    let mut rq = match prepare(&st, &parts) {
+        Ok(rq) => rq,
+        Err(r) => return r,
+    };
+    if !st.services.totp_enabled() {
+        return error_response(rq.t(), rq.rid(), ErrorPage::NotFound);
+    }
+    if !rq.ctx.https || rq.presented.handle.is_none() {
+        return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+    }
+    let raw = parts.uri.query().unwrap_or("");
+    if raw.len() > 512 {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let pairs: Vec<_> = url::form_urlencoded::parse(raw.as_bytes())
+        .filter(|(k, _)| k == "txn")
+        .take(2)
+        .collect();
+    if pairs.len() != 1 || !crate::crypto::is_well_formed_bind(&pairs[0].1) {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let transaction = pairs[0].1.to_string();
+    let bind = effective_bind(&st, &rq);
+    rq.presented.bind = Some(bind.clone());
+    let cookies = Cookies {
+        handle: rq.presented.handle.clone(),
+        bind: Some(bind.clone()),
+    };
+    let enrollment_required = match st
+        .services
+        .stepup_visit(&rq.ctx, &cookies, &Secret::new(transaction.clone()))
+        .await
+    {
+        Ok(ready) => !ready,
+        Err(f) => return fail_response(&rq, f),
+    };
+    let binding = stepup_csrf_binding(&rq, &transaction).expect("validated portal cookies");
+    let csrf = token_for(&st, &binding, Purpose::TotpStepUp);
+    render_page(
+        &rq,
+        pages::StepUpPage {
+            enrollment_required,
+            t: rq.t(),
+            request_id: rq.rid(),
+            transaction: &transaction,
+            csrf: &csrf,
+        },
+        &[portal_cookie_header(&st, &bind)],
+    )
+}
+pub(crate) async fn stepup_post(State(st): State<PortalState>, req: Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let rq = match prepare(&st, &parts) {
+        Ok(rq) => rq,
+        Err(r) => return r,
+    };
+    if !st.services.totp_enabled() {
+        return error_response(rq.t(), rq.rid(), ErrorPage::NotFound);
+    }
+    if !rq.ctx.https {
+        return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+    }
+    let form = match read_form(&st, &rq, &parts, body).await {
+        Ok(form) => form,
+        Err(r) => return r,
+    };
+    if ["txn", "csrf", "code"]
+        .iter()
+        .any(|name| form.0.0.iter().filter(|(k, _)| k == name).count() != 1)
+    {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let txn = form.0.get("txn").unwrap_or("");
+    let code = form.0.get("code").unwrap_or("");
+    if !crate::crypto::is_well_formed_bind(txn)
+        || code.len() != 6
+        || !code.bytes().all(|b| b.is_ascii_digit())
+    {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let Some(binding) = stepup_csrf_binding(&rq, txn) else {
+        return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+    };
+    if let Err(r) = guard(&st, &rq, &parts, &form, Purpose::TotpStepUp, Some(&binding)).await {
+        return r;
+    }
+    if !st.password_attempts.admit(rq.ctx.client_ip) {
+        let mut r = error_response(rq.t(), rq.rid(), ErrorPage::Unavailable);
+        *r.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+        r.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+        return r;
+    }
+    let cookies = Cookies {
+        handle: rq.presented.handle.clone(),
+        bind: rq.presented.bind.clone(),
+    };
+    match st
+        .services
+        .stepup_complete(
+            &rq.ctx,
+            &cookies,
+            &Secret::new(txn.into()),
+            &Secret::new(code.into()),
+        )
+        .await
+    {
+        Ok(redirect) => redirect_response(&st, &rq, &redirect, &[]),
+        Err(f) => fail_response(&rq, f),
+    }
+}

@@ -184,6 +184,29 @@ pub struct PasswordSubmission<'a> {
 
 #[async_trait]
 pub trait PortalServices: Send + Sync + 'static {
+    async fn stepup_visit(
+        &self,
+        _ctx: &RequestCtx,
+        _cookies: &Cookies,
+        _transaction: &Secret,
+    ) -> Result<bool, Failure> {
+        Err(Failure {
+            kind: FailKind::Forbidden,
+            reason: crate::event::types::reasons::INVALID_STATE,
+        })
+    }
+    async fn stepup_complete(
+        &self,
+        _ctx: &RequestCtx,
+        _cookies: &Cookies,
+        _transaction: &Secret,
+        _code: &Secret,
+    ) -> Result<Redirect, Failure> {
+        Err(Failure {
+            kind: FailKind::Forbidden,
+            reason: crate::event::types::reasons::INVALID_STATE,
+        })
+    }
     fn totp_enabled(&self) -> bool {
         false
     }

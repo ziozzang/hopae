@@ -1,6 +1,6 @@
 # Hopae
 
-<!-- doc-rev: 5 -->
+<!-- doc-rev: 6 -->
 
 [Documentation](docs/README.md) · [Roadmap](docs/ROADMAP.md) · [Release notes](CHANGELOG.md) · [한국어](README.ko.md)
 
@@ -46,6 +46,7 @@ it.
 - **Gateway integration** — the verify endpoint (`/_hopae/verify`) of the [gateway contract](docs/GATEWAY_CONTRACT.md): caller-key authentication with rotation, fail-closed answers, identity headers for the gateway to inject, and cross-domain single sign-on between registered hosts through a browser-bound handoff.
 - **Operations** — `hopae --check` preflight (prints the route fragment and redirect URIs to register), single-instance lock, backup before a schema migration, graceful shutdown, structured event log with transactional audit events, `/healthz`. See [operations](docs/OPERATIONS.md).
 - **Management console (M4-min)** — an optional third listener, reached through its own protected gateway route, with pages and a JSON API to list and search users, disable and enable a user, end one or all sessions, browse the login history and the audit trail, and read the status of applications, providers, store and build. Administrators are granted with `hopae admin grant` or `admin.users[]`; console freshness is a provider-verified reauthentication where the provider supports it and Hopae login age otherwise (Google). See [administration](docs/ADMIN.md).
+- **Native TOTP (main source)** — encrypted enrollment and bound browser step-up, atomic credential rotation and elevated handoff, current configuration-generation checks, and unchanged AAL 0 for service credentials. Requires a configured keyring and explicit assurance rules. [Second factors](docs/SECOND_FACTOR_EXTENSIONS.md). Internal MFA rollout, recovery/key lifecycle and external MFA API/Lua adapters remain open.
 - **Packaging** — a static binary and a hardened Docker Compose template in [`deploy/`](deploy/).
 
 Production use needs a gateway that sends the caller key (Hangang change HC-3);
@@ -56,8 +57,8 @@ turned off. See the compatibility matrix in the contract.
 
 Everything here is planned, not shipped; see the [roadmap](docs/ROADMAP.md).
 
-- Other providers (Kakao, Naver, email magic link, email and password), second factors, step-up enforcement.
-- Blacklists and throttling beyond the per-IP bounds, shared state for several instances (PostgreSQL, Redis/Valkey), managing providers and applications from the console, Hopae's own second factor for administrators.
+- Other providers (Kakao, Naver, email magic link, email and password), additional second factors and external MFA API/Lua adapters.
+- Blacklists and throttling beyond the per-IP bounds, shared state for several instances (PostgreSQL, Redis/Valkey), complete provider/application management, recovery and internal MFA qualification.
 - Lua hooks, webhooks, Prometheus metrics, configuration reload, signed self-update.
 
 ## Quick start

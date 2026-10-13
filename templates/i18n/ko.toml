@@ -247,3 +247,10 @@
 "totp.key" = "설정 키"
 "totp.code" = "인증 코드"
 "totp.confirm" = "인증 앱 확인"
+
+"stepup.title" = "추가 인증"
+"stepup.intro" = "계속하려면 인증 앱의 새 코드를 입력하십시오."
+
+"stepup.enrollment" = "계속하려면 인증 앱을 등록하십시오. 등록 후 이 페이지로 돌아와 새 코드를 사용하십시오."
+"stepup.setup" = "인증 앱 등록"
+"stepup.continue" = "등록 후 계속"

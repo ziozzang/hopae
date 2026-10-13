@@ -248,3 +248,10 @@
 "totp.key" = "Setup key"
 "totp.code" = "Authentication code"
 "totp.confirm" = "Confirm authenticator"
+
+"stepup.title" = "Additional verification"
+"stepup.intro" = "Enter a new code from your authenticator app to continue."
+
+"stepup.enrollment" = "Set up an authenticator before continuing. After setup, return to this page and use a new code."
+"stepup.setup" = "Set up authenticator"
+"stepup.continue" = "Continue after setup"

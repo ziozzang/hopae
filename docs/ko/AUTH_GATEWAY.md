@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=20 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=21 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -434,3 +434,12 @@ OTP 로그인·step-up·challenge와 세션 원자 승격은 활성화하지 않
 계정·분산 시도 제한·완전한 브라우저 UI 검증·최근 인증 갱신 UX·취소·해제·복구,
 QR·Hangang 메뉴·임베딩·키 폐기·내부 운영 배포는 남아 있습니다. 현재 내부
 `owner-v5-d876909`는 keyring을 설정하지 않았고 새 HTTP route 이전 버전입니다.
+
+## 네이티브 브라우저 TOTP 소스 갱신
+
+[2차 인증 확장 계약](SECOND_FACTOR_EXTENSIONS.md#네이티브-브라우저-otp-흐름)에
+keyring 설정·결합 챌린지와 CSRF·영속 설정 세대 검사·원자 교체·상승 핸드오프를
+포함한 OTP 브라우저 흐름을 구현했습니다. 자체 OIDC·HTTP 프로세스로 보호 접근과
+이전 자격 거절을 검증합니다. 이전 구현 기록은 과거 단계를 설명합니다.
+외부 MFA API·Lua 커넥터를 활성화하거나 복구·키 수명주기·모바일·UI·fleet
+검증을 대신하지 않으며 내부 이미지는 유지합니다.

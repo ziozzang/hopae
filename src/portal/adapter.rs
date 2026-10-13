@@ -53,6 +53,29 @@ impl Adapter {
         });
         self
     }
+    fn factor_store_error(error: crate::store::StoreError) -> Failure {
+        match error {
+            crate::store::StoreError::Conflict(_) | crate::store::StoreError::ProviderDisabled => {
+                Self::totp_refusal()
+            }
+            _ => Failure {
+                kind: FailKind::Unavailable,
+                reason: reasons::STORE_UNAVAILABLE,
+            },
+        }
+    }
+    fn factor_session_error(error: SessionError) -> Failure {
+        match error {
+            SessionError::Store(error) => Self::factor_store_error(error),
+            _ => Self::totp_refusal(),
+        }
+    }
+    fn factor_verification_error(error: crate::factor::service::Error) -> Failure {
+        match error {
+            crate::factor::service::Error::Store(error) => Self::factor_store_error(error),
+            _ => Self::totp_refusal(),
+        }
+    }
     fn totp_refusal() -> Failure {
         Failure {
             kind: FailKind::Forbidden,
@@ -177,6 +200,136 @@ fn account_label(a: &AccountSummary) -> String {
 
 #[async_trait]
 impl PortalServices for Adapter {
+    async fn stepup_visit(
+        &self,
+        ctx: &RequestCtx,
+        cookies: &Cookies,
+        transaction: &Secret,
+    ) -> Result<bool, Failure> {
+        if !ctx.https {
+            return Err(Self::totp_refusal());
+        }
+        let deps = self.totp.as_ref().ok_or_else(Self::totp_refusal)?;
+        let portal = cookies.bind.as_ref().ok_or_else(Self::totp_refusal)?;
+        let (actor, _, generation) = self
+            .svc
+            .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
+            .await
+            .map_err(Self::factor_session_error)?;
+        if !deps
+            .store
+            .has_active_totp(actor.user())
+            .await
+            .map_err(Self::factor_store_error)?
+        {
+            return Ok(false);
+        }
+        deps.store
+            .bind_totp_stepup(crate::store::BindTotpStepUp {
+                actor,
+                transaction: transaction.digest(),
+                portal_binding: portal.digest(),
+                config_generation: Some(generation),
+            })
+            .await
+            .map_err(Self::factor_store_error)?;
+        Ok(true)
+    }
+    async fn stepup_complete(
+        &self,
+        ctx: &RequestCtx,
+        cookies: &Cookies,
+        transaction: &Secret,
+        code: &Secret,
+    ) -> Result<Redirect, Failure> {
+        if !ctx.https {
+            return Err(Self::totp_refusal());
+        }
+        let deps = self.totp.as_ref().ok_or_else(Self::totp_refusal)?;
+        let portal = cookies.bind.as_ref().ok_or_else(Self::totp_refusal)?;
+        let (actor, row, generation) = self
+            .svc
+            .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
+            .await
+            .map_err(Self::factor_session_error)?;
+        let enrollment = row
+            .pending_identity
+            .as_ref()
+            .and_then(|v| v.get("enrollment_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(Self::totp_refusal)?
+            .to_owned();
+        let now = deps.clock.now();
+        let handle = crate::crypto::handle_value(deps.rng.as_ref());
+        let handoff = crate::crypto::random_token(deps.rng.as_ref(), 32);
+        let expiry = actor
+            .view
+            .handle
+            .absolute_expires_at
+            .min(actor.view.session.absolute_expires_at);
+        let portal_handle = crate::store::HandleRow {
+            handle_sha256: handle.digest(),
+            session_id: actor.view.session.session_id.clone(),
+            host: actor.view.handle.host.clone(),
+            issued_aal: crate::session::Aal::Two,
+            created_at: now,
+            last_seen_at: now,
+            absolute_expires_at: expiry,
+            revoked_at: None,
+            revoked_reason: None,
+        };
+        let handoff_row = crate::store::HandoffCodeRow {
+            code_sha256: handoff.digest(),
+            session_id: actor.view.session.session_id.clone(),
+            host: crate::policy::types::Host::parse(row.return_target.host_str().unwrap_or(""))
+                .map_err(|_| Self::totp_refusal())?,
+            return_target: row.return_target.clone(),
+            client_ip: ctx.client_ip,
+            bind_sha256: row.bind_sha256.ok_or_else(Self::totp_refusal)?,
+            issued_aal: crate::session::Aal::Two,
+            cred_gen: actor
+                .view
+                .session
+                .cred_gen
+                .checked_add(1)
+                .ok_or_else(Self::totp_refusal)?,
+            recovery_depth: row.recovery_depth,
+            created_at: now,
+            expires_at: now
+                .add(std::time::Duration::from_secs(60))
+                .min(actor.view.session.absolute_expires_at),
+            consumed_at: None,
+            consumed_reason: None,
+        };
+        crate::factor::service::elevate_authorized(
+            deps.store.as_ref(),
+            &deps.keys,
+            deps.clock.as_ref(),
+            crate::factor::service::StepUp {
+                enrollment: &enrollment,
+                actor,
+                code,
+                transaction: transaction.digest(),
+                portal_binding: portal.digest(),
+                config_generation: Some(generation),
+                portal_handle,
+                handoff: handoff_row,
+                events: vec![],
+            },
+        )
+        .await
+        .map_err(Self::factor_verification_error)?;
+        Ok(Redirect {
+            location: crate::session::handoff::landing_location(
+                &row.return_target,
+                handoff.expose(),
+            ),
+            set_handle: Some(HandleCookie {
+                value: handle,
+                max_age: expiry.since(now),
+            }),
+        })
+    }
     fn totp_enabled(&self) -> bool {
         self.totp.is_some()
     }

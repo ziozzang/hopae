@@ -160,6 +160,7 @@ pub struct StepUp<'a> {
     pub code: &'a Secret,
     pub transaction: crate::crypto::Digest,
     pub portal_binding: crate::crypto::Digest,
+    pub config_generation: Option<u64>,
     pub portal_handle: crate::store::HandleRow,
     pub handoff: crate::store::HandoffCodeRow,
     pub events: Vec<Event>,
@@ -196,6 +197,7 @@ pub async fn elevate_authorized(
             counter,
             transaction: input.transaction,
             portal_binding: input.portal_binding,
+            config_generation: input.config_generation,
             portal_handle: input.portal_handle,
             handoff: input.handoff,
             events: input.events,
@@ -222,6 +224,7 @@ pub async fn bind_stepup(
             actor,
             transaction: transaction.digest(),
             portal_binding: portal_cookie.digest(),
+            config_generation: None,
         })
         .await
         .map_err(Error::Store)

@@ -649,6 +649,38 @@ impl Service {
         })
     }
 
+    /// The current, enabled application and same user's live portal session.
+    /// The generation returned here is fenced again in the owner transaction.
+    pub(crate) async fn stepup_context(
+        &self,
+        ctx: &RequestCtx,
+        transaction: &Secret,
+        handle: Option<&Secret>,
+    ) -> Result<(crate::store::FactorActor, TransactionRow, u64), SessionError> {
+        let row = self.load_live_txn(ctx, transaction).await?;
+        let actor = self.factor_actor(ctx, handle).await?;
+        if row.purpose != TxnPurpose::Stepup
+            || row.portal_session_id.as_ref() != Some(&actor.view.session.session_id)
+            || row.client_ip != ctx.client_ip
+            || row.bind_sha256.is_none()
+        {
+            return Err(SessionError::Refused(reasons::TXN_PURPOSE_MISMATCH));
+        }
+        let snapshot = self.snapshot.load_full();
+        crate::policy::apps::validate_return_target(
+            row.return_target.as_str(),
+            &snapshot,
+            self.cfg.secure,
+        )
+        .map_err(SessionError::Refused)?;
+        let host = host_of(&row.return_target)?;
+        let app = crate::policy::apps::resolve(&snapshot, &host).map_err(SessionError::Refused)?;
+        if app.app_id != row.app_id {
+            return Err(SessionError::Refused(reasons::UNKNOWN_APP));
+        }
+        Ok((actor, row, snapshot.generation))
+    }
+
     /// Record portal activity on the handle and its session, coalesced like
     /// verify's touches (at most one write per `touch_coalesce`). Best effort:
     /// a lost touch only makes the next visit retry it.
@@ -788,6 +820,9 @@ impl Service {
             .filter(|c| is_well_formed_bind(c.expose()))
             .ok_or(SessionError::Refused(reasons::PORTAL_BIND_MISMATCH))?;
         let row = self.load_live_txn(ctx, txn).await?;
+        if row.purpose == TxnPurpose::Stepup {
+            return Err(SessionError::Refused(reasons::TXN_PURPOSE_MISMATCH));
+        }
         self.begin_provider_for(ctx, &row, provider_id, portal_cookie)
             .await
     }
@@ -1078,6 +1113,9 @@ impl Service {
         confirmed: bool,
     ) -> Result<LoginEntry, SessionError> {
         let row = self.load_live_txn(ctx, txn).await?;
+        if row.purpose == TxnPurpose::Stepup {
+            return Err(SessionError::Refused(reasons::TXN_PURPOSE_MISMATCH));
+        }
         if row.purpose != TxnPurpose::Login {
             return Err(wrong_purpose(row.purpose));
         }

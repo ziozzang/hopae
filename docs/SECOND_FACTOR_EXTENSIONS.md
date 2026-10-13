@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -9,7 +9,7 @@
 Native TOTP enrollment and confirmation exist, including encrypted seeds,
 owner authorization and durable counter fencing. The profile uses six digits,
 SHA-1 and a 30-second period. Manual setup is available; QR provisioning,
-recovery and browser sign-in step-up wiring remain unfinished. Enrollment does not
+recovery remain unfinished. Native browser TOTP step-up is implemented in source. Enrollment does not
 raise a session's assurance. Google/OIDC login is separate from an authenticator
 application generating a TOTP code.
 
@@ -218,3 +218,48 @@ or counter/challenge consumption. These tests do not exercise an actual browser
 step-up. The request engine still refuses unmet rules; browser challenge
 creation, portal page/CSRF, validated target/policy epoch checks and operational
 activation remain mandatory before enabling the workflow.
+
+## Native browser OTP workflow
+
+A configured TOTP keyring now enables `GET /stepup?txn=...` and `POST /stepup`.
+A document request with an unmet AAL 2 rule starts a capped, same-session
+challenge and keeps the existing handle; API requests remain 401 without a
+challenge. Without a keyring, AAL 2 documents retain fail-closed refusal. AAL 1
+primary-freshness requirements use provider reauthentication instead of looping
+through OTP. If primary authentication is older than five minutes, native AAL 2
+bootstrap reauthenticates before offering second-factor completion.
+
+The portal requires HTTPS and the live owner handle, validates the target against
+current application configuration, and binds the challenge through the owner
+store. An unenrolled owner gets setup/continue links without a code form; enrollment
+still does not elevate a session. The completion form has a distinct CSRF purpose
+bound to transaction, portal cookie and handle, plus exact Origin checking,
+unique fields, a six-digit code, bounded body and the existing IP admission budget.
+Its temporary combined bearer binding is zeroized. Ordinary login/provider entry
+points refuse a step-up transaction; refresh cannot send it through a weaker flow.
+
+Native portal preparation and completion carry the current configuration generation.
+The owner transaction compares it with persisted `meta.config_generation` under
+the writer lock and records it in the challenge context. Publication/restart
+configuration changes therefore invalidate completion before challenge/counter
+consumption. The generic trusted service/storage primitives retain optional
+unfenced generation for internal callers/tests; HTTP portal calls always provide
+one. Target validation is repeated before completion. Native assurance issuance
+is authentication evidence; Pumgye still owns service permissions.
+
+A valid new OTP atomically consumes proof/challenge, elevates/rotates credentials
+and mints the exact-target handoff. The portal installs the replacement cookie
+and redirects through the existing application-host handoff redemption. Store
+outages/corruption return unavailable rather than a credential rejection. No seed
+or code enters a redirect or audit payload; responses retain no-store and CSP.
+
+The owned OIDC/real-process HTTP fixture now covers unenrolled setup guidance,
+encrypted enrollment, non-elevating confirmation, document step-up, actual OTP,
+Origin/cross-purpose/anonymous/duplicate-query refusal, wrong ordinary login entry,
+new handoff redemption, AAL 2 protected access, old-handle refusal and completion
+replay. This uses the test browser client/cookie jar, not a Chromium/mobile-app
+qualification. Owner tests cover configuration changes/mismatch/zero generation
+without proof consumption. Recovery, cancel/removal UI, QR/mobile qualification,
+account/distributed admission, key lifecycle, Hangang navigation and internal
+MFA deployment still remain. Earlier notes about missing browser wiring describe
+prior source stages; the deployed `owner-v5-d876909` image is unchanged.

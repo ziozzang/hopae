@@ -838,6 +838,7 @@ pub struct TotpElevation {
     pub(crate) counter: u64,
     pub(crate) transaction: Digest,
     pub(crate) portal_binding: Digest,
+    pub(crate) config_generation: Option<u64>,
     pub(crate) portal_handle: HandleRow,
     pub(crate) handoff: HandoffCodeRow,
     pub(crate) events: Vec<crate::event::types::Event>,
@@ -848,6 +849,7 @@ pub struct BindTotpStepUp {
     pub(crate) actor: FactorActor,
     pub(crate) transaction: Digest,
     pub(crate) portal_binding: Digest,
+    pub(crate) config_generation: Option<u64>,
 }
 /// Bound enrollment metadata; no seed, credential or session assertion.
 #[derive(Debug)]

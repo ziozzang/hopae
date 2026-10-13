@@ -1631,3 +1631,27 @@ async fn stepup_requires_actual_second_factor_freshness_and_fixed_handle_level()
         );
     }
 }
+
+#[tokio::test]
+async fn primary_freshness_rule_starts_reauthentication_without_an_otp_loop() {
+    use fx::*;
+    use hopae::verify::{Decision, LoginKind};
+    for otp in [false, true] {
+        let mut f = Fx::with("m1-basic", |v| {
+            v["apps"][0]["step_up"] =
+                serde_json::json!([{"path_prefix":"/admin","require":{"aal":1,"max_age":60}}]);
+        });
+        f.ctx.limits.stepup_enabled = otp;
+        let (_user, _session, handle) = precondition(&f).await;
+        f.clock.set(hopae::crypto::Timestamp(T0 + 61_000));
+        assert!(matches!(
+            f.decide(f.req(APP_URL).cookie(&handle)).await,
+            Decision::Login {
+                kind: LoginKind::Reauth,
+                transaction: Some(_),
+                clear_handle: false,
+                ..
+            }
+        ));
+    }
+}

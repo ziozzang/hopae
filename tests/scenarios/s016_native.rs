@@ -1145,7 +1145,7 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
 }
 
 #[test]
-fn owned_oidc_portal_totp_enrollment_confirms_with_bound_csrf_without_elevating_session() {
+fn owned_oidc_portal_totp_enrollment_then_bound_stepup_rotates_credentials_and_handoff() {
     use crate::support::*;
     use hmac::{Hmac, Mac};
     let idp = MockIdp::start("default");
@@ -1153,7 +1153,7 @@ fn owned_oidc_portal_totp_enrollment_confirms_with_bound_csrf_without_elevating_
     let h = Hopae::spawn(
         Fixture::with(
             "m1-basic",
-            serde_json::json!({"totp_keyring":{"active_key":"v1","keys":[{"id":"v1","key_env":"OTP_KEY"}]}}),
+            serde_json::json!({"totp_keyring":{"active_key":"v1","keys":[{"id":"v1","key_env":"OTP_KEY"}]},"apps":[{"app_id":"app","hosts":["app.example.test"],"ports":[443],"step_up":[{"path_prefix":"/admin","require":{"aal":2,"max_age":300}}]}]}),
         ),
         &idp,
         &[("OTP_KEY", &key)],
@@ -1193,7 +1193,37 @@ fn owned_oidc_portal_totp_enrollment_confirms_with_bound_csrf_without_elevating_
     };
     assert_eq!(go.status, 302);
     let callback = idp.follow_authorization(go.location().unwrap());
-    assert_eq!(client.get(&callback).status, 302);
+    let initial_handoff = client.get(&callback);
+    assert_eq!(initial_handoff.status, 302);
+    let app_bind = first
+        .set_cookies()
+        .iter()
+        .find_map(|c| {
+            c.split_once('=')
+                .filter(|(name, _)| *name != h.cookie_name())
+                .map(|(name, value)| (name.to_owned(), value.split(';').next().unwrap().to_owned()))
+        })
+        .expect("app binding absent");
+    let redeemed = h.verify(
+        VerifyRequest::document(initial_handoff.location().unwrap())
+            .ip("192.0.2.10")
+            .cookie(&app_bind.0, &app_bind.1),
+    );
+    assert_eq!(redeemed.status, 302);
+    let old_app = cookie_value(&redeemed, &h.cookie_name());
+
+    let unenrolled = h.verify(
+        VerifyRequest::document("https://app.example.test/admin/x")
+            .ip("192.0.2.10")
+            .cookie(&h.cookie_name(), &old_app)
+            .cookie(&app_bind.0, &app_bind.1),
+    );
+    assert_eq!(unenrolled.status, 302);
+    let url = url::Url::parse(unenrolled.location().unwrap()).unwrap();
+    let welcome = client.get(&format!("{}?{}", url.path(), url.query().unwrap()));
+    assert_eq!(welcome.status, 200);
+    assert!(welcome.body.contains("href=\"/security/totp\""));
+    assert!(!welcome.body.contains("id=\"stepup-code\""));
     let cookie = client
         .jar()
         .header_for(
@@ -1299,4 +1329,119 @@ fn owned_oidc_portal_totp_enrollment_confirms_with_bound_csrf_without_elevating_
             .unwrap(),
         1
     );
+    fn cookie_value(response: &Response, name: &str) -> String {
+        response
+            .set_cookies()
+            .iter()
+            .find_map(|c| {
+                c.strip_prefix(&format!("{name}="))
+                    .map(|s| s.split(';').next().unwrap().to_owned())
+            })
+            .expect("cookie absent")
+    }
+    h.advance(Duration::from_secs(30));
+    let required = h.verify(
+        VerifyRequest::document("https://app.example.test/admin/x")
+            .ip("192.0.2.10")
+            .cookie(&h.cookie_name(), &old_app)
+            .cookie(&app_bind.0, &app_bind.1),
+    );
+    assert_eq!(required.status, 302);
+    let location = url::Url::parse(required.location().unwrap()).unwrap();
+    assert_eq!(location.path(), "/stepup");
+    let challenge = location
+        .query_pairs()
+        .find(|(k, _)| k == "txn")
+        .unwrap()
+        .1
+        .into_owned();
+    assert_eq!(client.get(&format!("/login?txn={challenge}")).status, 400);
+    let stepup = client.get(&format!("/stepup?txn={challenge}"));
+    assert_eq!(stepup.status, 200);
+    assert_eq!(stepup.header("cache-control"), Some("no-store"));
+    assert_eq!(
+        client
+            .get(&format!("/stepup?txn={challenge}&txn={challenge}"))
+            .status,
+        400
+    );
+    assert_eq!(
+        h.portal()
+            .with_ip("192.0.2.10")
+            .get(&format!("/stepup?txn={challenge}"))
+            .status,
+        403
+    );
+    let stepup_csrf = field(&stepup.body, "csrf");
+    let counter = (h.hooks.now_ms() as u64) / 30000;
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&secret).unwrap();
+    mac.update(&counter.to_be_bytes());
+    let digest = mac.finalize().into_bytes();
+    let offset = usize::from(digest[digest.len() - 1] & 15);
+    let code = format!(
+        "{:06}",
+        (u32::from_be_bytes(digest[offset..offset + 4].try_into().unwrap()) & 0x7fffffff) % 1000000
+    );
+    assert_eq!(
+        client
+            .post_form(
+                "/stepup",
+                &[("csrf", &stepup_csrf), ("txn", &challenge), ("code", &code)]
+            )
+            .status,
+        403
+    );
+    assert_eq!(
+        post(
+            "/stepup",
+            &[
+                ("csrf", &confirm_csrf),
+                ("txn", &challenge),
+                ("code", &code)
+            ]
+        )
+        .status,
+        403
+    );
+    let completed = post(
+        "/stepup",
+        &[("csrf", &stepup_csrf), ("txn", &challenge), ("code", &code)],
+    );
+    assert_eq!(completed.status, 302);
+    let elevated_handoff = h.verify(
+        VerifyRequest::document(completed.location().unwrap())
+            .ip("192.0.2.10")
+            .cookie(&app_bind.0, &app_bind.1)
+            .cookie(&h.cookie_name(), &old_app),
+    );
+    assert_eq!(elevated_handoff.status, 302);
+    let new_app = cookie_value(&elevated_handoff, &h.cookie_name());
+    let allow = h.verify(
+        VerifyRequest::document("https://app.example.test/admin/x")
+            .ip("192.0.2.10")
+            .cookie(&h.cookie_name(), &new_app),
+    );
+    assert_eq!(allow.status, 200);
+    assert_eq!(allow.header("x-hopae-aal"), Some("2"));
+    assert_ne!(new_app, old_app);
+    let old = h.verify(
+        VerifyRequest::other("https://app.example.test/admin/x")
+            .ip("192.0.2.10")
+            .cookie(&h.cookie_name(), &old_app),
+    );
+    assert_eq!(old.status, 401);
+    assert_eq!(
+        post(
+            "/stepup",
+            &[("csrf", &stepup_csrf), ("txn", &challenge), ("code", &code)]
+        )
+        .status,
+        403
+    );
+    assert_eq!(
+        db.query_row("SELECT max(aal) FROM sessions", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert!(!h.log().contains(setup));
 }

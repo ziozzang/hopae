@@ -259,19 +259,37 @@ async fn flow(cx: &Cx<'_>) -> Flow {
     match authenticate(cx, app).await? {
         Authn::Refused(cause) => login(cx, app, &target, cause, 0).await,
         Authn::Allowed(authed) => {
-            if matches!(
-                step_up::evaluate(
-                    &app.step_up,
-                    cx.input.canonical_path.as_str(),
-                    authed.view.handle.issued_aal.min(authed.view.session.aal),
-                    authed.view.session.auth_time,
-                    &authed.view.session.factors,
-                    cx.now,
-                ),
-                step_up::StepUpVerdict::Required { .. }
+            if let step_up::StepUpVerdict::Required { aal, max_age } = step_up::evaluate(
+                &app.step_up,
+                cx.input.canonical_path.as_str(),
+                authed.view.handle.issued_aal.min(authed.view.session.aal),
+                authed.view.session.auth_time,
+                &authed.view.session.factors,
+                cx.now,
             ) {
-                // Until the browser challenge/bootstrap is connected, do not
-                // authorize a document or redirect it to an unavailable endpoint.
+                if cx.document() && aal == crate::session::Aal::One {
+                    if authed.view.session.auth_time > cx.now {
+                        return Err(cx.deny(
+                            reasons::CLOCK_SKEW,
+                            DenyKind::Unavailable {
+                                retry_after: UNAVAILABLE_RETRY,
+                            },
+                        ));
+                    }
+                    return reauth(
+                        cx,
+                        app,
+                        &target,
+                        &authed.view,
+                        max_age.unwrap_or(Duration::from_secs(300)),
+                    )
+                    .await;
+                }
+                if cx.document() && cx.ctx.limits.stepup_enabled {
+                    return start_stepup(cx, app, &target, &authed.view).await;
+                }
+                // Without a configured factor keyring, retain fail-closed
+                // document refusal; non-document requests never start a flow.
                 return Ok(if cx.document() {
                     cx.deny(reasons::STEP_UP_REQUIRED, DenyKind::ForbiddenHtml)
                 } else {
@@ -728,6 +746,48 @@ pub(super) async fn login(
         kind: LoginKind::Login,
         clear_handle,
         cause,
+    })
+}
+
+async fn start_stepup(cx: &Cx<'_>, app: &AppPolicy, target: &url::Url, view: &HandleView) -> Flow {
+    if view.session.auth_time > cx.now {
+        return Err(cx.deny(
+            reasons::CLOCK_SKEW,
+            DenyKind::Unavailable {
+                retry_after: UNAVAILABLE_RETRY,
+            },
+        ));
+    }
+    if cx.now.since(view.session.auth_time) > Duration::from_secs(300) {
+        return reauth(cx, app, target, view, Duration::from_secs(300)).await;
+    }
+    let (digest, bind) = cx.bind_for_transaction();
+    let event = cx
+        .event(EventKind::LoginStarted, Outcome::Info, app)
+        .session(&view.session.session_id)
+        .user(&view.session.user_id)
+        .reason(reasons::STEP_UP_REQUIRED)
+        .build();
+    let transaction = create_txn(
+        cx,
+        app,
+        NewTxn {
+            target,
+            purpose: TxnPurpose::Stepup,
+            bind: Some(digest),
+            portal_session_id: Some(view.session.session_id.clone()),
+            recovery_depth: 0,
+            reauth_max_age: None,
+            events: vec![event],
+        },
+    )
+    .await?;
+    Ok(Decision::Login {
+        transaction: Some(transaction),
+        bind,
+        kind: LoginKind::StepUp,
+        clear_handle: false,
+        cause: Some(reasons::STEP_UP_REQUIRED),
     })
 }
 

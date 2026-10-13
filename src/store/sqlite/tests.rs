@@ -3153,6 +3153,7 @@ async fn totp_stepup_fixture(
             actor: stepup_actor(f, view.clone()),
             transaction: digest,
             portal_binding: sha256(b"owned-portal-cookie"),
+            config_generation: None,
         })
         .await
         .unwrap();
@@ -3193,6 +3194,7 @@ async fn native_totp_stepup_atomically_consumes_proof_and_challenge_rotates_and_
             code: &proof,
             transaction: txn.txn_sha256,
             portal_binding: txn.portal_bind_sha256.unwrap(),
+            config_generation: None,
             portal_handle: handle.clone(),
             handoff: code.clone(),
             events: vec![],
@@ -3251,6 +3253,7 @@ async fn native_totp_stepup_atomically_consumes_proof_and_challenge_rotates_and_
                 code: &proof,
                 transaction: txn.txn_sha256,
                 portal_binding: txn.portal_bind_sha256.unwrap(),
+                config_generation: None,
                 portal_handle: handle,
                 handoff: code,
                 events: vec![]
@@ -3342,6 +3345,7 @@ async fn native_totp_stepup_refusal_rolls_back_challenge_counter_and_credentials
                     code: &proof,
                     transaction: digest,
                     portal_binding: txn.portal_bind_sha256.unwrap(),
+                    config_generation: None,
                     portal_handle: handle,
                     handoff: code,
                     events
@@ -3425,6 +3429,7 @@ async fn native_totp_stepup_concurrent_challenges_have_one_winner() {
             code: &proof,
             transaction: txn.txn_sha256,
             portal_binding: txn.portal_bind_sha256.unwrap(),
+            config_generation: None,
             portal_handle: handle,
             handoff: code,
             events: vec![],
@@ -3440,6 +3445,7 @@ async fn native_totp_stepup_concurrent_challenges_have_one_winner() {
             code: &proof,
             transaction: second_digest,
             portal_binding: txn.portal_bind_sha256.unwrap(),
+            config_generation: None,
             portal_handle: second_handle,
             handoff: second_code,
             events: vec![],
@@ -3548,6 +3554,7 @@ async fn native_totp_stepup_binding_is_idempotent_and_refuses_transfer_or_stale_
                 actor,
                 transaction: txn.txn_sha256,
                 portal_binding: cookie,
+                config_generation: None,
             })
             .await;
         assert_eq!(result.is_ok(), case == "same", "{case}");
@@ -3667,6 +3674,7 @@ async fn native_totp_stepup_final_commit_refuses_wrong_portal_cookie_or_recorded
                     code: &proof,
                     transaction: txn.txn_sha256,
                     portal_binding: portal,
+                    config_generation: None,
                     portal_handle: handle,
                     handoff,
                     events: vec![]
@@ -3696,5 +3704,71 @@ async fn native_totp_stepup_final_commit_refuses_wrong_portal_cookie_or_recorded
                 .is_none(),
             "{case}"
         );
+    }
+}
+
+#[tokio::test]
+async fn native_totp_stepup_configuration_epoch_is_fenced_at_binding_and_commit() {
+    use crate::factor::service::{StepUp, elevate_authorized};
+    use crate::store::Factors;
+    for case in ["current", "changed", "mismatched", "zero"] {
+        let f = fx();
+        let (keys, _, txn, view, handle, handoff) = totp_stepup_fixture(&f).await;
+        let generation = f.store.bump_config_generation().await.unwrap();
+        assert!(generation > 0);
+        f.store.conn().execute("UPDATE login_txns SET portal_bind_sha256=NULL,conflicting_handle_sha256=NULL,pending_identity=NULL",[]).unwrap();
+        f.store
+            .bind_totp_stepup(BindTotpStepUp {
+                actor: stepup_actor(&f, view.clone()),
+                transaction: txn.txn_sha256,
+                portal_binding: txn.portal_bind_sha256.unwrap(),
+                config_generation: Some(generation),
+            })
+            .await
+            .unwrap();
+        let expected = match case {
+            "changed" => {
+                f.store.bump_config_generation().await.unwrap();
+                generation
+            }
+            "mismatched" => generation + 1,
+            "zero" => 0,
+            _ => generation,
+        };
+        let proof = Secret::new("287082".into());
+        let result = elevate_authorized(
+            &f.store,
+            &keys,
+            f.clock.as_ref(),
+            StepUp {
+                enrollment: "elevate",
+                actor: stepup_actor(&f, view),
+                code: &proof,
+                transaction: txn.txn_sha256,
+                portal_binding: txn.portal_bind_sha256.unwrap(),
+                config_generation: Some(expected),
+                portal_handle: handle,
+                handoff,
+                events: vec![],
+            },
+        )
+        .await;
+        assert_eq!(result.is_ok(), case == "current", "{case}");
+        if case != "current" {
+            assert_eq!(f.count("SELECT COUNT(*) FROM sessions WHERE aal=2"), 0);
+            assert_eq!(
+                f.count("SELECT COUNT(*) FROM totp_enrollments WHERE last_counter=1"),
+                0
+            );
+            assert!(
+                f.store
+                    .transaction(&txn.txn_sha256)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .consumed_at
+                    .is_none()
+            );
+        }
     }
 }

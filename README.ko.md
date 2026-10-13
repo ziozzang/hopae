@@ -1,6 +1,6 @@
 # Hopae
 
-<!-- translation-status: source=README.md source-rev=5 status=current -->
+<!-- translation-status: source=README.md source-rev=6 status=current -->
 
 [문서 목차](docs/ko/README.md) · [로드맵](docs/ko/ROADMAP.md) · [릴리스 노트](CHANGELOG.md) · [English](README.md)
 
@@ -49,13 +49,15 @@ Hopae(호패)라는 이름은 조선시대에 국가가 발급한 신분패에�
 수정되지 않은 게이트웨이는 호출자 인증을 끈 개발 용도로만 쓸 수 있습니다. 계약의
 호환성 표를 참고하세요.
 
+- **네이티브 TOTP(main 소스)** — 암호화 등록·결합 브라우저 단계 상승, 원자 자격 교체·상승 핸드오프, 현재 설정 세대 검사 및 서비스 자격의 AAL 0 유지. Keyring과 명시적 인증등급 규칙이 필요합니다. [2차 인증](docs/ko/SECOND_FACTOR_EXTENSIONS.md). 내부 MFA 배포·복구·키 수명주기·외부 MFA API·Lua 어댑터는 후속입니다.
+
 ## 아직 없는 것
 
 여기 있는 것은 모두 계획이며 구현되지 않았습니다. [로드맵](docs/ko/ROADMAP.md)을
 참고하세요.
 
-- 다른 제공자(카카오, 네이버, 이메일 매직 링크, 이메일과 비밀번호), 2차 인증, 스텝업 강제.
-- 블랙리스트와 IP별 한도를 넘는 제한, 여러 인스턴스를 위한 공유 상태(PostgreSQL, Redis/Valkey), 콘솔에서의 제공자·애플리케이션 관리, 관리자를 위한 Hopae 자체 2차 인증.
+- 다른 제공자(카카오, 네이버, 이메일 매직 링크, 이메일과 비밀번호), 추가 2차 인증 요소·외부 MFA API·Lua 어댑터.
+- 블랙리스트와 IP별 한도를 넘는 제한, 여러 인스턴스를 위한 공유 상태(PostgreSQL, Redis/Valkey), 전체 제공자·애플리케이션 관리, 복구 및 내부 MFA 검증.
 - Lua 훅, 웹훅, Prometheus 메트릭, 설정 다시 로드, 서명된 자가 업데이트.
 
 ## 빠른 시작

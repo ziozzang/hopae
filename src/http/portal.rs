@@ -21,6 +21,10 @@ use crate::portal::pages::ErrorPage;
 pub fn router(state: PortalState) -> Router {
     Router::new()
         .route("/healthz", get(handlers::healthz))
+        .route(
+            "/stepup",
+            get(handlers::stepup_get).post(handlers::stepup_post),
+        )
         .route("/security/totp", get(handlers::totp_get))
         .route("/security/totp/prepare", post(handlers::totp_prepare_post))
         .route("/security/totp/confirm", post(handlers::totp_confirm_post))

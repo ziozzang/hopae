@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 20 -->
+<!-- doc-rev: 21 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -487,3 +487,13 @@ Per-account/distributed admission, complete browser/UI qualification, recent-aut
 refresh UX, cancellation/removal/recovery, QR and Hangang navigation/embedding,
 key retirement and internal operational rollout remain required. Current deployed
 `owner-v5-d876909` has no keyring configured and predates these HTTP routes.
+
+## Native browser TOTP source update
+
+The [second-factor extension contract](SECOND_FACTOR_EXTENSIONS.md#native-browser-otp-workflow)
+now includes a source-implemented OTP browser workflow: configured keyring, bound
+challenge/CSRF, persisted configuration-generation fencing, atomic rotation and
+elevated handoff. Owned OIDC/HTTP-process qualification covers protected access
+and old-credential refusal. Earlier implementation notes describe prior stages.
+This does not enable external MFA API/Lua connectors or replace recovery/key
+lifecycle/mobile/UI/fleet qualification. The internal image remains unchanged.

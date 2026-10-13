@@ -251,6 +251,8 @@ pub enum Decision {
 /// Numbers from the configuration that the engine needs.
 #[derive(Clone, Copy, Debug)]
 pub struct VerifyLimits {
+    /// Native browser OTP completion is configured at bootstrap.
+    pub stepup_enabled: bool,
     /// `handoff.max_recoveries`.
     pub max_recoveries: u32,
     /// `txn.per_ip_per_minute`.
@@ -274,6 +276,7 @@ pub struct VerifyLimits {
 impl Default for VerifyLimits {
     fn default() -> Self {
         VerifyLimits {
+            stepup_enabled: false,
             max_recoveries: 3,
             txn_per_ip_per_minute: 30,
             txn_max_rows: 1000,

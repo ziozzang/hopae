@@ -301,3 +301,13 @@ pub struct TotpPage<'a> {
     pub manual_key: &'a str,
     pub complete: bool,
 }
+
+#[derive(Template)]
+#[template(path = "stepup.html")]
+pub struct StepUpPage<'a> {
+    pub enrollment_required: bool,
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub transaction: &'a str,
+    pub csrf: &'a str,
+}
