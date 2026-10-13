@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 8 -->
+<!-- doc-rev: 9 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -234,3 +234,21 @@ The rollback test uses a synthetic existing required event to force a duplicate-
 failure; it does not implement factor-specific audit semantics. Full process restart,
 challenge/session atomicity, pending cleanup/replacement, enrollment/recovery UI,
 key management and internal MFA dogfooding remain required.
+
+## Native verification and owner consumption
+
+`src/factor/service.rs` connects owner-bound encrypted enrollment lookup, key
+verification/decryption and the fixed native six-digit/30-second TOTP profile to
+revision-fenced database mutation. Enrollment confirmation refuses already-active
+state; authentication consumption refuses pending state. The enrollment confirmation
+counter is consumed at activation, so it cannot immediately authorize authentication.
+Revocation, owner disable or competing counter consumption after lookup is refused
+by the final write. The non-serializable receipt records purpose, owner, enrollment,
+resulting revision/counter and verification time; it confers no AAL or session authority.
+
+The real-store regression confirms enrollment once and admits exactly one of two
+concurrent verifications of a subsequent valid code. This internal service is not an
+HTTP route: admission, recent authentication, challenge binding, atomic challenge/session
+completion, keyring selection, factor-specific audit, recovery/UI and internal dogfooding
+remain required. Counter consumption alone must not be followed by a separate unsafe
+session elevation transaction; integrated completion still needs one atomic write.

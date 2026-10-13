@@ -2472,3 +2472,73 @@ async fn totp_storage_expiry_disable_audit_rollback_and_reopen() {
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn native_totp_verification_activates_once_and_consumes_concurrent_code_once() {
+    use crate::factor::service::{Purpose, Verification, verify};
+    use crate::store::Factors;
+    let f = fx();
+    let user = f.user(1).await;
+    f.clock.set(Timestamp(59_000));
+    let key = crate::factor::seed_cipher::Key::new("key-1".into(), [7; 32]).unwrap();
+    let seed = crate::factor::totp::Seed::from_bytes(b"12345678901234567890").unwrap();
+    let envelope = key
+        .seal(&seed, user.user_id.as_str(), "native", &f.rng)
+        .unwrap();
+    f.store
+        .create_totp_pending("native".into(), user.user_id.clone(), envelope, vec![])
+        .await
+        .unwrap();
+    let code = Secret::new("287082".into());
+    let input = |purpose| Verification {
+        enrollment: "native",
+        user: &user.user_id,
+        code: &code,
+        purpose,
+    };
+    assert!(
+        verify(
+            &f.store,
+            &key,
+            f.clock.as_ref(),
+            input(Purpose::ConsumeAuthentication),
+            vec![]
+        )
+        .await
+        .is_err()
+    );
+    let receipt = verify(
+        &f.store,
+        &key,
+        f.clock.as_ref(),
+        input(Purpose::ConfirmEnrollment),
+        vec![],
+    )
+    .await
+    .unwrap();
+    assert_eq!(receipt.counter(), 1);
+    assert!(
+        verify(
+            &f.store,
+            &key,
+            f.clock.as_ref(),
+            input(Purpose::ConsumeAuthentication),
+            vec![]
+        )
+        .await
+        .is_err()
+    );
+    f.clock.set(Timestamp(90_000));
+    let next = Secret::new("969429".into());
+    let next_input = || Verification {
+        enrollment: "native",
+        user: &user.user_id,
+        code: &next,
+        purpose: Purpose::ConsumeAuthentication,
+    };
+    let (a, b) = tokio::join!(
+        verify(&f.store, &key, f.clock.as_ref(), next_input(), vec![]),
+        verify(&f.store, &key, f.clock.as_ref(), next_input(), vec![])
+    );
+    assert_ne!(a.is_ok(), b.is_ok());
+}

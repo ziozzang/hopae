@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=8 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=9 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -203,3 +203,20 @@ counter 보존, 비활성 사용자 조회·소비 거부와 회수 가능을 �
 요인 전용 감사 의미를 구현하지는 않습니다. 전체 프로세스 재시작,
 challenge·세션 원자 처리, pending 정리·교체, 등록·복구 UI·키 관리·내부 MFA
 도그푸딩은 필수로 남아 있습니다.
+
+## 네이티브 검증과 소유 저장소 소비
+
+`src/factor/service.rs`는 owner에 묶인 암호화 등록 조회, 키 검증·복호화,
+네이티브 6자리·30초 TOTP 프로파일을 revision 검사 DB 변경에 연결합니다.
+등록 확인은 이미 active인 상태를 거부하고 인증 소비는 pending을 거부합니다.
+등록 확인 counter를 활성화 때 소비해 곧바로 인증에 재사용하지 못하게 합니다.
+조회 후 회수·owner 비활성화·경쟁 소비는 최종 쓰기에서 거부됩니다.
+직렬화하지 않는 결과는 목적·owner·등록·변경 후 revision·counter·검증 시간을
+기록하며 AAL·세션 권위를 부여하지 않습니다.
+
+실제 저장소 회귀는 등록을 한 번 확인하고 다음 유효 코드를 두 요청이 동시에
+검증하면 정확히 하나만 승인함을 확인합니다. 내부 서비스이며 HTTP route는
+아닙니다. 시도 제한·최근 인증·challenge binding·challenge와 세션의 원자 완료,
+keyring 선택·요인 전용 감사·복구·UI·내부 도그푸딩은 남아 있습니다.
+Counter만 소비한 뒤 별도 트랜잭션으로 안전하지 않게 세션을 승격하면 안 되며,
+통합 완료는 하나의 원자 쓰기로 구현해야 합니다.
