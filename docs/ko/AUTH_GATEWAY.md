@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=6 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=7 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -169,3 +169,21 @@ Envelope 필드는 비공개이며 제한된 JSON 파싱은 1024-byte 초과 문
 재사용 CAS·복구·세션 통합은 필수로 남습니다. 유효한 과거 암호문의 재사용은
 막지 않으므로 소유 DB가 등록 revision·회수를 검사해야 합니다.
 암호 API 참고: [RustCrypto chacha20poly1305](https://docs.rs/chacha20poly1305/0.10.1/chacha20poly1305/).
+
+## TOTP 소유 저장소 소스 상태
+
+Schema v5에 암호화 등록 envelope, pending·active·revoked 상태, revision,
+마지막 counter, pending 만료를 저장합니다. Unique index로 사용자당 pending·active를
+각각 하나로 제한합니다. Factors 저장소는 active 사용자에게 10분 만료 pending을
+만듭니다. 활성화는 owner·revision·미만료 pending·사용자 활성 상태를 검사한 뒤
+revision을 올리고 검증된 counter를 기록합니다. 소비는 예상 revision의 active
+owner·등록과 엄격히 큰 counter를 요구합니다. 회수는 revision을 올립니다.
+호출자가 준 이벤트는 변경과 함께 commit하고 거부 시 성공 이벤트를 기록하지 않습니다.
+
+SQLite 회귀는 owner 불일치, 재사용·낮은 counter, revision·회수와 독립된 두
+writer 연결의 같은 counter 경합을 검사합니다. 다중 프로세스·fleet 검증은 아닙니다.
+Counter는 신뢰한 호출자가 이미 검증해야 합니다. Challenge·세션의 원자 완료,
+요인 전용 감사, 조회·등록 서비스, 만료 pending 정리·교체·복구·UI는 미완성이며
+HTTP handler에서 이 연산을 호출하지 않습니다. 소스 schema v5는 내부 미배포입니다.
+오래된 바이너리가 업그레이드 DB를 열 수 없어 롤백은 일관된 이전 스키마 백업
+복원을 요구합니다.

@@ -8,6 +8,7 @@
 mod admin;
 mod directory;
 mod events;
+mod factors;
 mod rows;
 mod sessions;
 #[cfg(test)]
@@ -51,6 +52,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         4,
         "0004_ldap_provider_kind",
         include_str!("../migrations/0004_ldap_provider_kind.sql"),
+    ),
+    (
+        5,
+        "0005_totp_enrollments",
+        include_str!("../migrations/0005_totp_enrollments.sql"),
     ),
 ];
 

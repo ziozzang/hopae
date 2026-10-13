@@ -2271,3 +2271,80 @@ async fn reused_session_configuration_fence_preserves_transaction_on_refusal() {
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn totp_enrollment_counter_is_monotonic_owner_bound_and_revocable() {
+    use crate::store::Factors;
+    let f = fx();
+    let user = f.user(1).await;
+    let other = f.user(2).await;
+    let key = crate::factor::seed_cipher::Key::new("key-1".into(), [7; 32]).unwrap();
+    let seed = crate::factor::totp::Seed::from_bytes(&[5; 20]).unwrap();
+    let envelope = key
+        .seal(&seed, user.user_id.as_str(), "enrollment-1", &f.rng)
+        .unwrap();
+    f.store
+        .create_totp_pending(
+            "enrollment-1".into(),
+            user.user_id.clone(),
+            envelope,
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert!(
+        !f.store
+            .activate_totp("enrollment-1", &other.user_id, 1, 10, vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        f.store
+            .activate_totp("enrollment-1", &user.user_id, 1, 10, vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        !f.store
+            .consume_totp_counter("enrollment-1", &user.user_id, 2, 10, vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        !f.store
+            .consume_totp_counter("enrollment-1", &user.user_id, 2, 9, vec![])
+            .await
+            .unwrap()
+    );
+    let follower = Store::open(
+        &f._dir.path().join("hopae.db"),
+        f.clock.clone(),
+        vec![],
+        None,
+    )
+    .unwrap();
+    let (a, b) = tokio::join!(
+        f.store
+            .consume_totp_counter("enrollment-1", &user.user_id, 2, 11, vec![]),
+        follower.consume_totp_counter("enrollment-1", &user.user_id, 2, 11, vec![])
+    );
+    assert_ne!(a.unwrap(), b.unwrap());
+    assert!(
+        !f.store
+            .revoke_totp("enrollment-1", &user.user_id, 1, vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        f.store
+            .revoke_totp("enrollment-1", &user.user_id, 2, vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        !f.store
+            .consume_totp_counter("enrollment-1", &user.user_id, 2, 12, vec![])
+            .await
+            .unwrap()
+    );
+}

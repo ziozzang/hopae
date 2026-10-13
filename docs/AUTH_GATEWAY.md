@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -196,3 +196,23 @@ keyring rotation/backup/retirement, pending enrollment, replay CAS, recovery and
 session integration remain required. It does not prevent replay of a valid older
 ciphertext; the owner database must enforce enrollment revision and revocation.
 Cipher API reference: [RustCrypto chacha20poly1305](https://docs.rs/chacha20poly1305/0.10.1/chacha20poly1305/).
+
+## TOTP owner storage source status
+
+Schema v5 stores encrypted enrollment envelopes, pending/active/revoked state,
+revision, last counter and pending expiry. Unique indexes allow one pending and one
+active enrollment per user. The Factors store creates pending state for an active
+user with ten-minute expiry. Activation requires owner/revision, unexpired pending
+state and an active user, then advances revision and records the verified counter.
+Consumption requires the expected revision, active owner/enrollment and a strictly
+larger counter. Revocation advances revision. Caller-supplied events commit with
+mutations; refusals do not record success events.
+
+The SQLite regression covers owner mismatch, replay/lower counter, revision and
+revocation, and same-counter races through two independent writer connections.
+This is not multi-process/fleet qualification. Counters must already be verified by
+the trusted caller. Atomic challenge/session completion, typed factor audit events,
+read/enrollment services, expired-pending cleanup, replacement, recovery and UI remain
+unfinished; no HTTP handler invokes these primitives. Source schema v5 is not deployed
+internally. Rollback requires consistent prior-schema backup restoration because old
+binaries cannot open an upgraded database.

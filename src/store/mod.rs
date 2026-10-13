@@ -467,3 +467,38 @@ pub trait Events: Send + Sync {
     async fn query_page(&self, q: EventsQuery, deadline: Deadline) -> StoreResult<Page<Event>>;
     async fn status(&self, deadline: Deadline) -> StoreResult<StoreStatus>;
 }
+
+/// Owner storage primitives; callers still validate recent authentication/challenges.
+#[async_trait]
+pub trait Factors: Send + Sync {
+    async fn create_totp_pending(
+        &self,
+        id: String,
+        user: UserId,
+        envelope: crate::factor::seed_cipher::Envelope,
+        events: Vec<Event>,
+    ) -> StoreResult<()>;
+    async fn activate_totp(
+        &self,
+        id: &str,
+        user: &UserId,
+        revision: u64,
+        counter: u64,
+        events: Vec<Event>,
+    ) -> StoreResult<bool>;
+    async fn consume_totp_counter(
+        &self,
+        id: &str,
+        user: &UserId,
+        revision: u64,
+        counter: u64,
+        events: Vec<Event>,
+    ) -> StoreResult<bool>;
+    async fn revoke_totp(
+        &self,
+        id: &str,
+        user: &UserId,
+        revision: u64,
+        events: Vec<Event>,
+    ) -> StoreResult<bool>;
+}
