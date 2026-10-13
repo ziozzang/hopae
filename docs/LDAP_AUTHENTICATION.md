@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 20 -->
+<!-- doc-rev: 21 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -360,3 +360,11 @@ Library tests (419), OIDC scenarios (36) and strict Clippy passed. Configuration
 refuses LDAP activation pending real browser/directory qualification, connector epoch
 fencing, hard directory response bounds and revocation work. This chooser integration
 has not been deployed to the internal environment yet.
+
+## Concurrent password admission qualification
+
+A 32-thread synchronized test mixes native IPv4 and IPv4-mapped IPv6 submissions
+and verifies exactly one shared ten-attempt IP budget. A poisoned-state test proves
+admission fails closed rather than panicking or reopening the quota. Capacity,
+expiry and monotonic-window tests also pass. This is an admission invariant check,
+not a distributed quota implementation or full-stack throughput benchmark.

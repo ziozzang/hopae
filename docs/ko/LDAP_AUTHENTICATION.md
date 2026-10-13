@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=20 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=21 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -310,3 +310,10 @@ provider만 제공합니다. portal adapter는 설정된 직접 커넥터를 for
 419건·OIDC 36건과 엄격한 Clippy가 통과했습니다. 실제 브라우저/디렉토리 검증·커넥터
 epoch fence·디렉토리 응답의 엄격한 크기 제한·회수 작업 전에는 LDAP 설정 활성화를
 제한합니다. 이번 선택기 연결은 내부 운영에 아직 배포하지 않았습니다.
+
+## 동시 비밀번호 admission 검증
+
+32개 thread를 동기화하여 IPv4와 IPv4-mapped IPv6 제출을 섞고 하나의 IP 한도에서
+정확히 10개만 허용되는지 확인했습니다. 상태 lock 손상 시 panic이나 quota 재개 대신
+차단되는 것도 검증했습니다. 용량·만료·단조 시간 window 검사도 통과했습니다. admission
+불변조건 검증이며 분산 quota 구현이나 전체 스택 처리량 benchmark는 아닙니다.

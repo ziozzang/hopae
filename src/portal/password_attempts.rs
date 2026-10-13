@@ -63,6 +63,47 @@ impl PasswordAttempts {
 mod tests {
     use super::*;
     #[test]
+    fn simultaneous_alias_requests_cannot_exceed_one_ip_budget() {
+        let attempts = std::sync::Arc::new(PasswordAttempts::default());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(32));
+        let admitted = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for index in 0..32 {
+                let attempts = attempts.clone();
+                let barrier = barrier.clone();
+                let admitted = &admitted;
+                scope.spawn(move || {
+                    barrier.wait();
+                    let ip = if index % 2 == 0 {
+                        "192.0.2.1"
+                    } else {
+                        "::ffff:192.0.2.1"
+                    }
+                    .parse()
+                    .unwrap();
+                    if attempts.admit_at(ip, 100) {
+                        admitted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            admitted.load(std::sync::atomic::Ordering::SeqCst),
+            usize::from(ATTEMPTS)
+        );
+    }
+    #[test]
+    fn poisoned_admission_state_fails_closed() {
+        let attempts = std::sync::Arc::new(PasswordAttempts::default());
+        let worker = attempts.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = worker.windows.lock().unwrap();
+            panic!("owned admission poison test");
+        })
+        .join();
+        assert!(!attempts.admit_at("192.0.2.2".parse().unwrap(), 0));
+    }
+    #[test]
     fn mapped_ip_cannot_reset_quota_and_wall_clock_is_not_used() {
         let attempts = PasswordAttempts::default();
         let ip = "192.0.2.1".parse().unwrap();
