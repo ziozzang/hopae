@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -131,3 +131,13 @@ without treating capacity pressure as directory failure. The owned OpenLDAP test
 checks ordinary credential denial leaves the circuit closed and three wrong-CA
 failures open it. Circuits remain process-local; provider registry publication,
 persistent quarantine and administrative recovery are not implemented by this slice.
+
+## Mandatory StartTLS qualification
+
+The owned directory fixture now runs the credential scenarios over both LDAPS
+and explicitly required StartTLS. An additional owned rejecting peer observes
+StartTLS as the first protocol operation, returns an unavailable ExtendedResponse
+and verifies connection closure without a subsequent bind. Rejection cannot fall
+back to cleartext authentication. Certificate and invalid-user/circuit tests run
+for both configured modes. These tests do not activate LDAP in the portal registry
+or establish session revocation and high-load performance guarantees.

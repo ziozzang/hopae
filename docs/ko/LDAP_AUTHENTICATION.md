@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=4 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=5 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -111,3 +111,12 @@ probe 하나만 허용합니다. 취소는 lease drop으로 실패를 기록합�
 거부는 circuit을 닫힌 상태로 유지하고 잘못된 CA 실패 3회는 여는 것을 확인합니다.
 프로세스 로컬 circuit이며 provider registry 게시·영속 quarantine·관리 회복은
 이 구현에 포함하지 않습니다.
+
+## 필수 StartTLS 검증
+
+소유한 디렉토리 fixture는 LDAPS와 명시적인 필수 StartTLS 양쪽에서 자격 시나리오를
+실행합니다. 별도 거부 peer가 첫 protocol operation이 StartTLS임을 확인하고
+unavailable ExtendedResponse를 보낸 뒤 후속 bind 없이 연결이 닫히는지 검증합니다.
+거부 시 평문 인증으로 우회하지 않습니다. 인증서·잘못된 사용자·circuit 검사를 두
+설정에서 실행합니다. portal registry의 LDAP 활성화나 세션 회수·고부하 성능을
+증명하는 검사는 아닙니다.

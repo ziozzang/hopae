@@ -9,6 +9,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='owned-hopae-ldap-')as temporary:
         root=Path(temporary);(root/'db').mkdir();name='owned-hopae-ldap-'+secrets.token_hex(6)
         with socket.socket()as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
+        with socket.socket()as sock:sock.bind(('127.0.0.1',0));starttls_port=sock.getsockname()[1]
         def openssl(*arguments):subprocess.run(['openssl',*arguments],cwd=root,check=True,capture_output=True)
         for ca in ['ca','wrong-ca']:openssl('req','-x509','-newkey','rsa:2048','-nodes','-keyout',ca+'.key','-out',ca+'.pem','-days','1','-subj','/CN=Owned '+ca,'-addext','basicConstraints=critical,CA:TRUE')
         openssl('req','-new','-newkey','rsa:2048','-nodes','-keyout','server.key','-out','server.csr','-subj','/CN=Owned LDAP')
@@ -21,18 +22,20 @@ def main():
             ldif+='\ndn: cn=Duplicate'+label+',dc=example,dc=test\nobjectClass: inetOrgPerson\nuid: duplicated\ncn: Duplicate'+label+'\nsn: Owned\nuserPassword: '+user+'\n'
         subprocess.run(['docker','run','--rm','-i','-v',str(root)+':/owned',args.image,'slapadd','-f','/owned/slapd.conf'],input=ldif.encode(),check=True,capture_output=True)
         try:
-            subprocess.run(['docker','run','-d','--rm','--network','host','--name',name,'-v',str(root)+':/owned',args.image,'slapd','-f','/owned/slapd.conf','-h',f'ldaps://127.0.0.1:{port}','-d','0'],check=True,capture_output=True)
+            subprocess.run(['docker','run','-d','--rm','--network','host','--name',name,'-v',str(root)+':/owned',args.image,'slapd','-f','/owned/slapd.conf','-h',f'ldaps://127.0.0.1:{port} ldap://127.0.0.1:{starttls_port}','-d','0'],check=True,capture_output=True)
             for _ in range(100):
                 try:
                     with socket.create_connection(('127.0.0.1',port),timeout=.2):break
                 except OSError:time.sleep(.05)
             else:raise RuntimeError('owned directory readiness deadline')
             env=dict(os.environ,OWNED_LDAP_ENDPOINT=f'ldaps://127.0.0.1:{port}',OWNED_LDAP_CA=str(root/'ca.pem'),OWNED_LDAP_WRONG_CA=str(root/'wrong-ca.pem'),OWNED_LDAP_BIND_KEY=bind,OWNED_LDAP_USER_PASSWORD=user)
-            result=subprocess.run(['cargo','test','--locked','--lib','owned_ldaps_authenticates_immutable_identity_and_rejects_bad_credentials_and_ca','--','--ignored'],env=env,capture_output=True)
-            if result.returncode:
-                diagnostic=(result.stdout+result.stderr).decode(errors='replace').replace(bind,'[REDACTED]').replace(user,'[REDACTED]')
-                Path('/tmp/hopae-owned-ldap-test-failure.log').write_text(diagnostic)
-                raise RuntimeError('owned LDAP credential test failed; sanitized diagnostic in /tmp/hopae-owned-ldap-test-failure.log')
-            print('PASS: real owned OpenLDAP over verified TLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection and backend-circuit classification. Portal/session/runtime activation is not qualified.')
+            for endpoint,mode in [(f'ldaps://127.0.0.1:{port}','0'),(f'ldap://127.0.0.1:{starttls_port}','1')]:
+                env.update(OWNED_LDAP_ENDPOINT=endpoint,OWNED_LDAP_STARTTLS=mode)
+                result=subprocess.run(['cargo','test','--locked','--lib','owned_ldaps_authenticates_immutable_identity_and_rejects_bad_credentials_and_ca','--','--ignored'],env=env,capture_output=True)
+                if result.returncode:
+                    diagnostic=(result.stdout+result.stderr).decode(errors='replace').replace(bind,'[REDACTED]').replace(user,'[REDACTED]')
+                    Path('/tmp/hopae-owned-ldap-test-failure.log').write_text(diagnostic)
+                    raise RuntimeError('owned LDAP credential test failed; sanitized diagnostic in /tmp/hopae-owned-ldap-test-failure.log')
+            print('PASS: real owned OpenLDAP over LDAPS and mandatory StartTLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection and backend-circuit classification. Portal/session/runtime activation is not qualified.')
         finally:subprocess.run(['docker','rm','-f',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 if __name__=='__main__':main()

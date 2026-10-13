@@ -288,7 +288,7 @@ mod tests {
         let password = Secret::new(std::env::var("OWNED_LDAP_USER_PASSWORD").unwrap());
         let config = Config {
             endpoint,
-            starttls: false,
+            starttls: std::env::var("OWNED_LDAP_STARTTLS").is_ok_and(|value| value == "1"),
             ca: std::env::var("OWNED_LDAP_CA").unwrap().into(),
             base_dn: "dc=example,dc=test".into(),
             bind_dn: "cn=reader,dc=example,dc=test".into(),
@@ -342,6 +342,51 @@ mod tests {
             provider.circuit.state(),
             Some(crate::auth_gateway::breaker::State::Closed)
         );
+        if config.starttls {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let rejecting = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut header = [0u8; 2];
+                socket.read_exact(&mut header).await.unwrap();
+                assert_eq!(header[0], 0x30);
+                assert!(header[1] < 128);
+                let mut payload = vec![0u8; header[1] as usize];
+                socket.read_exact(&mut payload).await.unwrap();
+                let oid = b"1.3.6.1.4.1.1466.20037";
+                assert!(
+                    payload.windows(oid.len()).any(|window| window == oid),
+                    "first operation was not StartTLS"
+                );
+                let mut message = [0u8; 4096];
+                // LDAP ExtendedResponse: unavailable, empty matched DN and diagnostic.
+                socket
+                    .write_all(&[
+                        0x30, 0x0c, 0x02, 0x01, 0x01, 0x78, 0x07, 0x0a, 0x01, 0x34, 0x04, 0x00,
+                        0x04, 0x00,
+                    ])
+                    .await
+                    .unwrap();
+                let next = tokio::time::timeout(Duration::from_secs(3), socket.read(&mut message))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(next, 0, "client sent data after StartTLS rejection");
+            });
+            let mut refused = config.clone();
+            refused.endpoint = format!("ldap://{address}");
+            let provider =
+                LdapProvider::compile(ProviderId::new("rejecting-starttls"), refused, &env)
+                    .unwrap();
+            assert!(matches!(
+                provider
+                    .verify_password(PasswordInput::new("alice", &password).unwrap())
+                    .await,
+                Err(CredentialError::Unavailable)
+            ));
+            rejecting.await.unwrap();
+        }
         let mut wrong_ca = config;
         wrong_ca.ca = std::env::var("OWNED_LDAP_WRONG_CA").unwrap().into();
         let untrusted =
