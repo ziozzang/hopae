@@ -60,6 +60,12 @@ def main():
                     diagnostic=(result.stdout+result.stderr).decode(errors='replace').replace(bind,'[REDACTED]').replace(user,'[REDACTED]')
                     Path('/tmp/hopae-owned-ldap-test-failure.log').write_text(diagnostic)
                     raise RuntimeError('owned LDAP credential test failed; sanitized diagnostic in /tmp/hopae-owned-ldap-test-failure.log')
-            print('PASS: real owned OpenLDAP over LDAPS and mandatory StartTLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection, oversized/deep/semantic-malformed and wrong-operation TLS response rejection and backend-circuit classification. Portal/session/runtime activation is not qualified.')
+                browser=subprocess.run(['cargo','test','--locked','--test','scenarios','owned_ldap_runtime_browser_form_issues_bound_session_and_handoff','--','--ignored','--test-threads=1'],env=env,capture_output=True)
+                if browser.returncode:
+                    diagnostic=(browser.stdout+browser.stderr).decode(errors='replace').replace(bind,'[REDACTED]').replace(user,'[REDACTED]')
+                    Path('/tmp/hopae-owned-ldap-browser-failure.log').write_text(diagnostic)
+                    raise RuntimeError('owned LDAP runtime browser failed; diagnostic stored privately')
+            Path('/tmp/hopae-owned-ldap-browser-failure.log').unlink(missing_ok=True)
+            print('PASS: real owned OpenLDAP over LDAPS and mandatory StartTLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection, oversized/deep/semantic-malformed and wrong-operation TLS response rejection and backend-circuit classification. Owned HTTP runtime chooser/password/session/handoff and LDAP reauthentication/user-disable qualification passed; real browser, external directory revocation and fleet lifecycle remain separate.')
         finally:subprocess.run(['docker','rm','-f',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 if __name__=='__main__':main()

@@ -1453,3 +1453,235 @@ fn owned_oidc_portal_totp_enrollment_then_bound_stepup_rotates_credentials_and_h
     );
     assert!(!h.log().contains(setup));
 }
+
+#[test]
+#[ignore = "requires owned OpenLDAP TLS fixture (tools/owned_ldap_smoke.py)"]
+fn owned_ldap_runtime_browser_form_issues_bound_session_and_handoff() {
+    use crate::support::*;
+    use serde_json::json;
+    let env = |name: &str| std::env::var(name).expect("owned LDAP fixture required");
+    let key = env("OWNED_LDAP_BIND_KEY");
+    let password = env("OWNED_LDAP_USER_PASSWORD");
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(
+        Fixture::with(
+            "m1-basic",
+            json!({"apps":[{"app_id":"app","step_up":[{"path_prefix":"/fresh","require":{"aal":1,"max_age":60}}]}],"providers":[{"provider_id":"owned-directory","kind":"ldap","display_name":"Owned directory","enabled":true,"ldap":{"endpoint":env("OWNED_LDAP_ENDPOINT"),"starttls":env("OWNED_LDAP_STARTTLS")=="1","ca":env("OWNED_LDAP_CA"),"base_dn":"dc=example,dc=test","bind_dn":"cn=reader,dc=example,dc=test","bind_password_env":"OWNED_LDAP_BIND_KEY","username_attribute":"uid","subject_attribute":"entryUUID","timeout_ms":1000}}]}),
+        ),
+        &idp,
+        &[("OWNED_LDAP_BIND_KEY", &key)],
+    );
+    let browser = h.portal().with_ip("192.0.2.10");
+    let origin = format!("https://{}", h.portal_host());
+    fn field(body: &str, name: &str) -> String {
+        body.split(&format!("name=\"{name}\" value=\""))
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .expect("field missing")
+            .into()
+    }
+    let initial =
+        h.verify(VerifyRequest::document("https://app.example.test/private").ip("192.0.2.10"));
+    assert_eq!(initial.status, 302);
+    let location = url::Url::parse(initial.location().unwrap()).unwrap();
+    let txn = location
+        .query_pairs()
+        .find(|(k, _)| k == "txn")
+        .unwrap()
+        .1
+        .into_owned();
+    let chooser = browser.get(&format!("/login?txn={txn}"));
+    assert_eq!(chooser.status, 200);
+    assert!(chooser.body.contains("owned-directory"));
+    assert!(chooser.body.contains("mock"));
+    let form = browser.send(
+        Req::post("/login/owned-directory")
+            .header("origin", &origin)
+            .form(&[("csrf", &field(&chooser.body, "csrf")), ("txn", &txn)]),
+    );
+    assert_eq!(form.status, 200);
+    assert!(
+        form.header("content-security-policy")
+            .unwrap()
+            .contains("https://app.example.test")
+    );
+    let csrf = field(&form.body, "csrf");
+    let challenge = field(&form.body, "challenge");
+    let post = |password: &str| {
+        browser.send(
+            Req::post("/login/owned-directory/password")
+                .header("origin", &origin)
+                .form(&[
+                    ("csrf", &csrf),
+                    ("challenge", &challenge),
+                    ("username", "alice"),
+                    ("password", password),
+                ]),
+        )
+    };
+    assert_eq!(
+        browser
+            .post_form(
+                "/login/owned-directory/password",
+                &[
+                    ("csrf", &csrf),
+                    ("challenge", &challenge),
+                    ("username", "alice"),
+                    ("password", &password)
+                ]
+            )
+            .status,
+        403
+    );
+    assert_eq!(post("owned-invalid-password").status, 400);
+    let before = rusqlite::Connection::open(h.state_dir.path().join("state/hopae.db")).unwrap();
+    assert_eq!(
+        before
+            .query_row("SELECT count(*) FROM sessions", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        before
+            .query_row(
+                "SELECT count(*) FROM identities WHERE provider_id='owned-directory'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    drop(before);
+    let callback = post(&password);
+    assert_eq!(callback.status, 302);
+    let bind = initial
+        .set_cookies()
+        .iter()
+        .find_map(|c| {
+            c.split_once('=')
+                .map(|(k, v)| (k.to_owned(), v.split(';').next().unwrap().to_owned()))
+        })
+        .unwrap();
+    let handoff = h.verify(
+        VerifyRequest::document(callback.location().unwrap())
+            .ip("192.0.2.10")
+            .cookie(&bind.0, &bind.1),
+    );
+    assert_eq!(handoff.status, 302);
+    let handle = handoff
+        .set_cookies()
+        .iter()
+        .find_map(|c| {
+            c.strip_prefix(&format!("{}=", h.cookie_name()))
+                .map(|v| v.split(';').next().unwrap().to_owned())
+        })
+        .unwrap();
+    let allowed = h.verify(
+        VerifyRequest::document("https://app.example.test/private")
+            .ip("192.0.2.10")
+            .cookie(&h.cookie_name(), &handle),
+    );
+    assert_eq!(allowed.status, 200);
+    assert_eq!(allowed.header("x-hopae-aal"), Some("1"));
+    assert_eq!(allowed.header("x-hopae-provider"), Some("owned-directory"));
+    assert_ne!(post(&password).status, 302);
+    let db = rusqlite::Connection::open(h.state_dir.path().join("state/hopae.db")).unwrap();
+    assert_eq!(db.query_row("SELECT count(*) FROM identities WHERE provider_id='owned-directory' AND subject LIKE 't:entryuuid:%'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    assert_eq!(db.query_row("SELECT count(*) FROM login_txns WHERE provider_id='owned-directory' AND nonce IS NULL AND pkce_verifier IS NULL AND consumed_at IS NOT NULL",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    assert!(!h.log().contains(&password));
+    assert!(!h.log().contains(&key));
+
+    h.advance(Duration::from_secs(61));
+    let stale = h.verify(
+        VerifyRequest::document("https://app.example.test/fresh")
+            .ip("192.0.2.10")
+            .cookie(&h.cookie_name(), &handle)
+            .cookie(&bind.0, &bind.1),
+    );
+    assert_eq!(stale.status, 302);
+    let location = url::Url::parse(stale.location().unwrap()).unwrap();
+    let fresh_txn = location
+        .query_pairs()
+        .find(|(k, _)| k == "txn")
+        .unwrap()
+        .1
+        .into_owned();
+    let fresh_chooser = browser.get(&format!("/login?txn={fresh_txn}"));
+    assert_eq!(fresh_chooser.status, 200);
+    assert!(!fresh_chooser.body.contains("action=\"/login/mock\""));
+    let fresh_form = browser.send(
+        Req::post("/login/owned-directory")
+            .header("origin", &origin)
+            .form(&[
+                ("csrf", &field(&fresh_chooser.body, "csrf")),
+                ("txn", &fresh_txn),
+            ]),
+    );
+    assert_eq!(fresh_form.status, 200);
+    let fresh = browser.send(
+        Req::post("/login/owned-directory/password")
+            .header("origin", &origin)
+            .form(&[
+                ("csrf", &field(&fresh_form.body, "csrf")),
+                ("challenge", &field(&fresh_form.body, "challenge")),
+                ("username", "alice"),
+                ("password", &password),
+            ]),
+    );
+    assert_eq!(fresh.status, 302);
+    let fresh_handoff = h.verify(
+        VerifyRequest::document(fresh.location().unwrap())
+            .ip("192.0.2.10")
+            .cookie(&bind.0, &bind.1),
+    );
+    assert_eq!(fresh_handoff.status, 302);
+    let fresh_handle = fresh_handoff
+        .set_cookies()
+        .iter()
+        .find_map(|c| {
+            c.strip_prefix(&format!("{}=", h.cookie_name()))
+                .map(|v| v.split(';').next().unwrap().to_owned())
+        })
+        .unwrap();
+    assert_eq!(
+        h.verify(
+            VerifyRequest::document("https://app.example.test/fresh")
+                .ip("192.0.2.10")
+                .cookie(&h.cookie_name(), &fresh_handle)
+        )
+        .status,
+        200
+    );
+    let factors: String = db
+        .query_row(
+            "SELECT factors FROM sessions WHERE provider_id='owned-directory'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let factors: serde_json::Value = serde_json::from_str(&factors).unwrap();
+    assert_eq!(
+        factors.as_array().unwrap().last().unwrap()["kind"],
+        "password"
+    );
+    assert_eq!(
+        h.verify(
+            VerifyRequest::other("https://app.example.test/private")
+                .ip("192.0.2.10")
+                .cookie(&h.cookie_name(), &handle)
+        )
+        .status,
+        401
+    );
+    db.execute("UPDATE users SET status='disabled'", [])
+        .unwrap();
+    assert_eq!(
+        h.verify(
+            VerifyRequest::other("https://app.example.test/private")
+                .ip("192.0.2.10")
+                .cookie(&h.cookie_name(), &fresh_handle)
+        )
+        .status,
+        401
+    );
+}

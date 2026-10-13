@@ -179,6 +179,9 @@ impl PortalServices for Fake {
     ) -> Result<PasswordChallenge, Failure> {
         self.rec("prepare_password", Some(ctx), Some(cookies));
         Ok(PasswordChallenge {
+            form_origin: url::Url::parse("https://app.example.test/")
+                .unwrap()
+                .origin(),
             provider: provider.clone(),
             provider_name: "Owned directory".into(),
             challenge: Secret::new("A".repeat(43)),

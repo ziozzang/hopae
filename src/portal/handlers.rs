@@ -474,7 +474,7 @@ pub(crate) async fn login_post(
                         rejected: false,
                     },
                     &[],
-                    &[],
+                    &[prepared.form_origin],
                 )
             }
             Err(failure) => fail_response(&rq, failure),

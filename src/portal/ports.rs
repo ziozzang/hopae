@@ -169,6 +169,7 @@ pub struct Health {
 /// Prepared form metadata; Secret's Debug remains redacted.
 #[derive(Clone, Debug)]
 pub struct PasswordChallenge {
+    pub form_origin: Origin,
     pub provider: ProviderId,
     pub provider_name: String,
     pub challenge: Secret,

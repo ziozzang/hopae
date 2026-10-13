@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=21 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=22 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -130,12 +130,12 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 
 `providers[]`는 로그인 제공자를 정의합니다. 항목은 시작할 때 ADR-0010 가져오기
 규칙으로 저장소에 반영됩니다. 그 뒤에는 실행 중에 바뀐 제공자에 대해 데이터베이스가
-권위를 가집니다. M1은 `kind = oidc`만 지원합니다(검증된 제공자는 Google).
+권위를 가집니다. 소스 설정은 `kind = oidc`와 `kind = ldap`를 함께 지원합니다. 기존 OIDC 제공자는 Google이며 LDAP는 자체 LDAPS/StartTLS 런타임 검증을 거쳤습니다.
 
 | 키 | 타입 | 기본값 | 제약과 의미 |
 | --- | --- | --- | --- |
 | `providers[].provider_id` | 문자열 | 필수 | `[a-z0-9][a-z0-9_-]{0,31}`, 유일. redirect URI `<portal.public_url>/callback/<provider_id>`에 나타납니다. 프리셋 이름(`google`)과 같은 id는 `issuer`가 없을 때 그 프리셋을 선택합니다. |
-| `providers[].kind` | `oidc` | 필수 | `oauth2`, `email_link`, `password`는 파싱되지만 M3 이전에는 거부됩니다. |
+| `providers[].kind` | `oidc` 또는 `ldap` | 필수 | `oauth2`, `email_link`, `password`는 파싱되지만 M3 이전에는 거부됩니다. |
 | `providers[].display_name` | 문자열 | `provider_id` | 선택 화면의 라벨. |
 | `providers[].enabled` | 불리언 | `true` | 비활성 제공자는 제시되지 않습니다. |
 | `providers[].client_id` | 문자열 | 필수 | 비어 있으면 안 됩니다. 비밀 값이 아닙니다. |
@@ -202,7 +202,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | 키 | 마일스톤 | 기본값 | 결정된 곳 |
 | --- | --- | --- | --- |
 | `gateway.rate_limit_status` | HC-8 이후 | `403` | 게이트웨이가 중계하면 `429`([ADR-0005](../adr/0005-gateway-contract-and-versioning.md)) |
-| `oidc`가 아닌 `providers[].kind` | M3 | — | 카카오, 네이버, 이메일 링크, 비밀번호([ADR-0010](../adr/0010-provider-abstraction.md)) |
+| `oidc` 또는 `ldap`가 아닌 `providers[].kind` | M3 | — | 카카오, 네이버, 이메일 링크, 비밀번호([ADR-0010](../adr/0010-provider-abstraction.md)) |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, 없음, 없음 | 로컬 캐시와 Redis 버스([ADR-0006](../adr/0006-verify-caching-and-invalidation.md)) |
 | `store.kind = postgres`, `store.url_env` | M2 | — | 공유 기본 저장소([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
 
@@ -271,14 +271,14 @@ admin.hangang_delegation은 key_env와 선택적인 절대 경로 private sessio
 [네이티브 통합](HANGANG_NATIVE.md)을 참고하세요.
 
 
-## LDAP 설정 준비
+## LDAP 설정
 
 providers[].ldap 객체를 파싱·검증하고 provider 가져오기에 보존합니다. 필드는
 endpoint·starttls·절대 ca 경로·base_dn·bind_dn·bind_password_env·
 username_attribute·subject_attribute·subject_encoding(text/binary_hex)·
 timeout_ms(1–2000)입니다. client_id 필수 조건은 OIDC에 적용하며 LDAP는 OIDC
-자격 정보나 암시적 계정 연결을 사용하지 않습니다. 설정 검증의 LDAP portal 활성화
-제한은 유지합니다. [LDAP 구현 상태](LDAP_AUTHENTICATION.md)를 참고하세요.
+자격 정보나 암시적 계정 연결을 사용하지 않습니다. 소스 설정 검증은 LDAP portal 활성화를
+허용합니다. 운영 LDAP는 설정하지 않았습니다. [LDAP 구현 상태](LDAP_AUTHENTICATION.md)를 참고하세요.
 
 ## TOTP keyring bootstrap
 

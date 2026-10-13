@@ -1,17 +1,22 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=28 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=29 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
 ## 상태와 연결 위치
 
-구현 제안 계약이며 활성화된 provider가 아닙니다. 현재 Provider trait은 OAuth
-redirect/callback을 표현하고 Registry는 OIDC만 생성합니다. LDAP는 별도 자격 제출
-adapter로 같은 transaction·신원 해석·session·handoff·재인증·회수 서비스에 연결합니다.
-OAuth callback을 흉내 내거나 HOP1/API relay에 비밀번호를 전달하지 않습니다.
-redirect interface 옆에 명시적인 direct-credential provider interface를 추가하고
-선택 화면에 함께 표시합니다. LDAP가 OAuth code exchange를 구현할 필요는 없습니다.
+소스 설정은 OIDC와 LDAP provider를 함께 허용합니다. LDAP는 네이티브 자격 입력
+폼과 transaction·신원·session·handoff·재인증 서비스를 사용합니다. OAuth callback을
+흉내 내거나 HOP1으로 비밀번호를 전달하지 않습니다. 자체 OpenLDAP 환경의 LDAPS와
+필수 StartTLS에서 실제 Hopae 프로세스로 혼합 chooser, Origin 검사, 잘못된 비밀번호
+거부, session 발급, 바인딩된 handoff, 비밀번호 재인증, handle 교체와 로컬 사용자
+비활성화를 검증했습니다. 비밀번호 페이지 CSP는 검증된 앱 Origin만 허용합니다.
+
+아래 구현 기록은 이전 제한을 시간순으로 기록한 것입니다. 이번 소스 활성화가 과거의
+설정 거부 문구를 대체합니다. 운영 LDAP는 설정하지 않았습니다. 실제 Chromium 디렉터리
+로그인, 외부 디렉터리 계정 회수, 비밀·CA 게시 epoch와 분산 lifecycle 검증은 남아
+있습니다. Hopae 로컬 사용자 비활성화는 디렉터리 측 회수를 입증하지 않습니다.
 
 ## 인증 흐름
 

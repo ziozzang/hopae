@@ -827,6 +827,21 @@ impl Service {
             .await
     }
 
+    pub(crate) async fn credential_form_origin(
+        &self,
+        ctx: &RequestCtx,
+        transaction: &Secret,
+    ) -> Result<url::Origin, SessionError> {
+        let row = self.load_live_txn(ctx, transaction).await?;
+        crate::policy::apps::validate_return_target(
+            row.return_target.as_str(),
+            &self.snapshot.load(),
+            self.cfg.secure,
+        )
+        .map_err(SessionError::Refused)?;
+        Ok(row.return_target.origin())
+    }
+
     /// Prepare a direct password challenge after the portal validated its form/CSRF.
     /// The secret is a single-use challenge handle, not an OAuth redirect URL.
     pub async fn begin_password(
@@ -1901,7 +1916,7 @@ impl Service {
                 .build()
         };
         let factor = FactorEntry {
-            kind: factor_kind(ProviderKind::Oidc),
+            kind: factor_kind(provider_row.kind),
             provider: Some(provider_id.clone()),
             at: auth_time,
         };

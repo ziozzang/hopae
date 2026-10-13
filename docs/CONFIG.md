@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 21 -->
+<!-- doc-rev: 22 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -133,13 +133,13 @@ for. A host not listed is denied (`unknown_app`).
 
 `providers[]` defines sign-in providers. Entries are mirrored into the store at
 start by the ADR-0010 import rule; after that the database is authoritative for
-providers that were changed at run time. M1 supports `kind = oidc` only (Google
-is the tested provider).
+providers that were changed at run time. Source configuration supports `kind = oidc` and `kind = ldap` together. Google
+is the existing OIDC provider; LDAP has owned LDAPS/StartTLS runtime qualification.
 
 | Key | Type | Default | Constraints and meaning |
 | --- | --- | --- | --- |
 | `providers[].provider_id` | string | required | `[a-z0-9][a-z0-9_-]{0,31}`, unique. Appears in the redirect URI `<portal.public_url>/callback/<provider_id>`. An id equal to a preset name (`google`) selects that preset when `issuer` is unset. |
-| `providers[].kind` | `oidc` | required | `oauth2`, `email_link` and `password` parse but are rejected before M3. |
+| `providers[].kind` | `oidc` or `ldap` | required | `oauth2`, `email_link` and `password` parse but are rejected before M3. |
 | `providers[].display_name` | string | the `provider_id` | Chooser label. |
 | `providers[].enabled` | boolean | `true` | A disabled provider is not offered. |
 | `providers[].client_id` | string | required | Must not be empty. Not a secret. |
@@ -209,7 +209,7 @@ the milestone shown. Until then `hopae --check` rejects them as unknown.
 | Key | Milestone | Default | Decided in |
 | --- | --- | --- | --- |
 | `gateway.rate_limit_status` | after HC-8 | `403` | `429` once the gateway relays it ([ADR-0005](adr/0005-gateway-contract-and-versioning.md)) |
-| `providers[].kind` other than `oidc` | M3 | — | Kakao, Naver, email link, password ([ADR-0010](adr/0010-provider-abstraction.md)) |
+| `providers[].kind` other than `oidc` or `ldap` | M3 | — | Kakao, Naver, email link, password ([ADR-0010](adr/0010-provider-abstraction.md)) |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, none, none | Local cache and Redis bus ([ADR-0006](adr/0006-verify-caching-and-invalidation.md)) |
 | `store.kind = postgres`, `store.url_env` | M2 | — | Shared primary store ([ADR-0002](adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
 
@@ -278,14 +278,14 @@ Related pages: [operations](OPERATIONS.md), [architecture](ARCHITECTURE.md), [ga
 [Native integration](HANGANG_NATIVE.md) for bounds, browser/paired sessions and grants.
 
 
-## LDAP configuration preparation
+## LDAP configuration
 
 The providers[].ldap object is parsed, validated and preserved in provider import.
 Its fields are endpoint, starttls, absolute ca path, base_dn, bind_dn,
 bind_password_env, username_attribute, subject_attribute, subject_encoding
 (text or binary_hex), and timeout_ms (1–2000). The client_id requirement applies
 to OIDC; LDAP cannot use OIDC credentials or implicit account linking. LDAP portal
-activation is still rejected by configuration validation. See
+activation is accepted by source configuration validation; production LDAP is not configured. See
 [LDAP implementation status](LDAP_AUTHENTICATION.md).
 
 ## TOTP keyring bootstrap

@@ -514,6 +514,11 @@ impl PortalServices for Adapter {
         provider: &ProviderId,
         cookies: &Cookies,
     ) -> Result<super::ports::PasswordChallenge, Failure> {
+        let form_origin = self
+            .svc
+            .credential_form_origin(&Self::sctx(ctx), txn)
+            .await
+            .map_err(|error| failure(&error))?;
         let challenge = self
             .svc
             .begin_password(&Self::sctx(ctx), txn, provider, cookies.bind.as_ref())
@@ -531,6 +536,7 @@ impl PortalServices for Adapter {
                 reason: crate::event::types::reasons::PROVIDER_DISABLED,
             })?;
         Ok(super::ports::PasswordChallenge {
+            form_origin,
             provider: provider.clone(),
             provider_name: row.display_name,
             challenge,

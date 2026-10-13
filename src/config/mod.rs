@@ -1161,9 +1161,9 @@ impl Config {
             } else if p.ldap.is_some() {
                 errs.push(format!("{at}.ldap requires kind ldap"));
             }
-            if p.kind != ProviderKind::Oidc {
+            if !matches!(p.kind, ProviderKind::Oidc | ProviderKind::Ldap) {
                 errs.push(format!(
-                    "{at}.kind {:?} is not supported before M3; use oidc",
+                    "{at}.kind {:?} is not supported before M3; use oidc or ldap",
                     p.kind.as_str()
                 ));
             }
@@ -1843,8 +1843,8 @@ mod tests {
                 .any(|warning| warning.contains("OWNED_LDAP_KEY"))
         );
         assert!(
-            config.validate().is_err(),
-            "portal activation gate must remain until login wiring exists"
+            config.validate().is_ok(),
+            "typed LDAP configuration is accepted after owned runtime qualification"
         );
         config.providers[0].kind = ProviderKind::Oidc;
         config.providers[0].client_id = "owned".into();

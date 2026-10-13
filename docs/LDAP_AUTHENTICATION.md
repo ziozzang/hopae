@@ -1,18 +1,24 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 28 -->
+<!-- doc-rev: 29 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
 ## Status and integration point
 
-Proposed implementation contract, not an enabled provider. The current Provider
-trait models OAuth authorization redirects and callbacks, and Registry instantiates
-OIDC only. LDAP must use a credential submission adapter into the same transaction,
-identity resolution, session, handoff, reauthentication and revocation services.
-It must not emulate an OAuth callback or forward passwords through HOP1/API relay.
-Add an explicit direct-credential provider interface alongside the redirect interface;
-the chooser can display both without requiring LDAP to implement OAuth code exchange.
+Source configuration accepts both OIDC and LDAP providers. LDAP uses the native
+credential form, transaction, identity, session, handoff and reauthentication
+services; it does not emulate an OAuth callback or relay passwords through HOP1.
+Owned OpenLDAP fixtures qualified LDAPS and mandatory StartTLS with a real Hopae
+process: mixed provider chooser, origin checks, failed-password denial, session
+issuance, bound handoff, password reauthentication, handle rotation and local user
+disable. The password page CSP permits only the validated application origin.
+
+The implementation notes below record earlier gates chronologically. This source
+activation supersedes their configuration rejection statements. Production LDAP
+is not configured: actual Chromium directory login, external directory account
+revocation, secret/CA publication epochs and distributed lifecycle qualification
+remain open. Local Hopae user disable does not prove directory-side revocation.
 
 ## Authentication flow
 
