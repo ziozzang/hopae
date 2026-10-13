@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 3 -->
+<!-- doc-rev: 4 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
@@ -77,3 +77,11 @@ a disabled tombstone, over bootstrap configuration; a failed scope check or miss
 secret leaves durable state unchanged. Request/admin wiring and stream-generation
 enforcement remain pending; existing snapshot holders intentionally retain the old
 snapshot until their caller enforces its lifetime.
+
+GatewayState can now receive the shared authority reader. Each HTTP/HOP1 verify
+loads one runtime snapshot, and a presented bearer credential whose profile was
+removed is denied rather than falling back to a human cookie. The native parity
+scenario publishes a tombstone while retaining the connection and verifies the
+next request is denied. Production startup and delegated administration still use
+the existing file-owned path until their explicit wiring is completed; this does
+not yet revoke an already-open upstream application stream.

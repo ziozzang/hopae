@@ -1,6 +1,6 @@
 # 인증 프로필 게시
 
-<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=3 status=current -->
+<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=4 status=current -->
 
 [문서](README.md) · [English](../AUTH_PROFILE_PUBLICATION.md)
 
@@ -65,3 +65,10 @@ revision 런타임을 ArcSwap으로 설치합니다. 공유 reader handle은 DB 
 시작 시 삭제 상태를 포함한 DB 상태가 bootstrap 설정보다 우선하며 앱 범위 거부나
 비밀 참조 누락은 DB를 변경하지 않습니다. 요청/관리자 연결과 stream generation 집행은
 남아 있습니다. 기존 스냅샷 보유자는 호출자가 수명을 집행할 때까지 이전 스냅샷을 유지합니다.
+
+GatewayState에 공유 authority reader를 전달할 수 있습니다. HTTP/HOP1 검증마다
+스냅샷 하나를 읽고 삭제된 프로필의 bearer credential은 사람 cookie로 우회하지 않고
+거부합니다. 네이티브 parity 시나리오는 연결을 유지한 상태로 삭제를 게시하고 다음
+요청의 거부를 확인합니다. 운영 시작 경로와 위임 관리는 명시적인 연결 구현까지 기존
+파일 소유 경로를 사용합니다. 이미 열린 upstream 애플리케이션 stream 회수는 아직
+구현하지 않았습니다.

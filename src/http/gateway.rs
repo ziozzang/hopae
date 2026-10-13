@@ -37,7 +37,8 @@ pub struct GatewayState {
     emitter: Option<Emitter>,
     next_id: AtomicU64,
     id_salt: RandomState,
-    authentication_gateway: Option<Arc<crate::auth_gateway::runtime::Runtime>>,
+    authentication_gateway:
+        Option<Arc<arc_swap::ArcSwap<crate::auth_gateway::authority::Snapshot>>>,
 }
 
 impl GatewayState {
@@ -71,7 +72,22 @@ impl GatewayState {
     ) -> anyhow::Result<Arc<Self>> {
         Arc::get_mut(&mut self)
             .ok_or_else(|| anyhow::anyhow!("authentication gateway state is already shared"))?
-            .authentication_gateway = Some(Arc::new(runtime));
+            .authentication_gateway = Some(Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::auth_gateway::authority::Snapshot {
+                revision: 0,
+                runtime: Some(runtime),
+            },
+        )));
+        Ok(self)
+    }
+
+    pub fn with_authentication_authority(
+        mut self: Arc<Self>,
+        reader: Arc<arc_swap::ArcSwap<crate::auth_gateway::authority::Snapshot>>,
+    ) -> anyhow::Result<Arc<Self>> {
+        Arc::get_mut(&mut self)
+            .ok_or_else(|| anyhow::anyhow!("authentication gateway state is already shared"))?
+            .authentication_gateway = Some(reader);
         Ok(self)
     }
 
@@ -174,7 +190,27 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
         }
     };
     let (input, env) = (parsed.input, parsed.env);
-    if let Some(runtime) = &st.authentication_gateway
+    let authority = st
+        .authentication_gateway
+        .as_ref()
+        .map(|reader| reader.load_full());
+    // A presented service credential never falls back after its profile was removed.
+    if let Some(snapshot) = &authority
+        && matches!(
+            input.canonical_path.reserved(),
+            crate::verify::types::Reserved::No
+        )
+        && headers.contains_key(axum::http::header::AUTHORIZATION)
+        && snapshot
+            .runtime
+            .as_ref()
+            .is_none_or(|runtime| !runtime.handles(input.host.as_str(), input.port))
+    {
+        return hangang::service_identity::response(None, &request_id);
+    }
+    if let Some(runtime) = authority
+        .as_ref()
+        .and_then(|snapshot| snapshot.runtime.as_ref())
         && runtime.handles(input.host.as_str(), input.port)
         && matches!(
             input.canonical_path.reserved(),

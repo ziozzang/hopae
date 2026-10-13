@@ -399,9 +399,16 @@ async fn service_api_credential_http_native_parity_and_no_human_assurance() {
     let fx = Fx::new("m1-basic");
     let config:hopae::auth_gateway::runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"services","api_keys":[{"token_env":"OWNED_KEY","subject":"scheduler"}],"networks":["203.0.113.0/24"],"session_fallback":true}]})).unwrap();
     let credential = "owned-service-credential-at-least-thirty-two-bytes";
-    let runtime =
-        hopae::auth_gateway::runtime::Runtime::compile(&config, &|_| Some(credential.into()))
-            .unwrap();
+    let mut db = rusqlite::Connection::open_in_memory().unwrap();
+    db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT")
+        .unwrap();
+    let mut authority = hopae::auth_gateway::authority::Authority::load(
+        &mut db,
+        Some(config),
+        &|_| Some(credential.into()),
+        &|_| Ok(()),
+    )
+    .unwrap();
     let keys = Arc::new(CallerKeys::new(
         Some(Secret::new("native-test-key".into())),
         None,
@@ -415,7 +422,7 @@ async fn service_api_credential_http_native_parity_and_no_human_assurance() {
         None,
         None,
     )
-    .with_authentication_gateway(runtime)
+    .with_authentication_authority(authority.reader())
     .unwrap();
     let router = router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -498,6 +505,26 @@ async fn service_api_credential_http_native_parity_and_no_human_assurance() {
             .headers
             .iter()
             .any(|(name, value)| name == "x-hopae-aal" && value == b"1")
+    );
+    authority
+        .publish(
+            &mut db,
+            1,
+            None,
+            "admin",
+            &|_| Some(credential.into()),
+            &|_| Ok(()),
+        )
+        .unwrap();
+    headers.push((
+        "authorization".into(),
+        format!("Bearer {credential}").into_bytes(),
+    ));
+    let (_, payload) = exchange(&mut socket, 4, &wire::encode_request(&headers).unwrap()).await;
+    assert_eq!(
+        wire::decode_reply(&payload).unwrap().status,
+        401,
+        "removed credential fell back to an existing human session"
     );
     tx.send(true).unwrap();
     task.await.unwrap().unwrap();
