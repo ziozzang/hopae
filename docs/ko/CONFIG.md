@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=27 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=28 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -326,7 +326,7 @@ verifier 자격·CA 내용·클라이언트는 상태 생성·마이그레이션
 
 선택적인 `eligibility_lua` 텍스트 스크립트는 네이티브 소유자 문맥으로 factor 사용을
 제한합니다. 미릴리스 소스 기능이며 태그 0.0.3의 artifact에는 포함되지 않습니다.
-내부 `0.0.3-lua-1341bae` 후보는 런타임을 포함하지만 운영 외부 factor·스크립트는
+내부 `0.0.3-service-lua-5125ff7` 후보는 런타임을 포함하지만 운영 외부 factor·스크립트는
 설정하지 않았습니다.
 예를 들어 `return context.service == 'orders'`는 해당 서비스에서만
 검증을 진행합니다. 환경에는 서버 소유 식별자인 `context.service`, `context.connector`,
@@ -356,5 +356,8 @@ relay 전송·스크립트 실행으로 신선도를 연장하지 않습니다. 
 
 옵션을 생략하면 직렬화 설정과 인덱스 경로를 유지하며 VM을 실행하지 않습니다. 비밀
 참조 해석 전에 문법을 검사하고 실행 제한은 위 외부 factor와 같습니다. 범용 자격
-변환·커넥터 조합·사람의 1차 인증 hook은 후속입니다. 태그 0.0.3 asset 및 내부
-`0.0.3-lua-1341bae` 이미지에는 이 후속 서비스 profile 확장이 없습니다.
+변환·커넥터 조합·사람의 1차 인증 hook은 후속입니다. 태그 0.0.3 asset에는 이 후속
+서비스 profile 확장이 없습니다. 내부 `0.0.3-service-lua-5125ff7`은 기능을 포함하지만
+운영 스크립트는 설정하지 않았습니다. 최적화 비공개 후보의 HTTP·지속 mTLS·Chromium
+MFA·TOTP, macOS 네이티브 runtime 및 내부 라이브 회귀가 통과했습니다. 기존 설정·키와
+일관된 v6 복구 백업을 유지합니다.

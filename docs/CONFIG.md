@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 27 -->
+<!-- doc-rev: 28 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -336,7 +336,7 @@ API requests still fail closed without elevated evidence. External factors use
 the native HTTPS/CSRF/browser-bound response form and atomic owner completion.
 An optional `eligibility_lua` text script can restrict a factor by native owner
 context in unreleased source (not in tagged 0.0.3 artifacts). The internal
-`0.0.3-lua-1341bae` candidate includes the runtime; production external factors
+`0.0.3-service-lua-5125ff7` candidate includes the runtime; production external factors
 and scripts remain unconfigured.
 For example, `return context.service == 'orders'` allows verification
 only for that service. The environment contains only `context.service`,
@@ -374,5 +374,8 @@ Omitting the option preserves serialized configuration and the indexed native
 path without VM execution. Syntax is validated before secret resolution. Script
 limits match external-factor eligibility above. General credential translation,
 connector orchestration and human first-factor hooks remain unfinished. Tagged
-0.0.3 artifacts and the `0.0.3-lua-1341bae` internal image do not contain this
-later service-profile extension.
+0.0.3 artifacts do not contain this later service-profile extension. Internal
+`0.0.3-service-lua-5125ff7` includes it with production scripts unconfigured.
+Optimized private-candidate HTTP/pooled mTLS and Chromium MFA/TOTP checks pass;
+native macOS runtime tests and live internal regressions also pass. Existing
+configuration/keys and consistent v6 rollback backups are preserved.
