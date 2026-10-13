@@ -62,9 +62,151 @@ pub trait CredentialProvider: Send + Sync {
         input: PasswordInput<'_>,
     ) -> Result<ProviderIdentity, CredentialError>;
 }
+/// Verified direct authentication; assurance and freshness provenance are fixed.
+pub struct PasswordAuthentication {
+    provider: ProviderId,
+    identity: ProviderIdentity,
+    authenticated_at: crate::crypto::Timestamp,
+}
+impl PasswordAuthentication {
+    pub fn provider(&self) -> &ProviderId {
+        &self.provider
+    }
+    pub fn identity(&self) -> &ProviderIdentity {
+        &self.identity
+    }
+    pub fn authenticated_at(&self) -> crate::crypto::Timestamp {
+        self.authenticated_at
+    }
+    pub fn principal_kind(&self) -> crate::auth_gateway::PrincipalKind {
+        crate::auth_gateway::PrincipalKind::Human
+    }
+    pub fn aal(&self) -> crate::session::types::Aal {
+        crate::session::types::Aal::One
+    }
+    pub fn auth_time_source(&self) -> crate::store::types::AuthTimeSource {
+        crate::store::types::AuthTimeSource::HopaeCompletion
+    }
+}
+/// Must be called after portal transaction, binding, CSRF and throttling validation.
+pub async fn authenticate_password(
+    provider: &dyn CredentialProvider,
+    input: PasswordInput<'_>,
+    clock: &dyn crate::crypto::Clock,
+) -> Result<PasswordAuthentication, CredentialError> {
+    if !provider.enabled() {
+        return Err(CredentialError::Disabled);
+    }
+    let id = provider.id().clone();
+    let kind = provider.kind();
+    let identity = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        provider.verify_password(input),
+    )
+    .await
+    .map_err(|_| CredentialError::Unavailable)??;
+    if !provider.enabled() {
+        return Err(CredentialError::Disabled);
+    }
+    if provider.id() != &id
+        || provider.kind() != kind
+        || identity.auth_time.is_some()
+        || identity.subject.is_empty()
+        || identity.subject.len() > 256
+        || identity.subject.chars().any(char::is_control)
+        || identity.email_verified
+        || identity.email_authoritative
+        || serde_json::to_vec(&identity.raw_claims)
+            .map_err(|_| CredentialError::Unavailable)?
+            .len()
+            > 8192
+    {
+        return Err(CredentialError::Unavailable);
+    }
+    let authenticated_at = clock.now();
+    if authenticated_at.0 < 0 {
+        return Err(CredentialError::Unavailable);
+    }
+    Ok(PasswordAuthentication {
+        provider: id,
+        identity,
+        authenticated_at,
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct OwnedProvider {
+        id: ProviderId,
+        claim: bool,
+        disable: bool,
+        enabled: std::sync::atomic::AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl CredentialProvider for OwnedProvider {
+        fn id(&self) -> &ProviderId {
+            &self.id
+        }
+        fn kind(&self) -> CredentialKind {
+            CredentialKind::Ldap
+        }
+        fn enabled(&self) -> bool {
+            self.enabled.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        async fn verify_password(
+            &self,
+            _: PasswordInput<'_>,
+        ) -> Result<ProviderIdentity, CredentialError> {
+            if self.disable {
+                self.enabled
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(ProviderIdentity {
+                subject: "t:entryuuid:owned".into(),
+                email: None,
+                email_verified: false,
+                email_authoritative: false,
+                name: None,
+                username: None,
+                picture: None,
+                raw_claims: serde_json::json!({}),
+                auth_time: self.claim.then(|| serde_json::json!(9999)),
+            })
+        }
+    }
+    #[tokio::test]
+    async fn direct_result_has_local_aal_one_and_rejects_provider_time_or_late_disable() {
+        let password = Secret::new("owned-credential".into());
+        let clock = crate::crypto::TestClock::new(crate::crypto::Timestamp(1234));
+        for (claim, disable) in [(false, false), (true, false), (false, true)] {
+            let provider = OwnedProvider {
+                id: ProviderId::new("owned"),
+                claim,
+                disable,
+                enabled: std::sync::atomic::AtomicBool::new(true),
+            };
+            let result = authenticate_password(
+                &provider,
+                PasswordInput::new("worker", &password).unwrap(),
+                &clock,
+            )
+            .await;
+            if claim {
+                assert!(matches!(result, Err(CredentialError::Unavailable)));
+            } else if disable {
+                assert!(matches!(result, Err(CredentialError::Disabled)));
+            } else {
+                let result = result.unwrap();
+                assert_eq!(result.provider().as_str(), "owned");
+                assert_eq!(result.authenticated_at().0, 1234);
+                assert_eq!(result.aal(), crate::session::types::Aal::One);
+                assert_eq!(
+                    result.auth_time_source(),
+                    crate::store::types::AuthTimeSource::HopaeCompletion
+                );
+            }
+        }
+    }
     #[test]
     fn password_input_rejects_anonymous_bind_and_excessive_inputs_without_disclosure() {
         let empty = Secret::new(String::new());

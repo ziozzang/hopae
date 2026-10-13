@@ -417,6 +417,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(binary_identity.subject, "b:jpegphoto:0001ff");
+        let authenticated = crate::provider::credentials::authenticate_password(
+            &provider,
+            PasswordInput::new("alice", &password).unwrap(),
+            &crate::crypto::SystemClock,
+        )
+        .await
+        .unwrap();
+        assert_eq!(authenticated.identity().subject, first.subject);
+        assert_eq!(
+            authenticated.principal_kind(),
+            crate::auth_gateway::PrincipalKind::Human
+        );
+        assert_eq!(authenticated.aal(), crate::session::types::Aal::One);
+        assert_eq!(
+            authenticated.auth_time_source(),
+            crate::store::types::AuthTimeSource::HopaeCompletion
+        );
         let wrong = Secret::new("owned-wrong-password".into());
         assert!(matches!(
             provider

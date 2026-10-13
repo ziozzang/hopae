@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=7 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=8 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -147,3 +147,16 @@ provider 소유권·비밀 참조 유지와 반복 이전을 검증하고 테이
 원래 테이블과 이전 버전 복원을 확인합니다. 기존 사용자/세션/관리자 이전 검사도
 통과했습니다. v3 바이너리는 v4 DB를 열지 못하므로 향후 복구에는 이미지 교체뿐
 아니라 일관된 이전 전 DB 백업이 필요합니다.
+
+## 직접 인증 결과 경계
+
+authenticate_password wrapper는 커넥터 결과를 검증하고 principal을 Human,
+AAL을 1, 인증 시간 출처를 HopaeCompletion으로 고정합니다. 로컬 완료 시간을
+기록하며 provider auth_time·verified/authoritative email 주장을 거부하고
+subject/claim 크기와 제한된 검증 이후 provider ID·종류·활성 상태를 확인합니다.
+결과 형태로 MFA를 주장할 수 없습니다. 자격 오류 종류는 유지하고 잘못된 결과는
+unavailable로 처리합니다.
+
+위조 provider 시간·검증 도중 비활성화 및 실제 LDAP 결과의 LDAPS/StartTLS 경계
+통과를 검증합니다. 세션 입력 준비이며 세션 생성·portal CSRF/transaction 구현이
+아닙니다. 향후 세션 생성 트랜잭션 내부의 provider 활성 상태 fence도 필요합니다.

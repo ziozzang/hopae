@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -171,3 +171,18 @@ force failure after table replacement to prove restoration of the original table
 and migration version. Existing user/session/admin migration checks pass. Older
 schema-v3 binaries cannot open v4 databases: future rollback requires a consistent
 pre-migration database backup, not just restoring the previous image.
+
+## Direct authentication result boundary
+
+The authenticate_password wrapper now validates direct connector results and fixes
+principal kind to Human, AAL to 1, and authentication time provenance to
+HopaeCompletion. It records local completion time, rejects provider auth_time and
+verified/authoritative email claims, checks subject/claim bounds, and rechecks
+provider identity, kind and enabled state after the bounded verification call.
+A connector cannot supply an MFA assertion through this result shape. Credential
+failures preserve their typed distinction; invalid results are unavailable.
+
+Tests cover forged provider time and disable during verification, plus real LDAP
+results through this wrapper over LDAPS and StartTLS. This prepares session input;
+it does not create sessions, implement portal CSRF/transactions, or replace the
+required provider-enabled fence inside the eventual session creation transaction.
