@@ -47,6 +47,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         "0003_admin",
         include_str!("../migrations/0003_admin.sql"),
     ),
+    (
+        4,
+        "0004_ldap_provider_kind",
+        include_str!("../migrations/0004_ldap_provider_kind.sql"),
+    ),
 ];
 
 /// The schema version this binary migrates to (the last embedded migration).
@@ -700,6 +705,14 @@ pub fn validate_foundation(conn: &Connection, version: u32) -> Result<(), StoreE
             if !index(ix)? {
                 return Err(missing(ix.into()));
             }
+        }
+    }
+    if version >= 4 {
+        let supported:bool=conn.query_row("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='providers' AND sql LIKE '%''ldap''%'",[],|row|Ok(row.get::<_,i64>(0)?>0))?;
+        if !supported {
+            return Err(StoreError::Corrupt(
+                "schema v4 is missing LDAP provider support".into(),
+            ));
         }
     }
     Ok(())

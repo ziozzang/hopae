@@ -265,7 +265,10 @@ fn s304_3_store_build_and_configuration() {
     let events_after = count(&h, "SELECT COUNT(*) FROM events");
     let st = &s["store"];
     assert_eq!(st["kind"], "sqlite");
-    assert_eq!(st["schema_version"], 3);
+    assert_eq!(
+        st["schema_version"],
+        hopae::store::sqlite::LATEST_SCHEMA_VERSION
+    );
     assert_eq!(st["users"], users_before);
     assert_eq!(
         st["live_sessions"],

@@ -19,6 +19,7 @@ pub enum ProviderKind {
     Oauth2,
     EmailLink,
     Password,
+    Ldap,
 }
 
 impl ProviderKind {
@@ -28,6 +29,7 @@ impl ProviderKind {
             ProviderKind::Oauth2 => "oauth2",
             ProviderKind::EmailLink => "email_link",
             ProviderKind::Password => "password",
+            ProviderKind::Ldap => "ldap",
         }
     }
 
@@ -37,6 +39,7 @@ impl ProviderKind {
             "oauth2" => Some(ProviderKind::Oauth2),
             "email_link" => Some(ProviderKind::EmailLink),
             "password" => Some(ProviderKind::Password),
+            "ldap" => Some(ProviderKind::Ldap),
             _ => None,
         }
     }
@@ -280,6 +283,7 @@ mod tests {
             ProviderKind::Oauth2,
             ProviderKind::EmailLink,
             ProviderKind::Password,
+            ProviderKind::Ldap,
         ] {
             assert_eq!(ProviderKind::parse(k.as_str()), Some(k));
         }

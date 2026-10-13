@@ -137,7 +137,10 @@ fn migration_2_to_3_backs_up_after_precheck_and_keeps_old_sessions_legible() {
         None,
     )
     .unwrap();
-    assert_eq!(store.schema_version().unwrap(), 3);
+    assert_eq!(
+        store.schema_version().unwrap(),
+        crate::store::sqlite::LATEST_SCHEMA_VERSION
+    );
     let c = store.conn();
     let (src, prefix): (String, Option<String>) = c
         .query_row(
@@ -249,7 +252,10 @@ fn a_current_database_missing_a_v3_structure_is_refused_naming_it() {
         Err(StoreError::Corrupt(m)) => assert!(m.contains("events_kind_at_id"), "{m}"),
         other => panic!("{other:?}"),
     }
-    assert_eq!(version_of(&db), 3);
+    assert_eq!(
+        version_of(&db),
+        i64::from(crate::store::sqlite::LATEST_SCHEMA_VERSION)
+    );
     let opened = Store::open(
         &db,
         Arc::new(crate::crypto::TestClock::new(Timestamp(0))),
@@ -257,7 +263,11 @@ fn a_current_database_missing_a_v3_structure_is_refused_naming_it() {
         None,
     );
     assert!(matches!(opened, Err(StoreError::Corrupt(_))));
-    assert_eq!(version_of(&db), 3, "a refused database keeps its version");
+    assert_eq!(
+        version_of(&db),
+        i64::from(crate::store::sqlite::LATEST_SCHEMA_VERSION),
+        "a refused database keeps its version"
+    );
 }
 
 #[test]
@@ -298,17 +308,79 @@ fn the_cli_open_never_migrates_creates_or_backs_up() {
     let db = dir.path().join("hopae.db");
     write_v2(&db);
     match Store::open_cli(&db, clock.clone(), vec![]) {
-        Err(StoreError::SchemaTooOld {
-            found: 2,
-            latest: 3,
-        }) => {}
+        Err(StoreError::SchemaTooOld { found: 2, latest })
+            if latest == crate::store::sqlite::LATEST_SCHEMA_VERSION => {}
         other => panic!("{:?}", other.map(|_| ())),
     }
     assert_eq!(version_of(&db), 2);
     assert!(!dir.path().join("hopae.db.bak-v2").exists());
     drop(Store::open(&db, clock.clone(), vec![], None).unwrap());
     let cli = Store::open_cli(&db, clock, vec!["log".into()]).unwrap();
-    assert_eq!(cli.schema_version().unwrap(), 3);
+    assert_eq!(
+        cli.schema_version().unwrap(),
+        crate::store::sqlite::LATEST_SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn ldap_kind_migration_preserves_provider_rows_and_is_atomic_on_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("owned.db");
+    write_v2(&path);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(include_str!("../migrations/0003_admin.sql"))
+        .unwrap();
+    conn.execute("INSERT INTO schema_migrations VALUES(3,'0003_admin',0)", [])
+        .unwrap();
+    conn.execute("INSERT INTO providers(provider_id,kind,display_name,enabled,managed_by,client_secret_env,created_at,updated_at)VALUES('owned','oidc','Owned',1,'api','OWNED_REFERENCE',10,20)",[]).unwrap();
+    conn.execute_batch("CREATE TABLE providers_v4(occupied INTEGER)")
+        .unwrap();
+    assert!(super::super::migrate(&conn).is_err());
+    assert_eq!(version_of(&path), 3);
+    let original: (String, String, String) = conn
+        .query_row(
+            "SELECT kind,managed_by,client_secret_env FROM providers WHERE provider_id='owned'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        original,
+        ("oidc".into(), "api".into(), "OWNED_REFERENCE".into())
+    );
+    conn.execute_batch("DROP TABLE providers_v4").unwrap();
+    // Force rename failure after the replacement table was copied and old table dropped.
+    conn.execute_batch("CREATE VIEW invalid_owned_view AS SELECT * FROM missing_owned_table")
+        .unwrap();
+    assert!(super::super::migrate(&conn).is_err());
+    assert_eq!(version_of(&path), 3);
+    let rows: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM providers WHERE provider_id='owned'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1, "failed DDL did not restore the original table");
+    conn.execute_batch("DROP VIEW invalid_owned_view").unwrap();
+
+    assert_eq!(
+        super::super::migrate(&conn).unwrap(),
+        crate::store::sqlite::LATEST_SCHEMA_VERSION
+    );
+    let retained: (String, String, String) = conn
+        .query_row(
+            "SELECT kind,managed_by,client_secret_env FROM providers WHERE provider_id='owned'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(retained, original);
+    conn.execute("INSERT INTO providers(provider_id,kind,display_name,enabled,managed_by,created_at,updated_at)VALUES('directory','ldap','Directory',0,'file',0,0)",[]).unwrap();
+    assert_eq!(
+        super::super::migrate(&conn).unwrap(),
+        crate::store::sqlite::LATEST_SCHEMA_VERSION
+    );
 }
 
 // ---- the console fixture -----------------------------------------------
@@ -2705,7 +2777,10 @@ async fn store_status_counts_rows_deliveries_and_the_last_prune() {
         .unwrap();
     f.store.conn().execute_batch("INSERT INTO event_deliveries SELECT 'webhook', event_id, 'failed', 3, 0, 'x', 0 FROM events").unwrap();
     let st = f.store.status(long()).await.unwrap();
-    assert_eq!(st.schema_version, 3);
+    assert_eq!(
+        st.schema_version,
+        crate::store::sqlite::LATEST_SCHEMA_VERSION
+    );
     assert_eq!(st.users, 2);
     assert_eq!(st.live_sessions, 1);
     assert_eq!(st.events, 1);

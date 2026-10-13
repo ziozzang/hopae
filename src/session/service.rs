@@ -1760,7 +1760,7 @@ fn factor_kind(kind: ProviderKind) -> FactorKind {
         ProviderKind::Oidc => FactorKind::Oidc,
         ProviderKind::Oauth2 => FactorKind::Oauth2,
         ProviderKind::EmailLink => FactorKind::EmailLink,
-        ProviderKind::Password => FactorKind::Password,
+        ProviderKind::Password | ProviderKind::Ldap => FactorKind::Password,
     }
 }
 

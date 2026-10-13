@@ -21,7 +21,10 @@ fn mode(p: &std::path::Path) -> u32 {
 fn open_applies_migration_and_sets_pragmas() {
     let dir = tempfile::tempdir().unwrap();
     let store = open(&dir.path().join("state/hopae.db")).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 3);
+    assert_eq!(
+        store.schema_version().unwrap(),
+        hopae::store::sqlite::LATEST_SCHEMA_VERSION
+    );
     let c = store.conn();
     let jm: String = c
         .pragma_query_value(None, "journal_mode", |r| r.get(0))
@@ -70,12 +73,15 @@ fn migrations_are_idempotent_across_reopen() {
     let path = dir.path().join("hopae.db");
     drop(open(&path).unwrap());
     let store = open(&path).unwrap();
-    assert_eq!(migrate(&store.conn()).unwrap(), 3);
+    assert_eq!(
+        migrate(&store.conn()).unwrap(),
+        hopae::store::sqlite::LATEST_SCHEMA_VERSION
+    );
     let n: i64 = store
         .conn()
         .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(n, 3);
+    assert_eq!(n, i64::from(hopae::store::sqlite::LATEST_SCHEMA_VERSION));
 }
 
 #[test]
