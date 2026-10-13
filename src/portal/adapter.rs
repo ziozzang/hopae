@@ -224,6 +224,40 @@ impl PortalServices for Adapter {
             })
     }
 
+    fn password_provider(&self, provider: &ProviderId) -> bool {
+        self.registry.credential(provider).is_some()
+    }
+
+    async fn prepare_password(
+        &self,
+        ctx: &RequestCtx,
+        txn: &Secret,
+        provider: &ProviderId,
+        cookies: &Cookies,
+    ) -> Result<super::ports::PasswordChallenge, Failure> {
+        let challenge = self
+            .svc
+            .begin_password(&Self::sctx(ctx), txn, provider, cookies.bind.as_ref())
+            .await
+            .map_err(|error| failure(&error))?;
+        let rows = self.directory.providers().await.map_err(|_| Failure {
+            kind: FailKind::Unavailable,
+            reason: crate::event::types::reasons::PROVIDER_UNAVAILABLE,
+        })?;
+        let row = rows
+            .into_iter()
+            .find(|row| &row.provider_id == provider && row.enabled && row.deleted_at.is_none())
+            .ok_or(Failure {
+                kind: FailKind::Unavailable,
+                reason: crate::event::types::reasons::PROVIDER_DISABLED,
+            })?;
+        Ok(super::ports::PasswordChallenge {
+            provider: provider.clone(),
+            provider_name: row.display_name,
+            challenge,
+        })
+    }
+
     async fn password(
         &self,
         ctx: &RequestCtx,

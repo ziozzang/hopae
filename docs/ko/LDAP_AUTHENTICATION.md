@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=18 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=19 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -281,3 +281,18 @@ Origin/CSRF guard를 요구하며 중복/누락 자격 필드를 거부하고 �
 제출 10개만 서비스에 도달함을 검증했습니다. portal 61건이 통과했습니다. 선택기와
 최초 비밀번호 form은 아직 연결하지 않았고 LDAP 설정 활성화 제한도 유지합니다.
 내부 배포 및 실제 디렉토리/브라우저 전체 흐름 검증은 남아 있습니다.
+
+## 최초 비밀번호 form dispatch
+
+PortalServices.prepare_password와 adapter가 실제 세션 서비스 challenge를 준비하고
+provider 표시명과 Secret metadata를 반환합니다. 기존 provider 선택 POST는 등록된
+credential provider를 이 경로로 분기하여 Origin/CSRF 검사 후 HTTPS를 요구하고
+새 Login CSRF token의 PasswordForm을 렌더링합니다. redirect provider는 기존
+begin_provider를 사용합니다. 실제 store adapter 시나리오에서 준비 후 자격 완료를
+수행하고 실제 router와 제어된 서비스로 자격 검증 없이 바인딩 form 렌더링을 확인합니다.
+portal 62건과 Clippy가 통과했습니다.
+
+직접 provider를 최초/재인증 선택 목록에 포함하고 단일 provider redirect를 처리하는
+작업은 남아 있으며 설정 활성화 제한도 유지합니다. 소스 연결이며 내부 LDAP 배포나
+실제 디렉토리 브라우저 전체 검증은 아닙니다. 분산/계정 시도 제한과 커넥터 epoch
+fence도 필요합니다.

@@ -167,6 +167,23 @@ impl PortalServices for Fake {
         self.rec(format!("begin:{}:{}", txn.expose(), p), Some(ctx), Some(c));
         self.begin.lock().unwrap().clone()
     }
+    fn password_provider(&self, provider: &ProviderId) -> bool {
+        provider.as_str() == "directory"
+    }
+    async fn prepare_password(
+        &self,
+        ctx: &RequestCtx,
+        _txn: &Secret,
+        provider: &ProviderId,
+        cookies: &Cookies,
+    ) -> Result<PasswordChallenge, Failure> {
+        self.rec("prepare_password", Some(ctx), Some(cookies));
+        Ok(PasswordChallenge {
+            provider: provider.clone(),
+            provider_name: "Owned directory".into(),
+            challenge: Secret::new("A".repeat(43)),
+        })
+    }
     async fn password(
         &self,
         ctx: &RequestCtx,
@@ -1717,4 +1734,38 @@ async fn password_http_requires_tls_csrf_unique_fields_and_bounded_attempts() {
             .count(),
         10
     );
+}
+
+#[tokio::test]
+async fn selecting_direct_provider_renders_bound_password_form_after_tls_and_csrf() {
+    let mut e = env().await;
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        crate::gateway::forwarding::X_FORWARDED_PROTO.clone(),
+        reqwest::header::HeaderValue::from_static("https"),
+    );
+    e.http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .default_headers(headers)
+        .build()
+        .unwrap();
+    let cookie = portal_cookie(BIND);
+    let token = e.token(BIND, Purpose::Login);
+    let response = e
+        .post(
+            "/login/directory",
+            &[("csrf", &token), ("txn", "owned-txn")],
+            Some(&cookie),
+            Some(ORIGIN),
+        )
+        .await;
+    assert_eq!(response.status, 200);
+    assert!(
+        response
+            .body
+            .contains("action=\"/login/directory/password\"")
+    );
+    assert!(response.body.contains("name=\"challenge\""));
+    assert!(response.body.contains("type=\"password\""));
+    assert_eq!(e.fake.calls(), vec!["prepare_password"]);
 }

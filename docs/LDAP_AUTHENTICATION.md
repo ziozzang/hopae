@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 18 -->
+<!-- doc-rev: 19 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -327,3 +327,20 @@ ambiguous fields are refused without a credential call; only ten submissions rea
 the service. Portal tests pass (61 cases). The chooser and initial password form are
 still not wired, LDAP configuration activation remains gated, and this endpoint is
 not yet deployed internally. End-to-end real-directory/browser qualification remains.
+
+## Initial password form dispatch
+
+PortalServices.prepare_password and the adapter now prepare a real session-service
+challenge and return provider label plus redacted Secret metadata. The existing
+provider selection POST dispatches a registered credential provider to this path,
+requires HTTPS after its Origin/CSRF check, and renders PasswordForm with a newly
+issued Login CSRF token. Redirect-provider handling remains on begin_provider.
+The real-store adapter scenario uses this preparation before credential completion;
+a real-router controlled-service test confirms selection renders the bound form
+without invoking credential verification. Portal 62 cases and Clippy pass.
+
+The direct providers still need inclusion in initial/reauthentication chooser lists
+and single-provider redirect handling, and configuration activation remains gated.
+This is source integration, not an internal LDAP deployment or complete real-directory
+browser qualification. Distributed/account admission and connector epoch fencing
+also remain required.

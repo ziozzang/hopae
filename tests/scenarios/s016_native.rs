@@ -959,10 +959,13 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         )
         .await
         .unwrap();
-    let submitted_challenge = service
-        .begin_password(&ctx, &submitted_token, &id, Some(&cookie))
+    let prepared = adapter
+        .prepare_password(&portal_ctx, &submitted_token, &id, &portal_cookies)
         .await
         .unwrap();
+    assert_eq!(prepared.provider, id);
+    assert_eq!(prepared.provider_name, "Owned");
+    let submitted_challenge = prepared.challenge;
     let result = adapter
         .password(
             &portal_ctx,

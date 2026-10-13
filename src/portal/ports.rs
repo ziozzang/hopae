@@ -166,6 +166,14 @@ pub struct Health {
     pub providers: Vec<(ProviderId, ProviderHealth)>,
 }
 
+/// Prepared form metadata; Secret's Debug remains redacted.
+#[derive(Clone, Debug)]
+pub struct PasswordChallenge {
+    pub provider: ProviderId,
+    pub provider_name: String,
+    pub challenge: Secret,
+}
+
 /// Borrowed credential submission; no Debug/serialization or retained password value.
 pub struct PasswordSubmission<'a> {
     pub provider: &'a ProviderId,
@@ -191,6 +199,24 @@ pub trait PortalServices: Send + Sync + 'static {
         provider: &ProviderId,
         cookies: &Cookies,
     ) -> Result<Redirect, Failure>;
+
+    fn password_provider(&self, _provider: &ProviderId) -> bool {
+        false
+    }
+
+    /// Prepare a bound direct challenge after the login form's origin/CSRF checks.
+    async fn prepare_password(
+        &self,
+        _ctx: &RequestCtx,
+        _txn: &Secret,
+        _provider: &ProviderId,
+        _cookies: &Cookies,
+    ) -> Result<PasswordChallenge, Failure> {
+        Err(Failure {
+            kind: FailKind::Unavailable,
+            reason: crate::event::types::reasons::PROVIDER_UNAVAILABLE,
+        })
+    }
 
     /// Called only after HTTP origin/CSRF and password-attempt throttling checks.
     async fn password(

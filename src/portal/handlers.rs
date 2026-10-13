@@ -446,6 +446,40 @@ pub(crate) async fn login_post(
         bind: rq.presented.bind.clone(),
         handle: rq.presented.handle.clone(),
     };
+    let selected = ProviderId::new(provider.clone());
+    if st.services.password_provider(&selected) {
+        if !rq.ctx.https {
+            return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+        }
+        return match st
+            .services
+            .prepare_password(&rq.ctx, &Secret::new(txn.to_owned()), &selected, &cookies)
+            .await
+        {
+            Ok(prepared) => {
+                let Some(bind) = cookies.bind.as_ref() else {
+                    return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+                };
+                let csrf = token_for(&st, bind.expose(), Purpose::Login);
+                render_page_status(
+                    &rq,
+                    StatusCode::OK,
+                    pages::PasswordForm {
+                        t: rq.t(),
+                        request_id: rq.rid(),
+                        provider_id: prepared.provider.as_str(),
+                        provider_name: &prepared.provider_name,
+                        csrf: &csrf,
+                        challenge: prepared.challenge.expose(),
+                        rejected: false,
+                    },
+                    &[],
+                    &[],
+                )
+            }
+            Err(failure) => fail_response(&rq, failure),
+        };
+    }
     match st
         .services
         .begin_provider(
