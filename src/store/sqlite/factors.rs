@@ -10,6 +10,36 @@ use rusqlite::{OptionalExtension, params};
 
 #[async_trait]
 impl Factors for Store {
+    async fn bind_totp_stepup(
+        &self,
+        request: crate::store::BindTotpStepUp,
+    ) -> StoreResult<crate::store::TotpChallengeBinding> {
+        self.write("bind_totp_stepup", move |env| {
+            let shared=env.shared.clone();let now=shared.clock.now();let tx=env.begin()?;
+            let actor=&request.actor;let view=&actor.view;let user=actor.user();
+            require_actor(&tx,&shared,user.as_str(),actor)?;
+            let row:Option<(String,i64)> = tx.query_row("SELECT enrollment_id,revision FROM totp_enrollments WHERE user_id=?1 AND state='active'",[user.as_str()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+            let (enrollment,revision)=row.ok_or(StoreError::Conflict("active factor unavailable"))?;
+            let context=stepup_context(view.session.cred_gen,&enrollment,revision)?;
+            let changed=tx.execute("UPDATE login_txns SET portal_bind_sha256=?2,conflicting_handle_sha256=?3,pending_identity=?4 WHERE txn_sha256=?1 AND purpose='stepup' AND portal_session_id=?5 AND client_ip=?6 AND bind_sha256 IS NOT NULL AND consumed_at IS NULL AND created_at<=?7 AND expires_at>?7 AND portal_bind_sha256 IS NULL AND conflicting_handle_sha256 IS NULL AND pending_identity IS NULL AND provider_id IS NULL AND state_sha256 IS NULL AND nonce IS NULL AND pkce_verifier IS NULL AND reauth_max_age IS NULL",
+                params![&request.transaction.0[..],&request.portal_binding.0[..],&view.handle.handle_sha256.0[..],context,view.session.session_id.as_str(),actor.client_ip.to_string(),now.secs()])?;
+            if changed!=1 {
+                // Refresh is idempotent only for the identical bound browser,
+                // live actor, generation and active enrollment revision.
+                let matches:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM login_txns WHERE txn_sha256=?1 AND purpose='stepup' AND portal_session_id=?5 AND client_ip=?6 AND bind_sha256 IS NOT NULL AND consumed_at IS NULL AND created_at<=?7 AND expires_at>?7 AND portal_bind_sha256=?2 AND conflicting_handle_sha256=?3 AND pending_identity=?4 AND provider_id IS NULL AND state_sha256 IS NULL AND nonce IS NULL AND pkce_verifier IS NULL AND reauth_max_age IS NULL)",
+                    params![&request.transaction.0[..],&request.portal_binding.0[..],&view.handle.handle_sha256.0[..],context,view.session.session_id.as_str(),actor.client_ip.to_string(),now.secs()],|r|r.get(0))?;
+                if !matches {return Err(StoreError::Conflict("step-up challenge unavailable"));}
+            }
+            if changed==1 {
+                let event=EventBuilder::new(shared.clock.as_ref(),shared.rng().as_ref(),EventKind::LoginStarted,Outcome::Info,&actor.request_id).user(user).session(&view.session.session_id).reason(crate::event::types::reasons::STEP_UP_REQUIRED).attr("enrollment_id",enrollment.as_str()).build();
+                insert_events(&tx,&shared,&[event])?;
+            }
+            let binding=crate::store::TotpChallengeBinding{enrollment,revision:u64::try_from(revision).map_err(|_|StoreError::Corrupt("factor revision".into()))?};
+            commit(tx,&shared,None)?;
+            Ok(binding)
+        }).await
+    }
+
     async fn elevate_totp(&self, request: crate::store::TotpElevation) -> StoreResult<()> {
         self.write("elevate_totp", move |env| {
             use crate::{session::types::{Aal, FactorEntry, FactorKind}, event::types::reasons};
@@ -33,6 +63,7 @@ impl Factors for Store {
                 || handle.absolute_expires_at.secs() <= now.secs()
                 || handle.absolute_expires_at > view.handle.absolute_expires_at.min(view.session.absolute_expires_at)
                 || handle.revoked_at.is_some() || handle.revoked_reason.is_some()
+                || code.client_ip != actor.client_ip
                 || code.session_id != *sid || code.issued_aal != Aal::Two
                 || i64::try_from(code.cred_gen).ok() != Some(generation)
                 || code.created_at.secs() != now.secs() || code.expires_at.secs() <= now.secs()
@@ -47,8 +78,8 @@ impl Factors for Store {
             // A native step-up challenge is bound to the initiating portal handle.
             // The existing conflicting-handle column has this purpose for stepup only.
             let consumed = tx.execute(
-                "UPDATE login_txns SET consumed_at=?2,consumed_reason='elevation' WHERE txn_sha256=?1 AND purpose='stepup' AND portal_session_id=?3 AND conflicting_handle_sha256=?4 AND bind_sha256=?5 AND return_target=?6 AND client_ip=?7 AND recovery_depth=?8 AND consumed_at IS NULL AND created_at<=?2 AND expires_at>?2 AND reauth_max_age IS NULL AND provider_id IS NULL AND state_sha256 IS NULL AND nonce IS NULL AND pkce_verifier IS NULL",
-                params![&request.transaction.0[..],now.secs(),sid.as_str(),&view.handle.handle_sha256.0[..],&code.bind_sha256.0[..],code.return_target.as_str(),code.client_ip.to_string(),i64::from(code.recovery_depth)],
+                "UPDATE login_txns SET consumed_at=?2,consumed_reason='elevation' WHERE txn_sha256=?1 AND purpose='stepup' AND portal_session_id=?3 AND conflicting_handle_sha256=?4 AND bind_sha256=?5 AND return_target=?6 AND client_ip=?7 AND recovery_depth=?8 AND consumed_at IS NULL AND created_at<=?2 AND expires_at>?2 AND reauth_max_age IS NULL AND provider_id IS NULL AND state_sha256 IS NULL AND nonce IS NULL AND pkce_verifier IS NULL AND portal_bind_sha256=?9 AND pending_identity=?10",
+                params![&request.transaction.0[..],now.secs(),sid.as_str(),&view.handle.handle_sha256.0[..],&code.bind_sha256.0[..],code.return_target.as_str(),code.client_ip.to_string(),i64::from(code.recovery_depth),&request.portal_binding.0[..],stepup_context(view.session.cred_gen,&request.enrollment,revision)?],
             )?;
             if consumed != 1 { return Err(StoreError::Conflict("step-up challenge unavailable")); }
             if tx.execute("UPDATE totp_enrollments SET last_counter=?4,updated_at=?5 WHERE enrollment_id=?1 AND user_id=?2 AND revision=?3 AND state='active' AND last_counter<?4",params![request.enrollment,user.as_str(),revision,counter,now.secs()])? != 1 {
@@ -335,4 +366,11 @@ fn require_actor(
         return Err(StoreError::Conflict("factor authorization revoked"));
     }
     Ok(())
+}
+
+fn stepup_context(generation: u64, enrollment: &str, revision: i64) -> StoreResult<String> {
+    if revision <= 0 || i64::try_from(generation).is_err() {
+        return Err(StoreError::Conflict("invalid step-up context"));
+    }
+    Ok(serde_json::json!({"credential_generation":generation,"enrollment_id":enrollment,"enrollment_revision":revision}).to_string())
 }

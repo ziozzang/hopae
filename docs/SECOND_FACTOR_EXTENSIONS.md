@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 3 -->
+<!-- doc-rev: 4 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -187,3 +187,34 @@ The native admin listener maps assurance refusal to its existing
 misreporting a missing login. Prefix matching compares ASCII bytes without
 allocating lowercase strings on each request; existing UTF-8 and segment
 semantics are preserved. This is not a full-stack throughput qualification.
+
+## Durable portal challenge binding
+
+The native `bind_stepup` service now validates transaction/portal-cookie shape
+and authorizes one owner write against a fresh native factor actor. The owner
+selects the user's active TOTP enrollment and binds an unexpired `stepup`
+transaction to the same live session, exact portal handle, portal-cookie digest,
+client IP, credential generation, enrollment ID and enrollment revision.
+Application binding must already be present. OAuth and reauthentication fields
+must be absent. No seed, cookie or bearer value is written to this context.
+
+For `stepup` only, `pending_identity` contains the native generation/enrollment
+context; other transaction purposes retain their existing semantics. Repeated
+preparation succeeds only for an identical live binding and does not add a
+second binding audit event. A different browser cookie/handle/IP, changed
+credential generation or active enrollment revision cannot replace it. Binding
+and required audit/outbox insertions commit together. The final OTP elevation
+transaction compares the portal-cookie digest and exact recorded context before
+consuming either the challenge or counter; its new handoff IP must also match
+the native actor's current request IP. Refusal leaves both proofs usable by the
+correct browser until their normal expiry.
+
+Owned SQLite/service tests cover initial binding, idempotent refresh, cookie and
+handle transfer, IP changes, refreshed actors after generation changes,
+enrollment revision changes, wrong purpose, expiry, missing application binding,
+consumed challenges, malformed portal cookies, audit rollback and successful
+retry. Final completion also rejects wrong cookie/context/IP without elevation
+or counter/challenge consumption. These tests do not exercise an actual browser
+step-up. The request engine still refuses unmet rules; browser challenge
+creation, portal page/CSRF, validated target/policy epoch checks and operational
+activation remain mandatory before enabling the workflow.

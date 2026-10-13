@@ -812,6 +812,7 @@ pub struct TotpEnrollment {
 pub struct FactorActor {
     pub(crate) request_id: String,
     pub(crate) provider_configuration: (ProviderKind, serde_json::Value),
+    pub(crate) client_ip: IpAddr,
     pub(crate) view: HandleView,
     pub(crate) authorized_at: Timestamp,
     pub(crate) session_idle: std::time::Duration,
@@ -836,7 +837,29 @@ pub struct TotpElevation {
     pub(crate) revision: u64,
     pub(crate) counter: u64,
     pub(crate) transaction: Digest,
+    pub(crate) portal_binding: Digest,
     pub(crate) portal_handle: HandleRow,
     pub(crate) handoff: HandoffCodeRow,
     pub(crate) events: Vec<crate::event::types::Event>,
+}
+
+/// Native-only challenge binding. Raw portal cookie values are never stored.
+pub struct BindTotpStepUp {
+    pub(crate) actor: FactorActor,
+    pub(crate) transaction: Digest,
+    pub(crate) portal_binding: Digest,
+}
+/// Bound enrollment metadata; no seed, credential or session assertion.
+#[derive(Debug)]
+pub struct TotpChallengeBinding {
+    pub(crate) enrollment: String,
+    pub(crate) revision: u64,
+}
+impl TotpChallengeBinding {
+    pub fn enrollment(&self) -> &str {
+        &self.enrollment
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
 }

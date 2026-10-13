@@ -641,6 +641,7 @@ impl Service {
         Ok(crate::store::FactorActor {
             request_id: ctx.request_id.clone(),
             provider_configuration: (provider.kind, provider.config),
+            client_ip: ctx.client_ip,
             view,
             authorized_at: now,
             session_idle: self.cfg.session.idle,

@@ -159,6 +159,7 @@ pub struct StepUp<'a> {
     pub actor: crate::store::FactorActor,
     pub code: &'a Secret,
     pub transaction: crate::crypto::Digest,
+    pub portal_binding: crate::crypto::Digest,
     pub portal_handle: crate::store::HandleRow,
     pub handoff: crate::store::HandoffCodeRow,
     pub events: Vec<Event>,
@@ -194,9 +195,33 @@ pub async fn elevate_authorized(
             revision: row.revision,
             counter,
             transaction: input.transaction,
+            portal_binding: input.portal_binding,
             portal_handle: input.portal_handle,
             handoff: input.handoff,
             events: input.events,
+        })
+        .await
+        .map_err(Error::Store)
+}
+
+/// Bind a native challenge after HTTPS/recent portal-session authorization.
+/// The application binding is verified again during elevated handoff redemption.
+pub async fn bind_stepup(
+    store: &dyn Factors,
+    actor: crate::store::FactorActor,
+    transaction: &Secret,
+    portal_cookie: &Secret,
+) -> Result<crate::store::TotpChallengeBinding, Error> {
+    if !crate::crypto::is_well_formed_bind(portal_cookie.expose())
+        || !crate::crypto::is_well_formed_bind(transaction.expose())
+    {
+        return Err(Error::Refused);
+    }
+    store
+        .bind_totp_stepup(crate::store::BindTotpStepUp {
+            actor,
+            transaction: transaction.digest(),
+            portal_binding: portal_cookie.digest(),
         })
         .await
         .map_err(Error::Store)

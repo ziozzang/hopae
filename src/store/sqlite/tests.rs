@@ -2782,6 +2782,7 @@ async fn factor_actor_fences_registration_after_session_or_authority_revocation(
         let actor = FactorActor {
             request_id: "r_owned_factor".into(),
             provider_configuration: (ProviderKind::Oidc, serde_json::json!({})),
+            client_ip: ip("192.0.2.10"),
             view,
             authorized_at: f.now(),
             session_idle: Duration::from_secs(300),
@@ -2857,6 +2858,7 @@ async fn authorized_totp_confirmation_refuses_revoked_actor_and_active_removal_n
     let actor = |view| FactorActor {
         request_id: "r_owned_factor".into(),
         provider_configuration: (ProviderKind::Oidc, serde_json::json!({})),
+        client_ip: ip("192.0.2.10"),
         view,
         authorized_at: f.now(),
         session_idle: Duration::from_secs(300),
@@ -3044,6 +3046,7 @@ async fn native_authorized_confirmation_verifies_real_code_before_activation() {
     let actor = || FactorActor {
         request_id: "r_owned_factor".into(),
         provider_configuration: (ProviderKind::Oidc, serde_json::json!({})),
+        client_ip: ip("192.0.2.10"),
         view: view.clone(),
         authorized_at: f.now(),
         session_idle: Duration::from_secs(300),
@@ -3133,19 +3136,27 @@ async fn totp_stepup_fixture(
     let mut txn = new_txn(f, &random_token(&f.rng, 32), "192.0.2.10");
     txn.purpose = TxnPurpose::Stepup;
     txn.portal_session_id = Some(session.row.session_id.clone());
-    txn.conflicting_handle_sha256 = Some(session.portal_digest);
+    txn.conflicting_handle_sha256 = None;
     txn.return_target = old.row.return_target.clone();
     txn.bind_sha256 = Some(old.row.bind_sha256);
     txn.recovery_depth = 0;
     let digest = txn.txn_sha256;
     f.store.create_transaction(txn, vec![]).await.unwrap();
-    let txn = f.store.transaction(&digest).await.unwrap().unwrap();
     let view = f
         .store
         .lookup_handle(&session.portal_digest, &host(PORTAL_HOST))
         .await
         .unwrap()
         .unwrap();
+    f.store
+        .bind_totp_stepup(BindTotpStepUp {
+            actor: stepup_actor(f, view.clone()),
+            transaction: digest,
+            portal_binding: sha256(b"owned-portal-cookie"),
+        })
+        .await
+        .unwrap();
+    let txn = f.store.transaction(&digest).await.unwrap().unwrap();
     let mut handle = f.handle_row(&session.row.session_id, PORTAL_HOST, &handle_value(&f.rng));
     handle.issued_aal = Aal::Two;
     let mut code = old.row;
@@ -3158,6 +3169,7 @@ fn stepup_actor(f: &Fx, view: HandleView) -> FactorActor {
     FactorActor {
         request_id: "r_owned_stepup".into(),
         provider_configuration: (ProviderKind::Oidc, serde_json::json!({})),
+        client_ip: ip("192.0.2.10"),
         view,
         authorized_at: f.now(),
         session_idle: Duration::from_secs(300),
@@ -3180,6 +3192,7 @@ async fn native_totp_stepup_atomically_consumes_proof_and_challenge_rotates_and_
             actor: stepup_actor(&f, view.clone()),
             code: &proof,
             transaction: txn.txn_sha256,
+            portal_binding: txn.portal_bind_sha256.unwrap(),
             portal_handle: handle.clone(),
             handoff: code.clone(),
             events: vec![],
@@ -3237,6 +3250,7 @@ async fn native_totp_stepup_atomically_consumes_proof_and_challenge_rotates_and_
                 actor: stepup_actor(&f, view),
                 code: &proof,
                 transaction: txn.txn_sha256,
+                portal_binding: txn.portal_bind_sha256.unwrap(),
                 portal_handle: handle,
                 handoff: code,
                 events: vec![]
@@ -3327,6 +3341,7 @@ async fn native_totp_stepup_refusal_rolls_back_challenge_counter_and_credentials
                     actor: stepup_actor(&f, view),
                     code: &proof,
                     transaction: digest,
+                    portal_binding: txn.portal_bind_sha256.unwrap(),
                     portal_handle: handle,
                     handoff: code,
                     events
@@ -3388,6 +3403,8 @@ async fn native_totp_stepup_concurrent_challenges_have_one_winner() {
     second.purpose = TxnPurpose::Stepup;
     second.portal_session_id = txn.portal_session_id.clone();
     second.conflicting_handle_sha256 = txn.conflicting_handle_sha256;
+    second.portal_bind_sha256 = txn.portal_bind_sha256;
+    second.pending_identity = txn.pending_identity.clone();
     second.return_target = txn.return_target.clone();
     second.bind_sha256 = txn.bind_sha256;
     second.recovery_depth = txn.recovery_depth;
@@ -3407,6 +3424,7 @@ async fn native_totp_stepup_concurrent_challenges_have_one_winner() {
             actor: stepup_actor(&f, view.clone()),
             code: &proof,
             transaction: txn.txn_sha256,
+            portal_binding: txn.portal_bind_sha256.unwrap(),
             portal_handle: handle,
             handoff: code,
             events: vec![],
@@ -3421,6 +3439,7 @@ async fn native_totp_stepup_concurrent_challenges_have_one_winner() {
             actor: stepup_actor(&f, view),
             code: &proof,
             transaction: second_digest,
+            portal_binding: txn.portal_bind_sha256.unwrap(),
             portal_handle: second_handle,
             handoff: second_code,
             events: vec![],
@@ -3444,4 +3463,238 @@ async fn native_totp_stepup_concurrent_challenges_have_one_winner() {
         f.count("SELECT COUNT(*) FROM events WHERE kind='factor.totp_consumed'"),
         1
     );
+}
+
+#[tokio::test]
+async fn native_totp_stepup_binding_is_idempotent_and_refuses_transfer_or_stale_context() {
+    use crate::store::Factors;
+    for case in [
+        "same",
+        "cookie",
+        "handle",
+        "ip",
+        "generation",
+        "revision",
+        "purpose",
+        "expiry",
+        "app_binding",
+        "consumed",
+    ] {
+        let f = fx();
+        let (_, _, txn, view, _, _) = totp_stepup_fixture(&f).await;
+        let mut actor = stepup_actor(&f, view);
+        let mut cookie = txn.portal_bind_sha256.unwrap();
+        match case {
+            "cookie" => cookie = sha256(b"different-browser-cookie"),
+            "handle" => {
+                let secret = handle_value(&f.rng);
+                let handle = f.handle_row(&actor.view.session.session_id, PORTAL_HOST, &secret);
+                f.store.mint_handle(handle, None, vec![]).await.unwrap();
+                actor.view = f
+                    .store
+                    .lookup_handle(&secret.digest(), &host(PORTAL_HOST))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            "ip" => actor.client_ip = ip("192.0.2.11"),
+            "generation" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE sessions SET cred_gen=cred_gen+1", [])
+                    .unwrap();
+                actor.view = f
+                    .store
+                    .lookup_handle(&actor.view.handle.handle_sha256, &host(PORTAL_HOST))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            "revision" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE totp_enrollments SET revision=revision+1", [])
+                    .unwrap();
+            }
+            "purpose" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE login_txns SET purpose='login'", [])
+                    .unwrap();
+            }
+            "expiry" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE login_txns SET expires_at=0", [])
+                    .unwrap();
+            }
+            "app_binding" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE login_txns SET bind_sha256=NULL", [])
+                    .unwrap();
+            }
+            "consumed" => {
+                f.store
+                    .conn()
+                    .execute("UPDATE login_txns SET consumed_at=1", [])
+                    .unwrap();
+            }
+            _ => {}
+        }
+        let result = f
+            .store
+            .bind_totp_stepup(BindTotpStepUp {
+                actor,
+                transaction: txn.txn_sha256,
+                portal_binding: cookie,
+            })
+            .await;
+        assert_eq!(result.is_ok(), case == "same", "{case}");
+        if let Ok(binding) = result {
+            assert_eq!(binding.enrollment(), "elevate");
+            assert_eq!(binding.revision(), 2);
+        }
+        let persisted = f.store.transaction(&txn.txn_sha256).await.unwrap().unwrap();
+        assert_eq!(
+            persisted.portal_bind_sha256, txn.portal_bind_sha256,
+            "{case}"
+        );
+        assert_eq!(persisted.pending_identity, txn.pending_identity, "{case}");
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM events WHERE kind='login.started'"),
+            1,
+            "no duplicate binding audit for {case}"
+        );
+    }
+}
+#[tokio::test]
+async fn native_totp_stepup_binding_audit_failure_rolls_back_all_binding_fields() {
+    let f = fx();
+    let (_, session, _, view, _, _) = totp_stepup_fixture(&f).await;
+    let token = random_token(&f.rng, 16);
+    let portal_cookie = random_token(&f.rng, 16);
+    let mut challenge = new_txn(&f, &token, "192.0.2.10");
+    challenge.purpose = TxnPurpose::Stepup;
+    challenge.portal_session_id = Some(session.row.session_id);
+    f.store.create_transaction(challenge, vec![]).await.unwrap();
+    f.store.conn().execute_batch("CREATE TRIGGER owned_bind_audit_failure BEFORE INSERT ON events WHEN NEW.kind='login.started' BEGIN SELECT RAISE(ABORT,'owned audit failure'); END;").unwrap();
+    assert!(
+        crate::factor::service::bind_stepup(
+            &f.store,
+            stepup_actor(&f, view.clone()),
+            &token,
+            &portal_cookie
+        )
+        .await
+        .is_err()
+    );
+    let row = f.store.transaction(&token.digest()).await.unwrap().unwrap();
+    assert!(row.portal_bind_sha256.is_none());
+    assert!(row.conflicting_handle_sha256.is_none());
+    assert!(row.pending_identity.is_none());
+    assert!(row.consumed_at.is_none());
+    f.store
+        .conn()
+        .execute_batch("DROP TRIGGER owned_bind_audit_failure")
+        .unwrap();
+    assert!(
+        crate::factor::service::bind_stepup(
+            &f.store,
+            stepup_actor(&f, view.clone()),
+            &token,
+            &Secret::new("invalid".into())
+        )
+        .await
+        .is_err()
+    );
+    let binding = crate::factor::service::bind_stepup(
+        &f.store,
+        stepup_actor(&f, view),
+        &token,
+        &portal_cookie,
+    )
+    .await
+    .unwrap();
+    assert_eq!(binding.enrollment(), "elevate");
+    let row = f.store.transaction(&token.digest()).await.unwrap().unwrap();
+    assert_eq!(row.portal_bind_sha256, Some(portal_cookie.digest()));
+    assert_eq!(row.pending_identity.unwrap()["credential_generation"], 1);
+}
+#[tokio::test]
+async fn native_totp_stepup_final_commit_refuses_wrong_portal_cookie_or_recorded_context() {
+    use crate::factor::service::{StepUp, elevate_authorized};
+    for case in ["cookie", "generation", "revision", "enrollment", "ip"] {
+        let f = fx();
+        let (keys, _, txn, view, handle, mut handoff) = totp_stepup_fixture(&f).await;
+        let mut portal = txn.portal_bind_sha256.unwrap();
+        match case {
+            "cookie" => portal = sha256(b"different-cookie"),
+            "ip" => {
+                handoff.client_ip = ip("192.0.2.11");
+                f.store
+                    .conn()
+                    .execute("UPDATE login_txns SET client_ip='192.0.2.11'", [])
+                    .unwrap();
+            }
+            _ => {
+                let mut context = txn.pending_identity.clone().unwrap();
+                if case == "enrollment" {
+                    context["enrollment_id"] = "other".into();
+                } else if case == "revision" {
+                    context["enrollment_revision"] = 99.into();
+                } else {
+                    context["credential_generation"] = 99.into();
+                }
+                f.store
+                    .conn()
+                    .execute(
+                        "UPDATE login_txns SET pending_identity=?1",
+                        [context.to_string()],
+                    )
+                    .unwrap();
+            }
+        }
+        let proof = Secret::new("287082".into());
+        assert!(
+            elevate_authorized(
+                &f.store,
+                &keys,
+                f.clock.as_ref(),
+                StepUp {
+                    enrollment: "elevate",
+                    actor: stepup_actor(&f, view),
+                    code: &proof,
+                    transaction: txn.txn_sha256,
+                    portal_binding: portal,
+                    portal_handle: handle,
+                    handoff,
+                    events: vec![]
+                }
+            )
+            .await
+            .is_err(),
+            "{case}"
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM sessions WHERE aal=2"),
+            0,
+            "{case}"
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM totp_enrollments WHERE last_counter=1"),
+            0,
+            "{case}"
+        );
+        assert!(
+            f.store
+                .transaction(&txn.txn_sha256)
+                .await
+                .unwrap()
+                .unwrap()
+                .consumed_at
+                .is_none(),
+            "{case}"
+        );
+    }
 }
