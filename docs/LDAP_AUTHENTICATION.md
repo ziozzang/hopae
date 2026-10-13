@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 23 -->
+<!-- doc-rev: 24 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -395,3 +395,12 @@ This closes the last-read race for new-session creation. Identity resolution rem
 a separate transaction; configuration fencing of session reuse and reauthentication,
 actual secret/CA rotations and hard BER frame limits remain outstanding. LDAP remains
 unavailable through production configuration pending those activation requirements.
+
+## Existing-session reuse fence
+
+The direct-login session-reuse branch also passes the expected provider kind and
+configuration into transaction consumption. The same SQLite write fence refuses stale
+configuration before consuming the login challenge or recording events. A store test
+checks that refusal preserves the unconsumed challenge and audit state, then permits
+matching configuration. Reauthentication still needs equivalent fencing before its
+handle rotation; the production activation gate remains closed.

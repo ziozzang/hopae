@@ -1684,6 +1684,8 @@ impl Service {
                 .consume_transaction_for_provider(
                     &txn.txn_sha256,
                     provider_id,
+                    matches!(kind, ProviderKind::Ldap | ProviderKind::Password)
+                        .then(|| (row.kind, row.config.clone())),
                     CONSUMED_COMPLETED,
                     now,
                     vec![],

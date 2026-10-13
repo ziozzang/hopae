@@ -2215,3 +2215,59 @@ async fn direct_session_configuration_fence_rolls_back_every_write() {
         .unwrap();
     assert_eq!(f.count("SELECT COUNT(*) FROM sessions"), 1);
 }
+
+#[tokio::test]
+async fn reused_session_configuration_fence_preserves_transaction_on_refusal() {
+    let f = fx();
+    let secret = random_token(&f.rng, 16);
+    f.store
+        .create_transaction(new_txn(&f, &secret, "192.0.2.1"), vec![])
+        .await
+        .unwrap();
+    f.store.conn().execute(
+        "INSERT INTO providers(provider_id,kind,display_name,enabled,managed_by,config,created_at,updated_at) VALUES('directory','ldap','Directory',1,'api','{}',0,0)", [],
+    ).unwrap();
+    let provider = ProviderId::new("directory");
+    let before_events = f.count("SELECT COUNT(*) FROM events");
+    let refused = f
+        .store
+        .consume_transaction_for_provider(
+            &secret.digest(),
+            &provider,
+            Some((
+                crate::provider::types::ProviderKind::Ldap,
+                serde_json::json!({"stale":true}),
+            )),
+            reasons::TXN_CONSUMED,
+            f.now(),
+            vec![f.event(EventKind::LoginSucceeded)],
+        )
+        .await;
+    assert!(matches!(refused, Err(StoreError::ProviderDisabled)));
+    assert!(
+        f.store
+            .transaction(&secret.digest())
+            .await
+            .unwrap()
+            .unwrap()
+            .consumed_at
+            .is_none()
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM events"), before_events);
+    assert!(
+        f.store
+            .consume_transaction_for_provider(
+                &secret.digest(),
+                &provider,
+                Some((
+                    crate::provider::types::ProviderKind::Ldap,
+                    serde_json::json!({})
+                )),
+                reasons::TXN_CONSUMED,
+                f.now(),
+                vec![],
+            )
+            .await
+            .unwrap()
+    );
+}

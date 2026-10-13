@@ -394,6 +394,7 @@ pub trait Sessions: Send + Sync {
         &self,
         txn_sha256: &Digest,
         provider: &ProviderId,
+        configuration: Option<(crate::provider::types::ProviderKind, serde_json::Value)>,
         reason: Reason,
         at: Timestamp,
         events: Vec<Event>,

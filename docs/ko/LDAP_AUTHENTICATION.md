@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=23 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=24 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -344,3 +344,11 @@ provider가 존재하고 활성 상태이며 삭제되지 않았는지, 종류�
 트랜잭션입니다. 기존 세션 재사용·재인증 설정 검사, 실제 비밀·CA 교체,
 BER 프레임 크기 상한은 남아 있습니다. 이러한 활성화 조건을 완료하기 전까지
 운영 설정에서 LDAP 활성화는 계속 제한합니다.
+
+## 기존 세션 재사용 검사
+
+직접 로그인에서 기존 세션을 재사용할 때도 예상 provider 종류·설정을 transaction
+소비에 전달합니다. 같은 SQLite 쓰기 검사가 오래된 설정을 로그인 challenge 소비와
+이벤트 기록 전에 거부합니다. 저장소 테스트는 거부 시 challenge와 감사 상태를
+유지하고 일치하는 설정에서 소비됨을 확인합니다. 재인증의 핸들 교체에도 동등한
+검사가 필요하며 운영 활성화 제한은 계속 유지합니다.
