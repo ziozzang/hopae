@@ -276,6 +276,7 @@ impl Runtime {
         }
         Ok(VerifiedEvidence {
             subject: key.subject.clone(),
+            service: Some(p.service_id.clone()),
             connector: format!("api-key:{}", p.service_id),
             expires_at: now
                 .saturating_add(1000)

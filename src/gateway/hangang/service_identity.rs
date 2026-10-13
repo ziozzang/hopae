@@ -65,6 +65,12 @@ pub fn response(evidence: Option<&VerifiedEvidence>, request_id: &str) -> Respon
     }
     if let Some(evidence) = evidence {
         let subject = evidence.subject();
+        if let Some(service) = evidence.service() {
+            headers.insert(
+                "x-hopae-service-id",
+                HeaderValue::from_str(service).expect("configured service identifier"),
+            );
+        }
         headers.insert(
             "x-forwarded-user",
             HeaderValue::from_str(&stable_subject(subject)).expect("encoded service identifier"),

@@ -38,7 +38,8 @@ login/logout paths retain their existing session behavior.
 
 Successful authentication emits an opaque `s_…` subject derived from principal
 kind, authority/issuer, realm and configured subject. It emits
-`x-hopae-principal-kind: service` and `x-hopae-aal: 0`; it does not invent a human
+`x-hopae-principal-kind: service`, `x-hopae-aal: 0` and the authenticated
+`x-hopae-service-id`; it does not invent a human
 account, verified email or MFA. Replies contain no credential and use
 `Cache-Control: no-store`. Authentication is not a service permission grant:
 Hangang/Pumgye must enforce the service matrix. Parent support for typed

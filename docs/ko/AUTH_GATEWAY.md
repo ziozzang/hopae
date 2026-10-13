@@ -33,7 +33,7 @@ Profile은 제시한 Bearer credential을 선택합니다. 없는 credential은 
 주장을 받지 않습니다. 예약된 로그인/로그아웃 경로는 기존 세션 동작을 유지합니다.
 
 인증 성공은 principal kind·authority/issuer·realm·설정 subject로 만든 불투명한
-`s_…` 신원을 출력합니다. `x-hopae-principal-kind: service`와 `x-hopae-aal: 0`을
+`s_…` 신원을 출력합니다. `x-hopae-principal-kind: service`·`x-hopae-aal: 0`·인증된 `x-hopae-service-id`를
 출력하며 사람 계정·검증된 이메일·MFA를 만들지 않습니다. 응답에는 credential이
 없고 `Cache-Control: no-store`를 적용합니다. 인증은 서비스 권한 부여가 아니므로
 Hangang/품계가 서비스 매트릭스를 집행해야 합니다. Parent의 비인간 assurance

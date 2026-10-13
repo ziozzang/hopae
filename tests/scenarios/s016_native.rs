@@ -467,6 +467,7 @@ async fn service_api_credential_http_native_parity_and_no_human_assurance() {
         assert_eq!(native.status, expected);
         if valid {
             assert_eq!(http.headers()["x-hopae-aal"], "0");
+            assert_eq!(http.headers()["x-hopae-service-id"], "app");
             assert_eq!(http.headers()["x-hopae-principal-kind"], "service");
             assert!(
                 http.headers()["x-forwarded-user"]
