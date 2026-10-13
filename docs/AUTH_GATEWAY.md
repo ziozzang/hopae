@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 23 -->
+<!-- doc-rev: 24 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -20,6 +20,22 @@ The independent vector for service `ab`, audience `c`, method `GET`, target
 Malformed/ambiguous targets and oversized fields fail. This primitive is not
 receipt authentication, replay admission, authorization or credential issuance;
 it is not wired into the deployed projection path, which remains unimplemented.
+
+Unreleased `auth_gateway::receipt` adds a strict Ed25519 crypto primitive using
+the existing locked ed25519-dalek 2.2.0 dependency. A 146-byte receipt contains
+version/purpose, two big-endian u64 millisecond timestamps, a 32-byte native
+binding, a 32-byte CSPRNG nonce and a 64-byte signature. Signatures cover the
+domain `hangang-zerotrust:projection-receipt:v1` plus NUL and the exact 82-byte
+payload. Authentication and permit purposes differ; configured keys must be
+distinct and receiver-selected, never supplied by the client. Weak keys, wrong
+purpose/binding, malformed size, future/expired claims and leases over one second
+fail. Verification yields a private non-Clone, non-Serde receipt wrapper.
+
+The native binding still needs a canonical builder covering identity, issuer/key
+epoch, complete request/audience, revisions and the authentication/decision chain.
+Signature checks alone do not establish current permission: key registry, clock
+rollback fences, revocation, atomic nonce consumption and issuer/receiver endpoint
+integration remain required. No runtime issuance or deployment behavior changes.
 
 Runtime connectors authenticate local service API keys or relay a Bearer credential
 to a fixed external verifier, with optional IP conditions. It is opt-in through `authentication_gateway`; existing OIDC/session

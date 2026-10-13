@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=23 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=24 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -16,6 +16,19 @@ streaming body에는 별도 계약이 필요하고 빈 body 해시로 대체하�
 `234488f459d8b3069a74d308d639fa9bfb402b12a9544a413c06c6136a8dab11`입니다.
 잘못되거나 모호한 대상·너무 큰 필드는 거부합니다. receipt 인증·재사용 입장·권한·
 자격 발급은 아니며 아직 구현하지 않은 실제 변환 경로에 연결되지 않았습니다.
+
+미릴리스 `auth_gateway::receipt`는 기존 lock의 ed25519-dalek 2.2.0을 사용해 엄격한
+Ed25519 검증을 추가합니다. 146-byte receipt는 version·purpose, big-endian u64
+밀리초 시각 2개, native binding 32 bytes, CSPRNG nonce 32 bytes, 서명 64 bytes입니다.
+`hangang-zerotrust:projection-receipt:v1`과 NUL 및 정확한 82-byte payload에 서명합니다.
+인증·허용 목적을 구분하고 설정된 키도 분리하며 수신자가 선택해야 합니다. 클라이언트
+키를 신뢰하지 않습니다. 약한 키·다른 목적/binding·잘못된 길이·미래/만료·1초 초과를
+거부하며 검증 결과는 직접 생성·Clone·Serde가 불가능한 receipt wrapper로 반환합니다.
+
+신원·issuer/key epoch·전체 요청/대상·버전·인증/결정 chain을 묶는 native binding
+builder는 구현해야 합니다. 서명 확인만으로 현재 권한을 증명하지 않으며 key registry·
+시계 rollback fence·회수·원자적 nonce 소비·issuer/receiver endpoint 연결은 후속입니다.
+실제 발급·배포 동작은 바뀌지 않습니다.
 
 미릴리스 소스는 네이티브 서비스 자격 검증 후 선택적인 제한된 Lua 사용 조건을
 적용합니다. [서비스 사용 조건 설정](../CONFIG.md#service-authentication-lua-eligibility-unreleased)을

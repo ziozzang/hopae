@@ -56,6 +56,7 @@ unicode-normalization = "0.1"
 url = "2"
 ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
 mlua = { version = "0.12.2", default-features = false, features = ["lua54", "vendored"] }
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
 
 [features]
 # Loopback-only test control surface (clock, stall, commit gate, crash points,
