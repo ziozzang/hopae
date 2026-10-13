@@ -1538,15 +1538,16 @@ fn reassign_h(r: &Rig) {
 }
 
 #[test]
+#[cfg(unix)]
 fn s305_1_a_failed_evidence_write_aborts_before_the_grant() {
-    // stdout is /dev/full: every write fails. The operator never saw the
+    // stdout is a socket whose peer is closed: every write fails on Unix.
+    // The operator never saw the
     // user the grant would go to, so nothing is granted.
     let r = Rig::new();
     r.standard_users();
-    let full = std::fs::OpenOptions::new()
-        .write(true)
-        .open("/dev/full")
-        .expect("/dev/full");
+    let (writer, peer) = std::os::unix::net::UnixStream::pair().expect("stdout socket");
+    drop(peer);
+    let full = std::os::fd::OwnedFd::from(writer);
     let o =
         r.h.cli_with_stdout(&["admin", "grant", "u_a"], std::process::Stdio::from(full));
     assert_eq!(o.status, 2, "{}", o.all());

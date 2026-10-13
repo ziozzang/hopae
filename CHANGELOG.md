@@ -8,6 +8,10 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- Native macOS qualification harness: actual process RSS, portable failed-evidence output, bounded loopback verifier startup and complete-frame handling after HTTP connection reset. Truncated/ambiguous responses remain errors; release authentication behavior is unchanged.
+
 ## 0.0.3 — 2026-10-14
 
 ### Added

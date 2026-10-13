@@ -103,8 +103,45 @@ pub fn try_send_from(
     s.write_all(head.as_bytes())?;
     s.write_all(&req.body)?;
     let mut raw = Vec::new();
-    s.read_to_end(&mut raw)?;
+    if let Err(error) = s.read_to_end(&mut raw) {
+        // Some kernels reset a connection after rejecting an unread request
+        // body. Accept only a complete, explicitly framed response already
+        // received; truncated responses must retain their transport error.
+        if error.kind() != std::io::ErrorKind::ConnectionReset || !complete_response(&raw) {
+            return Err(error);
+        }
+    }
     parse_response(&raw).ok_or_else(|| std::io::Error::other("malformed HTTP response"))
+}
+
+fn complete_response(raw: &[u8]) -> bool {
+    let Some(split) = find(raw, b"\r\n\r\n") else {
+        return false;
+    };
+    let Ok(head) = std::str::from_utf8(&raw[..split]) else {
+        return false;
+    };
+    let headers: Vec<_> = head
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .collect();
+    let lengths: Vec<_> = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .collect();
+    let encodings: Vec<_> = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding"))
+        .collect();
+    let body = &raw[split + 4..];
+    if encodings.is_empty() && lengths.len() == 1 {
+        return lengths[0].1.trim().parse::<usize>().ok() == Some(body.len());
+    }
+    lengths.is_empty()
+        && encodings.len() == 1
+        && encodings[0].1.trim().eq_ignore_ascii_case("chunked")
+        && dechunk(body).is_some()
 }
 
 fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
@@ -149,11 +186,33 @@ fn dechunk(mut b: &[u8]) -> Option<Vec<u8>> {
         .ok()?;
         b = &b[eol + 2..];
         if size == 0 {
-            return Some(out);
+            return (b == b"\r\n").then_some(out);
         }
         out.extend_from_slice(b.get(..size)?);
+        if b.get(size..size + 2)? != b"\r\n" {
+            return None;
+        }
         b = b.get(size + 2..)?;
     }
+}
+
+#[test]
+fn reset_requires_complete_unambiguous_response_framing() {
+    assert!(complete_response(
+        b"HTTP/1.1 403 Forbidden\r\ncontent-length: 2\r\n\r\n{}"
+    ));
+    for raw in [
+        b"HTTP/1.1 403 Forbidden\r\ncontent-length: 3\r\n\r\n{}".as_slice(),
+        b"HTTP/1.1 403 Forbidden\r\ncontent-length: 2\r\ncontent-length: 2\r\n\r\n{}",
+        b"HTTP/1.1 403 Forbidden\r\n\r\n{}",
+        b"HTTP/1.1 403 Forbidden\r\ntransfer-encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n",
+        b"HTTP/1.1 403 Forbidden\r\ntransfer-encoding: chunked\r\ncontent-length: 2\r\n\r\n{}",
+    ] {
+        assert!(!complete_response(raw));
+    }
+    assert!(complete_response(
+        b"HTTP/1.1 403 Forbidden\r\ntransfer-encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
+    ));
 }
 
 /// One request a `Client` sends.

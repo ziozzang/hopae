@@ -336,3 +336,20 @@ Hopae artifact staging supports `tools/prepare_release.py --target TARGET --outp
 public key. The signer uses the same exact-byte payload/base64-envelope scheme as
 Sumunjang; staging independently verifies the signature, payload and artifact hash.
 The private seed remains outside the repository and server deployment.
+
+## Native macOS qualification prerequisites
+
+Run the serial native unit/integration/scenario suites on the target OS; a
+cross-build or `--version` check does not establish runtime qualification.
+Peer-isolation scenarios bind `127.0.0.2`. Provision that loopback alias on
+macOS before the run, preserve any preexisting alias and remove only an alias
+created for qualification afterward. Linux supplies the loopback subnet directly.
+RSS checks use the child's actual `/proc` data on Linux and `/bin/ps` on macOS.
+The evidence-write failure scenario uses a closed-peer Unix socket rather than
+the Linux-only `/dev/full`; the grant and required audit assertions stay intact.
+
+The raw test client permits a connection reset only after receiving a complete,
+explicitly framed HTTP response. Missing, truncated or ambiguous framing still
+fails. The loopback HTTPS verifier fixture avoids startup hostname resolution;
+its readiness must not depend on external DNS. These harness changes do not
+enable test hooks or change authentication behavior in release executables.

@@ -601,9 +601,8 @@ impl Hopae {
         self.wait_ready();
     }
 
-    /// Whether the process has exited (for crash-point tests); returns its exit status text.
-    /// The process's resident set in KiB (`VmRSS` of `/proc/<pid>/status`);
-    /// `None` when the process or the file is gone.
+    /// The child process's resident set in KiB; unavailable after exit.
+    #[cfg(target_os = "linux")]
     pub fn rss_kib(&self) -> Option<u64> {
         let status = std::fs::read_to_string(format!("/proc/{}/status", self.child.id())).ok()?;
         status
@@ -611,6 +610,27 @@ impl Hopae {
             .find_map(|l| l.strip_prefix("VmRSS:"))
             .and_then(|v| v.split_whitespace().next())
             .and_then(|n| n.parse().ok())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn rss_kib(&self) -> Option<u64> {
+        let output = Command::new("/bin/ps")
+            .args(["-o", "rss=", "-p", &self.child.id().to_string()])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        std::str::from_utf8(&output.stdout)
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub fn rss_kib(&self) -> Option<u64> {
+        None
     }
 
     pub fn exited(&mut self) -> Option<String> {

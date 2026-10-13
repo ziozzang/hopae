@@ -327,3 +327,19 @@ OFFLINE_SIGNER --seed PRIVATE_SEED_FILE`로 서명 준비합니다. 비공개 �
 키와 일치해야 하고 서버·저장소에 넣지 않습니다. 수문장의 정확한 payload bytes·base64
 서명 envelope와 같은 방식을 쓰며 별도로 서명·payload·artifact 해시를 검증합니다.
 호패 자동 self-update는 아직 미구현이므로 이번 서명 artifact로 지원을 주장하지 않습니다.
+
+## 네이티브 macOS 검증 사전 조건
+
+대상 OS에서 단위·통합·시나리오 테스트를 직렬 실행합니다. 크로스 빌드나 `--version`
+확인만으로 런타임 검증을 완료할 수 없습니다. peer 격리 시나리오는 `127.0.0.2`에
+바인딩합니다. macOS에서는 실행 전에 해당 loopback alias를 준비하고 기존 alias는
+유지하며 검증을 위해 새로 만든 alias만 실행 후 제거합니다. Linux는 loopback subnet을
+기본 제공하고 RSS는 실제 자식 프로세스의 Linux `/proc`·macOS `/bin/ps`로 검사합니다.
+감사 출력 실패는 Linux 전용 `/dev/full` 대신 상대가 닫힌 Unix socket으로 재현하며
+grant·필수 감사 기록의 검증은 유지합니다.
+
+raw 테스트 client는 명시적인 HTTP framing으로 응답 전체를 받은 경우에만 연결
+초기화를 허용합니다. framing이 없거나 잘렸거나 모호하면 계속 실패합니다. loopback
+HTTPS verifier fixture는 시작 시 hostname을 조회하지 않아 준비가 외부 DNS에 의존하지
+않습니다. 이 harness 수정은 릴리스 실행 파일에 test hook을 켜거나 인증 동작을
+바꾸지 않습니다.
