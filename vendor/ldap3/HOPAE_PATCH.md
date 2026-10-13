@@ -7,8 +7,10 @@ reject lengths wider than four octets, and cap the entire declared frame at 64 K
 The check covers both LDAPS and StartTLS, and rejects oversized headers before
 waiting for their body. This fork is scoped to Hopae credential lookup/bind usage;
 large generic LDAP entries are intentionally refused. Fragmented valid frames and
-coalesced small frames remain supported. This does not bound parser recursion or
-harden all malformed nested BER structures; that review remains necessary.
+coalesced small frames remain supported. An iterative preflight also caps traversal contexts at 32 and elements at 4096,
+rejecting child lengths outside their parent and indefinite nested lengths before
+recursive parsing. This does not harden every LDAP semantic/control parser; that
+review remains necessary.
 
 Run patch tests with `cargo test --manifest-path vendor/ldap3/Cargo.toml --no-default-features --features tls-rustls-ring --lib hopae_frame_tests`.
 When updating ldap3, review the complete upstream diff and reapply/qualify this patch.

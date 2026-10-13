@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 26 -->
+<!-- doc-rev: 27 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -441,3 +441,19 @@ Two focused wire tests and owned LDAPS/StartTLS authentication pass with the pat
 library. The cap bounds each wire frame, not parser recursion, total connection memory,
 all malformed nested BER, or aggregate results. Nested-parser hardening and actual
 malicious TLS peer qualification remain necessary before production activation.
+
+## Nested BER preflight and malicious TLS qualification
+
+The vendored decoder now scans each complete frame iteratively before lber parsing,
+using a fixed 32-context stack and a 4096-element limit. It rejects truncated tags or
+lengths, indefinite nested lengths, excessive tag/length widths and children outside
+their parent. Primitive payload bytes are skipped rather than interpreted as children;
+only the first complete frame is scanned when several arrive together.
+
+Three focused structure tests pass. Owned certificate-verified TLS peers send an
+oversized header without its body and a deeply nested complete frame, keep their
+connections open, and observe client closure within one second. The LDAP connector
+reports unavailable within that bound. Both cases pass during LDAPS and StartTLS
+fixture runs. Existing real-directory identity, invalid credentials and circuit tests
+also pass. These bounds do not qualify all LDAP semantic/control parsing, aggregate
+memory, directory revocation or actual browser/gateway activation.

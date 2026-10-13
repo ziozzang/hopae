@@ -95,6 +95,89 @@ fn bounded_frame_length(buf: &[u8]) -> io::Result<Option<usize>> {
     Ok((buf.len() >= total).then_some(total))
 }
 
+// Iterative preflight: never recurse or allocate according to untrusted lengths.
+fn validate_ber_tree(frame: &[u8]) -> io::Result<()> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid or excessive LDAP BER structure",
+        )
+    };
+    let mut ends = [frame.len(); 32];
+    let mut depth = 1usize;
+    let mut cursor = 0usize;
+    let mut nodes = 0usize;
+    while depth > 0 {
+        let boundary = ends[depth - 1];
+        if cursor == boundary {
+            depth -= 1;
+            continue;
+        }
+        if cursor > boundary {
+            return Err(invalid());
+        }
+        nodes += 1;
+        if nodes > 4096 {
+            return Err(invalid());
+        }
+        let tag = *frame.get(cursor).ok_or_else(invalid)?;
+        cursor += 1;
+        if tag & 0x1f == 0x1f {
+            let mut octets = 0;
+            loop {
+                if cursor >= boundary {
+                    return Err(invalid());
+                }
+                let byte = frame[cursor];
+                cursor += 1;
+                octets += 1;
+                if octets > 8 {
+                    return Err(invalid());
+                }
+                if byte & 0x80 == 0 {
+                    break;
+                }
+            }
+        }
+        if cursor >= boundary {
+            return Err(invalid());
+        }
+        let first = frame[cursor];
+        cursor += 1;
+        let length = if first < 128 {
+            usize::from(first)
+        } else {
+            let octets = usize::from(first & 0x7f);
+            if octets == 0 || octets > 4 || boundary - cursor < octets {
+                return Err(invalid());
+            }
+            let mut value = 0usize;
+            for byte in &frame[cursor..cursor + octets] {
+                value = value
+                    .checked_mul(256)
+                    .and_then(|n| n.checked_add(usize::from(*byte)))
+                    .ok_or_else(invalid)?;
+            }
+            cursor += octets;
+            value
+        };
+        let end = cursor
+            .checked_add(length)
+            .filter(|end| *end <= boundary)
+            .ok_or_else(invalid)?;
+        if tag & 0x20 != 0 && length != 0 {
+            if depth == ends.len() {
+                return Err(invalid());
+            }
+            ends[depth] = end;
+            depth += 1;
+        } else {
+            cursor = end;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod hopae_frame_tests {
     use super::*;
@@ -122,14 +205,38 @@ mod hopae_frame_tests {
             Some(MAX_LDAP_FRAME)
         );
     }
+    #[test]
+    fn bounds_nested_depth_nodes_and_parent_lengths() {
+        fn wrap(payload: Vec<u8>) -> Vec<u8> {
+            let mut out = vec![0x30, 0x82, (payload.len() >> 8) as u8, payload.len() as u8];
+            out.extend(payload);
+            out
+        }
+        let mut shallow = vec![0x04, 0];
+        for _ in 0..8 {
+            shallow = wrap(shallow);
+        }
+        assert!(validate_ber_tree(&shallow).is_ok());
+        let mut deep = shallow;
+        for _ in 0..64 {
+            deep = wrap(deep);
+        }
+        assert!(validate_ber_tree(&deep).is_err());
+        assert!(validate_ber_tree(&wrap(vec![0x04, 0].repeat(4096))).is_err());
+        assert!(validate_ber_tree(&[0x30, 2, 0x04, 5]).is_err());
+        assert!(validate_ber_tree(&[0x30, 2, 0x30, 0x80]).is_err());
+        assert!(validate_ber_tree(&[0x30, 1, 0x04]).is_err());
+        assert!(validate_ber_tree(&[0x30, 0]).is_ok());
+    }
 }
 
 #[allow(clippy::type_complexity)]
 fn decode_inner(buf: &mut BytesMut) -> Result<Option<(RequestId, (Tag, Vec<Control>))>, io::Error> {
     // Bound the declared frame before lber parses or clones nested values.
-    if bounded_frame_length(buf)?.is_none() {
+    let Some(frame_length) = bounded_frame_length(buf)? else {
         return Ok(None);
-    }
+    };
+    validate_ber_tree(&buf[..frame_length])?;
     let decoding_error = io::Error::new(io::ErrorKind::Other, "decoding error");
     let mut parser = lber::Parser::new();
     let binding = parser.parse(buf);

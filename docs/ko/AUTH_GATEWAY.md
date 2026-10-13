@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=3 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=4 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -89,3 +89,49 @@ upstream credential 교환·영속 quarantine·관리 게시·RFC 7662 필드 ad
 MFA가 되지 않습니다. audience 유지·최초 만료·1초 상한·만료 거부를 검증했습니다.
 조합 기초 계층이며 런타임 connector 실행 조합과 명시적으로 검증된 provider 간
 subject 관계는 남아 있습니다. 기존 요청 프로필은 설정된 커넥터를 사용합니다.
+
+## 사용자 2차 인증과 확장 계약 — 구현 백로그
+
+Google Authenticator와 호환되는 네이티브 TOTP, 외부 인증 API 호출,
+Lua 등을 통한 확장 가능한 adapter를 필수 범위에 추가합니다. 모델에
+`FactorKind::Totp`·AAL 2가 있다는 것만으로 MFA가 구현된 것은 아닙니다.
+서비스 API 증거는 AAL 0이며 네트워크 증거만으로 사용자 소유 요인이 되지 않습니다.
+
+요인 엔진은 1차 인증 provider adapter와 분리합니다. Challenge는 내부 user ID,
+1차 provider 증거, session/transaction, 서비스 audience, 브라우저 binding,
+요구 보증 수준, 정책 revision, 만료, single-use nonce를 묶습니다. Adapter는
+타입 증거만 반환하고 코어가 독립 요인을 결합하며 challenge 소비·OTP 재사용
+상태를 원자 commit한 뒤 자격 세대·핸들을 교체하고 보증 수준을 발급합니다.
+신원·provider·정책·등록·세션 변경은 대기 challenge를 무효화합니다.
+성공 OTP를 캐시해 다른 challenge를 승인하지 않습니다.
+
+네이티브 등록은 사용자별 무작위 seed를 DB 밖 버전 키로 암호화합니다.
+코드 확인 전에는 pending이며 provisioning 자료는 인증된 portal에서 한 번만
+표시하고 Hangang broker·감사로 내보내지 않습니다. 초기 제안은 30초·6자리
+HMAC-SHA-1 TOTP와 제한된 인접 시간창이며 실제 authenticator 호환성을 검증합니다.
+마지막 승인 counter를 replica 간 원자 CAS로 저장하고 시계 역행으로 코드를
+재사용할 수 없게 합니다. 계정·challenge·네트워크 시도 제한과 DB 권위 하의
+성공 소비를 적용합니다. 등록·교체·해제는 최근 인증과 적절한 step-up을 요구합니다.
+복구 코드는 개별 hash·single-use·감사를 적용하고 복구 결과를 무제한 MFA로
+승격하지 않습니다. 회수는 정책에 따라 세션·stream을 종료하거나 등급을 낮춥니다.
+OTP는 피싱 저항 요인이 아닙니다.
+
+외부 요인 API는 운영자가 승인한 고정 HTTPS endpoint·신원을 사용하며 redirect,
+env proxy, 요청이 선택한 URL을 금지합니다. 크기·deadline·동시성·서킷을 제한하고
+요청 nonce·user·audience·operation을 응답에도 묶어 짧은 만료와 인증된 provider
+결과를 검증합니다. 단순 `success=true`로 MFA를 부여하지 않습니다. 거부와 provider
+장애를 구분하고 필수 요인 장애에서 우회·key fallback 없이 거부합니다. 출처와
+요인 capability 제한으로 비밀번호·IP 검사를 독립 소유 요인으로 주장하지 못하게 합니다.
+
+Lua adapter는 제한된 context·불투명 secret handle만 받고 instruction·메모리·시간
+상한, 제한된 library와 승인된 host 네트워크 호출을 사용합니다. Script 배포는 검증,
+revision CAS·감사·롤백을 요구합니다. 세션 발급·임의 DB 쓰기·보증 수준 선택·원문
+자격 노출은 허용하지 않습니다. TOTP는 Rust 네이티브이며 Lua는 별도 검증할
+선택적 확장 수단입니다.
+
+알고리즘 vector, 등록·교체·복구, 프로세스 간 동시 재사용, 시계 역행, challenge
+교환, 요인 회수, 외부 API 대체·장애·서킷 복구, sandbox 탈출·자원 소진,
+서비스 step-up과 Hangang 관리자·stream 전파를 검증하고 내부 도그푸딩을 수행합니다.
+알고리즘 참고: [RFC 6238](https://www.rfc-editor.org/rfc/rfc6238),
+[RFC 4226](https://www.rfc-editor.org/rfc/rfc4226). 위 프로토콜 설정·수명주기는 호패의
+설계 제안이며 RFC가 등록·외부 API 설계를 정의하는 것은 아닙니다.

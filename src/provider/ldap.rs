@@ -512,6 +512,22 @@ mod tests {
             provider.circuit.state(),
             Some(crate::auth_gateway::breaker::State::Closed)
         );
+        for name in ["OWNED_LDAP_OVERSIZE", "OWNED_LDAP_DEEP"] {
+            let mut malicious = config.clone();
+            malicious.endpoint = std::env::var(name).unwrap();
+            malicious.starttls = false;
+            let malicious =
+                LdapProvider::compile(ProviderId::new("malicious-owned-peer"), malicious, &env)
+                    .unwrap();
+            let started = std::time::Instant::now();
+            assert!(matches!(
+                malicious
+                    .verify_password(PasswordInput::new("alice", &password).unwrap())
+                    .await,
+                Err(CredentialError::Unavailable)
+            ));
+            assert!(started.elapsed() < Duration::from_secs(1));
+        }
         if config.starttls {
             use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

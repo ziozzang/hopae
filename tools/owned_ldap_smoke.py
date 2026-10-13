@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Owned OpenLDAP TLS credential fixture. Never uses an operational directory."""
-import argparse,os,secrets,socket,subprocess,tempfile,time
+import argparse,os,secrets,socket,ssl,subprocess,tempfile,time,threading
 from pathlib import Path
 
 def main():
@@ -31,11 +31,32 @@ def main():
             env=dict(os.environ,OWNED_LDAP_ENDPOINT=f'ldaps://127.0.0.1:{port}',OWNED_LDAP_CA=str(root/'ca.pem'),OWNED_LDAP_WRONG_CA=str(root/'wrong-ca.pem'),OWNED_LDAP_BIND_KEY=bind,OWNED_LDAP_USER_PASSWORD=user)
             for endpoint,mode in [(f'ldaps://127.0.0.1:{port}','0'),(f'ldap://127.0.0.1:{starttls_port}','1')]:
                 env.update(OWNED_LDAP_ENDPOINT=endpoint,OWNED_LDAP_STARTTLS=mode)
+                peers=[];failures=[]
+                deep=b'\x04\x00'
+                for _ in range(64):deep=b'\x30\x82'+len(deep).to_bytes(2,'big')+deep
+                for key,packet in [('OWNED_LDAP_OVERSIZE',b'\x30\x83\x01\x00\x00'),('OWNED_LDAP_DEEP',deep)]:
+                    listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen(1);listener.settimeout(60)
+                    env[key]=f'ldaps://127.0.0.1:{listener.getsockname()[1]}'
+                    def serve(listener=listener,packet=packet):
+                        try:
+                            context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(root/'server.pem',root/'server.key')
+                            connection,_=listener.accept()
+                            with context.wrap_socket(connection,server_side=True)as tls:
+                                tls.settimeout(1);assert tls.recv(8192)
+                                tls.sendall(packet)
+                                # Keep the peer open: require client rejection rather than server EOF.
+                                while tls.recv(8192):pass
+                        except Exception as error:failures.append(type(error).__name__)
+                        finally:listener.close()
+                    thread=threading.Thread(target=serve,daemon=True);thread.start();peers.append(thread)
+
                 result=subprocess.run(['cargo','test','--locked','--lib','owned_ldaps_authenticates_immutable_identity_and_rejects_bad_credentials_and_ca','--','--ignored'],env=env,capture_output=True)
+                for peer in peers:peer.join(timeout=2)
+                if failures or any(peer.is_alive() for peer in peers):raise RuntimeError('malicious LDAP TLS peer was not rejected promptly: '+','.join(failures))
                 if result.returncode:
                     diagnostic=(result.stdout+result.stderr).decode(errors='replace').replace(bind,'[REDACTED]').replace(user,'[REDACTED]')
                     Path('/tmp/hopae-owned-ldap-test-failure.log').write_text(diagnostic)
                     raise RuntimeError('owned LDAP credential test failed; sanitized diagnostic in /tmp/hopae-owned-ldap-test-failure.log')
-            print('PASS: real owned OpenLDAP over LDAPS and mandatory StartTLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection and backend-circuit classification. Portal/session/runtime activation is not qualified.')
+            print('PASS: real owned OpenLDAP over LDAPS and mandatory StartTLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection, oversized/deep TLS response rejection and backend-circuit classification. Portal/session/runtime activation is not qualified.')
         finally:subprocess.run(['docker','rm','-f',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 if __name__=='__main__':main()

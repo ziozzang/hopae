@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 3 -->
+<!-- doc-rev: 4 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -105,3 +105,57 @@ factors do not imply human MFA. Tests verify audience retention, earliest expiry
 the one-second cap and expiry rejection. This is a composition primitive; runtime
 connector orchestration and explicitly verified cross-provider subject relationships
 remain pending. Existing request profiles still select their configured connector.
+
+## Human second factors and extension contract — implementation backlog
+
+Operator requirements include native TOTP compatible with Google Authenticator,
+external authentication API calls and extensible adapters, potentially Lua. These
+are required work, not implemented MFA merely because `FactorKind::Totp` and AAL 2
+exist in the model. Service API evidence stays AAL 0; network evidence alone does
+not become a human possession factor.
+
+The proposed factor engine is separate from first-factor provider adapters. A
+challenge binds the internal user ID, primary provider evidence, session/transaction,
+service audience, browser binding, requested assurance, policy revision, expiry and
+single-use nonce. Successful factor verification returns typed evidence to the core;
+only the core combines independent factors, commits challenge consumption and OTP
+replay state, rotates credential generation/handles and issues assurance. Changes to
+identity, provider, policy, enrollment or session state invalidate pending challenges.
+No cached successful OTP result can authorize another challenge.
+
+Native enrollment creates a random per-user seed encrypted under a versioned key
+outside the database. Enrollment is pending until a valid code proves possession;
+provisioning material is shown once over the authenticated portal and never exported
+through the Hangang broker or audit. Start with 30-second, six-digit HMAC-SHA-1 TOTP
+and a bounded adjacent-step window; qualify actual authenticator interoperability.
+Persist the last accepted counter with atomic compare-and-set across replicas;
+clock rollback cannot restore an accepted code. Limit attempts per account/challenge
+and network; serialize successful consumption under the DB authority. Enrollment,
+replacement and removal require recent authentication and appropriate step-up;
+recovery codes are individually hashed, single-use and auditable, and recovery must
+not silently inherit unrestricted MFA assurance. Revocation closes or downgrades
+sessions and streams according to service policy. OTP is not phishing-resistant.
+
+External factor APIs must use fixed operator-approved HTTPS endpoints and identities,
+no redirects/environment proxy or request-selected URLs, bounded request/response,
+deadline/concurrency and a circuit breaker. Requests bind nonce, user, audience and
+operation; replies must bind those same fields with short expiry and an authenticated
+provider result. A plain `success=true` cannot grant MFA. Denial differs from provider
+unavailability; required-factor outages fail closed without bypass or key fallback.
+Provider provenance and allowed factor capabilities prevent a password or IP check
+from claiming an independent possession factor.
+
+A Lua adapter would receive only capability-scoped context and opaque secret handles,
+with instruction, memory and wall-time limits, restricted libraries and approved
+host-mediated network calls. Script publication requires validation, revision CAS,
+audit and rollback. Scripts cannot mint sessions, write arbitrary DB state, choose
+assurance levels or disclose raw credentials. Native TOTP remains in Rust; Lua is
+an optional extension mechanism and must be qualified independently.
+
+Required qualification covers algorithm vectors, enrollment/rotation/recovery,
+concurrent replay across processes, clock rollback, challenge swaps, revoked factors,
+external API substitution/outage/circuit recovery, sandbox escape/resource exhaustion,
+service step-up and Hangang console/stream propagation. Internal dogfooding is required.
+Algorithm references: [RFC 6238](https://www.rfc-editor.org/rfc/rfc6238),
+[RFC 4226](https://www.rfc-editor.org/rfc/rfc4226). Protocol parameters and lifecycle
+above are proposed Hopae choices; the RFCs do not define this enrollment/API design.

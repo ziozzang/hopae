@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=26 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=27 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -386,3 +386,19 @@ wire 테스트 2건과 패치된 라이브러리를 사용한 소유 LDAPS·Star
 통과했습니다. 제한 대상은 개별 wire 프레임이며 파서 재귀, 연결 전체 메모리,
 모든 비정상 중첩 BER이나 결과 총량을 보장하지 않습니다. 중첩 파서 강화와
 악성 TLS peer의 실제 검증을 운영 활성화 전에 완료해야 합니다.
+
+## 중첩 BER 사전 검사와 악성 TLS 검증
+
+vendor 디코더는 lber 파싱 전에 완성된 프레임을 반복문으로 검사합니다.
+고정 32개 context 스택과 4096개 요소 상한을 사용하며, 잘린 tag·길이,
+중첩 무한 길이, 과도한 tag·길이 폭, 부모 범위 밖 자식을 거부합니다.
+primitive 내용은 자식으로 해석하지 않고 건너뛰며 여러 프레임을 함께 받으면
+첫 완성 프레임만 검사합니다.
+
+구조 집중 테스트 3건이 통과했습니다. 인증서를 검증하는 소유 TLS peer가
+본문 없는 과대 헤더와 깊게 중첩된 완성 프레임을 보내고 연결을 열어 둔 채
+1초 안에 클라이언트가 종료함을 확인합니다. LDAP 커넥터도 그 안에 unavailable을
+반환합니다. LDAPS·StartTLS fixture 실행에서 두 공격이 모두 통과하며 기존
+실제 디렉터리 신원·자격 거부·서킷 테스트도 유지됩니다. 모든 LDAP 의미·control
+파싱, 전체 메모리, 디렉터리 회수, 실제 브라우저·게이트웨이 활성화를 완료했다는
+의미는 아닙니다.
