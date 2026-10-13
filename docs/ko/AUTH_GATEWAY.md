@@ -557,3 +557,23 @@ receipt 동시성 검증은 독립 SQLite 연결 8개를 소비 전에 동기화
 테스트 5건은 재시작/비활성화/최소 버전·오래된 별도 게시자·관리자/audit 실패 시 DB와 메모리 유지·손상/버전 불일치·이전 reader 거부와 재활성화 후 새 서명 permit·마지막 guard의 plan 변경과 nonce 전체 rollback을 확인합니다. 애플리케이션 시작·위임 관리자 endpoint/UI·발급 audit/outbox 연결은 남아 있으며 운영 상태는 유지합니다.
 
 이 소스 갱신의 인증 gateway 테스트 총 54건과 fmt/clippy/경계 검사가 통과했습니다.
+
+## 애플리케이션 시작과 보호된 plan 관리
+
+미릴리스 소유자를 readiness 전에 로드해 Services·AdminState에 유지합니다.
+시작 선언의 버전 1 plan은 DB 소유자 row가 없을 때만 가져오고 DB 상태/비활성
+tombstone을 우선합니다. 시작·게시 시 선언된 서비스/대상/자원/행위/자격 방식·
+참조와 최소 AAL을 검사합니다. 보호된 참조 전용 GET/PUT·서명된 Hangang 게시
+변환은 네이티브 관리자·CSRF·replay·마지막 관리자 검사를 재사용합니다.
+[설정 문서](CONFIG.md#자격-변환-plan-미릴리스)에 필드·버전 동작을 기록합니다.
+실제 Hopae HTTP 프로세스로 viewer 거부·CSRF·필수 버전·잘못된 capability·
+오래된 쓰기·재시작 후 비활성/재활성화를 확인합니다. 소스의 plan 소유권/관리
+연결이며 gateway 자격 발급 활성화는 아닙니다. 운영 배포·위임 모듈 UI는 남아
+있습니다.
+
+시작/관리자 연결 갱신의 전체 target 네이티브 테스트는 898건 통과·42건 제외이며
+fmt/clippy/경계/문서/시나리오 커버리지도 통과했습니다. 의존성 감사는 기존
+검증 전용 RSA 예외와 rustls-pemfile 유지보수 중단 허용 경고 아래 통과한 것으로
+제약 없는 clean audit은 아닙니다. 서명 위임 projection 조회/게시에는 replay·
+오래된 버전·네이티브 grant 회수 검증을 포함합니다. 불변 v0.0.3 릴리스 자산과
+운영 이미지는 유지합니다.

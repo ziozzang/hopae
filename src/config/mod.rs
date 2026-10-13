@@ -54,6 +54,8 @@ pub struct Config {
     #[serde(default)]
     pub authentication_gateway: Option<crate::auth_gateway::runtime::Config>,
     #[serde(default)]
+    pub credential_projection: Option<crate::auth_gateway::projection::Configuration>,
+    #[serde(default)]
     pub linking: Linking,
     #[serde(default)]
     pub txn: Txn,
@@ -870,6 +872,26 @@ impl Config {
             }
         }
 
+        if let Some(config) = &self.credential_projection {
+            if config.revision != 1
+                || crate::auth_gateway::projection::Projector::compile(config.clone()).is_err()
+            {
+                errs.push("credential_projection: invalid bootstrap plans/revision".into());
+            }
+            if self.gateway.allow_unauthenticated_caller {
+                errs.push("credential_projection requires authenticated gateway callers".into());
+            }
+            if config.plans.iter().any(|plan| {
+                !self
+                    .apps
+                    .iter()
+                    .any(|app| app.app_id.as_str() == plan.service)
+            }) {
+                errs.push(
+                    "credential_projection service must match a configured application".into(),
+                );
+            }
+        }
         if let Some(config) = &self.authentication_gateway {
             if let Err(error) = config.validate() {
                 errs.push(format!("authentication_gateway: {error}"));

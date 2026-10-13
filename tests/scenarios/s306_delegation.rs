@@ -65,6 +65,7 @@ fn delegated_console_keeps_native_grants_and_signed_actor_audit() {
     let fixture = Fixture::with(
         "m4-admin",
         json!({"admin":{"hangang_delegation":{"key_env":"HOPAE_TEST_DELEGATION_KEY","sessions_file":mappings}},
+            "credential_projection":{"revision":1,"plans":[{"service":"app","audience":"app-api","resource":"app","action":"read","minimum_aal":1,"credential":{"type":"identity_header"}}]},
             "authentication_gateway":{"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"owned","session_fallback":true,
                 "api_relay":{"url":format!("{}/verify",idp.issuer.as_str().trim_end_matches('/')),"issuer":"owned","allow_private_endpoints":true}}]}}),
     );
@@ -132,6 +133,44 @@ fn delegated_console_keeps_native_grants_and_signed_actor_audit() {
         403
     );
 
+    let projection = signed(&h, "/v1/authentication/projections", "", "operator", 7, 104);
+    assert_eq!(projection.status, 200, "{projection:?}");
+    assert_eq!(projection.json()["revision"], 1);
+    let result = signed(
+        &h,
+        "/v1/authentication/projections/publish",
+        publication,
+        "operator",
+        7,
+        105,
+    );
+    assert_eq!(result.status, 200, "{result:?}");
+    assert_eq!(result.json()["revision"], 2);
+    assert_eq!(
+        signed(
+            &h,
+            "/v1/authentication/projections/publish",
+            publication,
+            "operator",
+            7,
+            106
+        )
+        .status,
+        409
+    );
+    assert_eq!(
+        signed(
+            &h,
+            "/v1/authentication/projections/publish",
+            publication,
+            "operator",
+            7,
+            105
+        )
+        .status,
+        403
+    );
+
     assert_eq!(
         signed(&h, "/v1/users/query", r#"{"limit":1}"#, "operator", 7, 10).status,
         200
@@ -167,6 +206,22 @@ fn delegated_console_keeps_native_grants_and_signed_actor_audit() {
     // Revoke native Hopae grant; Hangang's role alone cannot override it.
     kit::revoke(&h, &actor.user_id);
     assert_eq!(signed(&h, "/v1/users", "", "operator", 7, 6).status, 403);
+    assert_eq!(
+        signed(&h, "/v1/authentication/projections", "", "operator", 7, 107).status,
+        403
+    );
+    assert_eq!(
+        signed(
+            &h,
+            "/v1/authentication/projections/publish",
+            r#"{"revision":2,"configuration":null}"#,
+            "operator",
+            7,
+            108
+        )
+        .status,
+        403
+    );
 }
 
 #[test]

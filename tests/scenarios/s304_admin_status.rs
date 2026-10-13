@@ -746,3 +746,126 @@ fn authentication_profiles_put_requires_csrf_admin_revision_and_persists_tombsto
     assert_eq!(stored.revision, 2);
     assert!(stored.configuration.is_none());
 }
+
+#[test]
+fn credential_projection_admin_publication_is_fenced_and_survives_restart() {
+    let idp = MockIdp::start("auth_time_present");
+    let config = json!({"revision":1,"plans":[{"service":"app","audience":"app-api","resource":"app","action":"read","minimum_aal":1,"credential":{"type":"bearer_reference","secret_ref":"vault:owned-token"}}]});
+    let mut h = Hopae::spawn(
+        Fixture::with("m4-admin", json!({"credential_projection":config})),
+        &idp,
+        &[],
+    );
+    let u = users(&h, &idp);
+    let path = "/v1/authentication/projections";
+    assert_ne!(admin(&h).get(path).status, 200);
+    let read = admin(&h).with_handle(&u.v.handle).get(path);
+    assert_eq!(read.status, 200, "{read:?}");
+    assert_eq!(read.json()["revision"], 1);
+    assert_eq!(read.header("cache-control"), Some("no-store"));
+    let headers = [
+        ("content-type", "application/json"),
+        ("x-hopae-admin-request", "1"),
+        ("if-match", "\"1\""),
+    ];
+    let body = br#"{"configuration":null}"#;
+    assert_eq!(
+        admin(&h)
+            .with_handle(&u.v.handle)
+            .put_json_raw(path, &headers, body)
+            .status,
+        403
+    );
+    assert_eq!(
+        admin(&h)
+            .with_handle(&u.a.handle)
+            .put_json_raw(
+                path,
+                &[("content-type", "application/json"), ("if-match", "\"1\"")],
+                body
+            )
+            .status,
+        403
+    );
+    assert_eq!(
+        admin(&h)
+            .with_handle(&u.a.handle)
+            .put_json_raw(
+                path,
+                &[
+                    ("content-type", "application/json"),
+                    ("x-hopae-admin-request", "1")
+                ],
+                body
+            )
+            .status,
+        428
+    );
+    assert_eq!(
+        admin(&h)
+            .with_handle(&u.a.handle)
+            .put_json_raw(path, &headers, b"{}")
+            .status,
+        422
+    );
+    for field in ["secret", "audience", "assurance", "resource", "action"] {
+        let mut modified = config.clone();
+        modified["revision"] = json!(2);
+        match field {
+            "secret" => {
+                modified["plans"][0]["credential"]["secret_ref"] = json!("vault:undeclared")
+            }
+            "audience" => modified["plans"][0]["audience"] = json!("another-api"),
+            "assurance" => modified["plans"][0]["minimum_aal"] = json!(0),
+            "resource" => modified["plans"][0]["resource"] = json!("another-resource"),
+            _ => modified["plans"][0]["action"] = json!("write"),
+        }
+        let body = json!({"configuration":modified}).to_string();
+        let result =
+            admin(&h)
+                .with_handle(&u.a.handle)
+                .put_json_raw(path, &headers, body.as_bytes());
+        assert_eq!(result.status, 422, "{field}: {result:?}");
+    }
+    let result = admin(&h)
+        .with_handle(&u.a.handle)
+        .put_json_raw(path, &headers, body);
+    assert_eq!(result.status, 200, "{result:?}");
+    assert_eq!(result.json()["revision"], 2);
+    assert_eq!(
+        admin(&h)
+            .with_handle(&u.a.handle)
+            .put_json_raw(path, &headers, body)
+            .status,
+        409
+    );
+    h.restart();
+    let document = hopae::auth_gateway::projection_authority::read(&db(&h))
+        .unwrap()
+        .unwrap();
+    assert_eq!(document.revision, 2);
+    assert!(document.configuration.is_none());
+    let read = admin(&h).with_handle(&u.a.handle).get(path);
+    assert_eq!(read.status, 200, "{read:?}");
+    assert!(read.json()["configuration"].is_null());
+    let mut enabled = config;
+    enabled["revision"] = json!(3);
+    enabled["plans"][0]["minimum_aal"] = json!(2);
+    let body = json!({"configuration":enabled}).to_string();
+    let result = admin(&h).with_handle(&u.a.handle).put_json_raw(
+        path,
+        &[
+            ("content-type", "application/json"),
+            ("x-hopae-admin-request", "1"),
+            ("if-match", "\"2\""),
+        ],
+        body.as_bytes(),
+    );
+    assert_eq!(result.status, 200, "{result:?}");
+    h.restart();
+    let read = admin(&h).with_handle(&u.a.handle).get(path);
+    assert_eq!(read.status, 200, "{read:?}");
+    assert_eq!(read.json()["revision"], 3);
+    assert_eq!(read.json()["configuration"]["plans"][0]["minimum_aal"], 2);
+    assert!(!read.body.contains("Bearer "));
+}

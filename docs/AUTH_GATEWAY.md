@@ -629,3 +629,25 @@ The exclusive owner prepares its compiled Arc before commit and installs it with
 Five tests cover restart/disable/minimum floors, stale independent publisher, actor/audit rollback without live installation, corrupted/revision-mismatched state, old-reader refusal and newly signed permit after reenable, and plan mutation in the final guard with full nonce rollback. The source owner still needs application startup, delegated administrator endpoints/UI and issuance audit/outbox integration. Production state is unchanged.
 
 All 54 authentication-gateway tests and fmt/clippy/boundary checks pass for this source update.
+
+## Application startup and protected plan administration
+
+The unreleased owner is now loaded before readiness and retained in Services and
+AdminState. Startup imports declared revision-one plans only into an absent owner
+row; durable state/tombstones override bootstrap. Both startup and publication
+validate declared service/audience/resource/action/credential capabilities and
+assurance floors. The protected reference-only GET/PUT API and signed Hangang
+publish translation reuse native administrator, CSRF, replay and final actor
+fences. [Configuration](CONFIG.md#credential-projection-plans-unreleased) defines
+the fields and revision behavior. Actual Hopae HTTP process qualification covers
+viewer refusal, CSRF, required revision, invalid capabilities, stale writes, disable
+and reenable across restarts. This activates plan ownership/administration in source,
+not gateway credential issuance; production deployment and delegated module UI are
+still pending.
+
+This startup/admin update passes all-target native tests: 898 passed, 42 ignored,
+plus fmt/clippy/boundary/docs/scenario coverage. Scoped dependency audit passes
+under the existing verification-only RSA exception and allowed rustls-pemfile
+unmaintained warning; this is not an unrestricted clean audit. Signed delegated
+projection GET/publish tests include replay, stale revision and native grant
+revocation. The immutable v0.0.3 release assets and deployed images are unchanged.

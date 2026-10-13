@@ -30,6 +30,7 @@ pub mod events;
 pub mod me;
 pub mod pages;
 pub mod profiles;
+pub mod projections;
 pub mod seed;
 pub mod sessions;
 pub mod status;
@@ -109,6 +110,7 @@ impl AdminConfig {
 
 /// Shared state of the admin listener.
 pub struct AdminState {
+    pub projection_authority: Arc<Mutex<crate::auth_gateway::projection_authority::Authority>>,
     pub profile_authority: Option<Arc<Mutex<crate::auth_gateway::authority::Authority>>>,
     pub profile_config: Arc<crate::config::Config>,
     pub profile_store: crate::store::sqlite::Store,

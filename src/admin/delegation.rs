@@ -318,9 +318,14 @@ pub async fn middleware(
             | "/v1/users"
             | "/v1/sessions"
             | "/v1/events"
-            | "/v1/authentication/profiles",
+            | "/v1/authentication/profiles"
+            | "/v1/authentication/projections",
         ) if bytes.is_empty() => original_path.clone(),
-        ("POST", "/v1/authentication/profiles/publish") => {
+        (
+            "POST",
+            path @ ("/v1/authentication/profiles/publish"
+            | "/v1/authentication/projections/publish"),
+        ) => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Publication {
@@ -336,7 +341,7 @@ pub async fn middleware(
                 return denied();
             };
             profile_publication = Some((publication.revision, body));
-            "/v1/authentication/profiles".to_owned()
+            path.trim_end_matches("/publish").to_owned()
         }
         ("POST", path @ ("/v1/users/query" | "/v1/sessions/query" | "/v1/events/query")) => {
             #[derive(Deserialize)]

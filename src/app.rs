@@ -190,6 +190,8 @@ impl Readiness {
 /// Everything the routers and services are built from.
 #[derive(Clone)]
 pub struct Services {
+    pub projection_authority:
+        Arc<std::sync::Mutex<crate::auth_gateway::projection_authority::Authority>>,
     pub external_verifiers: Arc<crate::factor::external_registry::Registry>,
     pub totp_keyring: Option<Arc<crate::factor::keyring::Keyring>>,
     pub authentication_authority:
@@ -262,6 +264,7 @@ impl Services {
         let mut key = [0u8; 32];
         self.rng.fill(&mut key);
         Some(Arc::new(crate::admin::AdminState {
+            projection_authority: self.projection_authority.clone(),
             profile_authority: self.authentication_authority.clone(),
             profile_config: self.config.clone(),
             profile_store: self.store.clone(),
@@ -700,7 +703,38 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
             None
         }
     };
+    let projection_authority = {
+        let mut connection = store.conn();
+        let durable = crate::auth_gateway::projection_authority::read(&connection)
+            .map_err(|_| anyhow::anyhow!("invalid durable credential projection state"))?;
+        if let Some(configuration) = durable.as_ref().and_then(|d| d.configuration.as_ref()) {
+            crate::auth_gateway::projection::validate_capabilities(
+                configuration,
+                cfg.credential_projection.as_ref(),
+            )
+            .map_err(|_| {
+                anyhow::anyhow!("durable credential projection exceeds declared capabilities")
+            })?;
+        }
+        let mut owner = crate::auth_gateway::projection_authority::Authority::load(&connection, 0)
+            .map_err(|_| anyhow::anyhow!("credential projection owner unavailable"))?;
+        if durable.is_none()
+            && let Some(configuration) = &cfg.credential_projection
+        {
+            owner
+                .publish(
+                    &mut connection,
+                    0,
+                    Some(configuration.clone()),
+                    "bootstrap",
+                    &|_| Ok(()),
+                )
+                .map_err(|_| anyhow::anyhow!("credential projection bootstrap failed"))?;
+        }
+        Arc::new(std::sync::Mutex::new(owner))
+    };
     let services = Services {
+        projection_authority,
         external_verifiers,
         totp_keyring,
         authentication_authority,

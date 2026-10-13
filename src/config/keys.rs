@@ -178,6 +178,23 @@ pub(super) const ROOT: Node = Obj(&[
             ),
         ]),
     ),
+    (
+        "credential_projection",
+        Obj(&[
+            ("revision", Leaf),
+            (
+                "plans",
+                Arr(&Obj(&[
+                    ("service", Leaf),
+                    ("audience", Leaf),
+                    ("resource", Leaf),
+                    ("action", Leaf),
+                    ("minimum_aal", Leaf),
+                    ("credential", Obj(&[("type", Leaf), ("secret_ref", Leaf)])),
+                ])),
+            ),
+        ]),
+    ),
     ("state_dir", Leaf),
     ("store", Obj(&[("kind", Leaf), ("path", Leaf)])),
     (

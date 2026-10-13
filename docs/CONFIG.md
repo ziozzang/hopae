@@ -417,3 +417,32 @@ production profile document retains native-only credentials without scripts or
 mixed routing. Existing configuration, keys and consistent owner/delegation v6
 rollback backups are preserved; live gateway/console regressions pass. Tagged
 0.0.3 assets do not include this later feature.
+
+### Credential projection plans (unreleased)
+
+Optional `credential_projection` declares bootstrap revision `1` and up to 128
+reference-only plans. Each plan names a configured application `service`, fixed
+`audience`, `resource`, `action`, `minimum_aal` (0–3), and `credential`: either
+`{"type":"identity_header"}` or
+`{"type":"bearer_reference","secret_ref":"vault:example-token"}`. No secret
+value is embedded or resolved by configuration checking or the management API.
+Authenticated gateway callers are required. These plans do not activate a
+projection endpoint or send credentials through ordinary auth responses.
+
+Startup imports these plans only when the owner DB row is absent. DB publication
+—including a disabled tombstone—takes precedence on restart. Stored enabled plans
+must remain within the startup declaration: same service/audience/resource/action
+and credential capability/reference, with an equal or higher minimum AAL. Removal
+of a required declaration refuses readiness rather than silently granting another
+capability. A database restore still needs an external rollback/version fence.
+
+The protected admin API exposes `GET /v1/authentication/projections` (reference-only
+JSON, ETag and no-store) and `PUT /v1/authentication/projections`. PUT requires the
+existing admin/CSRF checks, exactly one quoted numeric `If-Match`, and an explicit
+`configuration` field. `null` publishes disable; an enabled configuration must use
+the next revision. New scopes/references or weaker assurance return 422; stale
+revision returns 409. Publication rechecks the native actor inside the transaction
+and commits reference-only audit with the document, then installs the prepared
+memory snapshot. Delegated Hangang requests use signed
+`POST /v1/authentication/projections/publish` with `revision` and `configuration`.
+The Hangang module UI and gateway projection transport still need integration.

@@ -77,6 +77,7 @@ pub fn pattern_of(path: &str) -> &'static str {
         [""] if !api => "/",
         ["assets", "admin.css"] if !api => "/assets/admin.css",
         ["status"] if api => "/v1/status",
+        ["authentication", "projections"] if api => "/v1/authentication/projections",
         ["authentication", "profiles"] if api => "/v1/authentication/profiles",
         ["me"] if api => "/v1/me",
         ["users"] => p!("/users", "/v1/users"),
@@ -101,7 +102,11 @@ pub fn pattern_of(path: &str) -> &'static str {
 /// that changes state. The listener checks these (CSRF, then the role) before
 /// the handler runs.
 pub fn is_mutation(method: &Method, pattern: &str) -> bool {
-    (*method == Method::PUT && pattern == "/v1/authentication/profiles")
+    (*method == Method::PUT
+        && matches!(
+            pattern,
+            "/v1/authentication/profiles" | "/v1/authentication/projections"
+        ))
         || *method == Method::POST
             && matches!(
                 pattern,

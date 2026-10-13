@@ -19,13 +19,13 @@ pub(crate) struct Scope {
     pub issued_ms: u64,
     pub expires_ms: u64,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Configuration {
     pub revision: u64,
     pub plans: Vec<Plan>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Plan {
     pub service: String,
@@ -35,7 +35,7 @@ pub struct Plan {
     pub action: String,
     pub credential: Credential,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Credential {
     IdentityHeader,
@@ -57,6 +57,38 @@ fn identifier(s: &str) -> bool {
         && s.len() <= 128
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+}
+/// Administrator publication may select declared capabilities, not introduce a
+/// secret reference, audience/resource/action or lower assurance requirement.
+pub fn validate_capabilities(
+    desired: &Configuration,
+    declared: Option<&Configuration>,
+) -> Result<(), Refused> {
+    Projector::compile(desired.clone())?;
+    let declared = declared.ok_or(Refused)?;
+    for plan in &desired.plans {
+        let original = declared
+            .plans
+            .iter()
+            .find(|p| p.service == plan.service && p.audience == plan.audience)
+            .ok_or(Refused)?;
+        let same_credential = match (&plan.credential, &original.credential) {
+            (Credential::IdentityHeader, Credential::IdentityHeader) => true,
+            (
+                Credential::BearerReference { secret_ref: a },
+                Credential::BearerReference { secret_ref: b },
+            ) => a == b,
+            _ => false,
+        };
+        if plan.resource != original.resource
+            || plan.action != original.action
+            || plan.minimum_aal < original.minimum_aal
+            || !same_credential
+        {
+            return Err(Refused);
+        }
+    }
+    Ok(())
 }
 impl Projector {
     /// Compile reference-only native plans. Secret resolution is deferred until

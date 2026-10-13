@@ -392,3 +392,30 @@ ASCII 4096 bytes로 제한합니다. 결정적인 서비스 자격 라우팅·�
 포함하지만 실제 운영 profile 문서는 스크립트·혼합 라우팅 없는 자체 자격을 유지합니다.
 기존 설정·키와 일관된 owner·delegation v6 복구 백업을 보관하며 라이브 게이트웨이·
 콘솔 회귀가 통과했습니다. 태그 0.0.3 asset에는 이 후속 기능이 없습니다.
+
+### 자격 변환 plan (미릴리스)
+
+선택적 `credential_projection`은 bootstrap 버전 `1`과 참조 전용 plan 최대
+128개를 선언합니다. plan은 설정된 app의 `service`, 고정 `audience`, `resource`,
+`action`, `minimum_aal`(0–3)과 `credential`을 지정합니다. 자격은
+`{"type":"identity_header"}` 또는
+`{"type":"bearer_reference","secret_ref":"vault:example-token"}`입니다.
+비밀값은 포함하지 않고 설정 검사·관리자 API에서 조회하지 않습니다. 인증된
+gateway caller가 필요하며 projection endpoint·일반 auth 응답 자격 전달을
+활성화하지는 않습니다.
+
+시작 시 소유자 DB row가 없을 때만 가져옵니다. 비활성 tombstone을 포함한 DB
+게시가 재시작 후에도 우선합니다. 저장된 활성 plan은 시작 선언의 동일한
+서비스/대상/자원/행위·자격 방식/참조를 유지하고 최소 AAL은 같거나 높아야 합니다.
+필요한 선언을 제거하면 다른 권한을 부여하지 않고 readiness를 거부합니다.
+DB 복원에는 별도의 외부 rollback/버전 검사가 필요합니다.
+
+보호된 관리자 API `GET /v1/authentication/projections`는 참조 전용 JSON·ETag·
+no-store를 제공합니다. `PUT /v1/authentication/projections`는 기존 관리자/CSRF
+검사, 따옴표로 감싼 숫자 `If-Match` 한 개와 명시적 `configuration` 필드를
+요구합니다. `null`은 비활성 게시이며 활성 설정은 다음 버전을 사용해야 합니다.
+새 범위/참조·약해진 AAL은 422, 오래된 버전은 409입니다. transaction 안에서
+네이티브 관리자를 재검사하고 문서·참조 전용 audit을 함께 commit한 후 준비된
+메모리 snapshot을 설치합니다. Hangang 위임 요청은 서명된
+`POST /v1/authentication/projections/publish`에 `revision`·`configuration`을
+사용합니다. Hangang 모듈 UI와 gateway 변환 전송 연결은 남아 있습니다.
