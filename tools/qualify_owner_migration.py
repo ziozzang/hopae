@@ -25,20 +25,23 @@ def snapshot(path):
         return version,result
 
 def main():
-    p=argparse.ArgumentParser();p.add_argument('--database',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--qualifier',type=Path,required=True);args=p.parse_args()
+    p=argparse.ArgumentParser();p.add_argument('--database',type=Path,required=True);p.add_argument('--output',type=Path,required=True);p.add_argument('--qualifier',type=Path,required=True);p.add_argument('--expected-before',type=int);p.add_argument('--expected-after',type=int);args=p.parse_args()
     os.umask(0o077);assert args.database.is_file();assert not args.output.exists()
     args.output.mkdir(mode=0o700,parents=True)
     backup=args.output/'consistent-backup.db';candidate=args.output/'migration-candidate.db';restored=args.output/'restored-backup.db'
     consistent_copy(args.database,backup)
-    before,original=snapshot(backup);consistent_copy(backup,candidate)
+    before,original=snapshot(backup)
+    if args.expected_before is not None:assert before==args.expected_before,'unexpected input schema'
+    consistent_copy(backup,candidate)
     completed=subprocess.run([str(args.qualifier.resolve()),str(candidate.resolve())],capture_output=True)
     if completed.returncode:raise RuntimeError('offline candidate migration failed; output intentionally suppressed')
     after,migrated=snapshot(candidate)
     assert after>=before
+    if args.expected_after is not None:assert after==args.expected_after,'unexpected migrated schema'
     for table,values in original.items():assert migrated.get(table)==values,'owner table changed: '+table
     consistent_copy(backup,restored);restored_version,restored_rows=snapshot(restored)
     assert (restored_version,restored_rows)==(before,original)
-    report={'schema_before':before,'schema_after':after,'preserved_tables':sorted(original),'restored_schema':restored_version,'migration_and_restore':'passed','production_database_migrated':False}
+    report={'schema_before':before,'schema_after':after,'preserved_tables':sorted(original),'restored_schema':restored_version,'migration_and_restore':'passed','production_database_migrated':False,'qualifier_sha256':hashlib.sha256(args.qualifier.read_bytes()).hexdigest()}
     (args.output/'report.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(report))
 if __name__=='__main__':main()

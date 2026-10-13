@@ -1,6 +1,6 @@
 # Second-factor extensions
 
-<!-- doc-rev: 14 -->
+<!-- doc-rev: 15 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
@@ -525,3 +525,37 @@ The live runtime still has schema v5 and its existing native-MFA image. No fixtu
 user/session entered production. Release-build/migration/rollback qualification,
 operational rollout, organization/provider accounts, per-service eligibility,
 enrollment/recovery/account admission and Lua remain unfinished.
+
+## Static release candidate and internal v6 dogfooding — 2026-10-14
+
+An optimized x86_64 musl static-pie binary now passes actual Chromium external
+MFA/TOTP coexistence on an online private owner-state copy migrated to v6.
+The same candidate passes HTTP and persistent mTLS HOP1 acceptance of the valid
+service credential and refusal of guest/invalid credentials. This qualifies the
+release build rather than only the earlier development binary; it is not a
+full-stack throughput or multi-host/follower benchmark.
+
+The offline migration tool now accepts `--expected-before 5 --expected-after 6`
+and records its qualifier binary digest. The static qualifier preserves every
+preexisting table's row count/content digest, restores an identical v5 backup,
+and refuses a no-op qualifier when v6 is expected. The actual deployed v5 binary
+refuses the v6 candidate without changing the DB and boots a restored v5 copy
+with matching original configuration/environment references. Minimal unrelated
+configuration was insufficient for the copied authentication-profile state and
+was replaced by the matching private configuration for this rollback test.
+
+Internal dogfooding now runs image `0.0.2-zerotrust-v6-c776cde`, schema v6, with
+existing configuration and key material preserved. Before migration the service
+was stopped and consistent owner/delegation backups retained with original
+configuration, secret files and previous image. The first deployment attempt
+stopped on an image-variable preflight mismatch and restored healthy v5 before
+any new-image migration; the corrected attempt uses the existing HOPAE_TAG
+variable and completes preflight before stopping the service.
+
+Live API matrix/acceptance/guest and bad-key refusal/credential stripping, all
+module menus/Pumgye matrix, SSO/logout/origin isolation and native regressions
+pass on v6. No external verifier or fixture user/session was added to production;
+existing assurance rules are unchanged. Prior internal-v5 statements record
+historical stages. Public signed release/assets, production organization/Google
+MFA, eligibility/enrollment/recovery/account limits, Lua, memory followers,
+existing-stream revocation and full-stack/fleet performance remain required.

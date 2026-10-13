@@ -1,6 +1,6 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=14 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=15 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
@@ -448,3 +448,30 @@ owner·delegation 상태 복사본이며 1차 session은 자체 fixture라 실�
 실제 운영은 기존 네이티브 MFA 이미지·schema v5를 유지하고 fixture 사용자·session을
 추가하지 않았습니다. 릴리스 빌드·마이그레이션·rollback 검증, 운영 반영, 조직·provider 계정,
 서비스별 자격, 등록·복구·계정 유입 제한·Lua는 후속입니다.
+
+## 정적 릴리스 후보·내부 v6 dogfooding — 2026-10-14
+
+최적화한 x86_64 musl static-pie 바이너리가 온라인 owner 상태의 비공개 복사본을
+v6로 마이그레이션한 후보에서 실제 Chromium 외부 MFA·TOTP 공존 검증을 통과했습니다.
+같은 후보의 HTTP·지속 mTLS HOP1도 정상 서비스 자격 허용·guest·잘못된 자격 거부를
+통과했습니다. 이전 개발 빌드 대신 릴리스 빌드 검증이며 전체 스택 처리량·다중 호스트·
+follower 벤치마크는 아닙니다.
+
+오프라인 도구는 `--expected-before 5 --expected-after 6`과 qualifier 바이너리 해시를
+지원합니다. 정적 qualifier로 기존 모든 테이블의 행 개수·내용 해시를 보존하고 동일한
+v5 백업을 복원했으며 v6가 필요한 경우 no-op qualifier도 거부합니다. 실제 운영 v5
+바이너리는 v6 후보 DB를 변경 없이 거부하고 원래 설정·환경 참조와 맞춘 복원 v5 복사본에서
+시작합니다. 별도 최소 설정으로는 복사된 인증 프로필 상태와 맞지 않아 실패했고 실제와
+일치하는 비공개 설정으로 rollback 시작 검증을 완료했습니다.
+
+내부 dogfooding은 기존 설정·키를 유지한 `0.0.2-zerotrust-v6-c776cde` 이미지·schema
+v6로 전환했습니다. 서비스 중지 후 일관된 owner·delegation 백업, 원래 설정·비밀 파일·
+이전 이미지를 보관했습니다. 첫 배포 시도는 이미지 변수 사전 검사 불일치에서 새 이미지
+마이그레이션 전에 중단되어 정상 v5로 복원했습니다. 기존 HOPAE_TAG에 맞춘 재시도는
+서비스 중지 전에 사전 검사를 완료하고 배포했습니다.
+
+v6에서 라이브 API 매트릭스·허용·guest·잘못된 키 거부·자격 제거, 모든 모듈 메뉴·
+품계 매트릭스, SSO·logout·Origin 격리와 네이티브 회귀를 통과했습니다. 운영에 외부
+verifier·fixture 사용자·session을 추가하지 않았고 기존 인증등급 규칙도 유지합니다.
+이전 내부 v5 문구는 당시 상태입니다. 공개 서명 릴리스·artifact, 운영 조직·Google MFA,
+자격·등록·복구·계정 제한·Lua·메모리 follower·기존 stream 회수·전체 스택·fleet 성능은 후속입니다.
