@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 8 -->
+<!-- doc-rev: 9 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -186,3 +186,13 @@ Tests cover forged provider time and disable during verification, plus real LDAP
 results through this wrapper over LDAPS and StartTLS. This prepares session input;
 it does not create sessions, implement portal CSRF/transactions, or replace the
 required provider-enabled fence inside the eventual session creation transaction.
+
+## Raw claim containment
+
+Direct password results now require an empty JSON object for raw_claims. Arbitrary
+metadata, credential echoes and assurance assertions are rejected before the verified
+session-input object is constructed. Future directory attributes need a separate
+typed allowlist rather than inheriting the OIDC raw-claim container. Tests reject
+credential-bearing objects, AAL assertions, null and array results, and confirm the
+real LDAP connector still passes through both TLS modes. Portal/session issuance
+remains unimplemented; this is the result-boundary contract, not a full login flow.

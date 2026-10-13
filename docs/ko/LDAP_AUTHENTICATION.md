@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=8 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=9 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -160,3 +160,12 @@ unavailable로 처리합니다.
 위조 provider 시간·검증 도중 비활성화 및 실제 LDAP 결과의 LDAPS/StartTLS 경계
 통과를 검증합니다. 세션 입력 준비이며 세션 생성·portal CSRF/transaction 구현이
 아닙니다. 향후 세션 생성 트랜잭션 내부의 provider 활성 상태 fence도 필요합니다.
+
+## Raw claim 제한
+
+직접 비밀번호 인증 결과의 raw_claims는 빈 JSON object여야 합니다. 임의 metadata·
+credential echo·assurance 주장은 검증된 세션 입력 객체를 만들기 전에 거부합니다.
+향후 디렉토리 attribute에는 OIDC raw-claim 컨테이너 대신 별도 typed 허용 목록이
+필요합니다. 자격 정보 객체·AAL 주장·null·array 거부와 실제 LDAP 커넥터의 두 TLS
+방식 통과를 검증합니다. portal/세션 발급은 미구현이며 결과 경계 계약이지 전체 로그인
+흐름의 완성을 의미하지 않습니다.

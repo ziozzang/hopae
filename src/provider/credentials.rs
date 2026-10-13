@@ -116,10 +116,10 @@ pub async fn authenticate_password(
         || identity.subject.chars().any(char::is_control)
         || identity.email_verified
         || identity.email_authoritative
-        || serde_json::to_vec(&identity.raw_claims)
-            .map_err(|_| CredentialError::Unavailable)?
-            .len()
-            > 8192
+        || identity
+            .raw_claims
+            .as_object()
+            .is_none_or(|claims| !claims.is_empty())
     {
         return Err(CredentialError::Unavailable);
     }
@@ -139,6 +139,7 @@ mod tests {
     struct OwnedProvider {
         id: ProviderId,
         claim: bool,
+        raw_claims: serde_json::Value,
         disable: bool,
         enabled: std::sync::atomic::AtomicBool,
     }
@@ -169,7 +170,7 @@ mod tests {
                 name: None,
                 username: None,
                 picture: None,
-                raw_claims: serde_json::json!({}),
+                raw_claims: self.raw_claims.clone(),
                 auth_time: self.claim.then(|| serde_json::json!(9999)),
             })
         }
@@ -182,6 +183,7 @@ mod tests {
             let provider = OwnedProvider {
                 id: ProviderId::new("owned"),
                 claim,
+                raw_claims: serde_json::json!({}),
                 disable,
                 enabled: std::sync::atomic::AtomicBool::new(true),
             };
@@ -205,6 +207,36 @@ mod tests {
                     crate::store::types::AuthTimeSource::HopaeCompletion
                 );
             }
+        }
+    }
+    #[tokio::test]
+    async fn direct_authentication_rejects_unstructured_or_privilege_bearing_claims() {
+        let password = Secret::new("owned-private-value".into());
+        let clock = crate::crypto::TestClock::new(crate::crypto::Timestamp(1000));
+        let mut echoed = serde_json::Map::new();
+        echoed.insert("credential".into(), serde_json::json!(password.expose()));
+        for raw_claims in [
+            serde_json::json!({"aal":3}),
+            serde_json::Value::Object(echoed),
+            serde_json::Value::Null,
+            serde_json::json!([]),
+        ] {
+            let provider = OwnedProvider {
+                id: ProviderId::new("owned"),
+                claim: false,
+                raw_claims,
+                disable: false,
+                enabled: std::sync::atomic::AtomicBool::new(true),
+            };
+            assert!(matches!(
+                authenticate_password(
+                    &provider,
+                    PasswordInput::new("worker", &password).unwrap(),
+                    &clock
+                )
+                .await,
+                Err(CredentialError::Unavailable)
+            ));
         }
     }
     #[test]
