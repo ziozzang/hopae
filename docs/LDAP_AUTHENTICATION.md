@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 3 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -94,3 +94,27 @@ distinguish invalid credentials, unavailable provider and disabled provider. Thi
 interface does not yet implement LDAP TLS/search/bind, local password hashing,
 portal form handling or session issuance; its identity/assurance requirements remain
 connector and portal implementation contracts until those paths are qualified.
+
+## Implemented directory connector
+
+`provider::ldap::LdapProvider` implements the direct credential interface using
+ldap3 with rustls. It requires LDAPS or explicit mandatory StartTLS, absolute
+bounded regular-file CA material and verified endpoint certificates; credentials
+are environment references. A 64-operation semaphore and 1–2000 ms total deadline
+cover lookup, service bind, streaming search and independent user bind. The fixed
+attribute filter escapes username values, requires one result and a single bounded
+text immutable identity attribute, and rejects referrals. Every connection driver
+is aborted on scope exit/cancellation; user-bound connections are never pooled.
+Parser conversion panics are converted to unavailable, and responses cannot supply
+email authority or provider auth_time. Binary objectGUID support, hard BER frame
+bounds and persistent service-lookup pooling still require implementation/review.
+
+An owned OpenLDAP fixture validates successful TLS bind, repeatable entryUUID,
+rejection of invalid credentials, absent users, duplicate users, injected filters
+and an incorrect CA.
+It generates ephemeral credentials and certificates and removes its container.
+Reproduce with `docker build -t hopae/owned-openldap:bookworm tests/fixtures/ldap`
+then `python3 tools/owned_ldap_smoke.py`. The fixture runs the explicitly ignored
+connector integration test; ordinary unit tests do not require Docker. This qualifies
+the connector slice, not the portal chooser/form, session issuance, revocation,
+circuit lifecycle, complete performance or an operational LDAP provider deployment.

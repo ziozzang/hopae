@@ -3,6 +3,7 @@
 //! `presets` the built-in defaults, `registry` the configured set.
 
 pub mod credentials;
+pub mod ldap;
 pub mod oidc;
 pub mod presets;
 pub mod registry;

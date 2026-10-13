@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=2 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=3 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -79,3 +79,23 @@ Debug에서 username과 password를 모두 숨깁니다. 생성자는 비밀번�
 provider 장애·비활성 provider를 구분합니다. LDAP TLS/search/bind·자체 비밀번호
 hash·portal form·세션 발급은 아직 구현하지 않았습니다. 신원/assurance 요건은
 해당 경로 검증까지 connector·portal 구현 계약입니다.
+
+## 구현된 디렉토리 커넥터
+
+`provider::ldap::LdapProvider`는 ldap3/rustls로 직접 자격 interface를 구현합니다.
+LDAPS 또는 명시적 필수 StartTLS, 절대 경로의 제한된 일반 CA 파일, endpoint 인증서
+검증을 요구하며 credential은 환경변수 참조입니다. semaphore 64개와 전체 기한
+1–2000ms로 연결·서비스 bind·stream 검색·별도 사용자 bind를 제한합니다. 고정
+attribute filter에 username을 escape하고 단일 결과·단일 제한된 텍스트 불변 신원
+attribute를 요구하며 referral을 거부합니다. scope 종료/취소에서 연결 driver를
+abort하고 사용자 bind 연결은 pool에 넣지 않습니다. 변환 parser panic은 unavailable로
+처리하고 email 권위나 provider auth_time을 반환하지 않습니다. binary objectGUID·
+BER frame의 엄격한 크기 제한·영속 서비스 lookup pool은 추가 구현/검토가 필요합니다.
+
+소유한 OpenLDAP fixture로 TLS bind 성공·반복 entryUUID·잘못된 비밀번호·미등록/
+중복 사용자·filter 주입·잘못된 CA 거부를 검증합니다. 임시 credential/인증서를
+만들고 container를 제거합니다. `docker build -t hopae/owned-openldap:bookworm
+tests/fixtures/ldap` 후 `python3 tools/owned_ldap_smoke.py`로 재현합니다. fixture는
+명시적 ignored connector 통합 테스트를 실행하며 일반 unit test는 Docker를 요구하지
+않습니다. 커넥터 일부 검증이며 portal 선택/form·세션 발급·회수·circuit 수명주기·
+전체 성능·운영 LDAP provider 배포를 증명하지 않습니다.
