@@ -425,6 +425,16 @@ impl Store {
             .unwrap_or_else(|p| p.into_inner()) = rng;
     }
 
+    /// Check administrator authority on the caller's already-open publication transaction.
+    pub(crate) fn fence_profile_actor(
+        &self,
+        connection: &Connection,
+        actor: &crate::store::Actor,
+        policy: &crate::store::ActorPolicy,
+    ) -> crate::store::StoreResult<()> {
+        admin::fence(connection, self.shared(), actor, policy)
+    }
+
     /// Borrow a utility connection (tests, operators, the test hooks). Not for request paths.
     pub fn conn(&self) -> MutexGuard<'_, Connection> {
         self.inner.util.lock().unwrap_or_else(|p| p.into_inner())

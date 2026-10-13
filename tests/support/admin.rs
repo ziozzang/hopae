@@ -136,6 +136,15 @@ impl<'a> AdminClient<'a> {
         self.dispatch(r)
     }
 
+    pub fn put_json_raw(&self, path: &str, headers: &[(&str, &str)], body: &[u8]) -> Response {
+        let mut request = self.base("PUT", path);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        request.body = body.to_vec();
+        self.dispatch(request)
+    }
+
     /// An HTML form post; `origin` is sent as the `Origin` header when given.
     pub fn post_form(&self, path: &str, fields: &[(&str, &str)], origin: Option<&str>) -> Response {
         let mut ser = url::form_urlencoded::Serializer::new(String::new());

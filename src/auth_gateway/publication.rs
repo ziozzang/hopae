@@ -19,6 +19,8 @@ pub enum Error {
     Conflict,
     #[error("invalid authentication profile document")]
     Invalid,
+    #[error("authentication profile actor revoked")]
+    Denied,
     #[error("authentication profile storage failure")]
     Storage,
 }
@@ -62,6 +64,16 @@ pub fn publish(
     configuration: Option<Config>,
     actor: &str,
 ) -> Result<Document, Error> {
+    publish_guarded(connection, expected, configuration, actor, &|_| Ok(()))
+}
+/// Recheck the authenticated actor inside the same transaction as authority and audit writes.
+pub fn publish_guarded(
+    connection: &mut Connection,
+    expected: u64,
+    configuration: Option<Config>,
+    actor: &str,
+    guard: &dyn Fn(&Connection) -> Result<(), Error>,
+) -> Result<Document, Error> {
     if actor.is_empty() || actor.len() > 128 || actor.chars().any(char::is_control) {
         return Err(Error::Invalid);
     }
@@ -69,6 +81,7 @@ pub fn publish(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| Error::Storage)?;
+    guard(&transaction)?;
     let previous = read(&transaction)?;
     if previous.as_ref().map_or(0, |d| d.revision) != expected {
         return Err(Error::Conflict);
@@ -97,12 +110,37 @@ pub fn publish(
             ],
         )
         .map_err(|_| Error::Storage)?;
+    guard(&transaction)?;
     transaction.commit().map_err(|_| Error::Storage)?;
     Ok(document)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn revoked_actor_before_commit_rolls_back_authority_and_audit() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT")
+            .unwrap();
+        let calls = std::cell::Cell::new(0);
+        let guard = |_: &Connection| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                Err(Error::Denied)
+            } else {
+                Ok(())
+            }
+        };
+        assert!(matches!(
+            publish_guarded(&mut db, 0, None, "admin", &guard),
+            Err(Error::Denied)
+        ));
+        assert!(read(&db).unwrap().is_none());
+        let count: i64 = db
+            .query_row("SELECT count(*) FROM meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
     #[test]
     fn deletion_survives_reopen_and_stale_publication_cannot_restore_it() {
         let dir = tempfile::tempdir().unwrap();

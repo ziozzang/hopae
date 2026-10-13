@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
@@ -104,3 +104,19 @@ HTTP deadline expires. The authenticated scenario checks anonymous rejection and
 inspection of an owned persisted profile. PUT remains pending: it must recheck the
 actor inside the write transaction using the existing administrator fence. The
 Hangang plugin UI and deployment of this endpoint are not yet qualified.
+
+PUT `/v1/authentication/profiles` now requires a singular quoted If-Match revision
+and a body containing only the required `configuration` field (null disables).
+The listener applies CSRF and administrator-role checks for this PUT. Its bounded
+blocking worker recompiles the candidate, invokes the existing actor fence inside
+the immediate transaction and again before commit, then installs the snapshot
+without an intervening await. Caller cancellation does not cancel that worker.
+Bootstrap-declared secret references are the current allowlist; verifier credentials
+and private endpoints additionally require the original endpoint/issuer/security
+binding. Declaring new references therefore still needs operator configuration.
+Tests cover viewer/CSRF denial, undeclared private endpoint denial, stale revision,
+durable tombstone and precommit actor denial rolling back both state and audit.
+The Hangang delegation middleware still restricts its endpoint allowlist, so this
+new write path is currently the authenticated native Hopae admin API; integrated
+console write controls and deployment remain pending. No stream revocation or
+complete authentication-lifecycle claim follows from these request-level checks.

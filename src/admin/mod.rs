@@ -109,6 +109,8 @@ impl AdminConfig {
 
 /// Shared state of the admin listener.
 pub struct AdminState {
+    pub profile_authority: Option<Arc<Mutex<crate::auth_gateway::authority::Authority>>>,
+    pub profile_config: Arc<crate::config::Config>,
     pub profile_store: crate::store::sqlite::Store,
     pub profile_workers: Arc<Semaphore>,
     pub cfg: AdminConfig,

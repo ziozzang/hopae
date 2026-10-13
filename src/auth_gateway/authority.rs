@@ -8,6 +8,10 @@ pub struct Snapshot {
     pub revision: u64,
     pub runtime: Option<runtime::Runtime>,
 }
+pub struct Authorization<'a> {
+    pub actor: &'a str,
+    pub guard: &'a dyn Fn(&Connection) -> Result<(), publication::Error>,
+}
 pub struct Authority {
     snapshot: Arc<ArcSwap<Snapshot>>,
 }
@@ -57,11 +61,38 @@ impl Authority {
         env: &dyn Fn(&str) -> Option<String>,
         validate: &dyn Fn(&runtime::Config) -> Result<(), publication::Error>,
     ) -> Result<publication::Document, publication::Error> {
+        self.publish_authorized(
+            connection,
+            expected,
+            configuration,
+            Authorization {
+                actor,
+                guard: &|_| Ok(()),
+            },
+            env,
+            validate,
+        )
+    }
+    pub fn publish_authorized(
+        &mut self,
+        connection: &mut Connection,
+        expected: u64,
+        configuration: Option<runtime::Config>,
+        authorization: Authorization<'_>,
+        env: &dyn Fn(&str) -> Option<String>,
+        validate: &dyn Fn(&runtime::Config) -> Result<(), publication::Error>,
+    ) -> Result<publication::Document, publication::Error> {
         if self.snapshot.load().revision != expected {
             return Err(publication::Error::Conflict);
         }
         let runtime = Self::compile(configuration.as_ref(), env, validate)?;
-        let document = publication::publish(connection, expected, configuration, actor)?;
+        let document = publication::publish_guarded(
+            connection,
+            expected,
+            configuration,
+            authorization.actor,
+            authorization.guard,
+        )?;
         self.snapshot.store(Arc::new(Snapshot {
             revision: document.revision,
             runtime,

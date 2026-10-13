@@ -44,7 +44,7 @@ pub fn router(state: Arc<AdminState>) -> Router {
         .route("/v1/status", get(status::data))
         .route(
             "/v1/authentication/profiles",
-            get(crate::admin::profiles::get),
+            get(crate::admin::profiles::get).put(crate::admin::profiles::put),
         )
         .route("/v1/me", get(me::get))
         .route("/assets/admin.css", get(stylesheet))

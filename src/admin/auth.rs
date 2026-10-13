@@ -77,6 +77,7 @@ pub fn pattern_of(path: &str) -> &'static str {
         [""] if !api => "/",
         ["assets", "admin.css"] if !api => "/assets/admin.css",
         ["status"] if api => "/v1/status",
+        ["authentication", "profiles"] if api => "/v1/authentication/profiles",
         ["me"] if api => "/v1/me",
         ["users"] => p!("/users", "/v1/users"),
         ["users", _] => p!("/users/{id}", "/v1/users/{id}"),
@@ -100,18 +101,19 @@ pub fn pattern_of(path: &str) -> &'static str {
 /// that changes state. The listener checks these (CSRF, then the role) before
 /// the handler runs.
 pub fn is_mutation(method: &Method, pattern: &str) -> bool {
-    *method == Method::POST
-        && matches!(
-            pattern,
-            "/users/{id}/disable"
-                | "/users/{id}/enable"
-                | "/users/{id}/sessions/terminate"
-                | "/sessions/{id}/terminate"
-                | "/v1/users/{id}/disable"
-                | "/v1/users/{id}/enable"
-                | "/v1/users/{id}/sessions/terminate"
-                | "/v1/sessions/{id}/terminate"
-        )
+    (*method == Method::PUT && pattern == "/v1/authentication/profiles")
+        || *method == Method::POST
+            && matches!(
+                pattern,
+                "/users/{id}/disable"
+                    | "/users/{id}/enable"
+                    | "/users/{id}/sessions/terminate"
+                    | "/sessions/{id}/terminate"
+                    | "/v1/users/{id}/disable"
+                    | "/v1/users/{id}/enable"
+                    | "/v1/users/{id}/sessions/terminate"
+                    | "/v1/sessions/{id}/terminate"
+            )
 }
 
 /// `host` or `host:port` against the console host (ASCII case-insensitive).

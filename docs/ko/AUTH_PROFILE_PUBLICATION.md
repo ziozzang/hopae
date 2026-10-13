@@ -1,6 +1,6 @@
 # 인증 프로필 게시
 
-<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=6 status=current -->
+<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=7 status=current -->
 
 [문서](README.md) · [English](../AUTH_PROFILE_PUBLICATION.md)
 
@@ -87,3 +87,16 @@ DB의 참조 전용 문서·revision ETag·no-store를 반환하고 authority가
 때까지 유지됩니다. 인증 시나리오에서 익명 거부와 소유한 저장 프로필 조회를 확인합니다.
 PUT은 기존 관리자 fence로 쓰기 트랜잭션 안에서 actor를 재검증해야 하므로 아직
 구현하지 않았습니다. Hangang 플러그인 UI와 이 endpoint 운영 배포 검증도 남아 있습니다.
+
+PUT `/v1/authentication/profiles`는 단일 따옴표 If-Match revision과 필수
+`configuration` 필드만 있는 본문을 요구합니다. null은 비활성화입니다. listener가
+이 PUT의 CSRF·관리자 역할을 확인합니다. 제한된 blocking worker는 후보를 다시
+컴파일하고 immediate 트랜잭션 내부 및 commit 직전에 기존 actor fence를 확인한 뒤
+중간 await 없이 스냅샷을 설치합니다. 호출자 취소가 worker를 취소하지 않습니다.
+현재 비밀 참조 허용 목록은 bootstrap 선언이며 verifier credential·사설 endpoint는
+원래 endpoint/issuer/보안 옵션 바인딩도 일치해야 합니다. 새 참조 선언은 운영자 설정이
+필요합니다. viewer/CSRF 거부·미선언 사설 endpoint 거부·오래된 revision·영속 삭제·
+commit 직전 actor 거부 시 상태와 감사 동시 롤백을 검증합니다. Hangang 위임
+middleware의 endpoint 허용 목록 연결은 남아 있으므로 새 쓰기는 현재 인증된 호패
+자체 admin API 경로입니다. 통합 콘솔 쓰기·배포는 남아 있고 stream 회수나 전체
+인증 수명주기 완성을 주장하지 않습니다.

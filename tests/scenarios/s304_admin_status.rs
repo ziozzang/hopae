@@ -675,3 +675,71 @@ fn authentication_profiles_read_is_authenticated_and_reference_only() {
         "OWNED_REFERENCE_ONLY"
     );
 }
+
+#[test]
+fn authentication_profiles_put_requires_csrf_admin_revision_and_persists_tombstone() {
+    let idp = MockIdp::start("auth_time_present");
+    let profile = json!({"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"owned",
+        "api_relay":{"url":format!("{}/verify",idp.issuer.as_str().trim_end_matches('/')),"issuer":"owned","allow_private_endpoints":true}}]});
+    let h = Hopae::spawn(
+        Fixture::with("m4-admin", json!({"authentication_gateway":profile})),
+        &idp,
+        &[],
+    );
+    let u = users(&h, &idp);
+    let path = "/v1/authentication/profiles";
+    let headers = [
+        ("content-type", "application/json"),
+        ("x-hopae-admin-request", "1"),
+        ("if-match", "\"1\""),
+    ];
+    let body = br#"{"configuration":null}"#;
+    assert_eq!(
+        admin(&h)
+            .with_handle(&u.v.handle)
+            .put_json_raw(path, &headers, body)
+            .status,
+        403
+    );
+    assert_eq!(
+        admin(&h)
+            .with_handle(&u.a.handle)
+            .put_json_raw(
+                path,
+                &[("content-type", "application/json"), ("if-match", "\"1\"")],
+                body
+            )
+            .status,
+        403
+    );
+    let mut modified = profile.clone();
+    modified["profiles"][0]["api_relay"]["url"] = json!(format!(
+        "{}/not-declared",
+        idp.issuer.as_str().trim_end_matches('/')
+    ));
+    let forbidden = json!({"configuration":modified}).to_string();
+    assert_eq!(
+        admin(&h)
+            .with_handle(&u.a.handle)
+            .put_json_raw(path, &headers, forbidden.as_bytes())
+            .status,
+        422
+    );
+    let result = admin(&h)
+        .with_handle(&u.a.handle)
+        .put_json_raw(path, &headers, body);
+    assert_eq!(result.status, 200, "{result:?}");
+    assert_eq!(result.json()["revision"], 2);
+    assert_eq!(
+        admin(&h)
+            .with_handle(&u.a.handle)
+            .put_json_raw(path, &headers, body)
+            .status,
+        409
+    );
+    let stored = hopae::auth_gateway::publication::read(&db(&h))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.revision, 2);
+    assert!(stored.configuration.is_none());
+}
