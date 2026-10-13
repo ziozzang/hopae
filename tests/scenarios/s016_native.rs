@@ -714,7 +714,7 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         directory: fx.ctx.directory.clone(),
         sessions: fx.ctx.sessions.clone(),
         events: fx.store.events(),
-        emitter,
+        emitter: emitter.clone(),
         clock: fx.clock.clone(),
         rng: fx.rng.clone(),
         snapshot: fx.snapshot.clone(),
@@ -928,6 +928,57 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
             .consumed_at
             .is_some()
     );
+    let adapter = hopae::portal::adapter::Adapter::new(
+        service.clone(),
+        Arc::new(hopae::provider::Registry::empty()),
+        fx.ctx.directory.clone(),
+        fx.store.events(),
+        emitter,
+        hopae::app::Readiness::default(),
+    );
+    use hopae::portal::ports::PortalServices;
+    let portal_ctx = hopae::portal::ports::RequestCtx {
+        client_ip: ip,
+        user_agent: None,
+        request_id: "owned-portal".into(),
+        client_request_id: None,
+        https: true,
+    };
+    let portal_cookies = hopae::portal::ports::Cookies {
+        bind: Some(cookie.clone()),
+        handle: None,
+    };
+    let submitted_token = random_token(fx.rng.as_ref(), 16);
+    fx.store
+        .create_transaction(
+            NewTransaction {
+                txn_sha256: submitted_token.digest(),
+                ..transaction.clone()
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+    let submitted_challenge = service
+        .begin_password(&ctx, &submitted_token, &id, Some(&cookie))
+        .await
+        .unwrap();
+    let result = adapter
+        .password(
+            &portal_ctx,
+            hopae::portal::ports::PasswordSubmission {
+                provider: &id,
+                challenge: &submitted_challenge,
+                username: "worker",
+                password: &password,
+            },
+            &portal_cookies,
+        )
+        .await;
+    assert!(
+        matches!(result, hopae::portal::ports::CallbackOutcome::Redirect(_)),
+        "portal credential adapter did not return the handoff"
+    );
     let next_token = random_token(fx.rng.as_ref(), 16);
     fx.store
         .create_transaction(
@@ -967,7 +1018,7 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
         .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
         .unwrap();
     assert_eq!(
-        sessions, 1,
+        sessions, 2,
         "provider disable during verification created a session"
     );
 }

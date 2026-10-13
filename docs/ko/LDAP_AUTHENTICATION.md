@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=16 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=17 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -253,3 +253,13 @@ POST로 challenge·CSRF hidden 필드와 라벨이 있는 username/current-passw
 HTML escape합니다. 두 언어·라벨·POST 바인딩·password value 속성 부재를 검사합니다.
 HTTP route나 provider 선택기에 아직 연결하지 않았고 CSRF·throttling·자격 제출·
 운영 LDAP 활성화는 남았습니다.
+
+## Portal 자격 adapter
+
+PortalServices에 OAuth callback과 분리된 borrowed PasswordSubmission을 추가했습니다.
+adapter는 PasswordInput을 검증하고 직접 세션 완료를 호출하여 기존 handoff/handle
+응답을 반환합니다. 실패는 장애와 자격 거부를 구분합니다. PasswordSubmission에는
+Debug·serialization 구현이 없고 호출 전 HTTP Origin/CSRF·시도 제한이 계약입니다.
+실제 store 서비스 시나리오에서 adapter를 통과한 handoff 응답을 확인했습니다.
+portal 검사와 Clippy가 통과했습니다. HTTP route·HTTPS 집행·CSRF/throttle handler·
+선택 화면 연결은 아직 활성화하지 않았습니다.

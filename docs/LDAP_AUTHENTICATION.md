@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 16 -->
+<!-- doc-rev: 17 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -294,3 +294,14 @@ HTML-escaped under the existing script-free template policy. Rendering tests cov
 both locales, labels, POST binding and absence of a password value attribute.
 This template is not yet connected to a HTTP route or provider chooser; CSRF,
 throttling, credential submission and operational LDAP activation remain pending.
+
+## Portal credential adapter
+
+PortalServices now accepts a borrowed PasswordSubmission independently of the
+OAuth callback interface. Adapter validates PasswordInput, calls the direct session
+completion method and returns the existing handoff/handle response; failure preserves
+typed unavailable versus credential rejection. PasswordSubmission has no Debug or
+serialization implementation. Its contract requires HTTP origin/CSRF and attempt
+throttling before invocation. The real-store service scenario now exercises this
+adapter and verifies a handoff response. Portal tests and Clippy pass. HTTP route,
+HTTPS enforcement, CSRF/throttle handler and chooser wiring are not enabled yet.

@@ -224,6 +224,58 @@ impl PortalServices for Adapter {
             })
     }
 
+    async fn password(
+        &self,
+        ctx: &RequestCtx,
+        submission: super::ports::PasswordSubmission<'_>,
+        cookies: &Cookies,
+    ) -> CallbackOutcome {
+        let input = match crate::provider::credentials::PasswordInput::new(
+            submission.username,
+            submission.password,
+        ) {
+            Ok(input) => input,
+            Err(_) => {
+                return CallbackOutcome::Failed(Failure {
+                    kind: FailKind::Failed,
+                    reason: crate::event::types::reasons::INVALID_CREDENTIALS,
+                });
+            }
+        };
+        match self
+            .svc
+            .complete_password(
+                &Self::sctx(ctx),
+                crate::session::service::PasswordCompletion {
+                    provider_id: submission.provider,
+                    challenge: submission.challenge,
+                    input,
+                    portal_cookie: cookies.bind.as_ref(),
+                    portal_handle: cookies.handle.as_ref(),
+                },
+            )
+            .await
+        {
+            Ok(Cb::LoggedIn {
+                location,
+                portal_handle,
+                ..
+            }) => CallbackOutcome::Redirect(Redirect {
+                location,
+                set_handle: portal_handle.map(|handle| HandleCookie {
+                    value: handle.value,
+                    max_age: handle.max_age,
+                }),
+            }),
+            Ok(Cb::LinkRequired { .. }) => CallbackOutcome::LinkNotice { via_provider: None },
+            Ok(Cb::Interrupted { .. }) => CallbackOutcome::Failed(Failure {
+                kind: FailKind::Failed,
+                reason: crate::event::types::reasons::PORTAL_BIND_MISMATCH,
+            }),
+            Err(error) => CallbackOutcome::Failed(failure(&error)),
+        }
+    }
+
     async fn callback(
         &self,
         ctx: &RequestCtx,

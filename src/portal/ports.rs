@@ -166,6 +166,14 @@ pub struct Health {
     pub providers: Vec<(ProviderId, ProviderHealth)>,
 }
 
+/// Borrowed credential submission; no Debug/serialization or retained password value.
+pub struct PasswordSubmission<'a> {
+    pub provider: &'a ProviderId,
+    pub challenge: &'a Secret,
+    pub username: &'a str,
+    pub password: &'a Secret,
+}
+
 #[async_trait]
 pub trait PortalServices: Send + Sync + 'static {
     /// `GET /login?txn=`: validate the transaction (unexpired, unconsumed, client
@@ -183,6 +191,19 @@ pub trait PortalServices: Send + Sync + 'static {
         provider: &ProviderId,
         cookies: &Cookies,
     ) -> Result<Redirect, Failure>;
+
+    /// Called only after HTTP origin/CSRF and password-attempt throttling checks.
+    async fn password(
+        &self,
+        _ctx: &RequestCtx,
+        _submission: PasswordSubmission<'_>,
+        _cookies: &Cookies,
+    ) -> CallbackOutcome {
+        CallbackOutcome::Failed(Failure {
+            kind: FailKind::Unavailable,
+            reason: crate::event::types::reasons::PROVIDER_UNAVAILABLE,
+        })
+    }
 
     /// `GET /callback/<provider>`: locate the transaction by `state`, check the
     /// portal binding, exchange and validate, resolve identity, create or reuse
