@@ -216,7 +216,20 @@ async fn gate(
 ) -> Response {
     let rid = request_id(&req);
     let path = req.uri().path().to_string();
-    let client = match auth::admit(&st, peer.ip(), req.headers(), &rid) {
+    let admission = if req
+        .extensions()
+        .get::<crate::admin::delegation::ValidatedDelegation>()
+        .is_some()
+        && req
+            .extensions()
+            .get::<hangang_runtime::AuthenticatedTlsPeer>()
+            .is_some()
+    {
+        auth::admit_delegated(&st, peer.ip(), req.headers(), &rid)
+    } else {
+        auth::admit(&st, peer.ip(), req.headers(), &rid)
+    };
+    let client = match admission {
         Ok(c) => c,
         Err(refused) => {
             let ip = refused.client_ip.unwrap_or_else(|| peer.ip());

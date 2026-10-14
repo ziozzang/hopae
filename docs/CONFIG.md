@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 34 -->
+<!-- doc-rev: 35 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -465,3 +465,5 @@ mTLS caller still needs the valid delegation signature and native authorization.
 Current tests cover actual certificate refusal, preserved login denial, shutdown,
 configuration constraints and unforgeable transport selection. Full remote delegated
 browser/Kubernetes qualification remains a separate gate.
+
+A fully validated signed delegation over authenticated mTLS trusts only its actual TCP peer for that request when reconstructing the signed forwarding context. It does not add the Pod/network range to global trusted_proxies. Unsigned TLS requests retain the normal proxy trust and native account checks.

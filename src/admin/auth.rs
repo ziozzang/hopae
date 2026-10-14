@@ -179,7 +179,27 @@ pub fn admit(
     headers: &HeaderMap,
     rid: &str,
 ) -> Result<Client, Refused> {
-    let trusted = st.cfg.trusted.iter().any(|n| n.contains(&peer));
+    admit_with_trust(st, peer, headers, rid, &st.cfg.trusted)
+}
+
+pub(crate) fn admit_delegated(
+    st: &AdminState,
+    peer: IpAddr,
+    headers: &HeaderMap,
+    rid: &str,
+) -> Result<Client, Refused> {
+    let network =
+        ipnet::IpNet::new(peer, if peer.is_ipv4() { 32 } else { 128 }).expect("host prefix");
+    admit_with_trust(st, peer, headers, rid, std::slice::from_ref(&network))
+}
+fn admit_with_trust(
+    st: &AdminState,
+    peer: IpAddr,
+    headers: &HeaderMap,
+    rid: &str,
+    networks: &[ipnet::IpNet],
+) -> Result<Client, Refused> {
+    let trusted = networks.iter().any(|n| n.contains(&peer));
     if !trusted && st.cfg.untrusted_peers == UntrustedPeers::Refuse {
         denials::record_refusal(
             st.emitter.as_ref(),
@@ -196,7 +216,7 @@ pub fn admit(
             requester: None,
         });
     }
-    let client = clientinfo::resolve(peer, headers, &st.cfg.trusted);
+    let client = clientinfo::resolve(peer, headers, networks);
     let right_host =
         addressed_host(headers, trusted).is_some_and(|h| host_is_console(h, &st.cfg.host));
     if !right_host {

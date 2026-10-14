@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=34 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=35 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -435,3 +435,5 @@ TLS는 관리자 계정·권한·세션·인증 수준·서명 위임 검사를 
 유효한 위임 서명과 네이티브 권한이 필요합니다.
 실제 인증서 거부·로그인 거부 유지·종료·설정 제약·전송 선택 위조 거부를 검증하며,
 전체 원격 위임 브라우저/K8s 검증은 별도 단계입니다.
+
+검증을 마친 서명 위임과 mTLS를 함께 가진 요청만 서명된 전달 문맥을 해석할 때 실제 TCP 접속자 하나를 신뢰합니다. Pod/네트워크 대역을 전역 trusted_proxies에 추가하지 않습니다. 서명이 없는 TLS 요청은 기존 프록시 신뢰와 네이티브 계정 검사를 따릅니다.

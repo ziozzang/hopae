@@ -196,6 +196,9 @@ fn one<'a>(r: &'a Request, name: &str) -> Option<&'a str> {
 fn denied() -> Response {
     api::json_error(StatusCode::FORBIDDEN, "delegation_rejected")
 }
+#[derive(Clone)]
+pub(crate) struct ValidatedDelegation;
+
 pub async fn middleware(
     State(st): State<Arc<AdminState>>,
     mut req: Request,
@@ -493,6 +496,7 @@ pub async fn middleware(
         nonce: assertion.nonce,
         expected_user_id,
     });
+    req.extensions_mut().insert(ValidatedDelegation);
     next.run(req).await
 }
 
