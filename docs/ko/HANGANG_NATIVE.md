@@ -143,3 +143,15 @@ OIDC 외부 HTTP client는 provider별 origin 서킷을 제한된 크기로 유�
 기존 최대 256개 연결 안에서 TLS 핸드셰이크를 3초로 제한합니다. 지속 연결은 300초 후 종료하고 프레임·검증 제한을 유지합니다. 전환을 위해 literal 루프백의 평문 연결만 허용합니다. Hangang 원격 TLS client 설정과 배포 검증은 후속 작업이며 서버 측 변경만으로 원격 Hangang 사용이 가능해진 것은 아닙니다.
 
 [서비스 인증 게이트웨이](AUTH_GATEWAY.md)에 선택적 API 키/network 런타임과 남은 connector/권한 작업을 기록했습니다.
+
+## 요청 바인딩 최종 전달 후보
+
+tools/service_stack_smoke.py --grpc --resource-catalog --native-resource
+--durable-restart로 실제 호패/품계/수문장 debug 프로세스와 HTTP origin을 사용해
+한강 auth.native_resource 옵션을 검증했습니다. 임시 발급자/신뢰·실제 원천 검증
+설정은 테스트가 소유합니다. origin에 합성한 /api/secure 경로와 비어 있지 않은
+본문이 API 자격 없이 도착합니다. pin/발급자/audience 오류와 본문 예산 초과는
+origin 전달 전에 거부하며 설정 복원·네트워크/권한/등급/AAL/서비스 거부·장애·
+영속 권한/인증 회수를 통과했습니다. 옵션 없는 기존 gRPC 자원 검사도
+통과했습니다. 로컬 후보 기능 검증이며 서명 릴리즈·Kubernetes/운영 반영·
+서명 권한/변환·처리량은 별도 검증입니다.

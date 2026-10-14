@@ -172,3 +172,17 @@ The authentication-gateway core also defines namespaced human/service/workload/n
 TLS handshakes have a 3-second bound within the existing 256-connection limit. Persistent connections expire after 300 seconds; frame and verification bounds remain unchanged. Plaintext remains available only on literal loopback for migration. Hangang's remote TLS client configuration and deployment qualification are follow-up work; this server-side change does not by itself enable remote Hangang use.
 
 [Service authentication gateway](AUTH_GATEWAY.md) documents the opt-in API-key/network runtime and remaining connector/authorization work.
+
+## Request-bound final dispatch candidate
+
+`tools/service_stack_smoke.py --grpc --resource-catalog --native-resource
+--durable-restart` qualifies Hangang's opt-in `auth.native_resource` with actual
+Hopae/Pumgye/Sumunjang debug processes and an HTTP origin. Ephemeral issuer/trust
+and native live-validation resources are fixture owned. The origin receives
+composed `/api/secure` and nonempty bytes without the API credential. Wrong
+pin/issuer/audience and an exceeded body budget refuse before origin dispatch;
+configuration restoration, network/permission/class/AAL/service refusal, outages
+and durable permission/authentication withdrawal pass. The old gRPC resource
+fixture without this option passes too. These are local candidate functional
+gates; signed release, Kubernetes/operating adoption, signed permission/projection
+and throughput remain separate qualifications.

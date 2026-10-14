@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Owned actual Hangang/Hopae/Pumgye, optional Sumunjang; no operational identities."""
-import argparse, copy, hashlib, sqlite3, http.client, http.server, json, os, secrets, ssl, struct, subprocess, tempfile, threading, time, urllib.request
+import argparse, base64, copy, hashlib, sqlite3, http.client, http.server, json, os, secrets, ssl, struct, subprocess, tempfile, threading, time, urllib.request
 from pathlib import Path
 from remote_hangang_smoke import port
 
@@ -10,14 +10,16 @@ def main():
     p.add_argument('--sumunjang-binary',type=Path)
     p.add_argument('--grpc',action='store_true')
     p.add_argument('--resource-catalog',action='store_true')
+    p.add_argument('--native-resource',action='store_true')
     p.add_argument('--external-verifier',action='store_true')
     p.add_argument('--durable-restart',action='store_true')
     args=p.parse_args()
     if args.resource_catalog and not args.grpc:p.error('--resource-catalog requires --grpc')
-    processes=[];seen=[];verifier_state={'unavailable':False,'calls':0}
+    if args.native_resource and not (args.grpc and args.resource_catalog and args.sumunjang_binary):p.error('--native-resource requires --grpc --resource-catalog and --sumunjang-binary')
+    processes=[];seen=[];seen_bodies=[];seen_paths=[];verifier_state={'unavailable':False,'calls':0}
     class Origin(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
-            seen.append(dict(self.headers));self.send_response(200);self.end_headers();self.wfile.write(b'owned')
+            seen.append(dict(self.headers));seen_bodies.append(self.rfile.read(int(self.headers.get('Content-Length','0'))));seen_paths.append(self.path);self.send_response(200);self.end_headers();self.wfile.write(b'owned')
         do_POST=do_GET
         def log_message(self,*args):pass
     class Verifier(http.server.BaseHTTPRequestHandler):
@@ -59,6 +61,15 @@ def main():
             hop['authentication_gateway']={'authority_id':'owned','profiles':[{'service_id':'orders','host':'app.example.test','ports':[public],'realm':'services','api_keys':[{'token_env':'OWNED_API_KEY','subject':'worker'}],'networks':['127.0.0.1/32']}]}
             if args.external_verifier:
                 profile=hop['authentication_gateway']['profiles'][0];profile.pop('api_keys');profile['api_relay']={'url':f'http://127.0.0.1:{verifier.server_port}/verify','issuer':'owned-external','allow_private_endpoints':True,'timeout_ms':500}
+            if args.native_resource:
+                openssl('genpkey','-algorithm','ED25519','-out','issuer.key')
+                openssl('pkey','-in','issuer.key','-outform','DER','-out','issuer.der')
+                openssl('pkey','-in','issuer.key','-pubout','-outform','DER','-out','issuer.pub')
+                seed=(root/'issuer.der').read_bytes();public_key=(root/'issuer.pub').read_bytes()
+                assert len(seed)==48 and len(public_key)==44
+                env['OWNED_RECEIPT_SEED']=base64.b64encode(seed[-32:]).decode()
+                issuer_pin=base64.b64encode(public_key[-32:]).decode()
+                hop['receipt_issuer']={'issuer_ref':'owned','key_epoch':1,'identity_authority_epoch':'epoch1','public_key':issuer_pin,'seed_env':'OWNED_RECEIPT_SEED','scopes':[{'service':'orders','audience':'orders-api'}]}
             (root/'hopae.json').write_text(json.dumps(hop))
             def tls(name):return {'server_name':name,'ca':str(root/'ca.pem'),'certificate':str(root/'client.pem'),'key':str(root/'client.key')}
             config={'http':[{'id':'orders','host':'app.example.test','path_prefix':'/secure','path_match':'segment_prefix','access_mode':'protected','backends':[f'http://127.0.0.1:{origin.server_port}'],'auth':{'url':f'http://127.0.0.1:{http_verify}/_hopae/verify','native':{'address':f'127.0.0.1:{hop_native}','tls':tls('hopae.example.test')},'request_headers':['authorization'],'response_headers':['x-forwarded-user','x-hopae-aal','x-hopae-principal-kind'],'static_request_headers':{'x-hopae-gateway-key':{'env':'FIXTURE_KEY'},'x-hopae-contract':'1'},'forward_response':True},'resource_policy':{'resource_id':'orders','principal':{'source':'external','subject_header':'x-forwarded-user'},'allow':[],'pumgye':{'service_id':'orders','information_class':'internal','permissions':{'GET':['read'],'POST':['write']}}}}],'pumgye_authority':{'decision_address':f'127.0.0.1:{pum_native}','management_address':f'127.0.0.1:{pum_http}','decision_token_env':'PUMGYE_DECISION_TOKEN','admin_token_env':'PUMGYE_ADMIN_TOKEN','tls':tls('pumgye.example.test'),'timeout_ms':1000}}
@@ -67,6 +78,12 @@ def main():
                 config['pumgye_authority'].update(transport='grpc',decision_address=f'localhost:{pum_grpc}')
             if args.resource_catalog:
                 resource=config['http'][0]['resource_policy'];resource.pop('pumgye');resource['pumgye_resource']={'service_id':'orders','resource':'db:orders','actions':{'GET':'select','POST':'update'}}
+            if args.native_resource:
+                config['http'][0]['auth']['native_resource']={'issuer_ref':'owned','key_epoch':1,'public_key':issuer_pin,'audience':'orders-api'}
+                config['http'][0]['backends'][0]+='/api'
+                (root/'authentication-trust.json').write_text(json.dumps({'entries':[{'issuer_ref':'owned','key_epoch':1,'identity_epoch':'epoch1','service':'orders','audience':'orders-api','minimum_revision':1,'public_key':issuer_pin}]}))
+                (root/'authentication-live.json').write_text(json.dumps(dict(tls('hopae.example.test'),issuer_ref='owned',address=f'https://localhost:{hop_grpc}',token_env='FIXTURE_KEY')))
+                (root/'network-live.json').write_text(json.dumps(dict(tls('sumunjang.example.test'),address=f'https://localhost:{guard_grpc}',token_env='HANGANG_GUARD_COLLECTOR_TOKEN')))
             (root/'hangang.json').write_text(json.dumps(config))
             def start(binary,argv,name):
                 log=open(root/(name+'.log'),'ab');process=subprocess.Popen([str(binary.resolve()),*argv],env=env,stdout=log,stderr=log);processes.append(process);return process
@@ -80,7 +97,6 @@ def main():
                 raise RuntimeError(name+' readiness deadline')
             context=ssl.create_default_context(cafile=str(root/'ca.pem'));context.load_cert_chain(str(root/'client.pem'),str(root/'client.key'))
             pum_args=['--listen',f'0.0.0.0:{pum_http}','--decision-listen',f'0.0.0.0:{pum_native}','--database',str(root/'pumgye.db'),'--policy',str(root/'policy.json'),'--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--client-ca',str(root/'ca.pem'),*(['--grpc-listen',f'0.0.0.0:{pum_grpc}'] if args.grpc else [])]
-            owner=start(args.pumgye_binary,pum_args,'pumgye');wait(f'https://127.0.0.1:{pum_http}/healthz',owner,'pumgye',context)
             hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae')
             guard_args=[]
             if args.sumunjang_binary:
@@ -94,13 +110,15 @@ def main():
                 assert guard_api('/v1/policy','PUT',{'mode':'enforce','allow':[]})==200
                 guard_args=['--guard-url',f'http://127.0.0.1:{guard_http}','--guard-decision-tcp',f'localhost:{guard_grpc if args.grpc else guard_native}','--guard-decision-server-name','sumunjang.example.test','--guard-decision-ca',str(root/'ca.pem'),'--guard-decision-cert',str(root/'client.pem'),'--guard-decision-key',str(root/'client.key'),'--guard-timeout-ms','1000']
                 if args.grpc:guard_args+=['--guard-decision-grpc']
+            if args.native_resource:pum_args+=['--authentication-trust',str(root/'authentication-trust.json'),'--authentication-live',str(root/'authentication-live.json'),'--network-live',str(root/'network-live.json')]
+            owner=start(args.pumgye_binary,pum_args,'pumgye');wait(f'https://127.0.0.1:{pum_http}/healthz',owner,'pumgye',context)
             gateway=start(args.gateway_binary,['--config',str(root/'hangang.json'),'--listen',f'127.0.0.1:{public}','--admin',f'127.0.0.1:{admin}','--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--threads','2','--lua-workers','1','--drain-seconds','1',*guard_args],'hangang');wait(f'http://127.0.0.1:{admin}/v1/config',gateway,'hangang',token=system)
             def request(method='GET',key=api_key):
                 c=http.client.HTTPSConnection('127.0.0.1',public,context=ssl.create_default_context(cafile=str(root/'ca.pem')),timeout=3)
                 headers={'Host':'app.example.test','x-forwarded-user':'u_forged','x-hopae-aal':'3'}
                 if key is not None:headers['Authorization']='Bearer '+key
                 before=len(seen)
-                c.request(method,'/secure',headers=headers);r=c.getresponse();status=r.status;r.read();c.close()
+                c.request(method,'/secure',body=b'owned final entity' if args.native_resource else None,headers=headers);r=c.getresponse();status=r.status;r.read();c.close()
                 assert len(seen)==before+(1 if status==200 else 0),'refused request reached application upstream'
                 return status
             def api(path='/v1/config',method='GET',document=None,extra=None):
@@ -109,7 +127,21 @@ def main():
                 with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{admin}'+path,data=None if document is None else json.dumps(document).encode(),headers=headers,method=method),timeout=3) as r:return json.loads(r.read()),dict(r.headers)
             assert request()==200 and request()==200
             assert len(seen)==2 and all(not any(k.lower()=='authorization' for k in h) for h in seen)
+            if args.native_resource:assert seen_paths==['/api/secure','/api/secure'] and seen_bodies==[b'owned final entity']*2, 'final target/entity mismatch'
             assert all(h.get('x-forwarded-user')==subject and h.get('x-hopae-aal')=='0' for h in seen)
+            if args.native_resource:
+                openssl('genpkey','-algorithm','ED25519','-out','wrong-issuer.key')
+                openssl('pkey','-in','wrong-issuer.key','-pubout','-outform','DER','-out','wrong-issuer.pub')
+                wrong_pin=base64.b64encode((root/'wrong-issuer.pub').read_bytes()[-32:]).decode()
+                for field,value,expected in [('public_key',wrong_pin,503),('issuer_ref','untrusted-issuer',503),('audience','untrusted-api',503),('maximum_body_bytes',4,413)]:
+                    document,_=api();baseline=copy.deepcopy(document['http'][0]['auth']['native_resource'])
+                    document['http'][0]['auth']['native_resource'][field]=value
+                    changed,_=api('/v1/config','PUT',document,{'If-Match':f'"{document["revision"]}"'})
+                    assert request()==expected,'native dispatch phase was bypassed: '+field
+                    changed['http'][0]['auth']['native_resource']=baseline
+                    api('/v1/config','PUT',changed,{'If-Match':f'"{changed["revision"]}"'})
+                    assert request()==200,'native configuration restoration failed'
+                print('PASS: actual final native dispatch refuses wrong pin/issuer/audience and oversized entity without upstream effects; restoration succeeds.')
             assert request('POST')==403 and request(key=None)==401 and request(key='invalid-service-key-at-least-thirty-two-bytes')==401
             root_config,_=api();current,headers=api('/v1/pumgye/policy');original=copy.deepcopy(current);current['policy']['services']['orders']['users']={}
             updated,_=api('/v1/pumgye/policy','PUT',current,{'If-Match':f'"{current["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==403
