@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=30 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=31 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -677,3 +677,5 @@ Chromium MFA/TOTP·운영 API/매트릭스/모듈/SSO/네이티브/브라우저 
 projection-1319351 이미지를 유지합니다. 제어된 회수 race는 네이티브
 테스트로 검증했으며 운영 smoke는 프로필을 변경하거나 분산/fleet 동작을
 증명하지 않습니다. 태그 릴리스 자산은 유지합니다.
+
+네이티브 Kubernetes Pod-bound 인증을 참조형 프로필과 HTTP/HOP1 회수 검사에 연결했습니다. [워크로드 계약](KUBERNETES_WORKLOAD.md)을 참고하십시오. 실제 클러스터 활성화·워크로드 receipt 발급은 아직 남았습니다.

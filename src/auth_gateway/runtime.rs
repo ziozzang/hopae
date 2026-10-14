@@ -22,6 +22,8 @@ pub struct Profile {
     pub api_keys: Vec<ApiKey>,
     #[serde(default)]
     pub api_relay: Option<super::relay::Config>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubernetes_tokenreview: Option<super::kubernetes::Profile>,
     #[serde(default)]
     pub networks: Vec<String>,
     #[serde(default)]
@@ -69,11 +71,14 @@ impl Config {
             ensure!(
                 (1..=16).contains(&p.ports.len())
                     && p.api_keys.len() <= 256
-                    && (p.api_relay.is_some() || !p.api_keys.is_empty())
+                    && (p.api_relay.is_some()
+                        || p.kubernetes_tokenreview.is_some()
+                        || !p.api_keys.is_empty())
                     && p.networks.len() <= 256,
                 "authentication profile exceeds bounds"
             );
-            let mixed = p.api_relay.is_some() && !p.api_keys.is_empty();
+            let mixed = p.api_relay.is_some()
+                && (!p.api_keys.is_empty() || p.kubernetes_tokenreview.is_some());
             ensure!(
                 !mixed || p.relay_token_prefix.is_some(),
                 "mixed authentication requires an explicit relay token prefix"
@@ -97,6 +102,19 @@ impl Config {
                 ensure!(
                     !mixed || relay.issuer != format!("hopae:{}", self.authority_id),
                     "mixed relay must use a distinct issuer namespace"
+                );
+            }
+            if let Some(kubernetes) = &p.kubernetes_tokenreview {
+                kubernetes.validate()?;
+                ensure!(
+                    kubernetes.connection.cluster_id == p.realm,
+                    "Kubernetes cluster must match profile realm"
+                );
+                ensure!(
+                    p.relay_token_prefix
+                        .as_ref()
+                        .is_none_or(|prefix| prefix != &kubernetes.token_prefix),
+                    "credential routing prefixes must be distinct"
                 );
             }
             total += p.api_keys.len();
@@ -210,6 +228,7 @@ struct Prepared {
     networks: Networks,
     session_fallback: bool,
     relay: Option<std::sync::Arc<super::relay::Connector>>,
+    kubernetes: Option<(std::sync::Arc<super::kubernetes::Connector>, String)>,
     eligibility: Option<super::lua::Policy>,
     eligibility_capacity: tokio::sync::Semaphore,
     relay_token_prefix: Option<String>,
@@ -254,6 +273,12 @@ impl Runtime {
                         .is_none_or(|prefix| !value.starts_with(prefix)),
                     "local credential collides with relay routing namespace"
                 );
+                ensure!(
+                    p.kubernetes_tokenreview
+                        .as_ref()
+                        .is_none_or(|k| !value.starts_with(&k.token_prefix)),
+                    "local credential collides with Kubernetes routing namespace"
+                );
                 let digest: [u8; 32] = Sha256::digest(value.as_bytes()).into();
                 let subject = Subject {
                     issuer: format!("hopae:{}", config.authority_id),
@@ -289,6 +314,24 @@ impl Runtime {
                     .cloned()
                     .unwrap_or(candidate)
             });
+            let kubernetes = p
+                .kubernetes_tokenreview
+                .as_ref()
+                .map(|k| {
+                    let candidate = std::sync::Arc::new(k.compile(env)?);
+                    let connector = previous
+                        .and_then(|runtime| runtime.profiles.get(&p.host.to_ascii_lowercase()))
+                        .and_then(|ports| p.ports.iter().find_map(|port| ports.get(port)))
+                        .filter(|old| old.service_id == p.service_id && old.realm == p.realm)
+                        .and_then(|old| old.kubernetes.as_ref())
+                        .filter(|(old, prefix)| {
+                            prefix == &k.token_prefix && old.same_binding(&candidate)
+                        })
+                        .map(|(old, _)| old.clone())
+                        .unwrap_or(candidate);
+                    Ok::<_, anyhow::Error>((connector, k.token_prefix.clone()))
+                })
+                .transpose()?;
             let prepared = std::sync::Arc::new(Prepared {
                 service_id: p.service_id.clone(),
                 realm: p.realm.clone(),
@@ -296,6 +339,7 @@ impl Runtime {
                 networks: Networks::compile(&p.networks, &mut budget)?,
                 session_fallback: p.session_fallback,
                 relay,
+                kubernetes,
                 eligibility: p
                     .eligibility_lua
                     .as_deref()
@@ -345,6 +389,30 @@ impl Runtime {
             .get(host)
             .and_then(|ports| ports.get(&port))
             .ok_or(Error::Invalid)?;
+        if let Some((kubernetes, prefix)) = &profile.kubernetes {
+            if !profile.networks.permits(ip) {
+                return Err(Error::NetworkDenied);
+            }
+            let credential = token.ok_or(Error::Missing)?;
+            if credential.len() > 4096 || !credential.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err(Error::Invalid);
+            }
+            if let Some(credential) = credential.strip_prefix(prefix) {
+                self.observed_time
+                    .fetch_max(now, std::sync::atomic::Ordering::AcqRel);
+                let now = self
+                    .observed_time
+                    .load(std::sync::atomic::Ordering::Acquire);
+                let started = std::time::Instant::now();
+                let evidence = kubernetes
+                    .authenticate(&profile.service_id, credential, now)
+                    .await?;
+                return profile.restrict(
+                    evidence,
+                    now.saturating_add(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+                );
+            }
+        }
         if let Some(relay) = &profile.relay {
             if !profile.networks.permits(ip) {
                 return Err(Error::NetworkDenied);
@@ -452,6 +520,39 @@ impl Prepared {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn kubernetes_profile_requires_distinct_prefix_realm_and_reference_material() {
+        let mut config: Config = serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"app.example.test","ports":[443],"realm":"example-cluster","api_keys":[{"token_env":"OWNED_KEY","subject":"worker"}],"kubernetes_tokenreview":{"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"k8s:"}}]})).unwrap();
+        config.validate().unwrap();
+        assert!(
+            Runtime::compile(&config, &|name| (name == "OWNED_KEY")
+                .then(|| "k8s:reserved-credential-at-least-thirty-two".into()))
+            .is_err()
+        );
+        let original = config.clone();
+        config.profiles[0].realm = "other-cluster".into();
+        assert!(config.validate().is_err());
+        config = original.clone();
+        config.profiles[0]
+            .kubernetes_tokenreview
+            .as_mut()
+            .unwrap()
+            .token_prefix = "".into();
+        assert!(config.validate().is_err());
+        config = original.clone();
+        config.profiles[0].api_relay = Some(super::super::relay::Config {
+            url: "https://verifier.example.test/check".into(),
+            issuer: "https://partner.example.test".into(),
+            timeout_ms: 100,
+            allow_private_endpoints: false,
+            verifier_key_env: None,
+        });
+        assert!(config.validate().is_err());
+        config.profiles[0].relay_token_prefix = Some("k8s:".into());
+        assert!(config.validate().is_err());
+        config.profiles[0].relay_token_prefix = Some("partner:".into());
+        config.validate().unwrap();
+    }
     fn config() -> Config {
         serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"api.example.test","ports":[443],"realm":"partner","api_keys":[{"token_env":"OWNED_API_TOKEN","subject":"scheduler","expires_at":5000}],"networks":["192.0.2.0/24","2001:db8::/32"]}]})).unwrap()
     }

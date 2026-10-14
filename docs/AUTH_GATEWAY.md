@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 30 -->
+<!-- doc-rev: 31 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -760,3 +760,5 @@ and no receipt RPC is activated. Consistent stopped owner/delegation backups and
 previous projection-1319351 image are retained. The controlled revocation race is
 qualified by native tests; the live smoke checks do not perform a production
 profile mutation or prove distributed/fleet behavior. Tagged assets are unchanged.
+
+Native Kubernetes Pod-bound authentication is integrated with reference-only profiles and shared HTTP/HOP1 revocation guards; see [workload contract](KUBERNETES_WORKLOAD.md). Real-cluster activation and workload receipt issuance remain pending.

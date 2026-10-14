@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use zeroize::Zeroizing;
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub api_origin: String,
@@ -17,8 +17,50 @@ pub struct Config {
     pub audience: String,
     pub timeout_ms: u64,
 }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    pub connection: Config,
+    pub ca_pem_env: String,
+    pub reviewer_token_env: String,
+    pub token_prefix: String,
+}
+impl Profile {
+    pub fn validate(&self) -> Result<()> {
+        self.connection.validate()?;
+        for name in [&self.ca_pem_env, &self.reviewer_token_env] {
+            ensure!(
+                !name.is_empty()
+                    && name.len() <= 128
+                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+                "invalid Kubernetes material reference"
+            );
+        }
+        let prefix = &self.token_prefix;
+        ensure!(
+            (2..=32).contains(&prefix.len())
+                && prefix.ends_with(':')
+                && prefix[..prefix.len() - 1]
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
+            "explicit Kubernetes credential prefix required"
+        );
+        Ok(())
+    }
+    pub fn compile(&self, env: &dyn Fn(&str) -> Option<String>) -> Result<Connector> {
+        self.validate()?;
+        let ca = env(&self.ca_pem_env)
+            .ok_or_else(|| anyhow::anyhow!("Kubernetes CA reference unavailable"))?;
+        let reviewer = Zeroizing::new(
+            env(&self.reviewer_token_env)
+                .ok_or_else(|| anyhow::anyhow!("Kubernetes reviewer reference unavailable"))?,
+        );
+        Connector::compile(&self.connection, ca.as_bytes(), reviewer)
+    }
+}
 pub struct Connector {
     config: Config,
+    binding: [u8; 32],
     client: reqwest::Client,
     endpoint: url::Url,
     authorization: reqwest::header::HeaderValue,
@@ -143,7 +185,12 @@ impl Connector {
         let mut authorization =
             reqwest::header::HeaderValue::from_str(&format!("Bearer {}", &*reviewer_token))?;
         authorization.set_sensitive(true);
+        let mut binding = Sha256::new();
+        binding.update(serde_json::to_vec(config)?);
+        binding.update(Sha256::digest(ca_pem));
+        binding.update(Sha256::digest(reviewer_token.as_bytes()));
         Ok(Self {
+            binding: binding.finalize().into(),
             config: config.clone(),
             client,
             endpoint: url::Url::parse(&config.api_origin)?
@@ -152,6 +199,9 @@ impl Connector {
             capacity: tokio::sync::Semaphore::new(64),
             circuit: Circuit::new(3, 30_000).expect("constant circuit bounds"),
         })
+    }
+    pub(crate) fn same_binding(&self, other: &Self) -> bool {
+        self.binding == other.binding
     }
     fn claims(&self, token: &str, now_ms: u64) -> Result<Claims, Error> {
         if !(32..=4096).contains(&token.len()) {
@@ -362,6 +412,7 @@ mod tests {
     fn connector() -> Connector {
         let config = config();
         Connector {
+            binding: [0; 32],
             config,
             client: reqwest::Client::new(),
             endpoint: url::Url::parse("https://kubernetes.example.test/").unwrap(),

@@ -2171,3 +2171,276 @@ async fn profile_revocation_during_remote_auth_refuses_http_and_native_allow() {
         verifier_task.abort();
     }
 }
+
+#[tokio::test]
+async fn kubernetes_workload_http_native_parity_and_profile_revocation() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    struct Verifier {
+        child: std::process::Child,
+        dir: tempfile::TempDir,
+    }
+    impl Drop for Verifier {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+    for native in [false, true] {
+        let mut fx = Fx::with("m1-basic", |v| {
+            v["apps"][0]["step_up"] =
+                serde_json::json!([{"path_prefix":"/admin","require":{"aal":2}}]);
+        });
+        fx.ctx.limits.budget = Duration::from_secs(2);
+        let dir = tempfile::tempdir().unwrap();
+        let openssl = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("openssl")
+                    .args(args)
+                    .current_dir(dir.path())
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            )
+        };
+        openssl(&[
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=Owned Kubernetes CA",
+            "-keyout",
+            "ca.key",
+            "-out",
+            "ca.pem",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+        ]);
+        openssl(&[
+            "req",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            "/CN=localhost",
+            "-keyout",
+            "server.key",
+            "-out",
+            "server.csr",
+        ]);
+        std::fs::write(dir.path().join("extensions"),"basicConstraints=critical,CA:FALSE\nsubjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth\n").unwrap();
+        openssl(&[
+            "x509",
+            "-req",
+            "-in",
+            "server.csr",
+            "-CA",
+            "ca.pem",
+            "-CAkey",
+            "ca.key",
+            "-CAcreateserial",
+            "-days",
+            "1",
+            "-extfile",
+            "extensions",
+            "-out",
+            "server.pem",
+        ]);
+        std::fs::write(dir.path().join("mode"), "valid").unwrap();
+        let child = std::process::Command::new("python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tools/owned_kubernetes_verifier.py"
+            ))
+            .arg(dir.path())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let verifier = Verifier { child, dir };
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !verifier.dir.path().join("ready").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let port = std::fs::read_to_string(verifier.dir.path().join("ready")).unwrap();
+        let ca = std::fs::read_to_string(verifier.dir.path().join("ca.pem")).unwrap();
+        let env = |name: &str| match name {
+            "OWNED_KUBE_CA" => Some(ca.clone()),
+            "OWNED_KUBE_REVIEWER" => Some("owned-kubernetes-reviewer-at-least-thirty-two".into()),
+            "OWNED_LOCAL_KEY" => Some("owned-local-service-key-at-least-thirty-two".into()),
+            _ => None,
+        };
+        let config:hopae::auth_gateway::runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"example-cluster","api_keys":[{"token_env":"OWNED_LOCAL_KEY","subject":"worker"}],"kubernetes_tokenreview":{"connection":{"api_origin":format!("https://127.0.0.1:{port}"),"issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","timeout_ms":1000},"ca_pem_env":"OWNED_KUBE_CA","reviewer_token_env":"OWNED_KUBE_REVIEWER","token_prefix":"k8s:"},"networks":["203.0.113.0/24"]}]})).unwrap();
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .unwrap();
+        let mut owner =
+            hopae::auth_gateway::authority::Authority::load(&mut db, Some(config), &env, &|_| {
+                Ok(())
+            })
+            .unwrap();
+        let keys = Arc::new(CallerKeys::new(
+            Some(Secret::new("native-test-key".into())),
+            None,
+            false,
+        ));
+        let state = GatewayState::new(
+            GatewayConfig::from_config(&fx.cfg),
+            fx.ctx.clone(),
+            keys.clone(),
+            32,
+            None,
+            None,
+        )
+        .with_authentication_authority(owner.reader())
+        .unwrap();
+        let router = router(state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = watch::channel(false);
+        let transport = tokio::spawn(native_gateway::serve(listener, router.clone(), keys, rx));
+        let payload = serde_json::json!({"iss":"https://issuer.example.test","sub":"system:serviceaccount:blue:worker","aud":["orders-workload"],"exp":(fx.clock.now().0 as u64+60_000)/1000,"kubernetes.io":{"namespace":"blue","serviceaccount":{"name":"worker","uid":"sa-1"},"pod":{"name":"worker-pod","uid":"pod-1"}}});
+        let jwt = format!(
+            "{}.{}.{}",
+            URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#),
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap()),
+            URL_SAFE_NO_PAD.encode([1; 32])
+        );
+        let credential = format!("k8s:{jwt}");
+        let make_headers = |credential: &str, path: &str| {
+            let mut headers = context(path);
+            headers.push((
+                "authorization".into(),
+                format!("Bearer {credential}").into_bytes(),
+            ));
+            headers
+        };
+        async fn call(
+            router: axum::Router,
+            address: std::net::SocketAddr,
+            native: bool,
+            headers: Vec<(String, Vec<u8>)>,
+        ) -> (u16, Vec<(String, Vec<u8>)>) {
+            if native {
+                let mut s = TcpStream::connect(address).await.unwrap();
+                assert_eq!(exchange(&mut s, 0, b"native-test-key").await.1, [1]);
+                let r = wire::decode_reply(
+                    &exchange(&mut s, 1, &wire::encode_request(&headers).unwrap())
+                        .await
+                        .1,
+                )
+                .unwrap();
+                (r.status, r.headers)
+            } else {
+                let mut req = Request::builder()
+                    .uri("/_hopae/verify")
+                    .body(Body::empty())
+                    .unwrap();
+                for (n, v) in headers {
+                    req.headers_mut().insert(
+                        axum::http::HeaderName::from_bytes(n.as_bytes()).unwrap(),
+                        axum::http::HeaderValue::from_bytes(&v).unwrap(),
+                    );
+                }
+                req.headers_mut()
+                    .insert("x-hopae-gateway-key", "native-test-key".parse().unwrap());
+                let r = router.oneshot(req).await.unwrap();
+                (
+                    r.status().as_u16(),
+                    r.headers()
+                        .iter()
+                        .map(|(n, v)| (n.to_string(), v.as_bytes().to_vec()))
+                        .collect(),
+                )
+            }
+        }
+        let (status, headers) = call(
+            router.clone(),
+            address,
+            native,
+            make_headers(&credential, "/private"),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert!(
+            headers
+                .iter()
+                .any(|(n, v)| n == "x-hopae-principal-kind" && v == b"workload")
+        );
+        assert!(headers.iter().any(|(n, v)| n == "x-hopae-aal" && v == b"0"));
+        let calls = std::fs::read_to_string(verifier.dir.path().join("calls")).unwrap();
+        for (token, status) in [
+            ("owned-local-service-key-at-least-thirty-two", 200),
+            ("unknown-local-service-key-at-least-thirty-two", 401),
+            (jwt.as_str(), 401),
+            ("k8s:invalid-shaped-credential", 401),
+        ] {
+            assert_eq!(
+                call(
+                    router.clone(),
+                    address,
+                    native,
+                    make_headers(token, "/private")
+                )
+                .await
+                .0,
+                status
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(verifier.dir.path().join("calls")).unwrap(),
+            calls,
+            "local/unknown credentials reached TokenReview"
+        );
+        assert_eq!(
+            call(
+                router.clone(),
+                address,
+                native,
+                make_headers(&credential, "/admin")
+            )
+            .await
+            .0,
+            403,
+            "workload satisfied human step-up"
+        );
+        for (mode, status) in [("denied", 401), ("wrong-uid", 503)] {
+            std::fs::write(verifier.dir.path().join("mode"), mode).unwrap();
+            let (s, h) = call(
+                router.clone(),
+                address,
+                native,
+                make_headers(&credential, "/private"),
+            )
+            .await;
+            assert_eq!(s, status);
+            assert!(!h.iter().any(|(n, _)| n == "x-forwarded-user"));
+        }
+        std::fs::write(verifier.dir.path().join("mode"), "hold").unwrap();
+        let pending = tokio::spawn(call(
+            router.clone(),
+            address,
+            native,
+            make_headers(&credential, "/private"),
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !verifier.dir.path().join("entered").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        owner
+            .publish(&mut db, 1, None, "operator", &|_| None, &|_| Ok(()))
+            .unwrap();
+        std::fs::write(verifier.dir.path().join("release"), "yes").unwrap();
+        let (s, h) = pending.await.unwrap();
+        assert_eq!(s, 503);
+        assert!(!h.iter().any(|(n, _)| n == "x-forwarded-user"));
+        tx.send(true).unwrap();
+        transport.await.unwrap().unwrap();
+    }
+}

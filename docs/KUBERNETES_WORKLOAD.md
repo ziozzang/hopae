@@ -1,13 +1,14 @@
 # Kubernetes workload authentication
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/KUBERNETES_WORKLOAD.md)
 
 Implemented native library: `auth_gateway::kubernetes::Connector`. It authenticates
 Pod-bound ServiceAccount JWTs through a fixed trusted Kubernetes TokenReview API.
-Root profile configuration, HTTP/HOP1 dispatch, console management, issuance and
-production activation are not yet integrated. It does not implement an offline
+Reference-only root/profile configuration, HTTP/HOP1 dispatch and console overview
+are integrated. Workload receipt issuance and real-cluster production activation
+remain pending. It does not implement an offline
 JWT signature verifier or qualify a real Kubernetes cluster.
 
 The owner supplies an HTTPS API origin, expected HTTPS issuer, cluster identity,
@@ -48,8 +49,11 @@ a credential denial and cannot open the source circuit.
 Total network/body work is bounded by the configured deadline and 64 KiB response
 cap. Response bytes are zeroized; typed parsing ignores the API's echoed spec.token
 without allocating a token field. No request/response material is logged. Reviewer
-and CA rotation require the native owner to recompile and retire the connector;
-automatic file rotation and profile-revision fencing still need integration.
+and CA rotation require the native owner to recompile and retire the connector.
+The runtime preserves a connector circuit across publication only when connection
+configuration, actual CA/reviewer material, prefix and service/realm binding match.
+Automatic file rotation remains pending; profile publication uses the existing
+owner snapshot fence and refuses a retired in-flight HTTP/HOP1 result.
 
 Kubernetes TokenReview has its own validity semantics: objects pending deletion
 can remain acceptable until the documented deletion grace expires. A one-second
@@ -71,3 +75,52 @@ opening. It deliberately uses fictional tokens: it proves the native transport a
 attestation contract, not a real API server's JWT signature or deletion behavior.
 See [Kubernetes bound token verification](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/#verifying-and-inspecting-private-claims)
 and [bound token lifecycle](https://kubernetes.io/docs/reference/access-authn-authz/service-accounts-admin/#bound-service-account-tokens).
+
+## Native profiles and HTTP/HOP1
+
+A profile may contain `kubernetes_tokenreview` alongside native keys and API relay.
+The connection uses separate native environment references for CA PEM and reviewer
+credential; neither value is part of the owner document or UI. Example fragment:
+
+```json
+{
+  "kubernetes_tokenreview": {
+    "connection": {
+      "api_origin": "https://kubernetes.example.test/",
+      "issuer": "https://issuer.example.test",
+      "cluster_id": "example-cluster",
+      "audience": "orders-workload",
+      "timeout_ms": 500
+    },
+    "ca_pem_env": "HOPAE_KUBERNETES_CA_PEM",
+    "reviewer_token_env": "HOPAE_KUBERNETES_REVIEWER",
+    "token_prefix": "k8s:"
+  }
+}
+```
+
+Profile realm must equal cluster_id. A mandatory 2–32 character prefix ending in
+`:` routes only marked credentials to TokenReview and is stripped before the API
+request. Local keys cannot occupy that prefix. When API relay is also configured,
+it needs a different explicit prefix; unmarked, invalid or failed Kubernetes
+credentials never fall through to another source. Presented credentials remain
+subject to the compiled profile's network gate before any remote request and to
+optional bounded Lua eligibility afterwards. The whole presented credential,
+including prefix, is at most 4096 bytes; native bound identifiers are at most 128.
+
+HTTP and HOP1 use the same runtime, publication fence and current application
+step-up checks. Responses identify `workload`, service and canonical native
+subject with AAL 0; no machine proof satisfies a human step-up rule. Hangang's
+trusted native-Hopae-to-Pumgye parser accepts canonical workload AAL 0 and refuses
+human assurance, noncanonical subjects, duplicate metadata and network-only identity.
+Console package 0.1.6 shows TokenReview, issuer, cluster, audience and routing prefix
+with the existing native owner editor/publication path. HTML-like values remain text;
+viewer controls remain read-only.
+
+The owned HTTPS/HTTP/HOP1 scenario covers mixed local/workload authentication,
+credential routing isolation, source/client failure classification, human step-up
+refusal and profile removal during a blocked TokenReview. The TLS source is a mock;
+actual cluster signature/deletion semantics, scale-out source fencing, long-stream
+identity revocation, mapped Pumgye grants, workload receipt issuance and full-chain
+performance remain qualification gates. Internal production profiles may stay
+native-only even when this compiled capability is deployed.

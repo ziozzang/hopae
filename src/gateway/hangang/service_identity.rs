@@ -30,6 +30,12 @@ pub fn stable_subject(subject: &Subject) -> String {
 }
 
 pub fn response(evidence: Option<&VerifiedEvidence>, request_id: &str) -> Response<Body> {
+    let kind = match evidence.map(|e| e.subject().kind) {
+        Some(crate::auth_gateway::PrincipalKind::Service) => "service",
+        Some(crate::auth_gateway::PrincipalKind::Workload) => "workload",
+        Some(_) => return response(None, request_id),
+        None => "service",
+    };
     let mut response = Response::builder()
         .status(if evidence.is_some() {
             StatusCode::OK
@@ -58,10 +64,7 @@ pub fn response(evidence: Option<&VerifiedEvidence>, request_id: &str) -> Respon
             "x-forwarded-user",
             HeaderValue::from_str(&stable_subject(subject)).expect("encoded service identifier"),
         );
-        headers.insert(
-            "x-hopae-principal-kind",
-            HeaderValue::from_static("service"),
-        );
+        headers.insert("x-hopae-principal-kind", HeaderValue::from_static(kind));
         headers.insert("x-hopae-aal", HeaderValue::from_static("0"));
     } else {
         headers.insert(

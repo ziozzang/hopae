@@ -298,7 +298,7 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
                     }
                     Ok(_) => None,
                 };
-                // A service proof has AAL 0 and cannot satisfy any human
+                // Service and workload proofs have AAL 0 and cannot satisfy human
                 // assurance rule. Evaluate after the remote exchange against
                 // the current application snapshot, over HTTP and HOP1 alike.
                 if let Some(reason) = refused {
