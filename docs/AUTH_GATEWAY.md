@@ -833,3 +833,21 @@ Existing issuer scope, expiry, rollback and mixed-namespace tests pass. This is
 the native adapter entry, not an enabled RPC route: peer authentication, configured
 issuer resources, request-context construction, distributed receiver freshness
 and permission/projection transport remain required integration work.
+
+## Single-pass internal gateway proof handoff (unreleased)
+
+With native issuer resources configured, the existing gateway pipeline retains
+its verified service authentication as an opaque in-process response extension.
+The ordinary HTTP headers/body and HOP1 wire response do not serialize this value.
+Caller authentication, profile freshness and application/step-up refusal still run
+through the existing pipeline. Without issuer configuration the ordinary path is
+unchanged. A future receipt RPC can consume the captured proof without a second
+external verifier call.
+
+`CapturedService::issue` fences both the exact profile and validated application
+snapshot before and after native guard work. Replacing the application snapshot
+refuses issuance even if its numeric generation is unchanged. A real in-process
+gateway-router test confirms authenticated internal capture, no receipt header/body
+and no capture for a refused caller. Signing tests confirm direct proof reuse and
+application replacement refusal. Receipt RPC, human/workload issuance, permission
+proof and upstream credential dispatch still need integration.

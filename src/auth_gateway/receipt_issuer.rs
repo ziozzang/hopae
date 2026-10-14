@@ -76,6 +76,45 @@ pub struct Request<'a> {
     pub audience: &'a str,
     pub request_sha256: [u8; 32],
 }
+/// Internal response extension; never serialized as a gateway header or body.
+pub struct CapturedService {
+    pub(crate) authentication: super::authority::ServiceAuthentication,
+    pub(crate) profile: Arc<super::authority::Snapshot>,
+    pub(crate) application: Arc<crate::policy::types::ConfigSnapshot>,
+}
+impl CapturedService {
+    pub fn application_generation(&self) -> u64 {
+        self.application.generation
+    }
+    pub fn issue(
+        &self,
+        issuer: &Issuer,
+        reader: &Arc<arc_swap::ArcSwap<super::authority::Snapshot>>,
+        applications: &Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
+        request: Request<'_>,
+        guard: &dyn Fn() -> Result<(), Refused>,
+    ) -> Result<Issued, Refused> {
+        issuer.issue_service(&self.authentication, request, &|| {
+            let current = reader.load_full();
+            if !current.available()
+                || !Arc::ptr_eq(&current, &self.profile)
+                || !Arc::ptr_eq(&applications.load_full(), &self.application)
+            {
+                return Err(Refused);
+            }
+            guard()?;
+            let current = reader.load_full();
+            if !current.available()
+                || !Arc::ptr_eq(&current, &self.profile)
+                || !Arc::ptr_eq(&applications.load_full(), &self.application)
+            {
+                return Err(Refused);
+            }
+            Ok(())
+        })
+    }
+}
+
 pub struct ServiceRequest<'a> {
     pub host: &'a str,
     pub port: u16,
@@ -515,6 +554,48 @@ mod tests {
         );
         server.abort();
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn captured_proof_signs_without_reauthentication_and_refuses_application_replacement() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut configuration = config(None);
+        configuration.profiles[0].api_keys[0].expires_at = None;
+        let owner = owner(&mut db, configuration);
+        let reader = owner.reader();
+        let profile = reader.load_full();
+        let clock = Arc::new(crate::crypto::SystemClock);
+        let signer = issuer(clock.clone());
+        let authentication = profile
+            .authenticate_for_receipt(
+                "orders.example.test",
+                443,
+                Some(TOKEN),
+                "203.0.113.9".parse().unwrap(),
+                clock.now().0 as u64,
+            )
+            .await
+            .unwrap();
+        let cfg=crate::config::parse(r#"{"state_dir":"owned","portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_GATEWAY"}}"#).unwrap();
+        let application = Arc::new(cfg.snapshot(1));
+        let applications = Arc::new(arc_swap::ArcSwap::from(application.clone()));
+        let captured = CapturedService {
+            authentication,
+            profile,
+            application,
+        };
+        let issued = captured
+            .issue(&signer, &reader, &applications, request(), &|| Ok(()))
+            .unwrap();
+        verify(&issued, clock.now().0 as u64);
+        applications.store(Arc::new(cfg.snapshot(1)));
+        assert!(
+            captured
+                .issue(&signer, &reader, &applications, request(), &|| panic!(
+                    "replacement must be fenced before signing guard"
+                ))
+                .is_err()
+        );
     }
 
     #[tokio::test]

@@ -344,6 +344,9 @@ pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
             .reader();
         gateway_state = gateway_state.with_authentication_authority(reader)?;
     }
+    if services.receipt_issuer.is_some() {
+        gateway_state = gateway_state.with_service_receipt_capture()?;
+    }
     let adapter = Adapter::new(
         services.session_service()?,
         services.registry.clone(),
@@ -1877,6 +1880,103 @@ pub async fn admin_check_warnings(cfg: &Config) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn actual_gateway_captures_native_service_proof_only_in_internal_extensions() {
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"state_dir":dir.path().join("state"),"listen":{"portal":"127.0.0.1:0","gateway":"127.0.0.1:0"},"portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_CAPTURE_CALLER"},"apps":[{"app_id":"orders","hosts":["orders.example.test"]}]});
+        let cfg = crate::config::parse(&value.to_string()).unwrap();
+        let mut bound = bind(&cfg).await.unwrap();
+        const KEY: &str = "owned-capture-key-at-least-thirty-two-bytes";
+        bound.services.caller_keys = Arc::new(CallerKeys::from_env(&cfg, |_| Some(KEY.into())));
+        let profile:crate::auth_gateway::runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"orders.example.test","ports":[443],"realm":"owned","api_keys":[{"token_env":"OWNED_CAPTURE_KEY","subject":"worker"}],"networks":["203.0.113.0/24"]}]})).unwrap();
+        let owner = crate::auth_gateway::authority::Authority::load(
+            &mut bound.services.store.conn(),
+            Some(profile),
+            &|_| Some(KEY.into()),
+            &|_| Ok(()),
+        )
+        .unwrap();
+        bound.services.authentication_authority = Some(Arc::new(std::sync::Mutex::new(owner)));
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let issuer = crate::auth_gateway::receipt_config::NativeIssuer {
+            issuer_ref: "owned".into(),
+            key_epoch: 1,
+            identity_authority_epoch: "epoch1".into(),
+            public_key: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                signing.verifying_key().to_bytes(),
+            ),
+            seed_env: "OWNED_CAPTURE_SEED".into(),
+            scopes: vec![crate::auth_gateway::receipt_issuer::Scope {
+                service: "orders".into(),
+                audience: "orders-api".into(),
+            }],
+        };
+        bound.services.receipt_issuer = Some(Arc::new(
+            issuer
+                .load(
+                    &|_| {
+                        Some(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            [7; 32],
+                        ))
+                    },
+                    bound.services.clock.clone(),
+                    bound.services.rng.clone(),
+                )
+                .unwrap(),
+        ));
+        let router = build_routers(&bound.services).unwrap().gateway;
+        let request = axum::http::Request::builder()
+            .uri("/_hopae/verify")
+            .header("x-hopae-gateway-key", KEY)
+            .header("x-hopae-contract", "1")
+            .header("authorization", format!("Bearer {KEY}"))
+            .header("x-forwarded-host", "orders.example.test")
+            .header("x-forwarded-proto", "https")
+            .header("x-forwarded-port", "443")
+            .header("x-forwarded-for", "203.0.113.9")
+            .header("x-original-method", "GET")
+            .header("x-original-url", "https://orders.example.test/private")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert!(
+            response
+                .extensions()
+                .get::<Arc<crate::auth_gateway::receipt_issuer::CapturedService>>()
+                .is_some()
+        );
+        assert!(
+            !response
+                .headers()
+                .keys()
+                .any(|key| key.as_str().contains("receipt"))
+        );
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert!(body.is_empty());
+        let denied = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/_hopae/verify")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), axum::http::StatusCode::FORBIDDEN);
+        assert!(
+            denied
+                .extensions()
+                .get::<Arc<crate::auth_gateway::receipt_issuer::CapturedService>>()
+                .is_none()
+        );
+    }
 
     #[tokio::test]
     async fn missing_receipt_seed_refuses_bind_before_state_creation() {

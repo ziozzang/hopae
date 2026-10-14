@@ -37,6 +37,7 @@ pub struct GatewayState {
     emitter: Option<Emitter>,
     next_id: AtomicU64,
     id_salt: RandomState,
+    capture_service_receipts: bool,
     authentication_gateway:
         Option<Arc<arc_swap::ArcSwap<crate::auth_gateway::authority::Snapshot>>>,
 }
@@ -62,6 +63,7 @@ impl GatewayState {
             emitter,
             next_id: AtomicU64::new(0),
             id_salt: RandomState::new(),
+            capture_service_receipts: false,
             authentication_gateway: None,
         })
     }
@@ -79,6 +81,13 @@ impl GatewayState {
                 runtime: Some(runtime),
             },
         )));
+        Ok(self)
+    }
+
+    pub fn with_service_receipt_capture(mut self: Arc<Self>) -> anyhow::Result<Arc<Self>> {
+        Arc::get_mut(&mut self)
+            .ok_or_else(|| anyhow::anyhow!("gateway state is already shared"))?
+            .capture_service_receipts = true;
         Ok(self)
     }
 
@@ -233,16 +242,35 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
             && runtime.session_fallback(input.host.as_str(), input.port);
         if !fallback {
             let result = match presented {
-                Ok(token) => tokio::time::timeout(
-                    st.ctx.limits.budget,
-                    runtime.authenticate_async(
-                        input.host.as_str(),
-                        input.port,
-                        token,
-                        input.client_ip,
-                        st.ctx.clock.now().0.max(0) as u64,
-                    ),
-                )
+                Ok(token) => tokio::time::timeout(st.ctx.limits.budget, async {
+                    let now = st.ctx.clock.now().0.max(0) as u64;
+                    if st.capture_service_receipts {
+                        let captured = authority
+                            .as_ref()
+                            .ok_or(crate::auth_gateway::runtime::Error::Unavailable)?;
+                        let proof = captured
+                            .authenticate_for_receipt(
+                                input.host.as_str(),
+                                input.port,
+                                token,
+                                input.client_ip,
+                                now,
+                            )
+                            .await?;
+                        Ok((proof.evidence.clone(), Some(proof)))
+                    } else {
+                        runtime
+                            .authenticate_async(
+                                input.host.as_str(),
+                                input.port,
+                                token,
+                                input.client_ip,
+                                now,
+                            )
+                            .await
+                            .map(|evidence| (evidence, None))
+                    }
+                })
                 .await
                 .unwrap_or(Err(crate::auth_gateway::runtime::Error::Unavailable)),
                 Err(_) => Err(crate::auth_gateway::runtime::Error::Invalid),
@@ -267,7 +295,9 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
                 result,
                 Err(crate::auth_gateway::runtime::Error::Unavailable)
             );
-            let evidence = result.ok();
+            let (evidence, receipt_proof) = result
+                .ok()
+                .map_or((None, None), |(evidence, proof)| (Some(evidence), proof));
             st.count(
                 "hopae_authentication_gateway_total",
                 &[(
@@ -282,8 +312,12 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
             if unavailable {
                 return hangang::service_identity::unavailable(&request_id);
             }
+            let mut validated_application = None;
             if evidence.is_some() {
                 let policy = st.ctx.snapshot.load_full();
+                if st.capture_service_receipts {
+                    validated_application = Some(policy.clone());
+                }
                 let refused = match crate::policy::apps::resolve(&policy, &input.host) {
                     Err(reason) => Some(reason),
                     Ok(app)
@@ -318,11 +352,24 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
                     return hangang::render(decision, input.navigation, &env, &st.cfg);
                 }
             }
-            return hangang::service_identity::response_at(
+            let mut response = hangang::service_identity::response_at(
                 evidence.as_ref(),
                 &request_id,
                 st.ctx.clock.now().0.max(0) as u64,
             );
+            if response.status().is_success()
+                && let (Some(proof), Some(profile), Some(application)) =
+                    (receipt_proof, authority.as_ref(), validated_application)
+            {
+                response.extensions_mut().insert(Arc::new(
+                    crate::auth_gateway::receipt_issuer::CapturedService {
+                        authentication: proof,
+                        profile: profile.clone(),
+                        application,
+                    },
+                ));
+            }
+            return response;
         }
     }
     let document = matches!(input.navigation, Navigation::Document);
