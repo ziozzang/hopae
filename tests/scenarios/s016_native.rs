@@ -2787,6 +2787,34 @@ async fn grpc_mtls_session_revocation_and_http_parity() {
                 .is_err()
         );
     }
+    // Optional actual gateway client against this same owned session engine.
+    let external = if let Ok(binary) = std::env::var("HANGANG_HOPAE_GRPC_CLIENT") {
+        let config = root.join("hangang-client.json");
+        std::fs::write(&config, serde_json::to_vec(&serde_json::json!({
+            "settings":{"transport":"grpc","address":format!("localhost:{}",address.port()),"pool_size":8,"tls":{"server_name":"hopae.example.test","ca":root.join("ca.pem"),"certificate":root.join("client.pem"),"key":root.join("client.key")}},
+            "headers": hs.iter().map(|(name,value)|serde_json::json!([name,std::str::from_utf8(value).unwrap()])).collect::<Vec<_>>()
+        })).unwrap()).unwrap();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                use std::io::BufRead;
+                let mut child = Command::new(binary)
+                    .arg(config)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+                let mut ready = String::new();
+                output.read_line(&mut ready).unwrap();
+                assert_eq!(ready.trim(), "READY");
+                (child, output)
+            })
+            .await
+            .unwrap(),
+        )
+    } else {
+        None
+    };
     fx.exec("UPDATE sessions SET terminated_at=1800000000,terminated_reason='logout'");
     assert_ne!(
         client
@@ -2797,6 +2825,19 @@ async fn grpc_mtls_session_revocation_and_http_parity() {
             .status,
         200
     );
+    if let Some((mut child, mut output)) = external {
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(b"revoke\n").unwrap();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let mut result = String::new();
+            output.read_to_string(&mut result).unwrap();
+            assert!(child.wait().unwrap().success());
+            assert!(result.contains("PASS: Hangang/Hopae gRPC"));
+        })
+        .await
+        .unwrap();
+    }
     tx.send(true).unwrap();
     drop(client);
     tokio::time::timeout(Duration::from_secs(3), task)
