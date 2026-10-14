@@ -190,6 +190,7 @@ impl Readiness {
 /// Everything the routers and services are built from.
 #[derive(Clone)]
 pub struct Services {
+    pub receipt_issuer: Option<Arc<crate::auth_gateway::receipt_issuer::Issuer>>,
     pub projection_authority:
         Arc<std::sync::Mutex<crate::auth_gateway::projection_authority::Authority>>,
     pub external_verifiers: Arc<crate::factor::external_registry::Registry>,
@@ -519,6 +520,20 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         tracing::warn!("{w}");
     }
     let env = env();
+    let receipt_issuer = cfg
+        .receipt_issuer
+        .as_ref()
+        .map(|config| {
+            config
+                .load(
+                    &|name| std::env::var(name).ok(),
+                    env.clock.clone(),
+                    env.rng.clone(),
+                )
+                .map(Arc::new)
+        })
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("native receipt issuer unavailable"))?;
     let store_path = cfg.store_path();
 
     // 1. One instance per store.
@@ -736,6 +751,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         Arc::new(std::sync::Mutex::new(owner))
     };
     let services = Services {
+        receipt_issuer,
         projection_authority,
         external_verifiers,
         totp_keyring,
@@ -1861,6 +1877,33 @@ pub async fn admin_check_warnings(cfg: &Config) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn missing_receipt_seed_refuses_bind_before_state_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("uncreated");
+        let name = format!(
+            "HOPAE_MISSING_RECEIPT_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let public = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            key.verifying_key().to_bytes(),
+        );
+        let value = serde_json::json!({"state_dir":state,"portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_CALLER_REFERENCE"},"apps":[{"app_id":"orders","hosts":["app.example.test"]}],"receipt_issuer":{"issuer_ref":"owned","key_epoch":1,"identity_authority_epoch":"epoch1","public_key":public,"seed_env":name,"scopes":[{"service":"orders","audience":"orders-api"}]}});
+        let cfg = crate::config::parse(&value.to_string()).unwrap();
+        let error = bind(&cfg)
+            .await
+            .err()
+            .expect("missing receipt seed must refuse");
+        assert_eq!(error.to_string(), "native receipt issuer unavailable");
+        assert!(!state.exists());
+    }
 
     #[tokio::test]
     async fn missing_external_verifier_key_refuses_bind_before_state_creation() {

@@ -265,3 +265,5 @@ mod tests {
         );
     }
 }
+
+pub mod receipt_config;

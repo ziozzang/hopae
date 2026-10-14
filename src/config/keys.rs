@@ -203,6 +203,20 @@ pub(super) const ROOT: Node = Obj(&[
         ]),
     ),
     (
+        "receipt_issuer",
+        Obj(&[
+            ("issuer_ref", Leaf),
+            ("key_epoch", Leaf),
+            ("identity_authority_epoch", Leaf),
+            ("public_key", Leaf),
+            ("seed_env", Leaf),
+            (
+                "scopes",
+                Arr(&Obj(&[("service", Leaf), ("audience", Leaf)])),
+            ),
+        ]),
+    ),
+    (
         "credential_projection",
         Obj(&[
             ("revision", Leaf),

@@ -474,3 +474,19 @@ configuration constraints and unforgeable transport selection. Full remote deleg
 browser/Kubernetes qualification remains a separate gate.
 
 A fully validated signed delegation over authenticated mTLS trusts only its actual TCP peer for that request when reconstructing the signed forwarding context. It does not add the Pod/network range to global trusted_proxies. Unsigned TLS requests retain the normal proxy trust and native account checks.
+
+## Native receipt issuer resources (unreleased)
+
+Optional `receipt_issuer` declares `issuer_ref`, `key_epoch`,
+`identity_authority_epoch`, a base64 Ed25519 `public_key`, `seed_env` and
+`scopes` containing service/audience pairs. The seed is a base64 32-byte value
+resolved only from the declared environment reference; inline seeds are rejected.
+Use a deployment receipt-signing identity separate from release artifact keys.
+Configured services must match applications and gateway callers must authenticate.
+References, epochs, scope uniqueness and public key strength are validated; missing
+or mismatched seed material refuses startup before state creation or listener bind.
+
+The server loads an immutable native issuer resource. This does not enable a
+receipt RPC, credential projection or hot/distributed key rotation. Omitting
+`receipt_issuer` preserves existing startup behavior. RPC activation, current
+owner/caller guards and receiver key lifecycle remain separate integration work.

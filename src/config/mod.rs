@@ -29,6 +29,8 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
+    pub receipt_issuer: Option<crate::auth_gateway::receipt_config::NativeIssuer>,
+    #[serde(default)]
     pub external_verifiers: Vec<crate::factor::external_transport::Config>,
     #[serde(default)]
     pub totp_keyring: Option<crate::factor::keyring::Configuration>,
@@ -898,6 +900,22 @@ impl Config {
             }
         }
 
+        if let Some(config) = &self.receipt_issuer {
+            if config.validate().is_err() {
+                errs.push("receipt_issuer: invalid native resources".into());
+            }
+            if self.gateway.allow_unauthenticated_caller {
+                errs.push("receipt_issuer requires authenticated gateway callers".into());
+            }
+            if config.scopes.iter().any(|scope| {
+                !self
+                    .apps
+                    .iter()
+                    .any(|app| app.app_id.as_str() == scope.service)
+            }) {
+                errs.push("receipt_issuer service must match a configured application".into());
+            }
+        }
         if let Some(config) = &self.credential_projection {
             if config.revision != 1
                 || crate::auth_gateway::projection::Projector::compile(config.clone()).is_err()

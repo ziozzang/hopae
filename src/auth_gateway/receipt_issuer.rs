@@ -57,7 +57,8 @@ impl SessionSeal {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Scope {
     pub service: String,
     pub audience: String,
