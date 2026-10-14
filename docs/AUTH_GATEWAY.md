@@ -983,3 +983,27 @@ This local primitive is not a permission grant or replay consumer. Native caller
 must recheck it before use. Remote validation RPC, issuer/key rotation retirement,
 fleet/restore floors and final permission/projection enforcement remain open.
 No operating endpoint or release was activated by this source increment.
+
+### Authenticated live validation RPC (unreleased)
+
+The opt-in mTLS `AuthenticationReceipts/ValidateService` RPC accepts a bounded
+receipt context, exact authentication receipt and caller-derived expected request
+digest. Caller authentication precedes context work; it shares the 4,096 request
+admission semaphore and rechecks caller credentials and local ownership before
+returning only correlation ID and original receipt expiry. Invalid signature,
+scope, kind, epoch, profile/app owner or expiry returns refusal. Ordinary Verify
+and HOP1 do not expose this method, and disabled issuer configuration leaves this
+service absent.
+
+The reply is a point-in-time live observation, not a durable lease, permission
+grant or cacheable Allow. Receivers must cap use at the original receipt expiry
+and retain their own policy/network/route/plan fences. Same-channel mTLS tests
+cover good receipt, wrong caller, tamper, profile removal/restoration and app
+generation change. Pumgye client/permit integration, remote transport delay fences
+and final credential projection remain open. Operating releases are unchanged.
+
+RPC qualification: full all-feature regression passed 919 tests with 42 explicit
+ignores; strict all-feature/all-target Clippy and documentation checks passed.
+The actual mTLS scenario validates on the same persistent channel across profile
+revocation/restoration and an in-memory application-generation replacement.
+It does not qualify a remote fleet, DB restore, permit issuance or production rollout.

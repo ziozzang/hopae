@@ -140,6 +140,73 @@ struct ReceiptService {
 }
 #[tonic::async_trait]
 impl v1::authentication_receipts_server::AuthenticationReceipts for ReceiptService {
+    async fn validate_service(
+        &self,
+        request: Request<v1::ServiceReceiptValidationRequest>,
+    ) -> Result<Response<v1::ServiceReceiptValidationReply>, Status> {
+        self.pipeline.caller(request.metadata())?;
+        let _permit = self
+            .pipeline
+            .requests
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("verification capacity"))?;
+        let metadata = request.metadata().clone();
+        let input = request.into_inner();
+        if input.request_id == 0 || input.receipt.len() != hopae_grpc::receipt::LENGTH {
+            return Err(Status::invalid_argument("invalid receipt request"));
+        }
+        let context = input
+            .context
+            .ok_or_else(|| Status::invalid_argument("receipt context required"))?;
+        let identity = context
+            .identity
+            .ok_or_else(|| Status::invalid_argument("identity required"))?;
+        if identity.kind != 2 || identity.aal != 0 {
+            return Err(Status::permission_denied("service proof required"));
+        }
+        let context = hopae_grpc::receipt_binding::Context {
+            issuer_ref: &context.issuer_ref,
+            key_epoch: context.key_epoch,
+            identity_authority_epoch: &context.identity_authority_epoch,
+            identity: hopae_grpc::receipt_binding::Identity {
+                subject_ref: &identity.subject_ref,
+                kind: hopae_grpc::PrincipalKind::Service,
+                aal: 0,
+                revision: identity.revision,
+                credential_generation: identity.credential_generation,
+            },
+            service: &context.service,
+            audience: &context.audience,
+            request_sha256: context
+                .request_sha256
+                .as_slice()
+                .try_into()
+                .map_err(|_| Status::invalid_argument("request digest required"))?,
+        };
+        let expected = input
+            .request_sha256
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("request digest required"))?;
+        let live = self
+            .issuer
+            .verify_live_service(
+                &self.profiles,
+                &self.applications,
+                &context,
+                &input.receipt,
+                &expected,
+            )
+            .map_err(|_| Status::permission_denied("receipt no longer valid"))?;
+        self.pipeline.caller(&metadata)?;
+        live.current()
+            .map_err(|_| Status::unavailable("receipt authority changed"))?;
+        Ok(Response::new(v1::ServiceReceiptValidationReply {
+            request_id: input.request_id,
+            expires_ms: live.expires_ms(),
+        }))
+    }
     async fn issue_service(
         &self,
         request: Request<v1::ServiceReceiptRequest>,

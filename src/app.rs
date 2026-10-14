@@ -2180,6 +2180,46 @@ mod tests {
         );
         let reply = client.issue_service(call(KEY)).await.unwrap().into_inner();
         assert_eq!(reply.request_id, 77);
+        let validation_message = crate::http::grpc_gateway::v1::ServiceReceiptValidationRequest {
+            request_id: 78,
+            context: reply.context.clone(),
+            receipt: reply.receipt.clone(),
+            request_sha256: vec![3; 32],
+        };
+        let validation_call = |key: &str| {
+            let mut request = tonic::Request::new(validation_message.clone());
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {key}").parse().unwrap());
+            request
+        };
+        assert_eq!(
+            client
+                .validate_service(validation_call("wrong-caller"))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        let validated = client
+            .validate_service(validation_call(KEY))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(validated.request_id, 78);
+        assert!(validated.expires_ms > bound.services.clock.now().0 as u64);
+        let mut tampered = validation_call(KEY);
+        tampered.get_mut().receipt[20] ^= 1;
+        assert_eq!(
+            client
+                .validate_service(tampered)
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
         let context = reply.context.unwrap();
         let identity = context.identity.unwrap();
         assert_eq!(identity.kind, 2);
@@ -2305,6 +2345,15 @@ mod tests {
             client.issue_service(call(KEY)).await.is_err(),
             "same-channel revoked profile cannot issue"
         );
+        assert_eq!(
+            client
+                .validate_service(validation_call(KEY))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
         if let Some((_, stdin, stdout)) = &mut external {
             use tokio::io::AsyncWriteExt;
             stdin.write_all(b"deny\n").await.unwrap();
@@ -2332,6 +2381,53 @@ mod tests {
             )
             .unwrap();
         let restored = client.issue_service(call(KEY)).await.unwrap().into_inner();
+
+        assert_eq!(
+            client
+                .validate_service(validation_call(KEY))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        let mut restored_validation = tonic::Request::new(
+            crate::http::grpc_gateway::v1::ServiceReceiptValidationRequest {
+                request_id: 79,
+                context: restored.context.clone(),
+                receipt: restored.receipt.clone(),
+                request_sha256: vec![3; 32],
+            },
+        );
+        restored_validation
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {KEY}").parse().unwrap());
+        let restored_message = restored_validation.get_ref().clone();
+        assert_eq!(
+            client
+                .validate_service(restored_validation)
+                .await
+                .unwrap()
+                .into_inner()
+                .request_id,
+            79
+        );
+        let mut changed_app = (**bound.services.snapshot.load()).clone();
+        changed_app.generation += 1;
+        bound.services.snapshot.store(Arc::new(changed_app));
+        let mut changed_validation = tonic::Request::new(restored_message);
+        changed_validation
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {KEY}").parse().unwrap());
+        assert_eq!(
+            client
+                .validate_service(changed_validation)
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
         assert_eq!(
             restored.context.unwrap().identity.unwrap().revision,
             saved.revision + 2
