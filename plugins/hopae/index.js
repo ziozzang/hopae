@@ -79,6 +79,7 @@ export async function mount(host) {
       else if(view==='profiles'){
         const help=node('p',label('Edit service authentication profiles. Use declared credential references; enter no passwords or token values. Saving replaces the complete profile configuration.','서비스 인증 프로필을 편집합니다. 선언된 자격 정보 참조를 사용하고 비밀번호·토큰 값을 입력하지 마세요. 저장하면 프로필 설정 전체를 교체합니다.'));
         const routing=node('p',label('Active profiles come from the database; startup JSON only bootstraps an empty authority. Mixed native keys and relay require relay_token_prefix (for example partner:), which is removed once before forwarding. Keep it when retiring keys. Use a distinct relay issuer. Lua conditions restrict verified identities and grant no permissions.','활성 프로필은 DB가 소유하며 시작 JSON은 비어 있는 authority만 초기화합니다. 자체 key·relay 혼합에는 relay_token_prefix(예: partner:)가 필요하며 전달 시 하나를 제거합니다. key 회수 후에도 유지하고 다른 relay issuer를 사용하세요. Lua 조건은 검증된 신원을 제한하며 권한을 부여하지 않습니다.'));
+        const expiry=node('p',label('API key expires_at is an absolute Unix timestamp in milliseconds, not seconds. Expired keys are refused immediately; omit expires_at for no configured expiry.','API key의 expires_at은 초가 아닌 Unix 밀리초 절대 시각입니다. 만료된 key는 즉시 거부하며, 설정 만료가 없으면 expires_at을 생략합니다.'));
         const summary=node('div');
         const summarize=(configuration)=>{
           summary.replaceChildren();
@@ -106,7 +107,7 @@ export async function mount(host) {
           finally{busy=false;if(!disposed&&!paused){save.disabled=!canWrite;refresh.disabled=false;}}
           if(saved&&!disposed&&!paused)await load();
         };
-        content.append(node('p',label('Revision: ','Revision: ')+show(data.revision)),help,routing,summary,editor,save);next=null;
+        content.append(node('p',label('Revision: ','Revision: ')+show(data.revision)),help,routing,expiry,summary,editor,save);next=null;
       }
       else if(view==='status'){
         const grid=node('div',undefined,'hopae-metrics');

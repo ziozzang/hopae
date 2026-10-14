@@ -391,6 +391,13 @@ HTTP and pooled mTLS. Mixed/native/relay and Chromium MFA/TOTP checks pass;
 native macOS runtime tests and live internal regressions also pass. Existing
 configuration/keys and consistent v6 rollback backups are preserved.
 
+
+Service API-key `expires_at` is an absolute Unix timestamp in **milliseconds**,
+not seconds. A key is refused at or after that timestamp. Omitting the field
+configures no key expiry; it does not bypass network restrictions, policy
+revocation or evidence freshness limits. The administrator profile editor uses
+the same unit.
+
 ## Mixed native and external service credentials (unreleased)
 
 A service profile can contain both `api_keys` and `api_relay` when it explicitly
