@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """Stage deterministic qualified Hopae artifacts; publication is separate."""
-import argparse,base64,gzip,hashlib,json,subprocess,tarfile,tomllib
+import argparse,base64,gzip,hashlib,json,subprocess,tarfile,tempfile,tomllib
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 TARGETS={'x86_64-unknown-linux-musl':('linux','amd64'),'aarch64-unknown-linux-musl':('linux','arm64'),'x86_64-apple-darwin':('darwin','amd64'),'aarch64-apple-darwin':('darwin','arm64')}
 def prepare(target,output,signer=None,seed=None):
  platform,arch=TARGETS[target];version=tomllib.loads((ROOT/'Cargo.toml').read_text())['package']['version']
  binary=ROOT/'target'/target/'release/hopae'
+ if target.endswith('-musl') and b'INTERP' in subprocess.check_output(['readelf','-lW',str(binary)]):raise ValueError('static release must not require an ELF interpreter')
  if subprocess.check_output([str(binary),'--version'],text=True).strip()!='hopae '+version:raise ValueError('binary version mismatch')
+ if (signer is None)!=(seed is None):raise ValueError('signer and seed must be supplied together')
+ if signer is not None:
+  if output.resolve()==seed.resolve() or output.resolve() in seed.resolve().parents or seed.resolve() in output.resolve().parents:raise ValueError('output must be separate from signing seed')
+  pin=(ROOT/'release-public-key.txt').read_text().strip()
+  reported=subprocess.check_output([str(signer.resolve()),'--public-key',str(seed.resolve())],text=True).strip()
+  if reported!=pin:raise ValueError('signing identity does not match repository pin')
  if output.exists() and any(output.iterdir()):raise ValueError('output must be empty')
  output.mkdir(parents=True,exist_ok=True);raw=output/('hopae-'+target);raw.write_bytes(binary.read_bytes());raw.chmod(0o755)
  folder=f'hopae-v{version}-{platform}-{arch}'
@@ -18,22 +25,20 @@ def prepare(target,output,signer=None,seed=None):
    info=tarfile.TarInfo(folder+'/'+name);info.size=path.stat().st_size;info.mode=0o755 if name=='hopae' else 0o644;info.mtime=0;info.uid=info.gid=0
    with path.open('rb') as source:tar.addfile(info,source)
  if signer is not None:
-  pin=(ROOT/'release-public-key.txt').read_text().strip()
-  reported=subprocess.check_output([str(signer.resolve()),'--public-key',str(seed.resolve())],text=True).strip()
-  if reported!=pin:raise ValueError('signing identity does not match repository pin')
   payload={'version':version,'target':target,'artifact_url':f'https://github.com/ziozzang/hopae/releases/download/v{version}/{raw.name}','sha256':hashlib.sha256(raw.read_bytes()).hexdigest(),'size':raw.stat().st_size}
   temporary=output/'.release-payload.json';temporary.write_text(json.dumps(payload,separators=(',',':')))
   manifest=output/(raw.name+'.manifest.json')
   try:subprocess.run([str(signer.resolve()),str(temporary.resolve()),str(seed.resolve()),str(manifest.resolve())],check=True,capture_output=True)
   finally:temporary.unlink(missing_ok=True)
-  from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
   envelope=json.loads(manifest.read_text());encoded=base64.b64decode(envelope['payload'],validate=True)
-  Ed25519PublicKey.from_public_bytes(base64.b64decode(pin,validate=True)).verify(base64.b64decode(envelope['signature'],validate=True),encoded)
+  with tempfile.TemporaryDirectory(prefix='hopae-signature-') as directory:
+   directory=Path(directory);(directory/'public.der').write_bytes(bytes.fromhex('302a300506032b6570032100')+base64.b64decode(pin,validate=True));(directory/'payload').write_bytes(encoded);(directory/'signature').write_bytes(base64.b64decode(envelope['signature'],validate=True))
+   subprocess.run(['openssl','pkeyutl','-verify','-pubin','-keyform','DER','-inkey',str(directory/'public.der'),'-rawin','-in',str(directory/'payload'),'-sigfile',str(directory/'signature')],check=True,capture_output=True)
   if json.loads(encoded)!=payload:raise ValueError('signed payload differs from qualified artifact')
   (output/'release-public-key.txt').write_text(pin+'\n')
  files=sorted(output.iterdir());(output/'SHA256SUMS').write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n' for p in files))
  print('Staged',target,'version',version)
 if __name__=='__main__':
- parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--target',choices=TARGETS,required=True);parser.add_argument('--output',type=Path,required=True);parser.add_argument('--signer',type=Path);parser.add_argument('--seed',type=Path);args=parser.parse_args();
+ parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--target',choices=TARGETS,default='x86_64-unknown-linux-musl');parser.add_argument('--output',type=Path,required=True);parser.add_argument('--signer',type=Path);parser.add_argument('--seed',type=Path);args=parser.parse_args();
  if (args.signer is None)!=(args.seed is None):parser.error('signer and private seed must be supplied together')
  prepare(args.target,args.output,args.signer,args.seed)

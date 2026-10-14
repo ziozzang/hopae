@@ -127,3 +127,11 @@ HOP1 connection admission and task ownership use the pinned `hangang-runtime`
 limit, immediate shutdown, TLS/ALPN checks, caller authentication, frame limits
 and authentication pipeline. This extraction does not merge domain cores or
 change the independent-server deployment model.
+
+Release preparation defaults to Linux amd64 static musl. Musl binaries with an
+ELF interpreter are refused before staging. For signed distribution, pass both
+`--signer` and `--seed` to `tools/prepare_release.py`; the private seed must remain
+separate from the output directory. The tool checks the repository signing pin
+before writing assets and independently verifies Ed25519 signatures with OpenSSL.
+Unsigned staging is for qualification only and must not be published as a signed
+release. Each additional platform requires separate current-source qualification.
