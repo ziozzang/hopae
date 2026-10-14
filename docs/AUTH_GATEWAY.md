@@ -946,3 +946,19 @@ HTTP/HOP1 mTLS expired/invalid refusal and a second container restart passed.
 Operating issuer resources remain unconfigured; native receipt activation requires
 explicit deployment keys/scopes. Human/workload receipts, signed permission,
 credential projection, fleet replication and automatic updates remain open.
+
+### Profile and application epoch contract (unreleased)
+
+`hopae-grpc::service_epoch` defines canonical
+`<authority>:service:<profile_revision>:app:<application_generation>` binding.
+Both numbers are nonzero JavaScript-safe integers with canonical decimal spelling;
+the entire epoch stays within the existing signed context’s 128-byte limit. The
+parser borrows the authority string and rejects legacy epochs lacking application
+generation. Actual Ed25519 qualification proves that changing only the application
+generation invalidates the signed receipt.
+
+This is a shared contract increment. The production issuer still emits the prior
+profile-only epoch and checks the exact application Arc during issuance. Issuer,
+Pumgye trust verification and live receiver validation must adopt this contract
+together before activation; parsing a generation alone does not prove its current
+ownership or durable restart/restore floor. No operating configuration changed.
