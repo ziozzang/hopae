@@ -498,3 +498,12 @@ profiles does not rotate the receipt key. Live/distributed key activation and
 revocation still require the receiver lifecycle integration. Startup tests refuse
 invalid/overflow epochs, weak pins, undeclared services, malformed references,
 inline seeds and unauthenticated caller mode.
+
+## Release feature boundary
+
+`test-hooks` exposes fixture clock, stall, commit/crash controls and deterministic
+randomness. Cargo builds inheriting the release profile now refuse that feature
+in `build.rs`, including `--release --all-features`. Production static builds use
+`cargo build --release --target x86_64-unknown-linux-musl --bin hopae`.
+Debug all-feature tests remain supported. The guard runs before the owning library
+or executable is compiled; it does not change provider or runtime configuration.
