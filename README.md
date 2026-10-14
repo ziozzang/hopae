@@ -166,3 +166,12 @@ qualification, source regression/Clippy and release boundary checks passed.
 All downloaded assets matched originals; pinned signatures, version/target/URL
 bindings and static ELF were independently verified. Internal adoption and
 Kubernetes combined-endpoint qualification remain subsequent gates.
+
+### 0.0.7 Internal adoption — 2026-10-15
+
+Internal deployment preserved users/providers/sessions/grants/MFA/profile owner
+data and the existing environment. Actual operating clones and clone-only
+credential publication/withdrawal qualified the new executable before replacement.
+HTTP/HOP1 mTLS expired/invalid denial, exact signed running bytes and second
+container restart passed. Receipt issuer remains separately unconfigured.
+
