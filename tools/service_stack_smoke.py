@@ -148,7 +148,7 @@ def main():
                 persisted['policy']['services']['orders']['users']={}
                 api('/v1/pumgye/policy','PUT',persisted,{'If-Match':f'"{persisted["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']})
                 assert request()==403
-            count=len(seen);owner.terminate();owner.wait(timeout=5);assert request()==503 and len(seen)==count
+            count=len(seen);owner.terminate();assert owner.wait(timeout=8)==0;assert request()==503 and len(seen)==count
             if not args.external_verifier:
                 owner=start(args.pumgye_binary,pum_args,'pumgye-restarted')
                 wait(f'https://127.0.0.1:{pum_http}/healthz',owner,'pumgye-restarted',context)
