@@ -14,7 +14,7 @@ can inject verified identity into upstream requests. It is packaged around the
 authentication check, and it stays usable behind any gateway that can forward
 such a check.
 
-> **Status: v0.0.5 release preparation; native zero-trust gateway integration.**
+> **Status: v0.0.5 released; native zero-trust gateway integration.**
 > OIDC/LDAP login, service API authentication, mTLS HOP1, delegated management,
 > TOTP and external MFA browser step-up are implemented. Internal v6 dogfooding
 > is active. Remaining scope is listed below and in the roadmap.
@@ -135,3 +135,17 @@ separate from the output directory. The tool checks the repository signing pin
 before writing assets and independently verifies Ed25519 signatures with OpenSSL.
 Unsigned staging is for qualification only and must not be published as a signed
 release. Each additional platform requires separate current-source qualification.
+
+## v0.0.5 qualification
+
+[v0.0.5](https://github.com/ziozzang/hopae/releases/tag/v0.0.5) is published at
+8ce0b8a with five independently verified Linux amd64 musl assets. All-feature
+tests passed 919 cases (42 existing ignored), with strict Clippy, six release
+boundary tests, actual native/gRPC four-process chains and operational DB-clone
+credential publication/withdrawal checks. Internal replacement preserved identity,
+provider, session, MFA and profile state and environment, verified refusal over
+HTTP/native mTLS, exact signed executable and container restart. The console
+package was installed with updated pins and its actual delegated status response
+was verified. Rollback backups are retained. This version has not yet been
+qualified in Kubernetes; signed projection delivery and full provider/fleet
+qualification remain unfinished.
