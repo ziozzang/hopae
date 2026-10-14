@@ -1024,6 +1024,8 @@ version = "0.0.3"
 dependencies = [
  "ed25519-dalek",
  "prost",
+ "serde",
+ "serde_json",
  "sha2",
  "subtle",
  "tonic",

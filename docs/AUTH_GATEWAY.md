@@ -63,8 +63,15 @@ Compilation rejects decreasing revisions or epochs, replacement without a newer
 epoch, reinstating removed material, weak or duplicate entries, and moving public
 material between authorities or purposes, including after retirement.
 Unchanged active keys may remain at their epoch in a newer registry revision.
-Removing a key retains its floor; reintroduction requires a higher epoch. Lookup
+Removing a key retains its floor; reintroduction requires a higher epoch and fresh
+public material. Historical material cannot return even at a higher epoch. Lookup
 borrows the issuer string without per-request allocation.
+
+The provider-independent registry now lives in `hopae-grpc::receipt_keys`,
+statically compiled into each consumer. Public snapshot encoding/decoding lets
+each server persist its own floors without importing Hopae providers or SQL.
+Hopae reexports the same implementation and retains its transactional DB adapter.
+Restart tests reject resurrection and accept fresh-key replacement.
 
 These are in-memory transition fences. A fresh registry without prior state cannot
 prove historical floors, and caller-owned context still must derive from verified

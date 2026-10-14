@@ -83,8 +83,16 @@ mod tests {
         assert!(load(&db, 3).is_err());
         assert!(publish(&mut db, 2, &[key(1)], "operator", &|_| Ok(())).is_err());
         assert!(publish(&mut db, 1, &[key(2)], "operator", &|_| Ok(())).is_err());
+        assert!(
+            publish(&mut db, 2, &[key(2)], "operator", &|_| Ok(())).is_err(),
+            "retired public material cannot return at a larger epoch"
+        );
+        let mut replacement = key(2);
+        replacement.public_key = ed25519_dalek::SigningKey::from_bytes(&[8; 32])
+            .verifying_key()
+            .to_bytes();
         assert_eq!(
-            publish(&mut db, 2, &[key(2)], "operator", &|_| Ok(()))
+            publish(&mut db, 2, &[replacement], "operator", &|_| Ok(()))
                 .unwrap()
                 .revision(),
             3
