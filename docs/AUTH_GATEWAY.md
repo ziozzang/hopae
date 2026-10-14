@@ -907,3 +907,17 @@ are separate from artifact release keys. This prepares a service-authentication
 capability, not human/workload issuance, signed permission or upstream credential
 projection. Static artifact qualification, signed publication and operating
 adoption of 0.0.6 remain pending.
+
+### Actual executable receipt qualification
+
+`tools/service_receipt_smoke.py --server <static-hopae> --client
+<hangang-receipt-client>` starts the actual owning executable in an isolated state
+with private ephemeral CA, issuer signing resources and credential references.
+The signed 0.0.6 executable passed real mTLS request-bound receipt verification
+with the Hangang 0.3.4 client, signed administrator profile CAS, immediate
+revocation and restoration on the same channel. Wrong caller, issuer reference,
+service, audience, server name, public key and key epoch all refuse issuance or
+acceptance. Application calls are not replayed. The fixture preserves operating
+data and emits only the result, never receipts, credentials or signing seeds.
+These local executable checks do not establish receipt-enabled Kubernetes or
+production activation, human/workload issuance or signed permission projection.
