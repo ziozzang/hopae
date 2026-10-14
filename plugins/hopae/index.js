@@ -116,6 +116,11 @@ export async function mount(host) {
         }content.append(grid);
         const heading=node('h2',label('Providers','프로바이더')),providerTable=node('table'),head=node('tr');for(const title of ['provider_id','kind','enabled','health'])head.append(node('th',title));providerTable.append(head);
         for(const provider of data.providers??[]){const row=node('tr');for(const key of ['provider_id','kind','enabled','health'])row.append(node('td',show(provider[key])));providerTable.append(row);}content.append(heading,providerTable);
+        const circuits=node('table'),circuitHead=node('tr');
+        for(const title of ['service_id','connector','circuit','available_capacity'])circuitHead.append(node('th',title));circuits.append(circuitHead);
+        for(const connector of data.authentication_gateway?.connectors??[]){const row=node('tr');for(const key of ['service_id','connector','circuit','available_capacity'])row.append(node('td',show(connector[key])));circuits.append(row);}
+        content.append(node('h2',label('Service authentication circuits','서비스 인증 서킷')),node('p',label('Observed at last refresh. An open circuit refuses external authentication; this view does not reset circuits.','마지막 새로고침 시점의 상태입니다. 열린 서킷은 외부 인증을 거부하며 이 화면은 서킷을 초기화하지 않습니다.')),circuits);
+
         const details=node('details'),summary=node('summary',label('Runtime details','런타임 상세'));details.append(summary,node('pre',JSON.stringify(data,null,2)));content.append(details);next=null;
       }
       else {content.append(table(Array.isArray(data.items)?data.items:[]));next=data.next_cursor??null;if(!data.items?.length)content.append(node('p',label('No records','조회 결과 없음')));}

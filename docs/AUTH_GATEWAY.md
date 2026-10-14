@@ -769,3 +769,19 @@ qualified by native tests; the live smoke checks do not perform a production
 profile mutation or prove distributed/fleet behavior. Tagged assets are unchanged.
 
 Native Kubernetes Pod-bound authentication is integrated with reference-only profiles and shared HTTP/HOP1 revocation guards; see [workload contract](KUBERNETES_WORKLOAD.md). Real-cluster activation and workload receipt issuance remain pending.
+
+## Service connector observations (unreleased)
+
+Authenticated `GET /v1/status` adds `authentication_gateway`: owner revision,
+publication availability, enabled state and bounded connector observations. Each
+row includes only service ID, connector type, connector circuit state and currently
+available capacity. Multiple ports sharing a prepared profile produce one row.
+No credential reference/value, subject, verifier URL or destination is exposed.
+A busy or unavailable owner produces null; this is not evidence of a closed circuit.
+The console status view displays these observations without resetting circuits.
+
+This reports the service connector circuit, not every underlying HTTP-origin or
+human-provider circuit. Observations may change immediately and do not authorize
+requests or extend cached evidence. Collection performs no provider network call.
+Runtime delivery of signed credential projection is still a separate unfinished
+integration; observing connectors does not enable upstream credential delivery.

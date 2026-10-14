@@ -172,6 +172,13 @@ impl Config {
     }
 }
 impl Connector {
+    pub(crate) fn status(&self) -> (&'static str, usize) {
+        (
+            self.circuit.status_name(),
+            self.capacity.available_permits(),
+        )
+    }
+
     /// Material is supplied by the native owner; it never appears in serialized Config.
     pub fn compile(
         config: &Config,

@@ -67,6 +67,13 @@ struct Reply {
     expires_at: Option<u64>,
 }
 impl Connector {
+    pub(crate) fn status(&self) -> (&'static str, usize) {
+        (
+            self.circuit.status_name(),
+            self.capacity.available_permits(),
+        )
+    }
+
     pub fn compile(config: &Config, env: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
         config.validate()?;
         let key = if let Some(name) = &config.verifier_key_env {

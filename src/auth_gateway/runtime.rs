@@ -245,7 +245,44 @@ pub enum Error {
     NetworkDenied,
     Unavailable,
 }
+#[derive(serde::Serialize)]
+pub struct ConnectorStatus {
+    pub service_id: String,
+    pub connector: &'static str,
+    pub circuit: &'static str,
+    pub available_capacity: usize,
+}
 impl Runtime {
+    /// Management-only observation; no credential, destination or subject metadata.
+    pub fn connector_status(&self) -> Vec<ConnectorStatus> {
+        let mut seen = std::collections::HashSet::new();
+        let mut rows = Vec::new();
+        for ports in self.profiles.values() {
+            for profile in ports.values() {
+                if !seen.insert(std::sync::Arc::as_ptr(profile)) {
+                    continue;
+                }
+                let connectors = [
+                    profile.relay.as_ref().map(|c| ("api-relay", c.status())),
+                    profile
+                        .kubernetes
+                        .as_ref()
+                        .map(|(c, _)| ("kubernetes-tokenreview", c.status())),
+                ];
+                for (connector, (circuit, available_capacity)) in connectors.into_iter().flatten() {
+                    rows.push(ConnectorStatus {
+                        service_id: profile.service_id.clone(),
+                        connector,
+                        circuit,
+                        available_capacity,
+                    });
+                }
+            }
+        }
+        rows.sort_by(|a, b| (&a.service_id, a.connector).cmp(&(&b.service_id, b.connector)));
+        rows
+    }
+
     pub fn compile(config: &Config, env: &dyn Fn(&str) -> Option<String>) -> Result<Self> {
         Self::compile_resuming(config, env, None)
     }
@@ -557,6 +594,37 @@ mod tests {
         serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"api.example.test","ports":[443],"realm":"partner","api_keys":[{"token_env":"OWNED_API_TOKEN","subject":"scheduler","expires_at":5000}],"networks":["192.0.2.0/24","2001:db8::/32"]}]})).unwrap()
     }
     const KEY: &str = "owned-service-key-at-least-thirty-two-bytes";
+    #[test]
+    fn connector_observation_deduplicates_ports_and_excludes_credentials_and_destinations() {
+        let mut cfg = config();
+        cfg.profiles[0].ports = vec![443, 8443];
+        cfg.profiles[0].relay_token_prefix = Some("partner:".into());
+        cfg.profiles[0].api_relay = Some(super::super::relay::Config {
+            url: "https://verifier.example.test/secret-path".into(),
+            issuer: "partner-authority".into(),
+            timeout_ms: 100,
+            allow_private_endpoints: false,
+            verifier_key_env: Some("OWNED_VERIFIER_KEY".into()),
+        });
+        let runtime = Runtime::compile(&cfg, &|_| Some(KEY.into())).unwrap();
+        let rows = runtime.connector_status();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].service_id, "orders");
+        assert_eq!(rows[0].connector, "api-relay");
+        assert_eq!(rows[0].circuit, "closed");
+        assert_eq!(rows[0].available_capacity, 64);
+        let serialized = serde_json::to_string(&rows).unwrap();
+        for excluded in [
+            KEY,
+            "OWNED_VERIFIER_KEY",
+            "verifier.example.test",
+            "secret-path",
+            "scheduler",
+        ] {
+            assert!(!serialized.contains(excluded));
+        }
+    }
+
     #[tokio::test]
     async fn mixed_routing_never_sends_local_credentials_to_relay() {
         use std::sync::{

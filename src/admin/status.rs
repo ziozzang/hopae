@@ -295,8 +295,16 @@ pub async fn collect(st: &AdminState) -> Result<StatusData, StoreError> {
     if let Some(native) = &st.listeners.native_gateway {
         listeners["native_gateway"] = json!(native);
     }
+    let authentication_gateway = st.profile_authority.as_ref().and_then(|owner| {
+        owner.try_lock().ok().map(|owner| {
+            let snapshot = owner.snapshot();
+            json!({"revision": snapshot.revision, "available": snapshot.available(), "enabled": snapshot.runtime.is_some(),
+                "connectors": snapshot.runtime.as_ref().map(|runtime| runtime.connector_status()).unwrap_or_default()})
+        })
+    });
     let version = env!("CARGO_PKG_VERSION");
     let json = json!({
+        "authentication_gateway": authentication_gateway,
         "apps": apps_json,
         "providers": providers_json,
         "store": {

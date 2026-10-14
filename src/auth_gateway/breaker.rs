@@ -126,6 +126,15 @@ impl Circuit {
     pub fn state(&self) -> Option<State> {
         self.state.lock().ok().map(|breaker| breaker.state())
     }
+    pub fn status_name(&self) -> &'static str {
+        match self.state() {
+            Some(State::Closed) => "closed",
+            Some(State::Open) => "open",
+            Some(State::HalfOpen) => "half_open",
+            Some(State::Quarantined) => "quarantined",
+            None => "unavailable",
+        }
+    }
     pub fn admit(self: &std::sync::Arc<Self>) -> Option<CircuitLease> {
         let permit = self.state.lock().ok()?.admit(self.now())?;
         Some(CircuitLease {
