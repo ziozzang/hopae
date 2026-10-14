@@ -174,4 +174,3 @@ data and the existing environment. Actual operating clones and clone-only
 credential publication/withdrawal qualified the new executable before replacement.
 HTTP/HOP1 mTLS expired/invalid denial, exact signed running bytes and second
 container restart passed. Receipt issuer remains separately unconfigured.
-
