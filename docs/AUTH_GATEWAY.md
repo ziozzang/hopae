@@ -817,3 +817,19 @@ remain valid. Seven pure contract tests and thirteen owning key/issuer/replay
 tests pass. The types describe claims; callers must still authenticate their
 source, select pinned live keys and enforce current owner/replay state. This
 source extraction does not activate transport or projection delivery.
+
+## Native service authentication-to-receipt adapter (unreleased)
+
+`Issuer::authenticate_service_and_issue` connects actual profile authentication
+to signing through the immutable owner reader. Configured service/audience scope
+is checked before authentication. A mandatory native guard checks caller/route
+authorization; the adapter fences the exact active snapshot and publication
+availability before and after guard work and signing. It derives identity proof
+from the profile owner, preserving service AAL 0 and bounded evidence expiry.
+
+An actual owner/native-key test signs a verifiable receipt and changes publication
+availability in the final guard; the changed owner cannot release the receipt.
+Existing issuer scope, expiry, rollback and mixed-namespace tests pass. This is
+the native adapter entry, not an enabled RPC route: peer authentication, configured
+issuer resources, request-context construction, distributed receiver freshness
+and permission/projection transport remain required integration work.

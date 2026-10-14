@@ -75,6 +75,12 @@ pub struct Request<'a> {
     pub audience: &'a str,
     pub request_sha256: [u8; 32],
 }
+pub struct ServiceRequest<'a> {
+    pub host: &'a str,
+    pub port: u16,
+    pub credential: Option<&'a str>,
+    pub client_ip: std::net::IpAddr,
+}
 pub struct Issuer {
     config: Arc<Configuration>,
     signer: ed25519_dalek::SigningKey,
@@ -206,6 +212,49 @@ impl Issuer {
     }
     /// Only profile-owned Service evidence is supported here. Neither network
     /// evidence nor an arbitrary caller principal can manufacture Human/MFA.
+    /// Native adapter entry: caller/route authorization remains mandatory in guard.
+    /// Snapshot identity is fenced around actual authentication and signing.
+    pub async fn authenticate_service_and_issue(
+        &self,
+        reader: &Arc<arc_swap::ArcSwap<super::authority::Snapshot>>,
+        input: ServiceRequest<'_>,
+        request: Request<'_>,
+        guard: &dyn Fn() -> Result<(), Refused>,
+    ) -> Result<Issued, Refused> {
+        if !self
+            .scopes
+            .get(request.service)
+            .is_some_and(|audiences| audiences.contains(request.audience))
+        {
+            return Err(Refused);
+        }
+        guard()?;
+        let snapshot = reader.load_full();
+        let authentication = snapshot
+            .authenticate_for_receipt(
+                input.host,
+                input.port,
+                input.credential,
+                input.client_ip,
+                self.now()?,
+            )
+            .await
+            .map_err(|_| Refused)?;
+        self.issue_service(&authentication, request, &|| {
+            let current = reader.load_full();
+            if !Arc::ptr_eq(&snapshot, &current) || !current.available() {
+                return Err(Refused);
+            }
+            guard()?;
+            // A native guard can run owner work; recheck after that work as well.
+            let current = reader.load_full();
+            if !Arc::ptr_eq(&snapshot, &current) || !current.available() {
+                return Err(Refused);
+            }
+            Ok(())
+        })
+    }
+
     pub fn issue_service(
         &self,
         authentication: &super::authority::ServiceAuthentication,
@@ -340,7 +389,7 @@ mod tests {
         )
         .unwrap()
     }
-    fn issuer(clock: Arc<crate::crypto::TestClock>) -> Issuer {
+    fn issuer(clock: Arc<dyn Clock>) -> Issuer {
         let signer = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
         Issuer::new(
             Configuration {
@@ -392,6 +441,45 @@ mod tests {
             "identity-1:service:1"
         );
     }
+    #[tokio::test]
+    async fn native_service_adapter_fences_owner_change_during_final_guard() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut configuration = config(None);
+        configuration.profiles[0].api_keys[0].expires_at = None;
+        let owner = owner(&mut db, configuration);
+        let reader = owner.reader();
+        let clock = Arc::new(crate::crypto::SystemClock);
+        let issuer = issuer(clock.clone());
+        let input = || ServiceRequest {
+            host: "orders.example.test",
+            port: 443,
+            credential: Some(TOKEN),
+            client_ip: "203.0.113.9".parse().unwrap(),
+        };
+        let issued = issuer
+            .authenticate_service_and_issue(&reader, input(), request(), &|| Ok(()))
+            .await
+            .unwrap();
+        verify(&issued, clock.now().0 as u64);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let changed = issuer
+            .authenticate_service_and_issue(&reader, input(), request(), &|| {
+                if calls.fetch_add(1, Ordering::SeqCst) == 2 {
+                    reader
+                        .load_full()
+                        .publication
+                        .store(true, Ordering::Release);
+                }
+                Ok(())
+            })
+            .await;
+        assert!(
+            changed.is_err(),
+            "final owner unavailability cannot release a receipt"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
     #[tokio::test]
     async fn native_profile_proof_signs_aal_zero_and_refuses_scope_kind_and_revocation() {
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
