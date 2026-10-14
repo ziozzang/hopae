@@ -690,6 +690,20 @@ fn authentication_profiles_put_requires_csrf_admin_revision_and_persists_tombsto
         &[],
     );
     let u = users(&h, &idp);
+    let observed = status(&h, &u.v.handle);
+    assert_eq!(observed["authentication_gateway"]["revision"], 1);
+    assert_eq!(observed["authentication_gateway"]["available"], true);
+    assert_eq!(observed["authentication_gateway"]["enabled"], true);
+    assert_eq!(
+        observed["authentication_gateway"]["connectors"],
+        json!([
+            {"service_id":"app","connector":"api-relay","circuit":"closed","available_capacity":64}
+        ])
+    );
+    let observation = observed["authentication_gateway"].to_string();
+    assert!(!observation.contains("/verify"));
+    assert!(!observation.contains(idp.issuer.as_str()));
+    assert_ne!(admin(&h).get("/v1/status").status, 200);
     let path = "/v1/authentication/profiles";
     let headers = [
         ("content-type", "application/json"),
@@ -745,6 +759,10 @@ fn authentication_profiles_put_requires_csrf_admin_revision_and_persists_tombsto
         .unwrap();
     assert_eq!(stored.revision, 2);
     assert!(stored.configuration.is_none());
+    let disabled = status(&h, &u.a.handle);
+    assert_eq!(disabled["authentication_gateway"]["revision"], 2);
+    assert_eq!(disabled["authentication_gateway"]["enabled"], false);
+    assert_eq!(disabled["authentication_gateway"]["connectors"], json!([]));
 }
 
 #[test]
