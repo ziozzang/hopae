@@ -19,43 +19,16 @@ use tower::ServiceExt;
 pub fn tls_acceptor(
     settings: &crate::config::NativeGatewayTls,
 ) -> anyhow::Result<tokio_rustls::TlsAcceptor> {
-    use std::io::Read;
-    fn read(path: &std::path::Path) -> anyhow::Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        anyhow::ensure!(
-            bytes.len() <= 1024 * 1024,
-            "native TLS material exceeds bound"
-        );
-        Ok(bytes)
-    }
-    let cert = read(&settings.certificate)?;
-    let key = read(&settings.key)?;
-    let ca = read(&settings.client_ca)?;
-    let certs = rustls_pemfile::certs(&mut cert.as_slice()).collect::<io::Result<Vec<_>>>()?;
-    let key = rustls_pemfile::private_key(&mut key.as_slice())?
-        .ok_or_else(|| anyhow::anyhow!("native TLS key missing"))?;
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut ca.as_slice()) {
-        roots.add(cert?)?;
-    }
-    anyhow::ensure!(!roots.is_empty(), "native TLS client CA missing");
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
-        Arc::new(roots),
-        provider.clone(),
-    )
-    .build()?;
-    let mut config = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()?
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(certs, key)?;
-    config.alpn_protocols = vec![b"hop1".to_vec()];
-    config.max_early_data_size = 0;
-    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+    Ok(tokio_rustls::TlsAcceptor::from(
+        hangang_runtime::tls_config(
+            &settings.certificate,
+            &settings.key,
+            &settings.client_ca,
+            &[b"hop1"],
+        )?,
+    ))
 }
+
 async fn read_frame<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<(u64, Vec<u8>)> {
     let mut h = [0; 16];
     stream.read_exact(&mut h).await?;
