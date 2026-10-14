@@ -120,6 +120,40 @@ impl CapturedService {
     }
 }
 
+/// Opaque local validation seal. Its owners must be rechecked before use.
+/// No permission grant, replay consumption or remote freshness assertion.
+pub struct LiveService<'a> {
+    issuer: &'a Issuer,
+    profiles: &'a Arc<arc_swap::ArcSwap<super::authority::Snapshot>>,
+    applications: &'a Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
+    profile: Arc<super::authority::Snapshot>,
+    application: Arc<crate::policy::types::ConfigSnapshot>,
+    expires_ms: u64,
+    verified_ms: u64,
+    begun: std::time::Instant,
+}
+impl LiveService<'_> {
+    pub fn current(&self) -> Result<(), Refused> {
+        let current = self.profiles.load_full();
+        let now = self.issuer.now()?.max(
+            self.verified_ms
+                .saturating_add(self.begun.elapsed().as_millis().min(u64::MAX as u128) as u64),
+        );
+        self.issuer.observed_time.fetch_max(now, Ordering::AcqRel);
+        if !current.available()
+            || !Arc::ptr_eq(&current, &self.profile)
+            || !Arc::ptr_eq(&self.applications.load_full(), &self.application)
+            || now >= self.expires_ms
+        {
+            return Err(Refused);
+        }
+        Ok(())
+    }
+    pub fn expires_ms(&self) -> u64 {
+        self.expires_ms
+    }
+}
+
 pub struct ServiceRequest<'a> {
     pub host: &'a str,
     pub port: u16,
@@ -156,6 +190,59 @@ fn identifier(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
 }
 impl Issuer {
+    /// Validate this issuer's signed service proof against actual live owners.
+    /// The request hash must be derived by the authenticated enforcement caller.
+    pub fn verify_live_service<'a>(
+        &'a self,
+        profiles: &'a Arc<arc_swap::ArcSwap<super::authority::Snapshot>>,
+        applications: &'a Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
+        context: &Context<'_>,
+        bytes: &[u8],
+        request_sha256: &[u8; 32],
+    ) -> Result<LiveService<'a>, Refused> {
+        let begun = std::time::Instant::now();
+        let verified_ms = self.now()?;
+        let epoch = hopae_grpc::service_epoch::decode(context.identity_authority_epoch)
+            .map_err(|_| Refused)?;
+        let profile = profiles.load_full();
+        let application = applications.load_full();
+        if context.issuer_ref != self.config.issuer_ref
+            || context.key_epoch != self.config.key_epoch
+            || epoch.authority != self.config.identity_authority_epoch
+            || epoch.profile_revision != profile.revision
+            || !profile.available()
+            || epoch.application_generation != application.generation
+            || context.identity.kind != PrincipalKind::Service
+            || context.identity.aal != 0
+            || context.identity.revision != profile.revision
+            || context.identity.credential_generation != profile.revision
+            || context.request_sha256 != *request_sha256
+            || !self.permits_service_audience(context.service, context.audience)
+        {
+            return Err(Refused);
+        }
+        let binding = super::receipt_binding::digest(context, None).map_err(|_| Refused)?;
+        let checked = receipt::verify(
+            &self.signer.verifying_key(),
+            bytes,
+            Purpose::Authentication,
+            &binding,
+            verified_ms,
+        )
+        .map_err(|_| Refused)?;
+        let live = LiveService {
+            issuer: self,
+            profiles,
+            applications,
+            profile,
+            application,
+            expires_ms: checked.claims().expires_ms,
+            verified_ms,
+            begun,
+        };
+        live.current()?;
+        Ok(live)
+    }
     pub fn permits_service_audience(&self, service: &str, audience: &str) -> bool {
         self.scopes
             .get(service)
@@ -598,7 +685,7 @@ mod tests {
         let owner = owner(&mut db, configuration);
         let reader = owner.reader();
         let profile = reader.load_full();
-        let clock = Arc::new(crate::crypto::SystemClock);
+        let clock = Arc::new(crate::crypto::TestClock::new(Timestamp(1000)));
         let signer = issuer(clock.clone());
         let authentication = profile
             .authenticate_for_receipt(
@@ -629,12 +716,80 @@ mod tests {
             captured.application_generation()
         );
         assert_eq!(epoch.profile_revision, issued.context().identity.revision);
+        let live = signer
+            .verify_live_service(
+                &reader,
+                &applications,
+                &issued.context(),
+                issued.bytes(),
+                &request().request_sha256,
+            )
+            .unwrap();
+        assert!(live.current().is_ok());
+        let mut tampered = *issued.bytes();
+        tampered[20] ^= 1;
+        assert!(
+            signer
+                .verify_live_service(
+                    &reader,
+                    &applications,
+                    &issued.context(),
+                    &tampered,
+                    &request().request_sha256
+                )
+                .is_err()
+        );
         applications.store(Arc::new(cfg.snapshot(1)));
+        assert!(live.current().is_err());
+        applications.store(Arc::new(cfg.snapshot(2)));
+        assert!(
+            signer
+                .verify_live_service(
+                    &reader,
+                    &applications,
+                    &issued.context(),
+                    issued.bytes(),
+                    &request().request_sha256
+                )
+                .is_err()
+        );
         assert!(
             captured
                 .issue(&signer, &reader, &applications, request(), &|| panic!(
                     "replacement must be fenced before signing guard"
                 ))
+                .is_err()
+        );
+        applications.store(captured.application.clone());
+        reader.store(Arc::new(super::super::authority::Snapshot {
+            publication: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            revision: 2,
+            runtime: None,
+        }));
+        assert!(live.current().is_err());
+        assert!(
+            signer
+                .verify_live_service(
+                    &reader,
+                    &applications,
+                    &issued.context(),
+                    issued.bytes(),
+                    &request().request_sha256
+                )
+                .is_err()
+        );
+        reader.store(captured.profile.clone());
+        clock.set(Timestamp(live.expires_ms() as i64));
+        assert!(live.current().is_err());
+        assert!(
+            signer
+                .verify_live_service(
+                    &reader,
+                    &applications,
+                    &issued.context(),
+                    issued.bytes(),
+                    &request().request_sha256
+                )
                 .is_err()
         );
     }

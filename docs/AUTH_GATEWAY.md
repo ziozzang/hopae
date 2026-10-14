@@ -968,3 +968,18 @@ This issuer integration passed the full all-feature regression: 919 tests passed
 42 explicitly ignored, including the actual gateway/mTLS receipt scenario and
 application replacement fence. Strict all-feature/all-target Clippy passed.
 Pumgye passed 55 workspace tests and strict Clippy on the matching verifier.
+
+### Local live service receipt validation (unreleased)
+
+`Issuer::verify_live_service` verifies its own authentication signature, purpose,
+request digest, configured scope/key/base, Service/AAL0 and profile/credential
+revision against the current available profile and application generation. It
+returns an opaque non-Clone/non-serde `LiveService` holding exact owner Arcs.
+`current()` rechecks both pointers, publication availability and expiry, combining
+wall-clock watermark with elapsed monotonic time. Tests reject tampering, same-
+generation Arc replacement of retained seals, newer app/profile owners and expiry.
+
+This local primitive is not a permission grant or replay consumer. Native callers
+must recheck it before use. Remote validation RPC, issuer/key rotation retirement,
+fleet/restore floors and final permission/projection enforcement remain open.
+No operating endpoint or release was activated by this source increment.
