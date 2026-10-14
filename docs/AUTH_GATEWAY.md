@@ -874,3 +874,11 @@ gRPC mTLS/session-revocation parity tests also pass. The new receipt RPC itself
 has not yet been qualified over actual mTLS sockets or linked to Hangang receipt
 clients, Pumgye permits, replay admission or credential dispatch. No deployed
 release activates this source endpoint yet.
+
+Subsequent actual-socket qualification of the new receipt RPC passed with owned
+CA/server/client certificates. A real client validates the signature, Service/AAL0
+context and correlation; wrong caller credentials, undeclared audience and missing
+client certificate are refused. On the same authenticated channel, durable profile
+revocation stops issuance and restoration returns the new owner revision. Ordinary
+HTTP proof capture remains internal. This is an isolated server fixture, not a
+Hangang receipt-client, permission/projection or deployment qualification.

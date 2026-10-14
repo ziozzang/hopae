@@ -2041,6 +2041,233 @@ mod tests {
             )
             .is_ok()
         );
+        // Exercise the registered receipt service over an actual mandatory-mTLS socket.
+        let tlsdir = dir.path().join("tls");
+        std::fs::create_dir(&tlsdir).unwrap();
+        let openssl = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("openssl")
+                    .args(args)
+                    .current_dir(&tlsdir)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            );
+        };
+        openssl(&[
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=owned-ca",
+            "-keyout",
+            "ca.key",
+            "-out",
+            "ca.pem",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+        ]);
+        for (name, usage) in [("server", "serverAuth"), ("client", "clientAuth")] {
+            let key = format!("{name}.key");
+            let csr = format!("{name}.csr");
+            let cert = format!("{name}.pem");
+            let ext = format!("{name}.ext");
+            openssl(&[
+                "req",
+                "-new",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-subj",
+                "/CN=owned",
+                "-keyout",
+                &key,
+                "-out",
+                &csr,
+            ]);
+            std::fs::write(tlsdir.join(&ext),format!("basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage={usage}\nsubjectAltName=DNS:hopae.example.test\n")).unwrap();
+            openssl(&[
+                "x509",
+                "-req",
+                "-in",
+                &csr,
+                "-CA",
+                "ca.pem",
+                "-CAkey",
+                "ca.key",
+                "-CAcreateserial",
+                "-days",
+                "1",
+                "-extfile",
+                &ext,
+                "-out",
+                &cert,
+            ]);
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let tls = hangang_runtime::configuration(
+            &tlsdir.join("server.pem"),
+            &tlsdir.join("server.key"),
+            &tlsdir.join("ca.pem"),
+        )
+        .unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let running = tokio::spawn(crate::http::grpc_gateway::serve_with_receipts(
+            listener,
+            tls,
+            router.clone(),
+            bound.services.caller_keys.clone(),
+            stopped,
+            Some(bound.services.clone()),
+        ));
+        let ca =
+            tonic::transport::Certificate::from_pem(std::fs::read(tlsdir.join("ca.pem")).unwrap());
+        let endpoint = tonic::transport::Endpoint::from_shared(format!("https://{address}"))
+            .unwrap()
+            .timeout(Duration::from_secs(2));
+        let tls = tonic::transport::ClientTlsConfig::new()
+            .domain_name("hopae.example.test")
+            .ca_certificate(ca.clone())
+            .identity(tonic::transport::Identity::from_pem(
+                std::fs::read(tlsdir.join("client.pem")).unwrap(),
+                std::fs::read(tlsdir.join("client.key")).unwrap(),
+            ));
+        let channel = endpoint
+            .clone()
+            .tls_config(tls)
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut client=crate::http::grpc_gateway::v1::authentication_receipts_client::AuthenticationReceiptsClient::new(channel);
+        let message = crate::http::grpc_gateway::v1::ServiceReceiptRequest {
+            verification: Some(crate::http::grpc_gateway::v1::VerifyRequest {
+                request_id: 77,
+                headers: request
+                    .headers()
+                    .iter()
+                    .filter(|(name, _)| name.as_str() != "x-hopae-gateway-key")
+                    .map(|(name, value)| crate::http::grpc_gateway::v1::Header {
+                        name: name.to_string(),
+                        value: value.as_bytes().to_vec(),
+                    })
+                    .collect(),
+            }),
+            service: "orders".into(),
+            audience: "orders-api".into(),
+            request_sha256: vec![3; 32],
+        };
+        let call = |key: &str| {
+            let mut call = tonic::Request::new(message.clone());
+            call.metadata_mut()
+                .insert("authorization", format!("Bearer {key}").parse().unwrap());
+            call
+        };
+        assert_eq!(
+            client
+                .issue_service(call("wrong-caller"))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        let reply = client.issue_service(call(KEY)).await.unwrap().into_inner();
+        assert_eq!(reply.request_id, 77);
+        let context = reply.context.unwrap();
+        let identity = context.identity.unwrap();
+        assert_eq!(identity.kind, 2);
+        assert_eq!(identity.aal, 0);
+        let binding = crate::auth_gateway::receipt_binding::digest(
+            &crate::auth_gateway::receipt_binding::Context {
+                issuer_ref: &context.issuer_ref,
+                key_epoch: context.key_epoch,
+                identity_authority_epoch: &context.identity_authority_epoch,
+                identity: crate::auth_gateway::receipt_binding::Identity {
+                    subject_ref: &identity.subject_ref,
+                    kind: crate::auth_gateway::PrincipalKind::Service,
+                    aal: 0,
+                    revision: identity.revision,
+                    credential_generation: identity.credential_generation,
+                },
+                service: &context.service,
+                audience: &context.audience,
+                request_sha256: context.request_sha256.try_into().unwrap(),
+            },
+            None,
+        )
+        .unwrap();
+        assert!(
+            crate::auth_gateway::receipt::verify(
+                &signing.verifying_key(),
+                &reply.receipt,
+                crate::auth_gateway::receipt::Purpose::Authentication,
+                &binding,
+                bound.services.clock.now().0 as u64
+            )
+            .is_ok()
+        );
+        let mut forbidden = call(KEY);
+        forbidden.get_mut().audience = "undeclared-audience".into();
+        assert_eq!(
+            client.issue_service(forbidden).await.err().unwrap().code(),
+            tonic::Code::PermissionDenied
+        );
+        let no_cert = tonic::transport::ClientTlsConfig::new()
+            .domain_name("hopae.example.test")
+            .ca_certificate(ca);
+        if let Ok(channel) = endpoint.tls_config(no_cert).unwrap().connect().await {
+            assert!(crate::http::grpc_gateway::v1::authentication_receipts_client::AuthenticationReceiptsClient::new(channel).issue_service(call(KEY)).await.is_err());
+        }
+        let saved = crate::auth_gateway::publication::read(&bound.services.store.conn())
+            .unwrap()
+            .unwrap();
+        let owner = bound.services.authentication_authority.as_ref().unwrap();
+        owner
+            .lock()
+            .unwrap()
+            .publish(
+                &mut bound.services.store.conn(),
+                saved.revision,
+                None,
+                "owned-operator",
+                &|_| Some(KEY.into()),
+                &|_| Ok(()),
+            )
+            .unwrap();
+        assert!(
+            client.issue_service(call(KEY)).await.is_err(),
+            "same-channel revoked profile cannot issue"
+        );
+        owner
+            .lock()
+            .unwrap()
+            .publish(
+                &mut bound.services.store.conn(),
+                saved.revision + 1,
+                saved.configuration,
+                "owned-operator",
+                &|_| Some(KEY.into()),
+                &|_| Ok(()),
+            )
+            .unwrap();
+        let restored = client.issue_service(call(KEY)).await.unwrap().into_inner();
+        assert_eq!(
+            restored.context.unwrap().identity.unwrap().revision,
+            saved.revision + 2
+        );
+        stop.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         let response = router.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         assert!(
