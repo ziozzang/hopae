@@ -93,6 +93,41 @@ impl NativeIssuer {
 mod tests {
     use super::*;
     #[test]
+    fn startup_configuration_refuses_untrusted_scope_and_invalid_key_generations() {
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let base = serde_json::json!({"state_dir":"owned-state","portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_CALLER_REFERENCE"},"apps":[{"app_id":"orders","hosts":["app.example.test"]}],"receipt_issuer":{"issuer_ref":"owned","key_epoch":1,"identity_authority_epoch":"epoch1","public_key":STANDARD.encode(signer.verifying_key().to_bytes()),"seed_env":"OWNED_RECEIPT_SEED","scopes":[{"service":"orders","audience":"orders-api"}]}});
+        assert!(crate::config::parse(&base.to_string()).is_ok());
+        for mutate in [
+            |v: &mut serde_json::Value| v["receipt_issuer"]["key_epoch"] = serde_json::json!(0),
+            |v: &mut serde_json::Value| {
+                v["receipt_issuer"]["key_epoch"] = serde_json::json!(9_007_199_254_740_992u64)
+            },
+            |v: &mut serde_json::Value| {
+                v["receipt_issuer"]["public_key"] = serde_json::json!(STANDARD.encode([0; 32]))
+            },
+            |v: &mut serde_json::Value| {
+                v["receipt_issuer"]["scopes"][0]["service"] = serde_json::json!("undeclared")
+            },
+            |v: &mut serde_json::Value| {
+                v["receipt_issuer"]["seed_env"] = serde_json::json!("bad reference")
+            },
+            |v: &mut serde_json::Value| {
+                v["receipt_issuer"]["seed"] = serde_json::json!("inline-value")
+            },
+            |v: &mut serde_json::Value| {
+                v["gateway"]["allow_unauthenticated_caller"] = serde_json::json!(true)
+            },
+        ] {
+            let mut invalid = base.clone();
+            mutate(&mut invalid);
+            assert!(
+                crate::config::parse(&invalid.to_string()).is_err(),
+                "invalid receipt capability accepted"
+            );
+        }
+    }
+
+    #[test]
     fn native_resources_reject_missing_wrong_seeds_inline_secrets_and_duplicate_scopes() {
         let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
         let config = NativeIssuer {

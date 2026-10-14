@@ -490,3 +490,11 @@ The server loads an immutable native issuer resource. This does not enable a
 receipt RPC, credential projection or hot/distributed key rotation. Omitting
 `receipt_issuer` preserves existing startup behavior. RPC activation, current
 owner/caller guards and receiver key lifecycle remain separate integration work.
+
+Receipt issuer resources follow current process configuration semantics: SIGHUP
+logs that reload is unsupported and does not replace the key. Change the native
+configuration and perform a qualified process restart; publishing authentication
+profiles does not rotate the receipt key. Live/distributed key activation and
+revocation still require the receiver lifecycle integration. Startup tests refuse
+invalid/overflow epochs, weak pins, undeclared services, malformed references,
+inline seeds and unauthenticated caller mode.
