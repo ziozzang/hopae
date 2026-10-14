@@ -851,3 +851,26 @@ gateway-router test confirms authenticated internal capture, no receipt header/b
 and no capture for a refused caller. Signing tests confirm direct proof reuse and
 application replacement refusal. Receipt RPC, human/workload issuance, permission
 proof and upstream credential dispatch still need integration.
+
+## Opt-in service receipt gRPC (unreleased)
+
+`AuthenticationReceipts/IssueService` is a separate service on the existing
+mandatory-mTLS gRPC listener. It is registered only when native issuer and profile
+owner resources exist. The verification-only server entry remains compatible.
+Caller Bearer authentication runs before scope validation; only declared
+service/audience pairs proceed to the existing verification pipeline. Header
+bounds and the shared 4096-request admission limit apply.
+
+The request contains ordinary `VerifyRequest` headers/correlation, native service/
+audience and the gateway-computed 32-byte final request digest. The response is
+a bounded 2 KiB envelope containing correlation, native receipt context and
+146 signed receipt bytes. No projected upstream credential is returned. Service
+proof capture avoids duplicate external authentication; profile/application
+snapshots and caller authorization are rechecked during issuance.
+
+In-process handler qualification verifies a real signature, Service/AAL0 context,
+correlation, anonymous refusal and undeclared audience refusal. Existing actual
+gRPC mTLS/session-revocation parity tests also pass. The new receipt RPC itself
+has not yet been qualified over actual mTLS sockets or linked to Hangang receipt
+clients, Pumgye permits, replay admission or credential dispatch. No deployed
+release activates this source endpoint yet.

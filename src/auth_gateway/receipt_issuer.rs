@@ -151,6 +151,11 @@ fn identifier(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
 }
 impl Issuer {
+    pub fn permits_service_audience(&self, service: &str, audience: &str) -> bool {
+        self.scopes
+            .get(service)
+            .is_some_and(|audiences| audiences.contains(audience))
+    }
     /// Seed is supplied by a native key-vault capability, with a pinned public key.
     /// Clock/RNG are native resources; production wiring must use the OS CSPRNG.
     pub fn new(

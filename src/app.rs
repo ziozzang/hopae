@@ -1027,11 +1027,19 @@ impl Bound {
         let grpc_router = routers.gateway.clone();
         let grpc_keys = self.services.caller_keys.clone();
         let grpc_stop = stop_rx.clone();
+        let grpc_services = self.services.clone();
         let grpc = async {
             match self.grpc_gateway {
                 Some((listener, tls)) => {
-                    http::grpc_gateway::serve(listener, tls, grpc_router, grpc_keys, grpc_stop)
-                        .await
+                    http::grpc_gateway::serve_with_receipts(
+                        listener,
+                        tls,
+                        grpc_router,
+                        grpc_keys,
+                        grpc_stop,
+                        Some(grpc_services),
+                    )
+                    .await
                 }
                 None => Ok(()),
             }
@@ -1942,6 +1950,97 @@ mod tests {
             .header("x-original-url", "https://orders.example.test/private")
             .body(axum::body::Body::empty())
             .unwrap();
+        let verification = crate::http::grpc_gateway::v1::VerifyRequest {
+            request_id: 42,
+            headers: request
+                .headers()
+                .iter()
+                .filter(|(name, _)| name.as_str() != "x-hopae-gateway-key")
+                .map(|(name, value)| crate::http::grpc_gateway::v1::Header {
+                    name: name.to_string(),
+                    value: value.as_bytes().to_vec(),
+                })
+                .collect(),
+        };
+        let rpc = crate::http::grpc_gateway::v1::ServiceReceiptRequest {
+            verification: Some(verification),
+            service: "orders".into(),
+            audience: "orders-api".into(),
+            request_sha256: vec![3; 32],
+        };
+        let anonymous = crate::http::grpc_gateway::issue_service_for_test(
+            bound.services.clone(),
+            router.clone(),
+            tonic::Request::new(rpc.clone()),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(anonymous.code(), tonic::Code::Unauthenticated);
+        let mut forbidden = rpc.clone();
+        forbidden.audience = "undeclared-audience".into();
+        let mut forbidden = tonic::Request::new(forbidden);
+        forbidden
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {KEY}").parse().unwrap());
+        assert_eq!(
+            crate::http::grpc_gateway::issue_service_for_test(
+                bound.services.clone(),
+                router.clone(),
+                forbidden
+            )
+            .await
+            .err()
+            .unwrap()
+            .code(),
+            tonic::Code::PermissionDenied
+        );
+        let mut call = tonic::Request::new(rpc);
+        call.metadata_mut()
+            .insert("authorization", format!("Bearer {KEY}").parse().unwrap());
+        let reply = crate::http::grpc_gateway::issue_service_for_test(
+            bound.services.clone(),
+            router.clone(),
+            call,
+        )
+        .await
+        .unwrap()
+        .into_inner();
+        assert_eq!(reply.request_id, 42);
+        assert_eq!(reply.receipt.len(), crate::auth_gateway::receipt::LENGTH);
+        let context = reply.context.unwrap();
+        let identity = context.identity.unwrap();
+        assert_eq!(identity.kind, 2);
+        assert_eq!(identity.aal, 0);
+        let binding = crate::auth_gateway::receipt_binding::digest(
+            &crate::auth_gateway::receipt_binding::Context {
+                issuer_ref: &context.issuer_ref,
+                key_epoch: context.key_epoch,
+                identity_authority_epoch: &context.identity_authority_epoch,
+                identity: crate::auth_gateway::receipt_binding::Identity {
+                    subject_ref: &identity.subject_ref,
+                    kind: crate::auth_gateway::PrincipalKind::Service,
+                    aal: 0,
+                    revision: identity.revision,
+                    credential_generation: identity.credential_generation,
+                },
+                service: &context.service,
+                audience: &context.audience,
+                request_sha256: context.request_sha256.try_into().unwrap(),
+            },
+            None,
+        )
+        .unwrap();
+        assert!(
+            crate::auth_gateway::receipt::verify(
+                &signing.verifying_key(),
+                &reply.receipt,
+                crate::auth_gateway::receipt::Purpose::Authentication,
+                &binding,
+                bound.services.clock.now().0 as u64
+            )
+            .is_ok()
+        );
         let response = router.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         assert!(
