@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=31 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=32 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -124,16 +124,20 @@ Hangang/품계가 서비스 매트릭스를 집행합니다. Hangang은 서비�
 upstream 전송 전에 Authorization credential을 소비합니다. 역할이 AAL 0을
 명시적으로 허용해야 하고 API 키로 사람/MFA 요구를 만족할 수 없습니다.
 
-`tools/service_stack_smoke.py`는 mTLS HOP1/PPG1의 실제 격리된 세 프로세스를
-실행합니다. 인증·IP/등급/메서드 권한·미등록/잘못된 credential 거부·gateway 설정을
-다시 쓰지 않는 영속 권한 회수/복원·서비스 간 격리·credential 소비·품계 장애 시
-거부를 검증합니다. 수문장은 이 fixture 밖에 있으며 전체 스택 처리량 측정이 아닙니다.
-운영 배포와 기존 스트림 credential 회수를 포함한 전체 수명주기는 별도 작업입니다.
+`tools/service_stack_smoke.py`는 실제 격리된 한강·호패·품계 프로세스를 실행합니다.
+`--sumunjang-binary /path/to/sumunjang`을 추가하면 네트워크 판정까지 포함하고
+서비스 매트릭스에 집행 근거를 필수로 요구합니다. `--grpc`는 세 판정 교환 모두
+mTLS gRPC를 사용하며 생략하면 같은 네 프로세스에서 HOP1/PPG1/HGD1을 사용합니다.
+인증·IP/등급/메서드 권한·잘못된 자격 거부·영속 권한 회수/복원·서비스 격리·
+upstream 자격 소비·원천 장애 시 거부를 검증합니다. 모든 거부 요청은 애플리케이션
+백엔드 호출 수를 늘리지 않아야 합니다. 네트워크 차단 해제/복원과 서버 장애/재연결도 확인합니다.
+초기 파일에 기존 허용이 남아 있어도 실제 품계 재시작 후 권한 회수가 유지되는지 확인합니다.
 
-LDAP·자체 사람 비밀번호·표준 introspection adapter·실제 connector 관계의
-Any/All 결합·upstream credential 변환·전체 credential 수명주기·전체 스택 100k QPS
-검증은 남아 있습니다. 기존 OIDC 서킷은 provider 호출을 보호하고 외부 verifier 릴레이에도 범위가
-정해진 서킷을 적용합니다. 인메모리 API 키 connector에는 원격 백엔드가 없습니다.
+`--external-verifier`는 실제 API 릴레이 장애와 열린 서킷의 추가 호출 억제를 검증합니다.
+`--durable-restart`는 초기 파일이 그대로여도 영속 프로파일 삭제가 실제 호패 재시작에
+살아남는지 확인합니다. 이는 로컬 기능 검증이며 실제 K8s 배포·운영 반영·기존 스트림을
+포함한 전체 자격 수명주기·분산 처리량은 별도 작업입니다. LDAP와 자체 사람 인증에는
+별도 검증이 있고 더 넓은 커넥터 조합·표준 introspection 호환·전체 변환/수명주기 검증은 남아 있습니다.
 
 ## 외부 API 검증 릴레이
 

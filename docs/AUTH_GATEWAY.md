@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 31 -->
+<!-- doc-rev: 32 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -148,19 +148,26 @@ gate, and consumes the incoming Authorization credential before policy/transform
 and upstream dispatch. A role must explicitly allow AAL 0; an API key cannot
 satisfy a human/MFA requirement.
 
-`tools/service_stack_smoke.py` runs three actual isolated processes over mTLS
-HOP1/PPG1. It verifies authentication, IP/class/method rights, unknown/invalid
-credential denial, durable permission revocation/restoration without rewriting
-gateway configuration, cross-service isolation, credential consumption and
-Pumgye-outage fail-closed. Guard is outside this fixture; it is not a full-stack
-throughput measurement. Operational rollout and full credential lifecycle,
-including existing-stream credential revocation, remain separate work.
+`tools/service_stack_smoke.py` runs actual isolated Hangang, Hopae and Pumgye
+processes. Add `--sumunjang-binary /path/to/sumunjang` to include the network
+authority and require its enforced evidence in the service matrix; `--grpc` selects
+mTLS gRPC for all three decision exchanges. Without `--grpc`, the same four-process
+fixture uses HOP1/PPG1/HGD1. It verifies authentication, IP/class/method rights,
+invalid credential denial, durable permission revocation/restoration, audience
+isolation, upstream credential consumption and authority-outage fail-closed.
+Every refused request must leave the application backend call count unchanged.
+Network block removal/restoration and server outage/reconnection are exercised.
+Permission revocation also survives an actual Pumgye restart while its original
+bootstrap file still contains the old grant.
 
-LDAP, local human passwords, standard introspection adapters, Any/All composition
-with actual connector relationships, upstream credential translation, full
-credential lifecycle and full-stack 100k QPS qualification remain open. Existing OIDC circuits protect provider network calls; external verifier relays
-also use scoped circuits, while the in-memory API-key connector has no remote
-backend to circuit-break.
+`--external-verifier` additionally verifies an actual API relay outage and circuit
+suppression. `--durable-restart` proves a persisted profile tombstone survives an
+actual Hopae restart despite unchanged bootstrap configuration. These are local
+functional fixtures; actual Kubernetes deployment, operational rollout, broader
+credential lifecycle (including existing streams) and fleet throughput remain
+separate gates. LDAP and local human authentication have their own qualifications;
+broader connector composition, standard introspection compatibility and full
+translation/lifecycle qualification remain open.
 
 ## External API verifier relay
 
