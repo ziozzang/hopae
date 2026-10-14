@@ -957,8 +957,14 @@ parser borrows the authority string and rejects legacy epochs lacking applicatio
 generation. Actual Ed25519 qualification proves that changing only the application
 generation invalidates the signed receipt.
 
-This is a shared contract increment. The production issuer still emits the prior
-profile-only epoch and checks the exact application Arc during issuance. Issuer,
-Pumgye trust verification and live receiver validation must adopt this contract
-together before activation; parsing a generation alone does not prove its current
+The native captured-proof gRPC issuer now signs the profile and actual captured
+application generation and retains exact Arc checks before/after issuance.
+Pumgye verifies this canonical form and exposes the authenticated app generation.
+Source-only profile adapters retain their legacy format and are refused by this
+Pumgye path. Live receiver validation must still be connected before permit activation; parsing a generation alone does not prove its current
 ownership or durable restart/restore floor. No operating configuration changed.
+
+This issuer integration passed the full all-feature regression: 919 tests passed,
+42 explicitly ignored, including the actual gateway/mTLS receipt scenario and
+application replacement fence. Strict all-feature/all-target Clippy passed.
+Pumgye passed 55 workspace tests and strict Clippy on the matching verifier.

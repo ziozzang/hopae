@@ -94,24 +94,29 @@ impl CapturedService {
         request: Request<'_>,
         guard: &dyn Fn() -> Result<(), Refused>,
     ) -> Result<Issued, Refused> {
-        issuer.issue_service(&self.authentication, request, &|| {
-            let current = reader.load_full();
-            if !current.available()
-                || !Arc::ptr_eq(&current, &self.profile)
-                || !Arc::ptr_eq(&applications.load_full(), &self.application)
-            {
-                return Err(Refused);
-            }
-            guard()?;
-            let current = reader.load_full();
-            if !current.available()
-                || !Arc::ptr_eq(&current, &self.profile)
-                || !Arc::ptr_eq(&applications.load_full(), &self.application)
-            {
-                return Err(Refused);
-            }
-            Ok(())
-        })
+        issuer.issue_service_owned(
+            &self.authentication,
+            request,
+            Some(self.application.generation),
+            &|| {
+                let current = reader.load_full();
+                if !current.available()
+                    || !Arc::ptr_eq(&current, &self.profile)
+                    || !Arc::ptr_eq(&applications.load_full(), &self.application)
+                {
+                    return Err(Refused);
+                }
+                guard()?;
+                let current = reader.load_full();
+                if !current.available()
+                    || !Arc::ptr_eq(&current, &self.profile)
+                    || !Arc::ptr_eq(&applications.load_full(), &self.application)
+                {
+                    return Err(Refused);
+                }
+                Ok(())
+            },
+        )
     }
 }
 
@@ -306,6 +311,15 @@ impl Issuer {
         request: Request<'_>,
         guard: &dyn Fn() -> Result<(), Refused>,
     ) -> Result<Issued, Refused> {
+        self.issue_service_owned(authentication, request, None, guard)
+    }
+    fn issue_service_owned(
+        &self,
+        authentication: &super::authority::ServiceAuthentication,
+        request: Request<'_>,
+        application_generation: Option<u64>,
+        guard: &dyn Fn() -> Result<(), Refused>,
+    ) -> Result<Issued, Refused> {
         let evidence = &authentication.evidence;
         if evidence.subject.kind != PrincipalKind::Service
             || evidence.service.as_deref() != Some(request.service)
@@ -333,10 +347,18 @@ impl Issuer {
         guard()?;
         let issued = Issued {
             config: self.config.clone(),
-            identity_epoch: format!(
-                "{}:service:{}",
-                self.config.identity_authority_epoch, authentication.revision
-            ),
+            identity_epoch: match application_generation {
+                Some(generation) => hopae_grpc::service_epoch::encode(
+                    &self.config.identity_authority_epoch,
+                    authentication.revision,
+                    generation,
+                )
+                .map_err(|_| Refused)?,
+                None => format!(
+                    "{}:service:{}",
+                    self.config.identity_authority_epoch, authentication.revision
+                ),
+            },
             subject: super::stable_subject(&evidence.subject),
             kind: PrincipalKind::Service,
             aal: 0,
@@ -481,10 +503,17 @@ mod tests {
         assert_eq!(issued.context().identity.aal, 0);
         assert_eq!(issued.context().identity.revision, 1);
         assert_eq!(issued.context().identity.credential_generation, 1);
-        assert_eq!(
-            issued.context().identity_authority_epoch,
-            "identity-1:service:1"
-        );
+        if let Ok(epoch) =
+            hopae_grpc::service_epoch::decode(issued.context().identity_authority_epoch)
+        {
+            assert_eq!(epoch.authority, "identity-1");
+            assert_eq!(epoch.profile_revision, 1);
+        } else {
+            assert_eq!(
+                issued.context().identity_authority_epoch,
+                "identity-1:service:1"
+            );
+        }
     }
     #[tokio::test]
     async fn native_service_adapter_refuses_late_verifier_success_after_profile_revocation() {
@@ -593,6 +622,13 @@ mod tests {
             .issue(&signer, &reader, &applications, request(), &|| Ok(()))
             .unwrap();
         verify(&issued, clock.now().0 as u64);
+        let epoch =
+            hopae_grpc::service_epoch::decode(issued.context().identity_authority_epoch).unwrap();
+        assert_eq!(
+            epoch.application_generation,
+            captured.application_generation()
+        );
+        assert_eq!(epoch.profile_revision, issued.context().identity.revision);
         applications.store(Arc::new(cfg.snapshot(1)));
         assert!(
             captured
