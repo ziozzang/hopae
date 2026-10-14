@@ -1,10 +1,10 @@
 [package]
 name = "hopae"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"
-description = "A single-binary identity provider that answers a gateway's forward-authentication check"
+description = "A composable authentication gateway with native identity verification and lifecycle management"
 repository = "https://github.com/ziozzang/hopae"
 
 [lib]
