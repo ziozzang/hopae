@@ -23,7 +23,7 @@ RUN case "$(uname -m)" in \
 
 # Dependencies first, so a source-only change reuses the cached layer.
 COPY Cargo.toml Cargo.lock build.rs ./
-COPY proto ./proto
+COPY crates ./crates
 COPY vendor ./vendor
 RUN mkdir -p src/store/migrations \
  && echo 'fn main() {}' > src/main.rs \

@@ -16,9 +16,7 @@ use tokio::{
 use tonic::{Request, Response, Status, transport::ServerTlsConfig};
 use tower::ServiceExt;
 
-pub mod v1 {
-    tonic::include_proto!("hangang.hopae.v1");
-}
+pub use hopae_grpc::v1;
 use v1::{
     Header, VerifyReply, VerifyRequest,
     authentication_server::{Authentication, AuthenticationServer},

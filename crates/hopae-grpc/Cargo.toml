@@ -1,0 +1,11 @@
+[package]
+name = "hopae-grpc"
+version = "0.0.3"
+edition = "2024"
+license = "MIT"
+[dependencies]
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+prost = "0.14"
+[build-dependencies]
+tonic-prost-build = "0.14.6"
