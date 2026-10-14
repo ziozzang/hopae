@@ -891,3 +891,5 @@ passed only through owned environment references; private fixture configuration
 contains no token values. Three consecutive runs passed after fixing a fractional
 clock rounding failure in Hangang. This qualifies client/server receipt exchange,
 not application forwarding, permission proofs or projected credential delivery.
+
+The owned service-stack fixture supports `--grpc --resource-catalog` to exercise actual Hangang resource gates. The four-process run with Sumunjang and `--durable-restart` passed owner class/catalog mutation, service/method/IP isolation, refusal without upstream calls, network outage and durable authentication/authorization revocation. The legacy gRPC variant also passed. These are local functional fixtures, not Kubernetes or production adoption of resource gates.

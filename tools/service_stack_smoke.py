@@ -9,9 +9,12 @@ def main():
     for name in ['gateway','hopae','pumgye']:p.add_argument('--'+name+'-binary',required=True,type=Path)
     p.add_argument('--sumunjang-binary',type=Path)
     p.add_argument('--grpc',action='store_true')
+    p.add_argument('--resource-catalog',action='store_true')
     p.add_argument('--external-verifier',action='store_true')
     p.add_argument('--durable-restart',action='store_true')
-    args=p.parse_args();processes=[];seen=[];verifier_state={'unavailable':False,'calls':0}
+    args=p.parse_args()
+    if args.resource_catalog and not args.grpc:p.error('--resource-catalog requires --grpc')
+    processes=[];seen=[];verifier_state={'unavailable':False,'calls':0}
     class Origin(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             seen.append(dict(self.headers));self.send_response(200);self.end_headers();self.wfile.write(b'owned')
@@ -47,6 +50,7 @@ def main():
             subject='s_'+digest.hexdigest()[:48]
             policy={'version':1,'information_classes':['internal','restricted'],'services':{'orders':{'permissions':['read','write'],'require_guard':bool(args.sumunjang_binary),'roles':{'reader':{'permissions':['read'],'information_classes':['internal'],'minimum_aal':0}},'users':{subject:['reader']},'networks':[{'cidr':'127.0.0.1/32','roles':['reader']}]}}}
             policy['services']['billing']=copy.deepcopy(policy['services']['orders'])
+            if args.resource_catalog:policy['resources']={'db:orders':{'service':'orders','information_class':'internal','actions':{'select':'read','update':'write'},'minimum_aal':0}}
             (root/'policy.json').write_text(json.dumps({'revision':0,'policy':policy}))
             hop=json.loads((Path(__file__).resolve().parent.parent/'tests/fixtures/m1-basic.json').read_text());hop['providers']=[];hop['state_dir']=str(root/'hopae-state')
             hop['listen']={'portal':f'127.0.0.1:{portal}','gateway':f'127.0.0.1:{http_verify}','native_gateway':f'0.0.0.0:{hop_native}','native_gateway_tls':{'certificate':str(root/'server.pem'),'key':str(root/'server.key'),'client_ca':str(root/'ca.pem')}}
@@ -61,6 +65,8 @@ def main():
             if args.grpc:
                 config['http'][0]['auth']['native'].update(transport='grpc',address=f'localhost:{hop_grpc}')
                 config['pumgye_authority'].update(transport='grpc',decision_address=f'localhost:{pum_grpc}')
+            if args.resource_catalog:
+                resource=config['http'][0]['resource_policy'];resource.pop('pumgye');resource['pumgye_resource']={'service_id':'orders','resource':'db:orders','actions':{'GET':'select','POST':'update'}}
             (root/'hangang.json').write_text(json.dumps(config))
             def start(binary,argv,name):
                 log=open(root/(name+'.log'),'ab');process=subprocess.Popen([str(binary.resolve()),*argv],env=env,stdout=log,stderr=log);processes.append(process);return process
@@ -117,11 +123,24 @@ def main():
                 baseline=copy.deepcopy(original);baseline['revision']=denied['revision']
                 restored,_=api('/v1/pumgye/policy','PUT',baseline,{'If-Match':f'"{denied["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']})
             now,_=api();assert now['revision']==root_config['revision'],'Pumgye publication rewrote gateway configuration'
-            classified=copy.deepcopy(now);classified['http'][0]['resource_policy']['pumgye']['information_class']='restricted'
-            classified,_=api('/v1/config','PUT',classified,{'If-Match':f'"{classified["revision"]}"'});assert request()==403,'class clearance was ignored'
-            classified['http'][0]['resource_policy']['pumgye']['information_class']='internal';api('/v1/config','PUT',classified,{'If-Match':f'"{classified["revision"]}"'})
-            changed,_=api();changed['http'][0]['resource_policy']['pumgye']['service_id']='billing';changed,_=api('/v1/config','PUT',changed,{'If-Match':f'"{changed["revision"]}"'});assert request()==403,'API credential crossed service audience'
-            changed['http'][0]['resource_policy']['pumgye']['service_id']='orders';api('/v1/config','PUT',changed,{'If-Match':f'"{changed["revision"]}"'});assert request()==200
+            if args.resource_catalog:
+                classified,headers=api('/v1/pumgye/policy')
+                classified['policy']['resources']['db:orders']['information_class']='restricted'
+                classified,_=api('/v1/pumgye/policy','PUT',classified,{'If-Match':f'"{classified["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==403,'owner class clearance was ignored'
+                classified['policy']['resources']['db:orders']['information_class']='internal'
+                classified,_=api('/v1/pumgye/policy','PUT',classified,{'If-Match':f'"{classified["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==200
+                catalog=copy.deepcopy(classified['policy']['resources'])
+                classified['policy']['resources']={}
+                classified,_=api('/v1/pumgye/policy','PUT',classified,{'If-Match':f'"{classified["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==403,'catalog deletion did not refuse'
+                classified['policy']['resources']=catalog
+                classified,_=api('/v1/pumgye/policy','PUT',classified,{'If-Match':f'"{classified["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==200
+            else:
+                classified=copy.deepcopy(now);classified['http'][0]['resource_policy']['pumgye']['information_class']='restricted'
+                classified,_=api('/v1/config','PUT',classified,{'If-Match':f'"{classified["revision"]}"'});assert request()==403,'class clearance was ignored'
+                classified['http'][0]['resource_policy']['pumgye']['information_class']='internal';api('/v1/config','PUT',classified,{'If-Match':f'"{classified["revision"]}"'})
+            gate_name='pumgye_resource' if args.resource_catalog else 'pumgye'
+            changed,_=api();changed['http'][0]['resource_policy'][gate_name]['service_id']='billing';changed,_=api('/v1/config','PUT',changed,{'If-Match':f'"{changed["revision"]}"'});assert request()==403,'API credential crossed service audience'
+            changed['http'][0]['resource_policy'][gate_name]['service_id']='orders';api('/v1/config','PUT',changed,{'If-Match':f'"{changed["revision"]}"'});assert request()==200
             if args.external_verifier:
                 verifier_state['unavailable']=True
                 for _ in range(3):assert request()==503
