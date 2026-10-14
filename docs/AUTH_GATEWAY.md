@@ -882,3 +882,12 @@ client certificate are refused. On the same authenticated channel, durable profi
 revocation stops issuance and restoration returns the new owner revision. Ordinary
 HTTP proof capture remains internal. This is an isolated server fixture, not a
 Hangang receipt-client, permission/projection or deployment qualification.
+
+The maintained actual-socket fixture can now launch Hangang
+`hopae_receipt_qualification` via `HANGANG_RECEIPT_CLIENT`. This uses the actual
+Hangang pooled client, native request digest and pinned signature receiver across
+profile issuance/revocation/restoration, on one retained client. Credentials are
+passed only through owned environment references; private fixture configuration
+contains no token values. Three consecutive runs passed after fixing a fractional
+clock rounding failure in Hangang. This qualifies client/server receipt exchange,
+not application forwarding, permission proofs or projected credential delivery.

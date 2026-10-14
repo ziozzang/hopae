@@ -67,6 +67,7 @@ ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"
 test-hooks = []
 
 [dev-dependencies]
+tokio = { version = "1", features = ["process", "io-util"] }
 rsa = { version = "0.9", features = ["pem"] }
 tempfile = "3"
 

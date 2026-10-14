@@ -2225,6 +2225,66 @@ mod tests {
         if let Ok(channel) = endpoint.tls_config(no_cert).unwrap().connect().await {
             assert!(crate::http::grpc_gateway::v1::authentication_receipts_client::AuthenticationReceiptsClient::new(channel).issue_service(call(KEY)).await.is_err());
         }
+        let mut external = if let Ok(binary) = std::env::var("HANGANG_RECEIPT_CLIENT") {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+            let path = tlsdir.join("native-client.json");
+            let headers = request
+                .headers()
+                .iter()
+                .filter(|(name, _)| {
+                    !matches!(name.as_str(), "authorization" | "x-hopae-gateway-key")
+                })
+                .map(|(name, value)| serde_json::json!([name.as_str(), value.to_str().unwrap()]))
+                .collect::<Vec<_>>();
+            std::fs::write(&path,serde_json::to_vec(&serde_json::json!({"settings":{"transport":"grpc","address":address.to_string(),"pool_size":8,"tls":{"server_name":"hopae.example.test","ca":tlsdir.join("ca.pem"),"certificate":tlsdir.join("client.pem"),"key":tlsdir.join("client.key")}},"issuer_ref":"owned","key_epoch":1,"public_key":base64::Engine::encode(&base64::engine::general_purpose::STANDARD,signing.verifying_key().to_bytes()),"service":"orders","audience":"orders-api","method":"GET","target":"/private","body":"","headers":headers})).unwrap()).unwrap();
+            let mut child = tokio::process::Command::new(binary)
+                .arg(path)
+                .env("OWNED_RECEIPT_CALLER", KEY)
+                .env("OWNED_RECEIPT_CREDENTIAL", KEY)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::from(
+                    std::fs::File::create(tlsdir.join("native-client.private.log")).unwrap(),
+                ))
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            let mut stdout = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+            stdin.write_all(b"allow\n").await.unwrap();
+            let row = tokio::time::timeout(Duration::from_secs(3), stdout.next_line())
+                .await
+                .unwrap()
+                .unwrap();
+            if row.is_none() {
+                let diagnostic = std::fs::read_to_string(tlsdir.join("native-client.private.log"))
+                    .unwrap_or_default();
+                let markers = [
+                    "invalid type",
+                    "unknown field",
+                    "invalid native issuer pin",
+                    "receipt result differed",
+                    "CryptoProvider",
+                    "reference unavailable",
+                    "No such file",
+                    "invalid native request binding",
+                ];
+                panic!(
+                    "owned client exited; diagnostic categories: {:?}",
+                    markers
+                        .into_iter()
+                        .filter(|marker| diagnostic.contains(marker))
+                        .collect::<Vec<_>>()
+                );
+            }
+            let row = row.unwrap();
+            let row: serde_json::Value = serde_json::from_str(&row).unwrap();
+            assert_eq!(row["allowed"], true);
+            assert_eq!(row["revision"], 1);
+            Some((child, stdin, stdout))
+        } else {
+            None
+        };
         let saved = crate::auth_gateway::publication::read(&bound.services.store.conn())
             .unwrap()
             .unwrap();
@@ -2245,6 +2305,20 @@ mod tests {
             client.issue_service(call(KEY)).await.is_err(),
             "same-channel revoked profile cannot issue"
         );
+        if let Some((_, stdin, stdout)) = &mut external {
+            use tokio::io::AsyncWriteExt;
+            stdin.write_all(b"deny\n").await.unwrap();
+            let row = tokio::time::timeout(Duration::from_secs(3), stdout.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&row).unwrap()["allowed"],
+                false
+            );
+        }
+
         owner
             .lock()
             .unwrap()
@@ -2262,6 +2336,26 @@ mod tests {
             restored.context.unwrap().identity.unwrap().revision,
             saved.revision + 2
         );
+        if let Some((mut child, mut stdin, mut stdout)) = external {
+            use tokio::io::AsyncWriteExt;
+            stdin.write_all(b"allow\n").await.unwrap();
+            let row = tokio::time::timeout(Duration::from_secs(3), stdout.next_line())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let row: serde_json::Value = serde_json::from_str(&row).unwrap();
+            assert_eq!(row["allowed"], true);
+            assert_eq!(row["revision"], saved.revision + 2);
+            drop(stdin);
+            assert!(
+                tokio::time::timeout(Duration::from_secs(3), child.wait())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .success()
+            );
+        }
         stop.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(3), running)
             .await
