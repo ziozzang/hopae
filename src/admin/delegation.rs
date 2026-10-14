@@ -545,7 +545,10 @@ mod transport_tests {
     fn remote_headers_cannot_forge_authenticated_transport() {
         let mut request = Request::builder()
             .header("x-authenticated-tls-peer", "true")
-            .header("x-forwarded-for", "127.0.0.1")
+            .header(
+                crate::gateway::forwarding::X_FORWARDED_FOR.clone(),
+                "127.0.0.1",
+            )
             .body(axum::body::Body::empty())
             .unwrap();
         request

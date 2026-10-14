@@ -121,3 +121,9 @@ auth-proxy refuses protected requests. Hopae retains provider, user and session
 ownership; native console grants remain distinct from service permissions.
 
 [gRPC gateway verification](docs/GRPC.md) shares the HTTP/HOP1 authentication pipeline and Hangang server runtime. Building requires `protoc`.
+
+HOP1 connection admission and task ownership use the pinned `hangang-runtime`
+0.1.2 base, shared with bounded management HTTPS. Hopae retains its 256-connection
+limit, immediate shutdown, TLS/ALPN checks, caller authentication, frame limits
+and authentication pipeline. This extraction does not merge domain cores or
+change the independent-server deployment model.

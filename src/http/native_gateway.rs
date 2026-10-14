@@ -12,8 +12,7 @@ use std::{io, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
-    sync::{Semaphore, watch},
-    task::JoinSet,
+    sync::watch,
 };
 use tower::ServiceExt;
 pub fn tls_acceptor(
@@ -134,18 +133,42 @@ pub async fn serve_with_tls(
     if tls.is_none() && !listener.local_addr()?.ip().is_loopback() {
         return Err(invalid());
     }
-    let slots = Arc::new(Semaphore::new(256));
-    let mut tasks = JoinSet::new();
     let connections_stop = stop.clone();
-    loop {
-        tokio::select! {
-                 _=stop.wait_for(|v|*v)=>break,
-                 Some(_)=tasks.join_next()=>{},
-                 accepted=listener.accept()=>{let(stream,_)=accepted?;let Ok(permit)=slots.clone().try_acquire_owned()else{continue;};let router=router.clone();let keys=keys.clone();let stop=connections_stop.clone();let tls=tls.clone();tasks.spawn(async move{let _permit=permit;if stream.set_nodelay(true).is_err(){return;}
-        if let Some(tls)=tls{if let Ok(Ok(stream))=tokio::time::timeout(Duration::from_secs(3),tls.accept(stream)).await{if stream.get_ref().1.alpn_protocol()!=Some(b"hop1".as_slice()){return;}let _=tokio::time::timeout(Duration::from_secs(300),connection(stream,router,keys,stop)).await;}}else{let _=tokio::time::timeout(Duration::from_secs(300),connection(stream,router,keys,stop)).await;}});}
+    hangang_runtime::serve_connections(
+        listener,
+        std::num::NonZeroUsize::new(256).unwrap(),
+        Duration::ZERO,
+        move |stream, _peer| {
+            let router = router.clone();
+            let keys = keys.clone();
+            let stop = connections_stop.clone();
+            let tls = tls.clone();
+            async move {
+                if let Some(tls) = tls {
+                    if let Ok(Ok(stream)) =
+                        tokio::time::timeout(Duration::from_secs(3), tls.accept(stream)).await
+                    {
+                        if stream.get_ref().1.alpn_protocol() != Some(b"hop1".as_slice()) {
+                            return;
+                        }
+                        let _ = tokio::time::timeout(
+                            Duration::from_secs(300),
+                            connection(stream, router, keys, stop),
+                        )
+                        .await;
+                    }
+                } else {
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(300),
+                        connection(stream, router, keys, stop),
+                    )
+                    .await;
                 }
-    }
-    tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
-    Ok(())
+            }
+        },
+        async move {
+            let _ = stop.wait_for(|v| *v).await;
+        },
+    )
+    .await
 }
