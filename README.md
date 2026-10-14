@@ -14,7 +14,7 @@ can inject verified identity into upstream requests. It is packaged around the
 authentication check, and it stays usable behind any gateway that can forward
 such a check.
 
-> **Status: v0.0.3 release preparation; native zero-trust gateway integration.**
+> **Status: v0.0.4 release preparation; native zero-trust gateway integration.**
 > OIDC/LDAP login, service API authentication, mTLS HOP1, delegated management,
 > TOTP and external MFA browser step-up are implemented. Internal v6 dogfooding
 > is active. Remaining scope is listed below and in the roadmap.
