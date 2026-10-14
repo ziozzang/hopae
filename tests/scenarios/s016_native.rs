@@ -1680,6 +1680,128 @@ fn owned_ldap_runtime_browser_form_issues_bound_session_and_handoff() {
         .status,
         401
     );
+    // Withdraw the credential in the owned directory, without changing Hopae's user.
+    // LDAP password revocation must fail reauthentication, but is not a push
+    // revocation signal for a previously issued session.
+    let modify_directory = |change: &str| {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("docker")
+            .args([
+                "exec",
+                "-i",
+                &env("OWNED_LDAP_CONTAINER"),
+                "ldapmodify",
+                "-x",
+                "-H",
+                &env("OWNED_LDAP_ADMIN_ENDPOINT"),
+                "-D",
+                "cn=reader,dc=example,dc=test",
+                "-y",
+                "/owned/bind-password",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("owned directory modifier");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(change.as_bytes())
+            .unwrap();
+        assert!(
+            child.wait().unwrap().success(),
+            "owned directory modification failed"
+        );
+    };
+    modify_directory(
+        "dn: uid=alice,dc=example,dc=test\nchangetype: modify\ndelete: userPassword\n\n",
+    );
+    let before_auth_time: i64 = db
+        .query_row(
+            "SELECT auth_time FROM sessions WHERE provider_id='owned-directory'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let before_handles: i64 = db
+        .query_row("SELECT count(*) FROM session_handles", [], |r| r.get(0))
+        .unwrap();
+    h.advance(Duration::from_secs(61));
+    let challenge_response = h.verify(
+        VerifyRequest::document("https://app.example.test/fresh")
+            .ip("192.0.2.10")
+            .cookie(&h.cookie_name(), &fresh_handle)
+            .cookie(&bind.0, &bind.1),
+    );
+    assert_eq!(challenge_response.status, 302);
+    let location = url::Url::parse(challenge_response.location().unwrap()).unwrap();
+    let revoked_txn = location
+        .query_pairs()
+        .find(|(k, _)| k == "txn")
+        .unwrap()
+        .1
+        .into_owned();
+    let chooser = browser.get(&format!("/login?txn={revoked_txn}"));
+    let form = browser.send(
+        Req::post("/login/owned-directory")
+            .header("origin", &origin)
+            .form(&[
+                ("csrf", &field(&chooser.body, "csrf")),
+                ("txn", &revoked_txn),
+            ]),
+    );
+    assert_eq!(form.status, 200);
+    let denied = browser.send(
+        Req::post("/login/owned-directory/password")
+            .header("origin", &origin)
+            .form(&[
+                ("csrf", &field(&form.body, "csrf")),
+                ("challenge", &field(&form.body, "challenge")),
+                ("username", "alice"),
+                ("password", &password),
+            ]),
+    );
+    assert_eq!(denied.status, 400);
+    assert_eq!(
+        db.query_row(
+            "SELECT auth_time FROM sessions WHERE provider_id='owned-directory'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        before_auth_time
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM session_handles", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        before_handles
+    );
+    assert_eq!(
+        h.verify(
+            VerifyRequest::other("https://app.example.test/fresh")
+                .ip("192.0.2.10")
+                .cookie(&h.cookie_name(), &fresh_handle)
+        )
+        .status,
+        401
+    );
+    assert_eq!(
+        h.verify(
+            VerifyRequest::other("https://app.example.test/private")
+                .ip("192.0.2.10")
+                .cookie(&h.cookie_name(), &fresh_handle)
+        )
+        .status,
+        200,
+        "directory password withdrawal does not push-revoke an issued session"
+    );
+    modify_directory(&format!(
+        "dn: uid=alice,dc=example,dc=test\nchangetype: modify\nadd: userPassword\nuserPassword: {password}\n\n"
+    ));
     db.execute("UPDATE users SET status='disabled'", [])
         .unwrap();
     assert_eq!(

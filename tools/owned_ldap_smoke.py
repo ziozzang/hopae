@@ -16,6 +16,7 @@ def main():
         (root/'server.ext').write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:127.0.0.1\n')
         openssl('x509','-req','-in','server.csr','-CA','ca.pem','-CAkey','ca.key','-CAcreateserial','-days','1','-extfile','server.ext','-out','server.pem')
         bind,user=secrets.token_hex(32),secrets.token_hex(32)
+        (root/'bind-password').write_text(bind)
         (root/'slapd.conf').write_text('include /etc/ldap/schema/core.schema\ninclude /etc/ldap/schema/cosine.schema\ninclude /etc/ldap/schema/inetorgperson.schema\npidfile /owned/slapd.pid\nargsfile /owned/slapd.args\nmodulepath /usr/lib/ldap\nmoduleload back_mdb\nTLSCACertificateFile /owned/ca.pem\nTLSCertificateFile /owned/server.pem\nTLSCertificateKeyFile /owned/server.key\ndatabase mdb\nmaxsize 16777216\nsuffix "dc=example,dc=test"\nrootdn "cn=reader,dc=example,dc=test"\nrootpw '+bind+'\ndirectory /owned/db\naccess to * by dn.exact="cn=reader,dc=example,dc=test" manage by self read by anonymous auth\n')
         ldif='dn: dc=example,dc=test\nobjectClass: dcObject\nobjectClass: organization\ndc: example\no: Owned fixture\n\ndn: uid=alice,dc=example,dc=test\nobjectClass: inetOrgPerson\nuid: alice\ncn: Alice\nsn: Owned\njpegPhoto:: AAH/\nuserPassword: '+user+'\n'
         for label in ['One','Two']:
@@ -28,7 +29,7 @@ def main():
                     with socket.create_connection(('127.0.0.1',port),timeout=.2):break
                 except OSError:time.sleep(.05)
             else:raise RuntimeError('owned directory readiness deadline')
-            env=dict(os.environ,OWNED_LDAP_ENDPOINT=f'ldaps://127.0.0.1:{port}',OWNED_LDAP_CA=str(root/'ca.pem'),OWNED_LDAP_WRONG_CA=str(root/'wrong-ca.pem'),OWNED_LDAP_BIND_KEY=bind,OWNED_LDAP_USER_PASSWORD=user)
+            env=dict(os.environ,OWNED_LDAP_ENDPOINT=f'ldaps://127.0.0.1:{port}',OWNED_LDAP_CA=str(root/'ca.pem'),OWNED_LDAP_WRONG_CA=str(root/'wrong-ca.pem'),OWNED_LDAP_BIND_KEY=bind,OWNED_LDAP_USER_PASSWORD=user,OWNED_LDAP_CONTAINER=name,OWNED_LDAP_ADMIN_ENDPOINT=f'ldap://127.0.0.1:{starttls_port}')
             for endpoint,mode in [(f'ldaps://127.0.0.1:{port}','0'),(f'ldap://127.0.0.1:{starttls_port}','1')]:
                 env.update(OWNED_LDAP_ENDPOINT=endpoint,OWNED_LDAP_STARTTLS=mode)
                 peers=[];failures=[]
@@ -66,6 +67,6 @@ def main():
                     Path('/tmp/hopae-owned-ldap-browser-failure.log').write_text(diagnostic)
                     raise RuntimeError('owned LDAP runtime browser failed; diagnostic stored privately')
             Path('/tmp/hopae-owned-ldap-browser-failure.log').unlink(missing_ok=True)
-            print('PASS: real owned OpenLDAP over LDAPS and mandatory StartTLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection, oversized/deep/semantic-malformed and wrong-operation TLS response rejection and backend-circuit classification. Owned HTTP runtime chooser/password/session/handoff and LDAP reauthentication/user-disable qualification passed; real browser, external directory revocation and fleet lifecycle remain separate.')
+            print('PASS: real owned OpenLDAP over LDAPS and mandatory StartTLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection, oversized/deep/semantic-malformed and wrong-operation TLS response rejection and backend-circuit classification. Owned HTTP runtime chooser/password/session/handoff and LDAP reauthentication, directory password withdrawal and local user-disable qualification passed; existing-session directory revocation, real browser and fleet lifecycle remain separate.')
         finally:subprocess.run(['docker','rm','-f',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 if __name__=='__main__':main()

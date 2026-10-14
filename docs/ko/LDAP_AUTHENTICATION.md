@@ -1,6 +1,6 @@
 # LDAP 인증 provider
 
-<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=29 status=current -->
+<!-- translation-status: source=../LDAP_AUTHENTICATION.md source-rev=30 status=current -->
 
 [문서](README.md) · [English](../LDAP_AUTHENTICATION.md)
 
@@ -11,11 +11,14 @@
 흉내 내거나 HOP1으로 비밀번호를 전달하지 않습니다. 자체 OpenLDAP 환경의 LDAPS와
 필수 StartTLS에서 실제 Hopae 프로세스로 혼합 chooser, Origin 검사, 잘못된 비밀번호
 거부, session 발급, 바인딩된 handoff, 비밀번호 재인증, handle 교체와 로컬 사용자
-비활성화를 검증했습니다. 비밀번호 페이지 CSP는 검증된 앱 Origin만 허용합니다.
+비활성화를 검증했습니다. 디렉터리에서 `userPassword`를 제거한 뒤 재인증이
+거부되고 session 인증 시각과 handle이 갱신되지 않는 것도 검증했습니다. 아직
+유효한 일반 session은 허용됩니다. 비밀번호 회수는 session 즉시 회수 신호가
+아닙니다. 비밀번호 페이지 CSP는 검증된 앱 Origin만 허용합니다.
 
 아래 구현 기록은 이전 제한을 시간순으로 기록한 것입니다. 이번 소스 활성화가 과거의
 설정 거부 문구를 대체합니다. 운영 LDAP는 설정하지 않았습니다. 실제 Chromium 디렉터리
-로그인, 외부 디렉터리 계정 회수, 비밀·CA 게시 epoch와 분산 lifecycle 검증은 남아
+로그인, 외부 디렉터리 session 즉시 회수, 비밀·CA 게시 epoch와 분산 lifecycle 검증은 남아
 있습니다. Hopae 로컬 사용자 비활성화는 디렉터리 측 회수를 입증하지 않습니다.
 
 ## 인증 흐름

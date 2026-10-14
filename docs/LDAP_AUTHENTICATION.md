@@ -1,6 +1,6 @@
 # LDAP authentication provider
 
-<!-- doc-rev: 29 -->
+<!-- doc-rev: 30 -->
 
 [Documentation](README.md) · [한국어](ko/LDAP_AUTHENTICATION.md)
 
@@ -12,11 +12,14 @@ services; it does not emulate an OAuth callback or relay passwords through HOP1.
 Owned OpenLDAP fixtures qualified LDAPS and mandatory StartTLS with a real Hopae
 process: mixed provider chooser, origin checks, failed-password denial, session
 issuance, bound handoff, password reauthentication, handle rotation and local user
-disable. The password page CSP permits only the validated application origin.
+disable. The fixture also removes `userPassword` in the directory and proves that
+reauthentication fails without advancing session authentication time or issuing
+a handle. A still-valid ordinary session remains accepted: directory password
+withdrawal is not a push revocation signal. The password page CSP permits only the validated application origin.
 
 The implementation notes below record earlier gates chronologically. This source
 activation supersedes their configuration rejection statements. Production LDAP
-is not configured: actual Chromium directory login, external directory account
+is not configured: actual Chromium directory login, immediate external directory session
 revocation, secret/CA publication epochs and distributed lifecycle qualification
 remain open. Local Hopae user disable does not prove directory-side revocation.
 
