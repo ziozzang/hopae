@@ -542,6 +542,15 @@ mod tests {
         assert_eq!(e.subject.kind, PrincipalKind::Workload);
         assert_eq!(e.expires_at, 1100);
         assert_eq!(e.service(), Some("orders"));
+        let rendered =
+            crate::gateway::hangang::service_identity::response_at(Some(&e), "fixture", 1001);
+        assert_eq!(rendered.status(), http::StatusCode::OK);
+        assert_eq!(rendered.headers()["x-hopae-evidence-ttl-ms"], "99");
+        let expired =
+            crate::gateway::hangang::service_identity::response_at(Some(&e), "fixture", 1100);
+        assert_eq!(expired.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!expired.headers().contains_key("x-forwarded-user"));
+
         let stable = super::super::stable_subject(e.subject());
         // Shared Pumgye workload-association contract vector.
         assert_eq!(stable, "s_529be5b595ab327853eabe2d1adf52256e262af036510607");

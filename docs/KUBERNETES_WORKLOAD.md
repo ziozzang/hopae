@@ -1,6 +1,6 @@
 # Kubernetes workload authentication
 
-<!-- doc-rev: 3 -->
+<!-- doc-rev: 4 -->
 
 [Documentation](README.md) · [한국어](ko/KUBERNETES_WORKLOAD.md)
 
@@ -9,7 +9,7 @@ Pod-bound ServiceAccount JWTs through a fixed trusted Kubernetes TokenReview API
 Reference-only root/profile configuration, HTTP/HOP1 dispatch and console overview
 are integrated. Workload receipt issuance and real-cluster production activation
 remain pending. It does not implement an offline
-JWT signature verifier or qualify a real Kubernetes cluster.
+JWT signature verifier. Owned actual API qualification is recorded below.
 
 The owner supplies an HTTPS API origin, expected HTTPS issuer, cluster identity,
 explicit workload audience, 1–1000 ms deadline, CA bundle and separate reviewer
@@ -170,3 +170,20 @@ upgrade; missing scope fails startup rather than admitting other namespaces.
 Kubernetes RBAC authorizes object GET, not a metadata-only permission; the native
 connector requests only partial metadata, while its reviewer role must still be
 reviewed as Pod/ServiceAccount GET authority.
+
+
+## Native evidence lifetime
+
+HTTP and HOP1 machine responses export `x-hopae-evidence-ttl-ms`, the remaining
+verified evidence lifetime at response construction, capped at 1000 ms. Expired
+evidence yields 503 without identity headers. This is authenticated response
+metadata, not a decision cache, signed receipt or client-provided authentication.
+Hangang anchors it to the start of its native exchange so network/processing time
+cannot extend the lease. Workload and service streams must stop at that deadline
+unless a future authenticated renewal/subscription replaces the evidence.
+
+This initial enforcement closes long machine streams at most one second after
+authentication (plus the retirement poll scheduling interval). Automatic renewal
+and targeted credential-revocation subscriptions are not implemented. Existing
+production images have not been switched by the lifetime qualification; do not
+claim this completes long-lived workload authentication.

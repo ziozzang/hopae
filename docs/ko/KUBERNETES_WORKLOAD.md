@@ -1,13 +1,13 @@
 # Kubernetes 워크로드 인증
 
-<!-- translation-status: source=../KUBERNETES_WORKLOAD.md source-rev=3 status=current -->
+<!-- translation-status: source=../KUBERNETES_WORKLOAD.md source-rev=4 status=current -->
 
 [문서](README.md) · [English](../KUBERNETES_WORKLOAD.md)
 
 네이티브 라이브러리 auth_gateway::kubernetes::Connector를 구현했습니다. Pod에
 바인딩된 ServiceAccount JWT를 고정된 신뢰 Kubernetes TokenReview API로 검증합니다.
 참조형 루트/프로필 설정·HTTP/HOP1 dispatch·콘솔 요약은 연결했습니다.
-워크로드 receipt 발급·실제 클러스터 운영 활성화는 아직 남았습니다. 오프라인 JWT 서명 검증기나 실제 클러스터 검증을 완료한 것은 아닙니다.
+워크로드 receipt 발급·실제 클러스터 운영 활성화는 아직 남았습니다. 오프라인 JWT 서명 검증기는 아닙니다. 소유 실제 API 검증은 아래에 기록했습니다.
 
 소유자는 HTTPS API origin, 기대 HTTPS issuer, cluster 식별자, workload audience,
 1–1000ms 기한, CA 묶음과 별도 reviewer 자격증명을 제공합니다. Config에는 비밀값이
@@ -137,3 +137,17 @@ RBAC를 만들고 제거합니다. 자격은 출력·인자에 넣지 않습니�
 누락 시 다른 namespace를 허용하는 대신 시작을 거절합니다. Kubernetes RBAC는
 metadata 전용 권한이 아닌 객체 GET을 인가합니다. 네이티브는 partial metadata만
 요청하지만 reviewer 권한은 Pod/ServiceAccount GET으로 검토해야 합니다.
+
+
+## 네이티브 인증 근거 유효기간
+
+HTTP·HOP1의 기계 인증 응답은 x-hopae-evidence-ttl-ms로 응답 생성 시 남은
+검증 근거 수명을 최대 1000ms로 전달합니다. 만료된 근거는 신원 헤더 없이 503을
+반환합니다. 인증된 응답 메타데이터이며 판단 캐시·서명 receipt·클라이언트 인증
+주장이 아닙니다. 한강은 교환 시작 시각에 묶어 통신/처리 시간이 수명을 늘리지
+않도록 합니다. 향후 인증된 갱신/구독으로 근거를 교체하지 않는다면 서비스·워크로드
+스트림도 기한에 종료해야 합니다.
+
+초기 구현은 인증 후 최대 1초에 회수 poll 스케줄링 간격을 더한 시점에 장기 기계
+스트림을 닫습니다. 자동 갱신·개별 자격 회수 구독은 미구현입니다. 이번 수명 검증은
+기존 운영 이미지를 전환하지 않으며 장기 워크로드 인증 완료를 의미하지 않습니다.

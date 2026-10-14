@@ -68,6 +68,9 @@ impl VerifiedEvidence {
     pub fn subject(&self) -> &Subject {
         &self.subject
     }
+    pub fn expires_at_ms(&self) -> u64 {
+        self.expires_at
+    }
     pub fn connector(&self) -> &str {
         &self.connector
     }

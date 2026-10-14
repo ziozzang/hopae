@@ -75,6 +75,30 @@ pub fn response(evidence: Option<&VerifiedEvidence>, request_id: &str) -> Respon
     response
 }
 
+/// Export remaining evidence lifetime without transferring credentials or a decision cache.
+pub fn response_at(
+    evidence: Option<&VerifiedEvidence>,
+    request_id: &str,
+    now_ms: u64,
+) -> Response<Body> {
+    if evidence.is_some_and(|e| e.expires_at_ms() <= now_ms) {
+        return unavailable(request_id);
+    }
+    let mut reply = response(evidence, request_id);
+    if reply.status() == StatusCode::OK {
+        let remaining = evidence
+            .unwrap()
+            .expires_at_ms()
+            .saturating_sub(now_ms)
+            .min(1000);
+        reply.headers_mut().insert(
+            "x-hopae-evidence-ttl-ms",
+            HeaderValue::from_str(&remaining.to_string()).expect("bounded lifetime"),
+        );
+    }
+    reply
+}
+
 pub fn unavailable(request_id: &str) -> Response<Body> {
     let mut response = response(None, request_id);
     *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;

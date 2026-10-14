@@ -318,7 +318,11 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
                     return hangang::render(decision, input.navigation, &env, &st.cfg);
                 }
             }
-            return hangang::service_identity::response(evidence.as_ref(), &request_id);
+            return hangang::service_identity::response_at(
+                evidence.as_ref(),
+                &request_id,
+                st.ctx.clock.now().0.max(0) as u64,
+            );
         }
     }
     let document = matches!(input.navigation, Navigation::Document);
