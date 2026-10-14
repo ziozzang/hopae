@@ -309,6 +309,109 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 5);
         server.abort();
     }
+    #[tokio::test]
+    async fn stalled_verifier_times_out_opens_and_recovers_without_capacity_leak() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stalled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let count = calls.clone();
+        let delay = stalled.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new().route(
+            "/verify",
+            post(move || {
+                let count = count.clone();
+                let delay = delay.clone();
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    if delay.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({"active": false})),
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let connector = Connector::compile(
+            &Config {
+                url: format!("http://{address}/verify"),
+                issuer: "owned".into(),
+                timeout_ms: 100,
+                allow_private_endpoints: true,
+                verifier_key_env: None,
+            },
+            &|_| None,
+        )
+        .unwrap();
+        // Both the relay and shared HTTP origin circuit retain production cooldowns.
+        let ip = "192.0.2.8".parse().unwrap();
+        for _ in 0..3 {
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                connector.authenticate(
+                    "orders",
+                    "partner",
+                    "owned-credential-at-least-sixteen",
+                    ip,
+                    1000,
+                ),
+            )
+            .await
+            .expect("verifier exceeded the outer functional deadline");
+            assert_eq!(result.unwrap_err(), Error::Unavailable);
+            assert_eq!(connector.capacity.available_permits(), 64);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            connector.circuit.state(),
+            Some(super::super::breaker::State::Open)
+        );
+        assert_eq!(
+            connector
+                .authenticate(
+                    "orders",
+                    "partner",
+                    "owned-credential-at-least-sixteen",
+                    ip,
+                    1000
+                )
+                .await
+                .unwrap_err(),
+            Error::Unavailable
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "open circuit must not dispatch"
+        );
+        stalled.store(false, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(30_100)).await;
+        assert_eq!(
+            connector
+                .authenticate(
+                    "orders",
+                    "partner",
+                    "owned-credential-at-least-sixteen",
+                    ip,
+                    1000
+                )
+                .await
+                .unwrap_err(),
+            Error::Invalid
+        );
+        assert_eq!(
+            connector.circuit.state(),
+            Some(super::super::breaker::State::Closed)
+        );
+        assert_eq!(connector.capacity.available_permits(), 64);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        server.abort();
+        let _ = server.await;
+    }
+
     #[test]
     fn verifier_configuration_cannot_accept_redirect_queries_or_plaintext_remote() {
         for url in [
