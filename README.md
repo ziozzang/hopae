@@ -149,3 +149,13 @@ package was installed with updated pins and its actual delegated status response
 was verified. Rollback backups are retained. This version has not yet been
 qualified in Kubernetes; signed projection delivery and full provider/fleet
 qualification remain unfinished.
+
+## v0.0.7 release preparation
+
+Native service receipts bind profile and application generations. The opt-in
+mTLS ValidateService RPC verifies signatures against live owners; shared key
+registry extraction also rejects retired material at higher epochs. Actual
+Pumgye/Sumunjang endpoint fixtures passed on debug and static candidates. Newly
+versioned assets still require qualification before publication; operating issuer
+resources remain separately configured. Permit/projection/fleet integration is
+incomplete. GitHub Actions remains disabled.
