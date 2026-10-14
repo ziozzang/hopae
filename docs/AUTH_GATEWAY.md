@@ -1007,3 +1007,11 @@ ignores; strict all-feature/all-target Clippy and documentation checks passed.
 The actual mTLS scenario validates on the same persistent channel across profile
 revocation/restoration and an in-memory application-generation replacement.
 It does not qualify a remote fleet, DB restore, permit issuance or production rollout.
+
+The portable `tools/service_receipt_smoke.py --live-validation` mode also
+qualifies the real Pumgye native client: cached unexpired receipt refusal after
+profile withdrawal, revision restoration and outage refusal after terminating
+the owned issuer with a freshly verified receipt. Seven existing trust refusals
+still run. Current debug binaries passed; this does not qualify static releases,
+Pumgye permit endpoints or operating deployment. The client entrypoint is
+[Pumgye’s owned example](https://github.com/ziozzang/pumgye/blob/main/crates/pumgye-server/examples/hopae_live_qualification.rs).

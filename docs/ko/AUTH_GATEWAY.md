@@ -881,3 +881,9 @@ RPC 검증: 전체 all-feature 검사 919개 통과·명시적 제외 42개, 엄
 Clippy·문서 검사를 통과했습니다. 실제 mTLS 시나리오는 동일 지속 연결에서 프로필
 회수/복구·메모리 앱 세대 교체를 검사합니다. 원격 다중 노드·DB 복구·permit 발급·
 운영 배포 검증은 아닙니다.
+
+portable tools/service_receipt_smoke.py의 --live-validation 모드는 실제 품계
+네이티브 클라이언트도 검사합니다. 만료 전 보관 증명의 프로필 회수 거부·리비전 복구·
+새 증명 검증 직후 테스트 발급자 종료 시 장애 거부와 기존 신뢰 거부 7종을 통과했습니다.
+현재 debug 바이너리 검사이며 정적 릴리스·품계 permit endpoint·운영 배포 검증은
+아닙니다. 클라이언트는 품계의 examples/hopae_live_qualification.rs입니다.

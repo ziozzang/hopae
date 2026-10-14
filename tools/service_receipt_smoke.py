@@ -9,6 +9,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', required=True, type=Path)
     parser.add_argument('--client', required=True, type=Path)
+    parser.add_argument('--live-validation', action='store_true', help='client supports cached receipt revocation and outage checks')
     args = parser.parse_args()
     os.umask(0o077)
     def port():
@@ -73,8 +74,9 @@ def main():
                 assert command('deny')['allowed'] is False
                 revision=publish(revision,copy.deepcopy(profile));assert revision==3
                 restored=command('allow');assert restored['allowed'] is True and restored['revision']==revision
-                client.stdin.close();assert client.wait(timeout=3)==0
-                selector.close()
+                if not args.live_validation:
+                    client.stdin.close();assert client.wait(timeout=3)==0
+                    selector.close()
                 openssl('genpkey','-algorithm','ED25519','-out',root/'wrong-issuer.pem')
                 wrong_public=openssl('pkey','-in',root/'wrong-issuer.pem','-pubout','-outform','DER')[-32:]
                 for name in ['caller', 'issuer', 'audience', 'service', 'server-name', 'key', 'key-epoch']:
@@ -89,7 +91,15 @@ def main():
                     denied_path=root/(name+'.json');denied_path.write_text(json.dumps(denied_config))
                     result=subprocess.run([str(args.client.resolve()),str(denied_path)],input='deny\n',env=denied_env,text=True,stdout=subprocess.PIPE,stderr=client_log,timeout=5)
                     assert result.returncode==0 and json.loads(result.stdout)['allowed'] is False, 'unsafe receipt accepted: '+name
-                print('PASS: actual static Hopae issuer with real Hangang mTLS client; pinned request-bound receipt, signed profile CAS, same-channel revocation/restoration and caller/issuer/service/audience/server-name/key/epoch refusal')
+                if args.live_validation:
+                    fresh=command('allow');assert fresh['allowed'] is True and fresh['revision']==revision
+                    server.kill();server.wait(timeout=3)
+                    assert command('outage')['allowed'] is False
+                    client.stdin.close();assert client.wait(timeout=3)==0
+                    selector.close()
+                    print('PASS: actual Hopae executable and Pumgye mTLS live client; cached unexpired receipt revocation, restoration, authority outage and seven trust refusals')
+                else:
+                    print('PASS: actual Hopae executable with configured mTLS receipt client; pinned request-bound receipt, signed profile CAS, same-channel revocation/restoration and caller/issuer/service/audience/server-name/key/epoch refusal')
             finally:
                 for process in reversed(processes):
                     if process.poll() is None:
