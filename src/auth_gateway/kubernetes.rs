@@ -543,6 +543,8 @@ mod tests {
         assert_eq!(e.expires_at, 1100);
         assert_eq!(e.service(), Some("orders"));
         let stable = super::super::stable_subject(e.subject());
+        // Shared Pumgye workload-association contract vector.
+        assert_eq!(stable, "s_529be5b595ab327853eabe2d1adf52256e262af036510607");
         let mut other = reply();
         other.status.user.as_mut().unwrap().uid = "sa-2".into();
         assert!(
