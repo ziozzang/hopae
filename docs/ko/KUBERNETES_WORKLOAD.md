@@ -1,6 +1,6 @@
 # Kubernetes 워크로드 인증
 
-<!-- translation-status: source=../KUBERNETES_WORKLOAD.md source-rev=4 status=current -->
+<!-- translation-status: source=../KUBERNETES_WORKLOAD.md source-rev=5 status=current -->
 
 [문서](README.md) · [English](../KUBERNETES_WORKLOAD.md)
 
@@ -149,5 +149,8 @@ HTTP·HOP1의 기계 인증 응답은 x-hopae-evidence-ttl-ms로 응답 생성 �
 스트림도 기한에 종료해야 합니다.
 
 초기 구현은 인증 후 최대 1초에 회수 poll 스케줄링 간격을 더한 시점에 장기 기계
-스트림을 닫습니다. 자동 갱신·개별 자격 회수 구독은 미구현입니다. 이번 수명 검증은
+스트림을 닫습니다. 한강은 이제
+auth.renew_native_evidence로 선택형 네이티브 재인증을 제공합니다. 명시적 유효 TTL과
+같은 신원/종류/AAL/service가 필요하며 실패·늦은 갱신은 거절합니다. 개별 자격 회수
+구독과 실제 클러스터 원천의 지속 가용성은 미구현입니다. 이번 수명 검증은
 기존 운영 이미지를 전환하지 않으며 장기 워크로드 인증 완료를 의미하지 않습니다.

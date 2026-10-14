@@ -1,6 +1,6 @@
 # Kubernetes workload authentication
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/KUBERNETES_WORKLOAD.md)
 
@@ -183,7 +183,10 @@ cannot extend the lease. Workload and service streams must stop at that deadline
 unless a future authenticated renewal/subscription replaces the evidence.
 
 This initial enforcement closes long machine streams at most one second after
-authentication (plus the retirement poll scheduling interval). Automatic renewal
-and targeted credential-revocation subscriptions are not implemented. Existing
+authentication (plus the retirement poll scheduling interval). Hangang now provides opt-in native reauthentication via
+`auth.renew_native_evidence`; it requires explicit usable TTL and unchanged
+subject/kind/AAL/service, and refuses failed or late renewals. Targeted
+credential-revocation subscriptions and sustained real-cluster source
+availability are not implemented. Existing
 production images have not been switched by the lifetime qualification; do not
 claim this completes long-lived workload authentication.
