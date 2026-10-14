@@ -20,3 +20,6 @@ pub mod receipt_binding;
 pub mod receipt_keys;
 
 pub mod service_epoch;
+
+/// Canonical schema for build-time consumers sharing the generated v1 types.
+pub const GATEWAY_PROTO: &str = include_str!("../proto/gateway.proto");

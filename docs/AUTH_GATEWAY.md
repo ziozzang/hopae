@@ -1015,3 +1015,8 @@ the owned issuer with a freshly verified receipt. Seven existing trust refusals
 still run. Current debug binaries passed; this does not qualify static releases,
 Pumgye permit endpoints or operating deployment. The client entrypoint is
 [Pumgye’s owned example](https://github.com/ziozzang/pumgye/blob/main/crates/pumgye-server/examples/hopae_live_qualification.rs).
+
+The pure contract crate exports `GATEWAY_PROTO` for build-time consumers using
+its exact generated receipt-context type through protobuf extern-path mapping.
+This avoids copied wire schemas and request-time JSON reinterpretation in native
+gRPC adapters; it does not grant access or change existing operating endpoints.

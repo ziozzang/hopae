@@ -887,3 +887,7 @@ portable tools/service_receipt_smoke.py의 --live-validation 모드는 실제 �
 새 증명 검증 직후 테스트 발급자 종료 시 장애 거부와 기존 신뢰 거부 7종을 통과했습니다.
 현재 debug 바이너리 검사이며 정적 릴리스·품계 permit endpoint·운영 배포 검증은
 아닙니다. 클라이언트는 품계의 examples/hopae_live_qualification.rs입니다.
+
+순수 계약 crate는 GATEWAY_PROTO를 내보내며 빌드 소비자가 protobuf extern-path로
+정확한 공용 receipt 문맥 타입을 사용할 수 있습니다. wire 스키마 복사와 네이티브
+gRPC 요청 중 JSON 재해석을 피하며 권한이나 운영 endpoint를 변경하지 않습니다.
