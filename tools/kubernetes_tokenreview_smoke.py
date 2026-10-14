@@ -28,6 +28,19 @@ with tempfile.TemporaryDirectory(prefix='hopae-tokenreview-owned-') as directory
     state={'mode':'valid','calls':0,'redirects':0}
     class Handler(http.server.BaseHTTPRequestHandler):
         def log_message(self,*_):pass
+        def do_GET(self):
+            assert self.headers.get('Authorization')=='Bearer '+reviewer
+            expected={'/api/v1/namespaces/blue/serviceaccounts/worker':('worker','sa-1'),'/api/v1/namespaces/blue/pods/worker-pod':('worker-pod','pod-1')}
+            if self.path not in expected:self.send_response(404);self.end_headers();return
+            name,uid=expected[self.path]
+            if state['mode']=='object-unavailable':self.send_response(503);self.end_headers();return
+            if state['mode']=='deleted-pod' and '/pods/' in self.path:self.send_response(404);self.end_headers();return
+            if state['mode']=='recreated-pod' and '/pods/' in self.path:uid='replacement-pod'
+            metadata={'name':name,'namespace':'blue','uid':uid}
+            if state['mode']=='deleting-sa' and '/serviceaccounts/' in self.path:metadata['deletionTimestamp']='2026-10-14T00:00:00Z'
+            if state['mode']=='object-oversize':metadata['padding']='x'*16385
+            body=json.dumps({'apiVersion':'meta.k8s.io/v1','kind':'PartialObjectMetadata','metadata':metadata}).encode()
+            self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
         def do_POST(self):
             if self.path=='/stolen':state['redirects']+=1
             assert self.path=='/apis/authentication.k8s.io/v1/tokenreviews'
@@ -40,7 +53,7 @@ with tempfile.TemporaryDirectory(prefix='hopae-tokenreview-owned-') as directory
             if mode=='redirect':self.send_response(302);self.send_header('Location','https://127.0.0.1:'+str(self.server.server_port)+'/stolen');self.end_headers();return
             if mode=='reviewer-denied':self.send_response(403);self.end_headers();return
             reply={'apiVersion':'authentication.k8s.io/v1','kind':'TokenReview','spec':{'token':token},'status':{'authenticated':True,'audiences':['workload.example.test'],'user':{'username':'system:serviceaccount:blue:worker','uid':'sa-1','extra':{'authentication.kubernetes.io/pod-name':['worker-pod'],'authentication.kubernetes.io/pod-uid':['pod-1']}}}}
-            if mode=='denied':reply['status']['authenticated']=False;reply['status']['error']='invalid fixture credential'
+            if mode=='denied':reply['status']={'user':{},'error':'invalid fixture credential'}
             if mode=='uid':reply['status']['user']['uid']='sa-2'
             if mode=='pod':reply['status']['user']['extra']['authentication.kubernetes.io/pod-uid']=['other-pod']
             if mode=='audience':reply['status']['audiences']=['other']
@@ -51,7 +64,7 @@ with tempfile.TemporaryDirectory(prefix='hopae-tokenreview-owned-') as directory
             try:self.wfile.write(data)
             except (OSError,ssl.SSLError):pass
     server=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler);context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(root/'server.pem',root/'server.key');server.socket=context.wrap_socket(server.socket,server_side=True);threading.Thread(target=server.serve_forever,daemon=True).start()
-    config={'api_origin':'https://127.0.0.1:'+str(server.server_port),'issuer':'https://issuer.example.test','cluster_id':'example-cluster','audience':'workload.example.test','timeout_ms':1000}
+    config={'api_origin':'https://127.0.0.1:'+str(server.server_port),'issuer':'https://issuer.example.test','cluster_id':'example-cluster','audience':'workload.example.test','namespaces':['blue'],'timeout_ms':1000}
     def invoke(attempts=1,ca_file='ca.pem',changes=None):
         current=dict(config,**(changes or {}));(root/'config.json').write_text(json.dumps(current))
         env=dict(os.environ,HTTPS_PROXY='http://127.0.0.1:1',ALL_PROXY='http://127.0.0.1:1')
@@ -64,10 +77,13 @@ with tempfile.TemporaryDirectory(prefix='hopae-tokenreview-owned-') as directory
         state['mode']='denied';before=state['calls'];assert all(v['status']=='invalid' for v in invoke(attempts=5));assert state['calls']-before==5
         for mode in ['uid','pod','audience','username','missing-bound']:
             state['mode']=mode;before=state['calls'];assert all(v['status']=='unavailable' for v in invoke(attempts=5));assert state['calls']-before==3
-        for mode in ['reviewer-denied','redirect','oversize']:
+        for mode in ['deleted-pod','recreated-pod','deleting-sa']:
+            state['mode']=mode;before=state['calls'];assert all(v['status']=='invalid' for v in invoke(attempts=5));assert state['calls']-before==5
+        for mode in ['reviewer-denied','redirect','oversize','object-unavailable','object-oversize']:
             state['mode']=mode;before=state['calls'];assert all(v['status']=='unavailable' for v in invoke(attempts=5));assert state['calls']-before==3
         assert state['redirects']==0
         state['mode']='valid';before=state['calls'];assert invoke(ca_file='other-ca.pem')[0]['status']=='unavailable' and state['calls']==before
+        before=state['calls'];assert invoke(changes={'namespaces':['red']})[0]['status']=='invalid' and state['calls']==before
         before=state['calls'];assert invoke(changes={'issuer':'https://other-issuer.example.test'})[0]['status']=='invalid' and state['calls']==before
         print('PASS: owned TLS TokenReview, reviewer/client credential isolation, exact service-account/Pod/audience binding, workload namespace separation, bounded bodies, redirect/proxy/CA refusal, source circuit opening, no credential output; mock does not qualify real cluster JWT signatures')
     finally:server.shutdown();server.server_close()

@@ -92,7 +92,7 @@ export async function mount(host) {
             const count=Array.isArray(profile.api_keys)?profile.api_keys.length:0,relay=profile.api_relay,kubernetes=profile.kubernetes_tokenreview,row=node('tr');
             const methods=[count?label('Native keys: ','자체 key: ')+count:null,relay?'API relay':null,kubernetes?'Kubernetes TokenReview':null].filter(Boolean).join(' + ');
             const issuers=[count?'hopae:'+show(configuration.authority_id):null,relay?show(relay.issuer):null,kubernetes?show(kubernetes.connection?.issuer):null].filter(Boolean).join(' / ');
-            for(const value of [profile.service_id,profile.realm,methods,issuers,profile.relay_token_prefix,profile.eligibility_lua?label('Enabled','활성'):label('None','없음'),profile.session_fallback?label('Missing credential only','자격 미제시만'):label('Disabled','비활성'),kubernetes?[show(kubernetes.connection?.cluster_id),show(kubernetes.connection?.audience),show(kubernetes.token_prefix)].join(' / '):null])row.append(node('td',show(value)));
+            for(const value of [profile.service_id,profile.realm,methods,issuers,profile.relay_token_prefix,profile.eligibility_lua?label('Enabled','활성'):label('None','없음'),profile.session_fallback?label('Missing credential only','자격 미제시만'):label('Disabled','비활성'),kubernetes?[show(kubernetes.connection?.cluster_id),show(kubernetes.connection?.audience),Array.isArray(kubernetes.connection?.namespaces)?kubernetes.connection.namespaces.map(show).join(', '):label('Namespace required','Namespace 필요'),show(kubernetes.token_prefix)].join(' / '):null])row.append(node('td',show(value)));
             body.append(row);
           }t.append(body);summary.append(t);
         };

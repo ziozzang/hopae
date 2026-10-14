@@ -180,6 +180,7 @@ pub(super) const ROOT: Node = Obj(&[
                                     ("issuer", Leaf),
                                     ("cluster_id", Leaf),
                                     ("audience", Leaf),
+                                    ("namespaces", Arr(&Leaf)),
                                     ("timeout_ms", Leaf),
                                 ]),
                             ),

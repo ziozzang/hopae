@@ -15,6 +15,7 @@ pub struct Config {
     pub issuer: String,
     pub cluster_id: String,
     pub audience: String,
+    pub namespaces: Vec<String>,
     pub timeout_ms: u64,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -106,7 +107,9 @@ struct Status {
 }
 #[derive(Deserialize)]
 struct User {
+    #[serde(default)]
     username: String,
+    #[serde(default)]
     uid: String,
     #[serde(default)]
     extra: BTreeMap<String, Vec<String>>,
@@ -116,6 +119,14 @@ fn identifier(s: &str) -> bool {
         && s.len() <= 128
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b))
+}
+fn namespace(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 63
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && s.as_bytes()[0].is_ascii_alphanumeric()
+        && s.as_bytes()[s.len() - 1].is_ascii_alphanumeric()
 }
 impl Config {
     pub fn validate(&self) -> Result<()> {
@@ -142,7 +153,15 @@ impl Config {
             "invalid Kubernetes issuer"
         );
         ensure!(
-            identifier(&self.cluster_id)
+            (1..=128).contains(&self.namespaces.len())
+                && self.namespaces.iter().all(|n| namespace(n))
+                && self
+                    .namespaces
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == self.namespaces.len()
+                && identifier(&self.cluster_id)
                 && !self.audience.is_empty()
                 && self.audience.len() <= 256
                 && !self.audience.chars().any(char::is_control)
@@ -236,7 +255,8 @@ impl Connector {
         let claims: Claims = serde_json::from_slice(&bytes).map_err(|_| Error::Invalid)?;
         let k = &claims.kubernetes;
         let expiry = claims.exp.checked_mul(1000).ok_or(Error::Invalid)?;
-        if claims.iss != self.config.issuer
+        if !self.config.namespaces.contains(&k.namespace)
+            || claims.iss != self.config.issuer
             || !claims.aud.iter().any(|a| a == &self.config.audience)
             || claims.aud.len() > 16
             || expiry <= now_ms
@@ -312,22 +332,95 @@ impl Connector {
                 }
                 body.extend_from_slice(&chunk);
             }
-            serde_json::from_slice::<Reply>(&body).map_err(|_| Error::Unavailable)
+            let reply = serde_json::from_slice::<Reply>(&body).map_err(|_| Error::Unavailable)?;
+            let verified_ms = now_ms
+                .checked_add(
+                    u64::try_from(started.elapsed().as_millis()).map_err(|_| Error::Unavailable)?,
+                )
+                .ok_or(Error::Unavailable)?;
+            let mut evidence = self.evidence(service, &claims, reply, verified_ms)?;
+            self.current_objects(&claims).await?;
+            let final_ms = now_ms
+                .checked_add(
+                    u64::try_from(started.elapsed().as_millis()).map_err(|_| Error::Unavailable)?,
+                )
+                .ok_or(Error::Unavailable)?;
+            evidence.expires_at = evidence
+                .expires_at
+                .min(now_ms.checked_add(1000).ok_or(Error::Unavailable)?);
+            if evidence.expires_at <= final_ms {
+                return Err(Error::Invalid);
+            }
+            Ok(evidence)
         };
-        let reply = tokio::time::timeout(Duration::from_millis(self.config.timeout_ms), future)
+        tokio::time::timeout(Duration::from_millis(self.config.timeout_ms), future)
             .await
-            .map_err(|_| Error::Unavailable)??;
-        let now_ms = now_ms
-            .checked_add(
-                u64::try_from(started.elapsed().as_millis()).map_err(|_| Error::Unavailable)?,
-            )
-            .ok_or(Error::Unavailable)?;
-        self.evidence(service, claims, reply, now_ms)
+            .map_err(|_| Error::Unavailable)?
+    }
+    async fn current_objects(&self, claims: &Claims) -> Result<(), Error> {
+        let k = &claims.kubernetes;
+        for (resource, object) in [("serviceaccounts", &k.serviceaccount), ("pods", &k.pod)] {
+            let endpoint = self
+                .endpoint
+                .join(&format!(
+                    "/api/v1/namespaces/{}/{}/{}",
+                    k.namespace, resource, object.name
+                ))
+                .map_err(|_| Error::Unavailable)?;
+            let mut response = self
+                .client
+                .get(endpoint)
+                .header(reqwest::header::AUTHORIZATION, self.authorization.clone())
+                .header(
+                    reqwest::header::ACCEPT,
+                    "application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=v1",
+                )
+                .send()
+                .await
+                .map_err(|_| Error::Unavailable)?;
+            if [404, 410].contains(&response.status().as_u16()) {
+                return Err(Error::Invalid);
+            }
+            if response.status().as_u16() != 200
+                || !response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| {
+                        v.split(';')
+                            .next()
+                            .is_some_and(|v| v.trim() == "application/json")
+                    })
+            {
+                return Err(Error::Unavailable);
+            }
+            let mut body = Vec::new();
+            while let Some(chunk) = response.chunk().await.map_err(|_| Error::Unavailable)? {
+                if body.len() + chunk.len() > 16384 {
+                    return Err(Error::Unavailable);
+                }
+                body.extend_from_slice(&chunk);
+            }
+            let value: serde_json::Value =
+                serde_json::from_slice(&body).map_err(|_| Error::Unavailable)?;
+            if value["apiVersion"] != "meta.k8s.io/v1" || value["kind"] != "PartialObjectMetadata" {
+                return Err(Error::Unavailable);
+            }
+            let m = &value["metadata"];
+            if m["name"] != object.name
+                || m["namespace"] != k.namespace
+                || m["uid"] != object.uid
+                || m.get("deletionTimestamp").is_some_and(|v| !v.is_null())
+            {
+                return Err(Error::Invalid);
+            }
+        }
+        Ok(())
     }
     fn evidence(
         &self,
         service: &str,
-        claims: Claims,
+        claims: &Claims,
         reply: Reply,
         now_ms: u64,
     ) -> Result<VerifiedEvidence, Error> {
@@ -403,6 +496,7 @@ mod tests {
             issuer: "https://issuer.example.test".into(),
             cluster_id: "example-cluster".into(),
             audience: "example-workload".into(),
+            namespaces: vec!["blue".into()],
             timeout_ms: 500,
         }
     }
@@ -425,11 +519,25 @@ mod tests {
         serde_json::from_value(serde_json::json!({"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"audiences":["example-workload"],"user":{"username":"system:serviceaccount:blue:worker","uid":"sa-1","extra":{"authentication.kubernetes.io/pod-name":["worker-pod"],"authentication.kubernetes.io/pod-uid":["pod-1"]}}}})).unwrap()
     }
     #[test]
+    fn actual_api_negative_shape_is_denial_but_empty_positive_user_is_source_failure() {
+        let c = connector();
+        let denied: Reply = serde_json::from_value(serde_json::json!({"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"user":{},"error":"invalid fixture signature"}})).unwrap();
+        assert!(matches!(
+            c.evidence("orders", &c.claims(&token(), 100).unwrap(), denied, 100),
+            Err(Error::Invalid)
+        ));
+        let positive: Reply = serde_json::from_value(serde_json::json!({"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"audiences":["example-workload"],"user":{}}})).unwrap();
+        assert!(matches!(
+            c.evidence("orders", &c.claims(&token(), 100).unwrap(), positive, 100),
+            Err(Error::Unavailable)
+        ));
+    }
+    #[test]
     fn scope_and_bound_object_attestation_are_required() {
         let c = connector();
         let t = token();
         let e = c
-            .evidence("orders", c.claims(&t, 100).unwrap(), reply(), 100)
+            .evidence("orders", &c.claims(&t, 100).unwrap(), reply(), 100)
             .unwrap();
         assert_eq!(e.subject.kind, PrincipalKind::Workload);
         assert_eq!(e.expires_at, 1100);
@@ -438,36 +546,36 @@ mod tests {
         let mut other = reply();
         other.status.user.as_mut().unwrap().uid = "sa-2".into();
         assert!(
-            c.evidence("orders", c.claims(&t, 100).unwrap(), other, 100)
+            c.evidence("orders", &c.claims(&t, 100).unwrap(), other, 100)
                 .is_err()
         );
         let mut other = reply();
         other.status.user.as_mut().unwrap().extra.clear();
         assert!(
-            c.evidence("orders", c.claims(&t, 100).unwrap(), other, 100)
+            c.evidence("orders", &c.claims(&t, 100).unwrap(), other, 100)
                 .is_err()
         );
         let mut other = reply();
         other.status.audiences = vec!["other".into()];
         assert!(
-            c.evidence("orders", c.claims(&t, 100).unwrap(), other, 100)
+            c.evidence("orders", &c.claims(&t, 100).unwrap(), other, 100)
                 .is_err()
         );
         let mut other = reply();
         other.status.authenticated = false;
         other.status.error = Some("invalid fixture credential".into());
         assert!(matches!(
-            c.evidence("orders", c.claims(&t, 100).unwrap(), other, 100),
+            c.evidence("orders", &c.claims(&t, 100).unwrap(), other, 100),
             Err(Error::Invalid)
         ));
         let mut other = connector();
         other.config.cluster_id = "other-cluster".into();
         let e = other
-            .evidence("orders", other.claims(&t, 100).unwrap(), reply(), 100)
+            .evidence("orders", &other.claims(&t, 100).unwrap(), reply(), 100)
             .unwrap();
         assert_ne!(super::super::stable_subject(e.subject()), stable);
         assert!(
-            c.evidence("orders", c.claims(&t, 100).unwrap(), reply(), 2000)
+            c.evidence("orders", &c.claims(&t, 100).unwrap(), reply(), 2000)
                 .is_err()
         );
     }
@@ -496,6 +604,16 @@ mod tests {
     }
     #[test]
     fn api_origin_never_accepts_credentials_redirect_targets_or_http() {
+        for namespaces in [
+            vec![],
+            vec!["blue".into(), "blue".into()],
+            vec!["*".into()],
+            vec!["../red".into()],
+        ] {
+            let mut c = config();
+            c.namespaces = namespaces;
+            assert!(c.validate().is_err());
+        }
         for origin in [
             "http://kubernetes.example.test/",
             "https://user:pass@kubernetes.example.test/",

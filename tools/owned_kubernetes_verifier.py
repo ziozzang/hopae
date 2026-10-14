@@ -12,6 +12,12 @@ root=pathlib.Path(sys.argv[1])
 class Handler(http.server.BaseHTTPRequestHandler):
     calls=0
     def log_message(self,*_):pass
+    def do_GET(self):
+        if self.headers.get('Authorization')!='Bearer owned-kubernetes-reviewer-at-least-thirty-two':self.send_response(403);self.end_headers();return
+        expected={'/api/v1/namespaces/blue/serviceaccounts/worker':('worker','sa-1'),'/api/v1/namespaces/blue/pods/worker-pod':('worker-pod','pod-1')}
+        if self.path not in expected:self.send_response(404);self.end_headers();return
+        name,uid=expected[self.path]
+        data=json.dumps({'apiVersion':'meta.k8s.io/v1','kind':'PartialObjectMetadata','metadata':{'name':name,'namespace':'blue','uid':uid}}).encode();self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
     def do_POST(self):
         if self.path!='/apis/authentication.k8s.io/v1/tokenreviews' or self.headers.get('Authorization')!='Bearer owned-kubernetes-reviewer-at-least-thirty-two':
             self.send_response(403);self.end_headers();return
@@ -26,6 +32,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             while not (root/'release').exists() and time.monotonic()<deadline:time.sleep(.005)
         if mode=='unavailable':self.send_response(503);self.end_headers();return
         reply={'apiVersion':'authentication.k8s.io/v1','kind':'TokenReview','status':{'authenticated':mode!='denied','audiences':['orders-workload'],'user':{'username':claims['sub'],'uid':k['serviceaccount']['uid'],'extra':{'authentication.kubernetes.io/pod-name':[k['pod']['name']],'authentication.kubernetes.io/pod-uid':[k['pod']['uid']]}}}}
+        if mode=='denied':reply['status']={'user':{},'error':'invalid fixture credential'}
         if mode=='wrong-uid':reply['status']['user']['uid']='other-service-account'
         data=json.dumps(reply).encode();self.send_response(201);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(data)));self.end_headers()
         try:self.wfile.write(data)

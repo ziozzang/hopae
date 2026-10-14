@@ -1,6 +1,6 @@
 # Kubernetes workload authentication
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 3 -->
 
 [Documentation](README.md) · [한국어](ko/KUBERNETES_WORKLOAD.md)
 
@@ -17,7 +17,8 @@ credential. Secret material is absent from serialized Config. Only the configure
 CA roots are trusted; redirects and environment proxies are disabled. The fixed
 endpoint is `/apis/authentication.k8s.io/v1/tokenreviews`. Client JWTs are sent only
 in `spec.token`; the Authorization header contains the reviewer's credential.
-The reviewer needs narrowly scoped `create` permission for TokenReview, not access
+The reviewer needs narrowly scoped `create` permission for TokenReview plus
+namespace-scoped `get` on Pods/ServiceAccounts, fetched as metadata, not access
 to workload Secrets or arbitrary Role/Binding writes. Kubernetes authorizes this
 API independently from the application policy.
 
@@ -37,7 +38,7 @@ Issuer and cluster identity namespace it; a domain-separated length-prefixed has
 binds namespace, ServiceAccount name/UID and Pod name/UID. Existing stable-subject
 encoding then produces the native identifier. Recreating either bound object changes
 that identity. Evidence is service-scoped, expires at the earlier of token expiry
-and one second after verification completion, and contains no credential or Pod
+and one second after authentication start, and contains no credential or Pod
 labels. The native caller supplies trusted time. There is no result cache: every
 invocation contacts TokenReview, using pooled connections and at most 64 outstanding
 requests. Three source failures open the cancellation-safe endpoint circuit for
@@ -57,8 +58,8 @@ owner snapshot fence and refuses a retired in-flight HTTP/HOP1 result.
 
 Kubernetes TokenReview has its own validity semantics: objects pending deletion
 can remain acceptable until the documented deletion grace expires. A one-second
-Hopae lease does not eliminate that API-side window. Strict early withdrawal needs
-additional source deletion/revision fencing. Watches, long-stream revocation,
+Hopae lease does not eliminate that API-side window. Live object checks below provide early bound-object withdrawal; watch-backed
+source/follower revision fencing remains pending. Watches, long-stream revocation,
 verified Pumgye associations, profile lifecycle and full-chain throughput remain
 gates before production activation.
 
@@ -90,6 +91,7 @@ credential; neither value is part of the owner document or UI. Example fragment:
       "issuer": "https://issuer.example.test",
       "cluster_id": "example-cluster",
       "audience": "orders-workload",
+      "namespaces": ["blue"],
       "timeout_ms": 500
     },
     "ca_pem_env": "HOPAE_KUBERNETES_CA_PEM",
@@ -113,7 +115,7 @@ step-up checks. Responses identify `workload`, service and canonical native
 subject with AAL 0; no machine proof satisfies a human step-up rule. Hangang's
 trusted native-Hopae-to-Pumgye parser accepts canonical workload AAL 0 and refuses
 human assurance, noncanonical subjects, duplicate metadata and network-only identity.
-Console package 0.1.6 shows TokenReview, issuer, cluster, audience and routing prefix
+Console package 0.1.7 shows TokenReview, issuer, cluster, audience, allowed namespaces and routing prefix
 with the existing native owner editor/publication path. HTML-like values remain text;
 viewer controls remain read-only.
 
@@ -124,3 +126,47 @@ actual cluster signature/deletion semantics, scale-out source fencing, long-stre
 identity revocation, mapped Pumgye grants, workload receipt issuance and full-chain
 performance remain qualification gates. Internal production profiles may stay
 native-only even when this compiled capability is deployed.
+
+## Live bound-object checks and actual API qualification
+
+`connection.namespaces` is mandatory: 1–128 distinct DNS-label namespaces, checked
+before any remote request. Unknown namespaces are credential denials, not source
+failures. Negative TokenReview can omit authenticated/audiences and return user:{};
+this canonical API shape is a denial even with an error diagnostic. An empty or
+contradictory positive user remains a source failure.
+
+A successful review is followed by authenticated GET of current ServiceAccount
+and Pod PartialObjectMetadata, limited to 16 KiB each, using the same fixed CA/API
+and total deadline. Missing objects, changed UID/name/namespace or non-null
+`deletionTimestamp` deny immediately; transport/permission/malformed metadata
+errors fail closed and count towards the source circuit. No full Pod spec or Secret
+is fetched. Bound facts are checked before returning the evidence and the lease is
+limited to one second from authentication start. This adds native metadata reads;
+it is not the planned watch-backed high-throughput object index.
+
+An owned kind Kubernetes v1.37.0 test discovered approximately 9.8 seconds of
+TokenReview-only Pod-deletion propagation. With live object guards, the same
+strong-deletion fixture withdraws in approximately 0.12 seconds. These are fixture
+observations, not fleet latency guarantees. Real signatures, signature tampering,
+issuer/audience/namespace checks, unbound refusal, reviewer least privilege,
+Pod/ServiceAccount deletion and same-name Pod recreation are qualified. Graceful
+termination, partitions, streams and other supported cluster versions still need
+deployment qualification. One-second evidence alone does not bound upstream
+TokenReview caching; the live metadata guard addresses bound-object withdrawal.
+
+```sh
+python3 tools/kubernetes_real_cluster.py \
+  --driver target/debug/examples/qualify_kubernetes_tokenreview \
+  --state-dir /private/owned-kind-qualification
+```
+
+The tool is restricted to the named owned kind cluster and private kubeconfig;
+it creates unique fixture namespaces/RBAC, removes them, and keeps credentials
+out of output and command arguments. It requires Python PyYAML and the cluster's
+bundled kubectl; it does not touch production configuration.
+
+Existing workload configurations must add explicit `connection.namespaces` before
+upgrade; missing scope fails startup rather than admitting other namespaces.
+Kubernetes RBAC authorizes object GET, not a metadata-only permission; the native
+connector requests only partial metadata, while its reviewer role must still be
+reviewed as Pod/ServiceAccount GET authority.

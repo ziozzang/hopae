@@ -1,6 +1,6 @@
 # Kubernetes 워크로드 인증
 
-<!-- translation-status: source=../KUBERNETES_WORKLOAD.md source-rev=2 status=current -->
+<!-- translation-status: source=../KUBERNETES_WORKLOAD.md source-rev=3 status=current -->
 
 [문서](README.md) · [English](../KUBERNETES_WORKLOAD.md)
 
@@ -13,7 +13,7 @@
 1–1000ms 기한, CA 묶음과 별도 reviewer 자격증명을 제공합니다. Config에는 비밀값이
 없습니다. 지정 CA만 신뢰하고 리다이렉트·환경 프록시는 사용하지 않습니다. endpoint는
 /apis/authentication.k8s.io/v1/tokenreviews로 고정합니다. 클라이언트 JWT는 spec.token에,
-reviewer는 Authorization 헤더에 전달합니다. reviewer는 TokenReview create만 필요한
+reviewer는 Authorization 헤더에 전달합니다. reviewer는 TokenReview create와 namespace 범위 Pod/ServiceAccount metadata get의
 최소 권한으로 구성하고 workload Secret이나 임의 Role/Binding 쓰기를 부여하지 않습니다.
 TokenReview API 인가는 앱 정책과 별개입니다.
 
@@ -28,7 +28,7 @@ audience·만료·선택적 nbf·ServiceAccount namespace/name/UID·Pod name/UID
 신원 종류는 Workload이며 사람 MFA 등급을 만들지 않습니다. issuer와 cluster로
 네임스페이스를 나누고 길이 구분 SHA-256으로 namespace·서비스 계정 name/UID·Pod
 name/UID를 묶은 뒤 기존 stable-subject 변환을 적용합니다. 동명 객체 재생성은
-신원을 바꿉니다. 근거는 서비스 범위와 토큰 만료/검증 완료 후 1초 중 이른 기한에
+신원을 바꿉니다. 근거는 서비스 범위와 토큰 만료/인증 시작 후 1초 중 이른 기한에
 제한합니다. 토큰·Pod labels는 근거에 포함하지 않으며 신뢰 시각은 네이티브 호출자가
 제공합니다. 결과 캐시는 없고 매 호출 TokenReview를 요청합니다. 풀 연결·최대 64개
 요청을 사용하고 원천 오류 3건이면 취소 안전한 회로를 30초간 엽니다. 사용자 거절은
@@ -43,8 +43,8 @@ API가 돌려주는 spec.token은 타입 파싱에서 무시합니다. 인증/�
 fence로 회수 중인 HTTP/HOP1 결과는 거절합니다.
 
 Kubernetes는 deletion pending 객체를 문서의 삭제 유예 동안 인정할 수 있습니다.
-호패 근거 1초 제한이 API 원천의 이 창을 없애지는 않습니다. 조기 회수에는 별도
-삭제/revision fence가 필요합니다. watch·장기 스트림 회수·품계 신원 연관 검증·프로필
+호패 근거 1초 제한이 API 원천의 이 창을 없애지는 않습니다. 현재 객체 검사로 조기 바인딩 객체 회수를 보완하며 watch 기반 삭제/revision
+fence는 남았습니다. watch·장기 스트림 회수·품계 신원 연관 검증·프로필
 수명주기·전체 경로 성능을 운영 활성화 전에 검증해야 합니다.
 
 ```sh
@@ -72,6 +72,7 @@ CA PEM·reviewer는 별도 네이티브 환경 참조이며 owner 문서/UI에 �
       "issuer": "https://issuer.example.test",
       "cluster_id": "example-cluster",
       "audience": "orders-workload",
+      "namespaces": ["blue"],
       "timeout_ms": 500
     },
     "ca_pem_env": "HOPAE_KUBERNETES_CA_PEM",
@@ -92,8 +93,8 @@ API 요청 전에 접두사를 제거합니다. 자체 키가 해당 접두사�
 HTTP/HOP1은 같은 런타임·게시 fence·현재 앱 step-up 검사를 사용합니다. workload,
 서비스·정규 native subject·AAL 0을 반환하고 기계 근거로 사람 step-up을 만족하지
 않습니다. 한강의 신뢰 네이티브 호패→품계 파서는 workload AAL 0만 허용하고 사람
-등급·비정규 subject·중복 metadata·network 단독 신원을 거절합니다. 콘솔 0.1.6은
-TokenReview·issuer·cluster·audience·접두사를 기존 owner 편집/게시 경로와 함께 표시합니다.
+등급·비정규 subject·중복 metadata·network 단독 신원을 거절합니다. 콘솔 0.1.7은
+TokenReview·issuer·cluster·audience·허용 namespace·접두사를 기존 owner 편집/게시 경로와 함께 표시합니다.
 HTML처럼 보이는 값도 text이며 viewer는 읽기 전용입니다.
 
 소유 HTTPS/HTTP/HOP1 시나리오는 자체/워크로드 혼합, 자격 라우팅 격리, 원천/사용자
@@ -101,3 +102,38 @@ HTML처럼 보이는 값도 text이며 viewer는 읽기 전용입니다.
 TLS 원천은 mock입니다. 실제 클러스터 서명/삭제·분산 fence·장기 스트림 신원 회수·
 품계 매핑 권한·워크로드 receipt·전체 성능 검증이 남았습니다. 컴파일된 기능을 배포해도
 내부 운영 프로필은 native-only로 유지할 수 있습니다.
+
+## 현재 바인딩 객체 검사와 실제 API 검증
+
+connection.namespaces는 필수이며 서로 다른 DNS-label namespace 1–128개를 지정합니다.
+원격 호출 전에 검사하고 다른 namespace는 사용자 거절로 처리합니다. 실제 음성
+TokenReview는 authenticated/audiences를 생략하고 user:{}를 반환할 수 있으며 error 진단이
+있어도 원천 장애가 아닙니다. 비어 있거나 모순된 양성 user는 원천 오류입니다.
+
+성공 review 뒤 같은 CA/API/전체 기한으로 ServiceAccount·Pod PartialObjectMetadata를
+인증된 GET으로 확인합니다. 각각 16 KiB 제한이며 전체 Pod spec·Secret은 읽지 않습니다.
+누락·UID/name/namespace 변경·null이 아닌 deletionTimestamp는 즉시 거절하고 통신/권한/
+형식 오류는 거절하며 원천 회로에 반영합니다. 반환 전에 바인딩 사실을 확인하고 lease는
+인증 시작부터 1초에 제한합니다. native metadata 조회이며 고속 watch 인덱스는 아닙니다.
+
+소유 kind Kubernetes v1.37.0에서 TokenReview만 쓸 때 Pod 삭제 전파가 약 9.8초였고
+현재 객체 검사 후 동일한 강제 삭제 fixture는 약 0.12초에 회수됐습니다. fixture 관찰이며
+fleet 지연 보장이 아닙니다. 실제 서명·서명 변조·issuer/audience/namespace·unbound 거절·
+reviewer 최소 권한·Pod/ServiceAccount 삭제·동명 Pod 재생성을 검증했습니다. 정상 종료·
+분할·스트림·다른 클러스터 버전은 배포 검증이 남습니다. 근거 1초 자체가 원천 캐시를
+제한하지 않으며 metadata 검사가 바인딩 객체 회수를 보완합니다.
+
+```sh
+python3 tools/kubernetes_real_cluster.py \
+  --driver target/debug/examples/qualify_kubernetes_tokenreview \
+  --state-dir /private/owned-kind-qualification
+```
+
+도구는 고정된 소유 kind 클러스터·비공개 kubeconfig에 제한하며 고유 fixture namespace/
+RBAC를 만들고 제거합니다. 자격은 출력·인자에 넣지 않습니다. Python PyYAML·클러스터
+내 kubectl이 필요하고 운영 설정은 바꾸지 않습니다.
+
+기존 workload 설정은 업그레이드 전에 connection.namespaces를 명시해야 합니다.
+누락 시 다른 namespace를 허용하는 대신 시작을 거절합니다. Kubernetes RBAC는
+metadata 전용 권한이 아닌 객체 GET을 인가합니다. 네이티브는 partial metadata만
+요청하지만 reviewer 권한은 Pod/ServiceAccount GET으로 검토해야 합니다.
