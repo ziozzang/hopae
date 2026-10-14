@@ -921,3 +921,21 @@ acceptance. Application calls are not replayed. The fixture preserves operating
 data and emits only the result, never receipts, credentials or signing seeds.
 These local executable checks do not establish receipt-enabled Kubernetes or
 production activation, human/workload issuance or signed permission projection.
+
+## v0.0.6 publication and operating adoption
+
+[Hopae v0.0.6](https://github.com/ziozzang/hopae/releases/tag/v0.0.6) is published
+at 896ece5 with five independently verified Linux amd64 static signed assets;
+all downloaded assets match. The exact executable passed the local receipt
+fixture and the remote Kubernetes package with a receipt-enabled Hopae Pod,
+real Hangang mTLS client and existing browser/admin/application lifecycle tests.
+The Kubernetes receipt check covers issuance/verification over service DNS;
+same-channel receipt revocation/restoration and seven trust refusals were qualified
+in the local actual-executable fixture. The owned namespace was removed.
+
+Internal adoption preserved user/provider/session/grant/MFA/profile authority data
+and environment after real-DB-clone qualification and private rollback backups.
+HTTP/HOP1 mTLS expired/invalid refusal and a second container restart passed.
+Operating issuer resources remain unconfigured; native receipt activation requires
+explicit deployment keys/scopes. Human/workload receipts, signed permission,
+credential projection, fleet replication and automatic updates remain open.
