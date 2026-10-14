@@ -4,3 +4,5 @@ pub mod v1 {
 }
 
 pub mod request_binding;
+
+pub mod receipt;

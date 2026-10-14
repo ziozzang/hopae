@@ -4,6 +4,8 @@ version = "0.0.3"
 edition = "2024"
 license = "MIT"
 [dependencies]
+ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
+subtle = "2"
 sha2 = "0.10"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"

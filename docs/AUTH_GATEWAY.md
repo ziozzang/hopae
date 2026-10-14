@@ -796,3 +796,15 @@ method/body/path/query variation and malformed origin-form refusal tests remain
 unchanged in meaning. This only establishes agreement on request binding; it
 does not authenticate metadata, issue permissions or activate projection RPC.
 The gateway must supply the final transmitted request context, not client claims.
+
+## Shared receipt cryptography (unreleased)
+
+The provider-independent contract also exposes `receipt` cryptography: the existing
+146-byte v1 receipt, domain-separated Ed25519 signing and strict verification,
+purpose/binding/nonce checks and a maximum one-second lifetime. Hopae re-exports
+the shared implementation. Binding comparison remains constant-time. This
+extraction preserves the existing crypto contract and does not move issuer/key
+selection, live owner-state checks or atomic replay admission into transport.
+Verification alone never grants permission or releases an upstream secret.
+The contract tests and ten owning projection-admission regressions pass. No
+receipt RPC endpoint or upstream credential delivery is activated by extraction.

@@ -1022,8 +1022,10 @@ dependencies = [
 name = "hopae-grpc"
 version = "0.0.3"
 dependencies = [
+ "ed25519-dalek",
  "prost",
  "sha2",
+ "subtle",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
