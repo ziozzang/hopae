@@ -808,3 +808,12 @@ selection, live owner-state checks or atomic replay admission into transport.
 Verification alone never grants permission or releases an upstream secret.
 The contract tests and ten owning projection-admission regressions pass. No
 receipt RPC endpoint or upstream credential delivery is activated by extraction.
+
+The same contract now owns `PrincipalKind` and `receipt_binding` context/types,
+including native identity/key generations, service/audience/request scope and
+permission-chain owner revisions. Hopae re-exports them without a conversion
+layer. Existing authentication/permission fixed vectors and all field fences
+remain valid. Seven pure contract tests and thirteen owning key/issuer/replay
+tests pass. The types describe claims; callers must still authenticate their
+source, select pinned live keys and enforce current owner/replay state. This
+source extraction does not activate transport or projection delivery.

@@ -6,3 +6,13 @@ pub mod v1 {
 pub mod request_binding;
 
 pub mod receipt;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrincipalKind {
+    Human,
+    Service,
+    Workload,
+    Network,
+}
+
+pub mod receipt_binding;

@@ -19,13 +19,8 @@ pub mod relay;
 pub mod request_binding;
 pub mod runtime;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PrincipalKind {
-    Human,
-    Service,
-    Workload,
-    Network,
-}
+pub use hopae_grpc::PrincipalKind;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subject {
     pub issuer: String,
