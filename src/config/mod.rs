@@ -1837,6 +1837,32 @@ mod tests {
     }"#;
 
     #[test]
+    fn root_kubernetes_profile_loads_references_and_refuses_inline_secret() {
+        let mut value: serde_json::Value = serde_json::from_str(BASE).unwrap();
+        value["apps"] =
+            serde_json::json!([{"app_id":"orders","hosts":["app.example.test"],"ports":[443]}]);
+        value["authentication_gateway"] = serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"app.example.test","ports":[443],"realm":"example-cluster","kubernetes_tokenreview":{"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"k8s:"}}]});
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        let loaded = load(file.path()).unwrap();
+        assert_eq!(
+            loaded.authentication_gateway.unwrap().profiles[0]
+                .kubernetes_tokenreview
+                .as_ref()
+                .unwrap()
+                .token_prefix,
+            "k8s:"
+        );
+        value["authentication_gateway"]["profiles"][0]["kubernetes_tokenreview"]["reviewer_token"] =
+            "do-not-display-fixture".into();
+        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = load(file.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("environment variable name")
+                && !error.contains("do-not-display-fixture")
+        );
+    }
+    #[test]
     fn external_verifier_configuration_validates_references_and_redacts_material_errors() {
         let verifier = serde_json::json!({"factor":"push","configuration_revision":1,"url":"https://verifier.example.test/check","verifier_key_env":"OWNED_FACTOR_KEY","timeout_ms":100});
         let config =

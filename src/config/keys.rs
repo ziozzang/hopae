@@ -170,6 +170,24 @@ pub(super) const ROOT: Node = Obj(&[
                             ("verifier_key_env", Leaf),
                         ]),
                     ),
+                    (
+                        "kubernetes_tokenreview",
+                        Obj(&[
+                            (
+                                "connection",
+                                Obj(&[
+                                    ("api_origin", Leaf),
+                                    ("issuer", Leaf),
+                                    ("cluster_id", Leaf),
+                                    ("audience", Leaf),
+                                    ("timeout_ms", Leaf),
+                                ]),
+                            ),
+                            ("ca_pem_env", Leaf),
+                            ("reviewer_token_env", Leaf),
+                            ("token_prefix", Leaf),
+                        ]),
+                    ),
                     ("networks", Arr(&Leaf)),
                     ("session_fallback", Leaf),
                     ("relay_token_prefix", Leaf),
