@@ -893,3 +893,17 @@ clock rounding failure in Hangang. This qualifies client/server receipt exchange
 not application forwarding, permission proofs or projected credential delivery.
 
 The owned service-stack fixture supports `--grpc --resource-catalog` to exercise actual Hangang resource gates. The four-process run with Sumunjang and `--durable-restart` passed owner class/catalog mutation, service/method/IP isolation, refusal without upstream calls, network outage and durable authentication/authorization revocation. The legacy gRPC variant also passed. These are local functional fixtures, not Kubernetes or production adoption of resource gates.
+
+## v0.0.6 preparation
+
+The current service receipt source passed full all-feature regression (919 passed,
+42 ignored), strict all-feature/all-target Clippy and documentation/publication
+checks. The provider-independent contract passed seven tests. The actual mTLS
+fixture with the rebuilt Hangang 0.3.4 client passed issuance, immediate profile
+revocation refusal and restoration on the same channel. The captured internal proof
+avoids a second provider call and remains fenced by profile/application ownership.
+The native issuer is explicitly configured and reference-only; signing resources
+are separate from artifact release keys. This prepares a service-authentication
+capability, not human/workload issuance, signed permission or upstream credential
+projection. Static artifact qualification, signed publication and operating
+adoption of 0.0.6 remain pending.
