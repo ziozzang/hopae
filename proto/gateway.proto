@@ -1,0 +1,6 @@
+syntax = "proto3";
+package hangang.hopae.v1;
+service Authentication { rpc Verify(VerifyRequest) returns (VerifyReply); }
+message Header { string name = 1; bytes value = 2; }
+message VerifyRequest { uint64 request_id = 1; repeated Header headers = 2; }
+message VerifyReply { uint64 request_id = 1; uint32 status = 2; repeated Header headers = 3; bytes body = 4; }

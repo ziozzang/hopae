@@ -444,6 +444,7 @@ struct EventWiring {
 
 /// Bound listeners and the open store; call [`Bound::run`] to serve.
 pub struct Bound {
+    grpc_gateway: Option<(TcpListener, tonic::transport::ServerTlsConfig)>,
     native_gateway: Option<(TcpListener, SocketAddr)>,
     native_gateway_tls: Option<tokio_rustls::TlsAcceptor>,
     portal: TcpListener,
@@ -804,12 +805,34 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         }
         None => None,
     };
+    let grpc_gateway = match &cfg.listen.grpc_gateway {
+        Some(value) => {
+            let settings = cfg
+                .listen
+                .native_gateway_tls
+                .as_ref()
+                .context("gRPC gateway requires mTLS")?;
+            let tls = hangang_runtime::configuration(
+                &settings.certificate,
+                &settings.key,
+                &settings.client_ca,
+            )?;
+            let listener = TcpListener::bind(value)
+                .await
+                .context("binding gRPC gateway")?;
+            Some((listener, tls))
+        }
+        None => None,
+    };
     // Once set, never changed: the status page shows what is actually bound.
     let _ = services.listeners.set(crate::admin::Listeners {
         portal: portal_addr.to_string(),
         gateway: gateway_addr.to_string(),
         admin: admin.as_ref().map(|a| a.1.to_string()).unwrap_or_default(),
         native_gateway: native_gateway.as_ref().map(|a| a.1.to_string()),
+        grpc_gateway: grpc_gateway
+            .as_ref()
+            .map(|a| a.0.local_addr().unwrap().to_string()),
     });
     match &admin {
         Some((_, a)) => tracing::info!(
@@ -818,6 +841,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         None => tracing::info!("listeners bound: portal {portal_addr}, gateway {gateway_addr}"),
     }
     Ok(Bound {
+        grpc_gateway,
         native_gateway,
         native_gateway_tls,
         portal,
@@ -970,6 +994,18 @@ impl Bound {
         let wait = |mut rx: watch::Receiver<bool>| async move {
             let _ = rx.wait_for(|stop| *stop).await;
         };
+        let grpc_router = routers.gateway.clone();
+        let grpc_keys = self.services.caller_keys.clone();
+        let grpc_stop = stop_rx.clone();
+        let grpc = async {
+            match self.grpc_gateway {
+                Some((listener, tls)) => {
+                    http::grpc_gateway::serve(listener, tls, grpc_router, grpc_keys, grpc_stop)
+                        .await
+                }
+                None => Ok(()),
+            }
+        };
         let native_router = routers.gateway.clone();
         let native_keys = self.services.caller_keys.clone();
         let native_stop = stop_rx.clone();
@@ -1031,7 +1067,7 @@ impl Bound {
         let hooks = async { Ok::<(), std::io::Error>(()) };
 
         self.services.readiness.set(true);
-        let servers = async { tokio::join!(portal, gateway, admin, hooks, native) };
+        let servers = async { tokio::join!(portal, gateway, admin, hooks, native, grpc) };
         tokio::pin!(servers);
         // Serve until the stop signal, then give in-flight requests DRAIN to finish.
         let mut stopped = stop_rx.clone();
@@ -1068,7 +1104,8 @@ impl Bound {
         .await;
         tracing::info!("shutdown complete");
 
-        if let Some((p, g, a, h, n)) = served {
+        if let Some((p, g, a, h, n, grpc)) = served {
+            grpc.context("gRPC gateway listener")?;
             p.context("portal listener")?;
             g.context("gateway listener")?;
             a.context("admin listener")?;

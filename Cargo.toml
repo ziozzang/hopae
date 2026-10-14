@@ -16,6 +16,10 @@ name = "hopae"
 path = "src/main.rs"
 
 [dependencies]
+hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "81352ef35a2a0c522e02b2f14ac4770b59a17d40" }
+tonic = { version = "0.14.6", features = ["tls-ring"] }
+tonic-prost = "0.14.6"
+prost = "0.14"
 libc = "0.2"
 tower = { version = "0.5", features = ["util"] }
 anyhow = "1"
@@ -80,3 +84,6 @@ opt-level = 2
 # Local response-frame hardening; provenance and maintenance in vendor/ldap3/HOPAE_PATCH.md.
 [patch.crates-io]
 ldap3 = { path = "vendor/ldap3" }
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"

@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 32 -->
+<!-- doc-rev: 33 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -446,3 +446,7 @@ and commits reference-only audit with the document, then installs the prepared
 memory snapshot. Delegated Hangang requests use signed
 `POST /v1/authentication/projections/publish` with `revision` and `configuration`.
 The Hangang module UI and gateway projection transport still need integration.
+
+### gRPC verification listener
+
+`listen.grpc_gateway` is an optional literal socket address. It requires `listen.native_gateway_tls` and authenticated gateway callers, even on loopback. HOP1 may be disabled. See [gRPC verification](GRPC.md).

@@ -2566,3 +2566,266 @@ async fn kubernetes_workload_http_native_parity_and_profile_revocation() {
         transport.await.unwrap().unwrap();
     }
 }
+
+#[tokio::test]
+async fn grpc_mtls_session_revocation_and_http_parity() {
+    use std::process::{Command, Stdio};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let run = |args: &[&str]| {
+        assert!(
+            Command::new("openssl")
+                .current_dir(root)
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    run(&[
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        "ca.key",
+        "-out",
+        "ca.pem",
+        "-days",
+        "1",
+        "-subj",
+        "/CN=Owned HOP1 CA",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+    ]);
+    for (name, usage) in [("server", "serverAuth"), ("client", "clientAuth")] {
+        let key = format!("{name}.key");
+        let csr = format!("{name}.csr");
+        let cert = format!("{name}.pem");
+        let ext = format!("{name}.ext");
+        run(&[
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            &key,
+            "-out",
+            &csr,
+            "-subj",
+            &format!("/CN={name}"),
+        ]);
+        std::fs::write(root.join(&ext),format!("basicConstraints=critical,CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage={usage}\nsubjectAltName=DNS:hopae.example.test\n")).unwrap();
+        run(&[
+            "x509",
+            "-req",
+            "-in",
+            &csr,
+            "-CA",
+            "ca.pem",
+            "-CAkey",
+            "ca.key",
+            "-CAcreateserial",
+            "-days",
+            "1",
+            "-extfile",
+            &ext,
+            "-out",
+            &cert,
+        ]);
+    }
+
+    use hopae::http::grpc_gateway::{
+        self,
+        v1::{Header, VerifyRequest, authentication_client::AuthenticationClient},
+    };
+    use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+    let fx = Fx::new("m1-basic");
+    let keys = Arc::new(CallerKeys::new(
+        Some(Secret::new("grpc-test-key".into())),
+        None,
+        false,
+    ));
+    let router = router(GatewayState::new(
+        GatewayConfig::from_config(&fx.cfg),
+        fx.ctx.clone(),
+        keys.clone(),
+        32,
+        None,
+        None,
+    ));
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let tls = hangang_runtime::configuration(
+        &root.join("server.pem"),
+        &root.join("server.key"),
+        &root.join("ca.pem"),
+    )
+    .unwrap();
+    let (tx, rx) = watch::channel(false);
+    let task = tokio::spawn(grpc_gateway::serve(listener, tls, router.clone(), keys, rx));
+    let endpoint = Endpoint::from_shared(format!("https://127.0.0.1:{}", address.port()))
+        .unwrap()
+        .connect_timeout(Duration::from_secs(2))
+        .timeout(Duration::from_secs(2));
+    let ca = Certificate::from_pem(std::fs::read(root.join("ca.pem")).unwrap());
+    let tls = ClientTlsConfig::new()
+        .domain_name("hopae.example.test")
+        .ca_certificate(ca.clone())
+        .identity(Identity::from_pem(
+            std::fs::read(root.join("client.pem")).unwrap(),
+            std::fs::read(root.join("client.key")).unwrap(),
+        ));
+    let channel = endpoint
+        .clone()
+        .tls_config(tls)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = AuthenticationClient::new(channel);
+    let user = fx.user("grpc@example.test", Some("grpc"), None).await;
+    let session = fx.session(&user).await;
+    let handle = fx.handle(&session, "app.example.test").await;
+    let mut hs = context("/private");
+    hs.push((
+        "cookie".into(),
+        format!("__Host-hopae={}", handle.expose()).into_bytes(),
+    ));
+    let request = |fields: Vec<(String, Vec<u8>)>, token: &str| {
+        let mut request = tonic::Request::new(VerifyRequest {
+            request_id: 17,
+            headers: fields
+                .into_iter()
+                .map(|(name, value)| Header { name, value })
+                .collect(),
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        request
+    };
+    let reply = client
+        .verify(request(hs.clone(), "grpc-test-key"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!((reply.request_id, reply.status), (17, 200));
+    let mut http = Request::builder()
+        .uri(hopae::gateway::hangang::VERIFY_PATH)
+        .header("x-hopae-gateway-key", "grpc-test-key")
+        .body(Body::empty())
+        .unwrap();
+    for (name, value) in &hs {
+        http.headers_mut().append(
+            axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            axum::http::HeaderValue::from_bytes(value).unwrap(),
+        );
+    }
+    let response = router.oneshot(http).await.unwrap();
+    assert_eq!(reply.status, u32::from(response.status().as_u16()));
+    assert_eq!(
+        reply
+            .headers
+            .iter()
+            .find(|h| h.name == "x-hopae-reason")
+            .map(|h| h.value.as_slice()),
+        response
+            .headers()
+            .get("x-hopae-reason")
+            .map(|v| v.as_bytes())
+    );
+    assert_eq!(
+        client
+            .verify(request(hs.clone(), "wrong-key"))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::Unauthenticated
+    );
+    let mut duplicate = request(hs.clone(), "grpc-test-key");
+    duplicate
+        .metadata_mut()
+        .append("authorization", "Bearer grpc-test-key".parse().unwrap());
+    assert_eq!(
+        client.verify(duplicate).await.unwrap_err().code(),
+        tonic::Code::Unauthenticated
+    );
+    let mut injected = hs.clone();
+    injected.push(("X-Hopae-Gateway-Key".into(), b"injected".to_vec()));
+    assert_eq!(
+        client
+            .verify(request(injected, "grpc-test-key"))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::InvalidArgument
+    );
+    assert_eq!(
+        client
+            .verify(request(
+                vec![("cookie".into(), vec![b'x'; 16385])],
+                "grpc-test-key"
+            ))
+            .await
+            .unwrap_err()
+            .code(),
+        tonic::Code::InvalidArgument
+    );
+    let badtls = ClientTlsConfig::new()
+        .domain_name("hopae.example.test")
+        .ca_certificate(ca);
+    if let Ok(channel) = endpoint.tls_config(badtls).unwrap().connect().await {
+        assert!(
+            AuthenticationClient::new(channel)
+                .verify(request(hs.clone(), "grpc-test-key"))
+                .await
+                .is_err()
+        );
+    }
+    fx.exec("UPDATE sessions SET terminated_at=1800000000,terminated_reason='logout'");
+    assert_ne!(
+        client
+            .verify(request(hs, "grpc-test-key"))
+            .await
+            .unwrap()
+            .into_inner()
+            .status,
+        200
+    );
+    tx.send(true).unwrap();
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[test]
+fn grpc_configuration_requires_mtls_and_distinct_authenticated_listener() {
+    let mut cfg = Fx::new("m1-basic").cfg;
+    cfg.listen.grpc_gateway = Some("127.0.0.1:8703".into());
+    assert!(cfg.validate().is_err());
+    cfg.listen.native_gateway_tls = Some(hopae::config::NativeGatewayTls {
+        certificate: "/etc/hopae/server.pem".into(),
+        key: "/etc/hopae/server.key".into(),
+        client_ca: "/etc/hopae/client-ca.pem".into(),
+    });
+    assert!(cfg.validate().is_ok());
+    cfg.listen.native_gateway = cfg.listen.grpc_gateway.clone();
+    assert!(cfg.validate().is_err());
+    cfg.listen.native_gateway = None;
+    cfg.gateway.allow_unauthenticated_caller = true;
+    assert!(cfg.validate().is_err());
+    cfg.gateway.allow_unauthenticated_caller = false;
+    cfg.listen.gateway = "127.0.0.1:8701".into();
+    cfg.listen.grpc_gateway = Some(cfg.listen.gateway.clone());
+    assert!(cfg.validate().is_err());
+    cfg.listen.grpc_gateway = Some("239.0.0.1:8703".into());
+    assert!(cfg.validate().is_err());
+}

@@ -1,6 +1,6 @@
 # Hopae
 
-<!-- translation-status: source=README.md source-rev=7 status=current -->
+<!-- translation-status: source=README.md source-rev=8 status=current -->
 
 [문서 목차](docs/ko/README.md) · [로드맵](docs/ko/ROADMAP.md) · [릴리스 노트](CHANGELOG.md) · [English](README.md)
 
@@ -114,3 +114,5 @@ target/release/hopae run     --config deploy/hopae.example.json
 인증 성공만으로 서비스 권한을 부여하지 않습니다. 미배정 사용자는 guest이며
 auth-proxy가 보호 요청을 거부합니다. 프로바이더·사용자·세션은 계속 호패 소유이고,
 네이티브 콘솔 관리 권한은 서비스 접근 권한과 구분합니다.
+
+[gRPC 게이트웨이 인증](docs/ko/GRPC.md)은 HTTP/HOP1 인증 경로와 한강 공용 서버 런타임을 공유합니다. 빌드에 `protoc`가 필요합니다.

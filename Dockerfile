@@ -9,7 +9,7 @@
 
 FROM rust:1.96-bookworm AS build
 RUN apt-get update \
- && apt-get install -y --no-install-recommends musl-tools \
+ && apt-get install -y --no-install-recommends musl-tools protobuf-compiler \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 
@@ -23,11 +23,13 @@ RUN case "$(uname -m)" in \
 
 # Dependencies first, so a source-only change reuses the cached layer.
 COPY Cargo.toml Cargo.lock build.rs ./
+COPY proto ./proto
+COPY vendor ./vendor
 RUN mkdir -p src/store/migrations \
  && echo 'fn main() {}' > src/main.rs \
  && echo '' > src/lib.rs \
  && cargo build --release --locked --target "$(cat /target)" \
- ; rm -rf src
+ && rm -rf src
 
 COPY build.rs Cargo.toml Cargo.lock ./
 COPY src ./src

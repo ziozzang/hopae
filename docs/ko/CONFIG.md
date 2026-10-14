@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=32 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=33 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -419,3 +419,7 @@ no-store를 제공합니다. `PUT /v1/authentication/projections`는 기존 관�
 메모리 snapshot을 설치합니다. Hangang 위임 요청은 서명된
 `POST /v1/authentication/projections/publish`에 `revision`·`configuration`을
 사용합니다. Hangang 모듈 UI와 gateway 변환 전송 연결은 남아 있습니다.
+
+### gRPC 인증 확인 리스너
+
+선택 설정 `listen.grpc_gateway`는 리터럴 소켓 주소이며 루프백에서도 `listen.native_gateway_tls`와 게이트웨이 인증 자격이 필수다. HOP1은 비활성화할 수 있다. [gRPC 인증](GRPC.md) 참조.

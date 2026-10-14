@@ -1,6 +1,6 @@
 # Hopae
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](docs/README.md) · [Roadmap](docs/ROADMAP.md) · [Release notes](CHANGELOG.md) · [한국어](README.ko.md)
 
@@ -119,3 +119,5 @@ to the independent Pumgye authority and enforces access with Sumunjang network e
 alone does not grant service access: unassigned users remain guest and the
 auth-proxy refuses protected requests. Hopae retains provider, user and session
 ownership; native console grants remain distinct from service permissions.
+
+[gRPC gateway verification](docs/GRPC.md) shares the HTTP/HOP1 authentication pipeline and Hangang server runtime. Building requires `protoc`.

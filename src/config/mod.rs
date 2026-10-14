@@ -84,6 +84,9 @@ pub struct Listen {
     /// Authenticated persistent verification; remote transport requires mTLS.
     #[serde(default)]
     pub native_gateway: Option<String>,
+    /// Additional gRPC verification endpoint; mandatory shared gateway mTLS.
+    #[serde(default)]
+    pub grpc_gateway: Option<String>,
     #[serde(default)]
     pub native_gateway_tls: Option<NativeGatewayTls>,
     /// Admin listener; `127.0.0.1:8702` when `admin.public_url` is set.
@@ -105,6 +108,7 @@ impl Default for Listen {
             portal: default_portal_addr(),
             gateway: default_gateway_addr(),
             native_gateway: None,
+            grpc_gateway: None,
             native_gateway_tls: None,
             admin: None,
         }
@@ -784,7 +788,7 @@ impl Config {
             errs.push("listen.portal and listen.gateway must differ".to_string());
         }
         if let Some(tls) = &self.listen.native_gateway_tls
-            && (self.listen.native_gateway.is_none()
+            && ((self.listen.native_gateway.is_none() && self.listen.grpc_gateway.is_none())
                 || [&tls.certificate, &tls.key, &tls.client_ca]
                     .iter()
                     .any(|p| !p.is_absolute()))
@@ -812,6 +816,16 @@ impl Config {
                 }
                 _ => errs
                     .push("listen.native_gateway must be a literal socket address; outside loopback mTLS is required".into()),
+            }
+        }
+        if let Some(value) = &self.listen.grpc_gateway {
+            match value.parse::<SocketAddr>() {
+                Ok(address) if !address.ip().is_multicast() && self.listen.native_gateway_tls.is_some() && !self.gateway.allow_unauthenticated_caller => {
+                    if address.port() != 0 && [self.listen.portal.as_str(), self.listen.gateway.as_str(), self.listen.native_gateway.as_deref().unwrap_or(""), self.listen.admin.as_deref().unwrap_or("")].iter().any(|v| v.parse::<SocketAddr>().ok() == Some(address)) {
+                        errs.push("listen.grpc_gateway must have a distinct address".into());
+                    }
+                }
+                _ => errs.push("listen.grpc_gateway requires a literal address, mTLS and authenticated callers".into()),
             }
         }
         if let Some(a) = &self.listen.admin {

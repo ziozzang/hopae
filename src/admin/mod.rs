@@ -150,6 +150,7 @@ pub struct Listeners {
     pub gateway: String,
     pub admin: String,
     pub native_gateway: Option<String>,
+    pub grpc_gateway: Option<String>,
 }
 
 /// An authenticated administrator, as authentication hands it to a handler.

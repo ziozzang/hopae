@@ -289,6 +289,9 @@ pub async fn collect(st: &AdminState) -> Result<StatusData, StoreError> {
         "gateway": st.listeners.gateway,
         "admin": st.listeners.admin,
     });
+    if let Some(grpc) = &st.listeners.grpc_gateway {
+        listeners["grpc_gateway"] = json!(grpc);
+    }
     if let Some(native) = &st.listeners.native_gateway {
         listeners["native_gateway"] = json!(native);
     }
