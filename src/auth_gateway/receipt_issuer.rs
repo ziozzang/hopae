@@ -442,6 +442,81 @@ mod tests {
         );
     }
     #[tokio::test]
+    async fn native_service_adapter_refuses_late_verifier_success_after_profile_revocation() {
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let released = Arc::new(tokio::sync::Notify::new());
+        let arrived = entered.clone();
+        let resume = released.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route("/verify", axum::routing::post(move || {
+            let arrived = arrived.clone(); let resume = resume.clone();
+            async move {
+                arrived.notify_one(); resume.notified().await;
+                let now = crate::crypto::SystemClock.now().0 as u64;
+                axum::Json(serde_json::json!({"active":true,"subject":"worker","service_id":"orders","expires_at":now+1000}))
+            }
+        }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut configuration = config(Some(format!("http://{address}/verify")));
+        configuration.profiles[0].api_keys[0].expires_at = None;
+        let mut owner = owner(&mut db, configuration);
+        let reader = owner.reader();
+        let old = reader.load_full();
+        let issuer = issuer(Arc::new(crate::crypto::SystemClock));
+        let calls = std::cell::Cell::new(0usize);
+        let guard = || {
+            calls.set(calls.get() + 1);
+            Ok(())
+        };
+        let issue = issuer.authenticate_service_and_issue(
+            &reader,
+            ServiceRequest {
+                host: "orders.example.test",
+                port: 443,
+                credential: Some("partner:owned-relay-credential"),
+                client_ip: "203.0.113.9".parse().unwrap(),
+            },
+            request(),
+            &guard,
+        );
+        let revoke = async {
+            tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+                .await
+                .unwrap();
+            owner
+                .publish(
+                    &mut db,
+                    1,
+                    None,
+                    "owned-operator",
+                    &|_| Some(TOKEN.into()),
+                    &|_| Ok(()),
+                )
+                .unwrap();
+            assert_eq!(reader.load_full().revision, 2);
+            assert!(
+                old.available(),
+                "completed publication resets shared availability; pointer fencing remains necessary"
+            );
+            released.notify_one();
+        };
+        let (result, ()) = tokio::join!(issue, revoke);
+        assert!(
+            result.is_err(),
+            "late valid external identity must not obtain a revoked receipt"
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "old owner must be rejected before signing guard"
+        );
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
     async fn native_service_adapter_fences_owner_change_during_final_guard() {
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
         let mut configuration = config(None);
