@@ -110,3 +110,37 @@ pub fn unavailable(request_id: &str) -> Response<Body> {
         .insert(http::header::RETRY_AFTER, HeaderValue::from_static("1"));
     response
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn remaining_evidence_lifetime_is_bounded_and_expired_identity_is_absent() {
+        let key = "owned-test-service-key-at-least-thirty-two";
+        let config = serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"api.example.test","ports":[443],"realm":"owned","api_keys":[{"token_env":"FIXTURE_KEY","subject":"worker"}]}]})).unwrap();
+        let runtime = crate::auth_gateway::runtime::Runtime::compile(&config, &|name| {
+            (name == "FIXTURE_KEY").then(|| key.to_owned())
+        })
+        .unwrap();
+        let evidence = runtime
+            .authenticate(
+                "api.example.test",
+                443,
+                Some(key),
+                "127.0.0.1".parse().unwrap(),
+                100,
+            )
+            .unwrap();
+        let reply = response_at(Some(&evidence), "fixture", 1001);
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(reply.headers()["x-hopae-evidence-ttl-ms"], "99");
+        assert_eq!(
+            response_at(Some(&evidence), "fixture", 0).headers()["x-hopae-evidence-ttl-ms"],
+            "1000"
+        );
+        let expired = response_at(Some(&evidence), "fixture", 1100);
+        assert_eq!(expired.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!expired.headers().contains_key("x-forwarded-user"));
+        assert!(!expired.headers().contains_key("x-hopae-evidence-ttl-ms"));
+    }
+}

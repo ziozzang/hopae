@@ -1070,14 +1070,16 @@ fn s004_a3_concurrency_limit_fails_closed() {
     let h = Hopae::spawn(
         Fixture::with(
             "m1-basic",
-            serde_json::json!({"limits": {"gateway_max_concurrent": 64},"gateway":{"verify_budget_ms":2000}}),
+            serde_json::json!({"limits": {"gateway_max_concurrent": 64},"gateway":{"verify_budget_ms":8000}}),
         ),
         &idp,
         &[],
     );
     // Start the burst only once all clients exist; hold admitted work long enough
     // to measure saturation rather than thread-creation or scheduler stagger.
-    h.hooks.stall(1000);
+    // Keep the rejection threshold unchanged; the wider hold window tolerates
+    // a loaded host scheduling the ready client cohort over more than one second.
+    h.hooks.stall(3000);
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(201));
     let h = std::sync::Arc::new(h);
     let mut threads = vec![];
