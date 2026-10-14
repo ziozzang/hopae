@@ -159,3 +159,10 @@ Pumgye/Sumunjang endpoint fixtures passed on debug and static candidates. Newly
 versioned assets still require qualification before publication; operating issuer
 resources remain separately configured. Permit/projection/fleet integration is
 incomplete. GitHub Actions remains disabled.
+
+[v0.0.7](https://github.com/ziozzang/hopae/releases/tag/v0.0.7) is now
+published at `00684199ed5f63d1cec47b8669623ea681aca745`. Exact newly versioned static three-authority endpoint
+qualification, source regression/Clippy and release boundary checks passed.
+All downloaded assets matched originals; pinned signatures, version/target/URL
+bindings and static ELF were independently verified. Internal adoption and
+Kubernetes combined-endpoint qualification remain subsequent gates.
