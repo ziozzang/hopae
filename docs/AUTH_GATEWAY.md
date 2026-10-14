@@ -785,3 +785,14 @@ human-provider circuit. Observations may change immediately and do not authorize
 requests or extend cached evidence. Collection performs no provider network call.
 Runtime delivery of signed credential projection is still a separate unfinished
 integration; observing connectors does not enable upstream credential delivery.
+
+## Shared native request binding contract (unreleased)
+
+The provider-independent `hopae-grpc` contract crate now exposes
+`request_binding::{Request, digest, InvalidRequest}`. Hopae re-exports this exact
+implementation; consumers statically link the pinned contract rather than copy
+the request hashing rules. The existing fixed digest vector, field separation,
+method/body/path/query variation and malformed origin-form refusal tests remain
+unchanged in meaning. This only establishes agreement on request binding; it
+does not authenticate metadata, issue permissions or activate projection RPC.
+The gateway must supply the final transmitted request context, not client claims.

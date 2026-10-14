@@ -1023,6 +1023,7 @@ name = "hopae-grpc"
 version = "0.0.3"
 dependencies = [
  "prost",
+ "sha2",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
