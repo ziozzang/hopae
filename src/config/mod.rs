@@ -92,6 +92,9 @@ pub struct Listen {
     /// Admin listener; `127.0.0.1:8702` when `admin.public_url` is set.
     #[serde(default)]
     pub admin: Option<String>,
+    /// Optional mandatory mTLS for the administrator listener.
+    #[serde(default)]
+    pub admin_tls: Option<NativeGatewayTls>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,6 +114,7 @@ impl Default for Listen {
             grpc_gateway: None,
             native_gateway_tls: None,
             admin: None,
+            admin_tls: None,
         }
     }
 }
@@ -827,6 +831,14 @@ impl Config {
                 }
                 _ => errs.push("listen.grpc_gateway requires a literal address, mTLS and authenticated callers".into()),
             }
+        }
+        if let Some(tls) = &self.listen.admin_tls
+            && (!self.admin_enabled()
+                || [&tls.certificate, &tls.key, &tls.client_ca]
+                    .iter()
+                    .any(|p| !p.is_absolute()))
+        {
+            errs.push("listen.admin_tls requires an enabled console and absolute TLS paths".into());
         }
         if let Some(a) = &self.listen.admin {
             match a.parse::<SocketAddr>() {

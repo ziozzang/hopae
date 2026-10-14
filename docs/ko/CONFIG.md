@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=33 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=34 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -423,3 +423,15 @@ no-store를 제공합니다. `PUT /v1/authentication/projections`는 기존 관�
 ### gRPC 인증 확인 리스너
 
 선택 설정 `listen.grpc_gateway`는 리터럴 소켓 주소이며 루프백에서도 `listen.native_gateway_tls`와 게이트웨이 인증 자격이 필수다. HOP1은 비활성화할 수 있다. [gRPC 인증](GRPC.md) 참조.
+
+### 관리자 리스너 mTLS
+
+listen.admin_tls에 절대 경로 certificate·key·client_ca를 설정할 수 있습니다.
+admin.public_url로 활성화된 콘솔이 필수이며 공용 제한 런타임으로 클라이언트
+인증서가 필수인 HTTPS를 제공합니다. 설정이 없으면 기존 루프백/평문 관리를 유지합니다.
+TLS는 관리자 계정·권한·세션·인증 수준·서명 위임 검사를 대신하지 않고 실제 TCP
+접속자 문맥을 유지합니다. 한강 서명 위임은 루프백 또는 서버가 주입한 검증된 TLS
+접속 증거를 요구하며 HTTP 헤더로 그 증거를 만들 수 없습니다. 원격 mTLS 호출도
+유효한 위임 서명과 네이티브 권한이 필요합니다.
+실제 인증서 거부·로그인 거부 유지·종료·설정 제약·전송 선택 위조 거부를 검증하며,
+전체 원격 위임 브라우저/K8s 검증은 별도 단계입니다.

@@ -444,6 +444,7 @@ struct EventWiring {
 
 /// Bound listeners and the open store; call [`Bound::run`] to serve.
 pub struct Bound {
+    admin_tls: Option<Arc<rustls::ServerConfig>>,
     grpc_gateway: Option<(TcpListener, tonic::transport::ServerTlsConfig)>,
     native_gateway: Option<(TcpListener, SocketAddr)>,
     native_gateway_tls: Option<tokio_rustls::TlsAcceptor>,
@@ -784,6 +785,15 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         }
         None => None,
     };
+    let admin_tls = cfg
+        .listen
+        .admin_tls
+        .as_ref()
+        .map(|tls| {
+            hangang_runtime::tls_config(&tls.certificate, &tls.key, &tls.client_ca, &[b"http/1.1"])
+        })
+        .transpose()
+        .context("loading administrator mTLS")?;
     let gateway = TcpListener::bind(cfg.gateway_addr())
         .await
         .context("binding gateway listener")?;
@@ -841,6 +851,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         None => tracing::info!("listeners bound: portal {portal_addr}, gateway {gateway_addr}"),
     }
     Ok(Bound {
+        admin_tls,
         grpc_gateway,
         native_gateway,
         native_gateway_tls,
@@ -1042,14 +1053,19 @@ impl Bound {
         let admin = async {
             match (self.admin, routers.admin) {
                 (Some((l, _)), Some(router)) => {
-                    axum::serve(
-                        l,
-                        router.into_make_service_with_connect_info::<SocketAddr>(),
-                    )
-                    .with_graceful_shutdown(wait(stop_rx.clone()))
-                    .await
+                    if let Some(tls) = self.admin_tls {
+                        hangang_runtime::serve_https(l, tls, router, wait(stop_rx.clone())).await
+                    } else {
+                        axum::serve(
+                            l,
+                            router.into_make_service_with_connect_info::<SocketAddr>(),
+                        )
+                        .with_graceful_shutdown(wait(stop_rx.clone()))
+                        .await
+                        .map_err(anyhow::Error::from)
+                    }
                 }
-                _ => Ok(()),
+                _ => Ok::<(), anyhow::Error>(()),
             }
         };
         #[cfg(feature = "test-hooks")]

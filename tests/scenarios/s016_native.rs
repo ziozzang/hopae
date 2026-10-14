@@ -2870,3 +2870,18 @@ fn grpc_configuration_requires_mtls_and_distinct_authenticated_listener() {
     cfg.listen.grpc_gateway = Some("239.0.0.1:8703".into());
     assert!(cfg.validate().is_err());
 }
+
+#[test]
+fn admin_mtls_requires_console_and_absolute_material() {
+    let mut cfg = Fx::new("m1-basic").cfg;
+    cfg.listen.admin_tls = Some(hopae::config::NativeGatewayTls {
+        certificate: "/private/server.pem".into(),
+        key: "/private/key.pem".into(),
+        client_ca: "/private/ca.pem".into(),
+    });
+    assert!(cfg.validate().is_err());
+    cfg.admin.public_url = Some("https://admin.example.test".into());
+    assert!(cfg.validate().is_ok());
+    cfg.listen.admin_tls.as_mut().unwrap().key = "relative.key".into();
+    assert!(cfg.validate().is_err());
+}

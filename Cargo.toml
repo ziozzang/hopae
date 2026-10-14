@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 hopae-grpc = { path = "crates/hopae-grpc" }
-hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "039166beac3a9a40caa36e00abe4c46d665f4727" }
+hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "ba1a06c56c3bec38499ca63fdf3ae65da237fbbe" }
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 libc = "0.2"
 tower = { version = "0.5", features = ["util"] }

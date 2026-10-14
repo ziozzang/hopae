@@ -114,6 +114,10 @@ pub(super) const ROOT: Node = Obj(&[
             ("portal", Leaf),
             ("gateway", Leaf),
             ("admin", Leaf),
+            (
+                "admin_tls",
+                Obj(&[("certificate", Leaf), ("key", Leaf), ("client_ca", Leaf)]),
+            ),
             ("native_gateway", Leaf),
             ("grpc_gateway", Leaf),
             (

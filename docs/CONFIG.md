@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 33 -->
+<!-- doc-rev: 34 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -450,3 +450,18 @@ The Hangang module UI and gateway projection transport still need integration.
 ### gRPC verification listener
 
 `listen.grpc_gateway` is an optional literal socket address. It requires `listen.native_gateway_tls` and authenticated gateway callers, even on loopback. HOP1 may be disabled. See [gRPC verification](GRPC.md).
+
+### Administrator listener mTLS
+
+`listen.admin_tls` optionally contains absolute `certificate`, `key` and `client_ca`
+paths. An enabled `admin.public_url` console is required. The admin listener then
+serves mandatory-client-certificate HTTPS through the shared bounded runtime;
+without this object existing loopback/plain administration remains compatible.
+TLS does not authenticate an administrator account or bypass native grants, session,
+assurance or signed delegation checks. Actual TCP peer context is preserved.
+Signed Hangang delegation accepts a loopback peer or server-injected authenticated
+TLS peer evidence; arbitrary HTTP headers cannot provide that evidence. A remote
+mTLS caller still needs the valid delegation signature and native authorization.
+Current tests cover actual certificate refusal, preserved login denial, shutdown,
+configuration constraints and unforgeable transport selection. Full remote delegated
+browser/Kubernetes qualification remains a separate gate.

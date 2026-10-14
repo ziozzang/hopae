@@ -209,11 +209,7 @@ pub async fn middleware(
     let Some(config) = &st.delegation else {
         return denied();
     };
-    if !req
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .is_some_and(|p| p.0.ip().is_loopback())
-    {
+    if !transport_allowed(&req) {
         return denied();
     }
     let Ok(key) = std::env::var(&config.key_env) else {
@@ -523,5 +519,40 @@ mod tests {
         std::os::unix::fs::symlink(&p, &q).unwrap();
         assert!(admit_nonce(&q, "op", 100).is_none());
         assert!(mappings(&p).is_none());
+    }
+}
+
+fn transport_allowed(request: &Request) -> bool {
+    request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|peer| {
+            peer.0.ip().is_loopback()
+                || request
+                    .extensions()
+                    .get::<hangang_runtime::AuthenticatedTlsPeer>()
+                    .is_some()
+        })
+}
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    #[test]
+    fn remote_headers_cannot_forge_authenticated_transport() {
+        let mut request = Request::builder()
+            .header("x-authenticated-tls-peer", "true")
+            .header("x-forwarded-for", "127.0.0.1")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo("192.0.2.9:443".parse::<SocketAddr>().unwrap()));
+        assert!(!transport_allowed(&request));
+        request
+            .extensions_mut()
+            .insert(hangang_runtime::AuthenticatedTlsPeer);
+        assert!(transport_allowed(&request));
+        request.extensions_mut().remove::<ConnectInfo<SocketAddr>>();
+        assert!(!transport_allowed(&request));
     }
 }

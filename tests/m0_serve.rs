@@ -103,3 +103,136 @@ fn binary_serves_and_exits_cleanly_on_sigterm() {
     let exit = child.wait().unwrap();
     assert!(exit.success(), "{exit:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn administrator_mtls_requires_certificate_and_preserves_authentication() {
+    use std::process::{Command, Stdio};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let run = |args: &[&str]| {
+        assert!(
+            Command::new("openssl")
+                .current_dir(root)
+                .args(args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    run(&[
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        "ca.key",
+        "-out",
+        "ca.pem",
+        "-days",
+        "1",
+        "-subj",
+        "/CN=Owned HOP1 CA",
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+    ]);
+    for (name, usage) in [("server", "serverAuth"), ("client", "clientAuth")] {
+        let key = format!("{name}.key");
+        let csr = format!("{name}.csr");
+        let cert = format!("{name}.pem");
+        let ext = format!("{name}.ext");
+        run(&[
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            &key,
+            "-out",
+            &csr,
+            "-subj",
+            &format!("/CN={name}"),
+        ]);
+        std::fs::write(root.join(&ext),format!("basicConstraints=critical,CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage={usage}\nsubjectAltName=DNS:hopae.example.test,DNS:admin.example.test\n")).unwrap();
+        run(&[
+            "x509",
+            "-req",
+            "-in",
+            &csr,
+            "-CA",
+            "ca.pem",
+            "-CAkey",
+            "ca.key",
+            "-CAcreateserial",
+            "-days",
+            "1",
+            "-extfile",
+            &ext,
+            "-out",
+            &cert,
+        ]);
+    }
+
+    let mut json: serde_json::Value = serde_json::from_str(&config_json(root)).unwrap();
+    json["admin"] = serde_json::json!({"public_url":"https://admin.example.test"});
+    json["listen"]["admin"] = serde_json::json!("127.0.0.1:0");
+    json["listen"]["admin_tls"] = serde_json::json!({"certificate":root.join("server.pem"),"key":root.join("server.key"),"client_ca":root.join("ca.pem")});
+    let cfg = hopae::config::parse(&json.to_string()).unwrap();
+    let bound = hopae::app::bind(&cfg).await.unwrap();
+    let address = bound.admin_addr().unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(bound.run(async {
+        let _ = rx.await;
+    }));
+    let ca = reqwest::Certificate::from_pem(&std::fs::read(root.join("ca.pem")).unwrap()).unwrap();
+    let mut pem = std::fs::read(root.join("client.pem")).unwrap();
+    pem.extend(std::fs::read(root.join("client.key")).unwrap());
+    let identity = reqwest::Identity::from_pem(&pem).unwrap();
+    let url = format!("https://admin.example.test:{}/v1/status", address.port());
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .tls_built_in_root_certs(false)
+        .add_root_certificate(ca.clone())
+        .identity(identity)
+        .resolve("admin.example.test", address)
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let response = client
+        .get(&url)
+        .header("x-forwarded-host", "admin.example.test")
+        .header("x-forwarded-proto", "https")
+        .header("x-forwarded-port", "443")
+        .header("x-forwarded-for", "192.0.2.8")
+        .send()
+        .await
+        .unwrap();
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap();
+    assert!(
+        matches!(status, 401 | 403),
+        "unexpected status {status}: {body}"
+    );
+    let anonymous = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .tls_built_in_root_certs(false)
+        .add_root_certificate(ca)
+        .resolve("admin.example.test", address)
+        .timeout(std::time::Duration::from_secs(1))
+        .build()
+        .unwrap();
+    assert!(anonymous.get(&url).send().await.is_err());
+    drop(client);
+    drop(anonymous);
+    tx.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}

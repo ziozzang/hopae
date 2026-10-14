@@ -904,7 +904,7 @@ dependencies = [
 [[package]]
 name = "hangang-runtime"
 version = "0.1.1"
-source = "git+https://github.com/ziozzang/hangang-runtime?rev=039166beac3a9a40caa36e00abe4c46d665f4727#039166beac3a9a40caa36e00abe4c46d665f4727"
+source = "git+https://github.com/ziozzang/hangang-runtime?rev=ba1a06c56c3bec38499ca63fdf3ae65da237fbbe#ba1a06c56c3bec38499ca63fdf3ae65da237fbbe"
 dependencies = [
  "anyhow",
  "axum",
