@@ -904,7 +904,7 @@ dependencies = [
 [[package]]
 name = "hangang-runtime"
 version = "0.1.2"
-source = "git+https://github.com/ziozzang/hangang-runtime?rev=ed2eee4b02397fd2ef74a95ed743a84d1baf33e6#ed2eee4b02397fd2ef74a95ed743a84d1baf33e6"
+source = "git+https://github.com/ziozzang/hangang-runtime?rev=0cdbd1660cefe46eed8bab3c0deb1b62c560ecf6#0cdbd1660cefe46eed8bab3c0deb1b62c560ecf6"
 dependencies = [
  "anyhow",
  "axum",
@@ -1026,11 +1026,15 @@ name = "hopae-grpc"
 version = "0.0.3"
 dependencies = [
  "ed25519-dalek",
+ "hangang-runtime",
  "prost",
  "serde",
  "serde_json",
  "sha2",
  "subtle",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

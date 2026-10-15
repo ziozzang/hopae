@@ -50,3 +50,6 @@ mod projection_privacy_tests {
         assert!(!debug.contains("111, 119, 110"));
     }
 }
+
+#[cfg(feature = "native-client")]
+pub mod observed_client;

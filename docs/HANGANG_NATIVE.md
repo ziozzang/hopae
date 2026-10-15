@@ -495,11 +495,17 @@ the canonical domain-prefixed payload instead of allocating its message buffer.
 All four production gRPC services authenticate initial caller metadata before
 generated protobuf decoding, in addition to their existing domain checks. Bearer
 authorization must be in initial metadata; trailer-only credentials are refused.
-Configured message limits are preserved. This closes wrong/missing-bearer decode
-work, but does not provide a process-wide decode memory budget or a cumulative
-unary body limit for an authenticated caller. Those shared ingress limits remain
-an explicit follow-up; per-message limits and handler semaphores are insufficient
-to claim them.
+Configured message limits are preserved. All four services now share 16 additional
+predecode slots across connections, inside the metadata interceptor and separate
+from handler slots. The runtime allows one uncompressed unary frame and caps actual
+DATA at each service's existing payload cap plus five prefix bytes (128 KiB for
+authentication/receipts, 512 bytes for plans, 8,448 bytes for projection). Slots
+remain held through the handler future, including cancellation. The 128 KiB
+repeated-header case can expand to roughly 3 MiB in decoded element storage on a
+64-bit target; 16 slots therefore imply roughly 48 MiB for that representation,
+plus transport, payload, allocation and process overhead. This estimate is not a
+measured memory ceiling or throughput claim. Prost remains the protobuf decoder;
+response draining and synchronous CPU preemption are outside this ingress guard.
 
 `receipt_time::ClockRates` adds explicit independent source/receiver oscillator
 limits. The new `from_signature_with_rates` rounds admission downward and full
@@ -529,3 +535,34 @@ one within the safe integer range. Explicit discard uses the freshly read revisi
 Role loss, logout and plugin disposal scrub drafts; full page reload also clears
 them. These are source-level protections, covered by 35 mocked Chromium cases,
 not evidence of a deployed package or end-to-end authentication qualification.
+
+
+## Fixed-owner observed client (source only)
+
+The optional `hopae-grpc/native-client` feature provides a statically linked,
+fixed-owner mTLS client. Native configuration supplies the HTTPS endpoint, SNI,
+CA/client identity, bearer, exact receipt context/key/registry generation, explicit
+clock-rate model and bounded concurrency/timeout (1 ms through 1 second). Incoming requests cannot supply
+a channel or observation report. Prepared final-request digests are immutable and
+client-bound; every actual issue/observe/refresh RPC uses a fresh correlation ID.
+`observe` independently validates a received public proof against a locally
+prepared final request, verifies its signature once, and queries the same pinned
+owner; another client's local observation capability is never reused. Responses
+must match context, signature, digest, source domain, owner generations and zero
+cache TTL. BOOTTIME brackets each exchange and checks the complete verification
+budget. Consuming refresh can only shorten admission and lengthen full-proof replay
+retention; strict UTC APIs remain unchanged and there is no fallback between modes.
+
+`Client::retire()` invalidates new and in-flight admission for that client while
+retention remains queryable. The native configuration owner must retire it before
+replacement and independently fence active state immediately before authorization
+or final output. Immutable pins and successful RPCs are observations, not remote
+revocation leases. Accessors expose public signed evidence, never permission or
+credentials. This source foundation is not yet adopted by Pumgye permits, Hangang
+final dispatch, or Hopae's paired durable replay ledger. Actual cross-host/K3s and
+rebuilt signed-release qualification remain open.
+
+Feature tests use a real generated mTLS fixture to check successful issuance and
+refresh, fresh correlations, previous-ID replies, wrong caller/SNI/client/request,
+modified digest/domain/generations/cache policy, timeout/cancellation and retirement
+during issue/refresh. This fixture is not the actual deployed Hopae owner.

@@ -39,6 +39,20 @@ fn authenticate_transport<S>(
         Ok(request)
     })
 }
+fn bounded_transport<S>(
+    service: S,
+    pipeline: Service,
+    slots: Arc<Semaphore>,
+    max_payload: usize,
+) -> tonic::service::interceptor::InterceptedService<
+    hangang_runtime::unary_ingress::UnaryIngress<S>,
+    impl tonic::service::Interceptor + Clone,
+> {
+    authenticate_transport(
+        hangang_runtime::unary_ingress::UnaryIngress::new(service, slots, max_payload),
+        pipeline,
+    )
+}
 impl Service {
     pub(super) fn caller(
         &self,
@@ -501,6 +515,9 @@ pub async fn serve_with_receipts(
         keys,
         requests: Arc::new(Semaphore::new(4096)),
     };
+    // All generated services and connections share a separate decode budget.
+    // Verify's repeated headers can amplify a 128 KiB message in memory.
+    let ingress = Arc::new(Semaphore::new(16));
     let plan_service = services
         .as_ref()
         .map(|services| {
@@ -542,20 +559,24 @@ pub async fn serve_with_receipts(
                 .max_encoding_message_size(2048)
         });
     hangang_runtime::server(tls)?
-        .add_service(authenticate_transport(
+        .add_service(bounded_transport(
             AuthenticationServer::new(pipeline.clone())
                 .max_decoding_message_size(wire::MAX_FRAME)
                 .max_encoding_message_size(wire::MAX_FRAME),
             pipeline.clone(),
+            ingress.clone(),
+            wire::MAX_FRAME,
         ))
+        .add_optional_service(receipt_service.map(|service| {
+            bounded_transport(service, pipeline.clone(), ingress.clone(), wire::MAX_FRAME)
+        }))
         .add_optional_service(
-            receipt_service.map(|service| authenticate_transport(service, pipeline.clone())),
+            plan_service
+                .map(|service| bounded_transport(service, pipeline.clone(), ingress.clone(), 512)),
         )
         .add_optional_service(
-            plan_service.map(|service| authenticate_transport(service, pipeline.clone())),
-        )
-        .add_optional_service(
-            projection_service.map(|service| authenticate_transport(service, pipeline.clone())),
+            projection_service
+                .map(|service| bounded_transport(service, pipeline.clone(), ingress.clone(), 8448)),
         )
         .serve_with_incoming_shutdown(hangang_runtime::incoming(listener), async move {
             let _ = stop.wait_for(|v| *v).await;
@@ -1427,7 +1448,12 @@ mod observed_boundary_tests {
                     )
                     .max_decoding_message_size(wire::MAX_FRAME)
                     .max_encoding_message_size(2048);
-                let service = authenticate_transport(generated, pipeline);
+                let service = bounded_transport(
+                    generated,
+                    pipeline,
+                    Arc::new(Semaphore::new(16)),
+                    wire::MAX_FRAME,
+                );
                 // Even the gRPC prefix is deliberately hostile. If protobuf
                 // decoding runs first, poll_next panics instead of hiding the
                 // ordering mistake behind a normal decoder error.
@@ -1460,7 +1486,12 @@ mod observed_boundary_tests {
             v1::authentication_receipts_server::AuthenticationReceiptsServer::new(fixture.service)
                 .max_decoding_message_size(wire::MAX_FRAME)
                 .max_encoding_message_size(2048);
-        let service = authenticate_transport(generated, pipeline);
+        let service = bounded_transport(
+            generated,
+            pipeline,
+            Arc::new(Semaphore::new(16)),
+            wire::MAX_FRAME,
+        );
         let frame = protobuf_frame(&issue(50).into_inner());
         // Split the five-byte framing prefix across chunks to exercise the
         // generated decoder instead of relying on one contiguous request body.
@@ -1532,7 +1563,12 @@ mod observed_boundary_tests {
             )
             .max_decoding_message_size(wire::MAX_FRAME)
             .max_encoding_message_size(2048);
-            let service = authenticate_transport(generated, pipeline);
+            let service = bounded_transport(
+                generated,
+                pipeline,
+                Arc::new(Semaphore::new(16)),
+                wire::MAX_FRAME,
+            );
             let mut frame = vec![0];
             frame.extend_from_slice(&u32::try_from(wire::MAX_FRAME + 1).unwrap().to_be_bytes());
             let (body, polls) = grpc_body(vec![bytes::Bytes::from(frame)], false);
@@ -1553,6 +1589,47 @@ mod observed_boundary_tests {
             assert_eq!(fixture.router_calls.load(Ordering::SeqCst), 0);
             assert_eq!(fixture.clock.0.load(Ordering::SeqCst), 0);
             assert_eq!(capacity.available_permits(), 1);
+        }
+    }
+    #[tokio::test]
+    async fn unary_ingress_refuses_extra_messages_before_observed_owner_execution() {
+        for method in ["IssueServiceObserved", "ObserveServiceTime"] {
+            let fixture = fixture();
+            let pipeline = fixture.service.pipeline.clone();
+            let generated = v1::authentication_receipts_server::AuthenticationReceiptsServer::new(
+                fixture.service,
+            )
+            .max_decoding_message_size(wire::MAX_FRAME)
+            .max_encoding_message_size(2048);
+            let slots = Arc::new(Semaphore::new(1));
+            let service = bounded_transport(generated, pipeline, slots.clone(), wire::MAX_FRAME);
+            let frame = if method == "IssueServiceObserved" {
+                protobuf_frame(&issue(50).into_inner())
+            } else {
+                // Empty protobuf is structurally valid; no owner handler may run.
+                vec![0, 0, 0, 0, 0]
+            };
+            let (body, _) = grpc_body(
+                vec![
+                    bytes::Bytes::from(frame),
+                    bytes::Bytes::from_static(&[0, 0, 0, 0, 0]),
+                ],
+                false,
+            );
+            let response = service
+                .oneshot(grpc_http_request(
+                    method,
+                    &["Bearer owned-boundary-gateway-key"],
+                    body,
+                ))
+                .await
+                .unwrap();
+            let (status, data) = grpc_response(response).await;
+            assert_ne!(status, tonic::Code::Ok as u16);
+            assert!(data.is_empty());
+            assert_eq!(fixture.router_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(fixture.clock.0.load(Ordering::SeqCst), 0);
+            assert_eq!(slots.available_permits(), 1);
         }
     }
 }

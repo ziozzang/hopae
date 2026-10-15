@@ -3,7 +3,13 @@ name = "hopae-grpc"
 version = "0.0.3"
 edition = "2024"
 license = "MIT"
+[features]
+default = []
+native-client = ["dep:hangang-runtime", "dep:tokio", "tonic/tls-ring"]
+
 [dependencies]
+hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "0cdbd1660cefe46eed8bab3c0deb1b62c560ecf6", optional = true }
+tokio = { version = "1", features = ["sync", "time"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
@@ -14,3 +20,8 @@ tonic-prost = "0.14.6"
 prost = "0.14"
 [build-dependencies]
 tonic-prost-build = "0.14.6"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tempfile = "3"
