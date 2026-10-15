@@ -182,7 +182,7 @@ impl Readiness {
         self.0.load(Ordering::SeqCst)
     }
 
-    fn set(&self, ready: bool) {
+    pub(crate) fn set(&self, ready: bool) {
         self.0.store(ready, Ordering::SeqCst);
     }
 }
@@ -190,6 +190,7 @@ impl Readiness {
 /// Everything the routers and services are built from.
 #[derive(Clone)]
 pub struct Services {
+    pub(crate) human_owner: Arc<crate::verify::human::Owner>,
     pub projection_resources: Option<Arc<crate::auth_gateway::projection_resources::Prepared>>,
     pub receipt_authority: Arc<std::sync::Mutex<crate::auth_gateway::receipt_authority::Authority>>,
     pub receipt_issuer: Option<Arc<crate::auth_gateway::receipt_issuer::Issuer>>,
@@ -340,13 +341,7 @@ pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
         Some(Arc::new(counters::inc)),
         Some(services.emitter.clone()),
     );
-    gateway_state = gateway_state.with_human_owner(crate::verify::human::Owner::new(
-        services.store.clone(),
-        services.registry.clone(),
-        services.snapshot.clone(),
-        services.clock.clone(),
-        services.rng.as_ref(),
-    ))?;
+    gateway_state = gateway_state.with_human_owner(services.human_owner.clone())?;
     if let Some(authority) = &services.authentication_authority {
         let reader = authority
             .lock()
@@ -813,7 +808,15 @@ async fn bind_environment(
         }
         Arc::new(std::sync::Mutex::new(owner))
     };
+    let human_owner = crate::verify::human::Owner::new(
+        store.clone(),
+        registry.clone(),
+        applications.clone(),
+        env.clock.clone(),
+        env.rng.as_ref(),
+    );
     let services = Services {
+        human_owner,
         projection_resources,
         receipt_authority,
         receipt_issuer,

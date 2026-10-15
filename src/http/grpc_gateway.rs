@@ -53,6 +53,45 @@ fn bounded_transport<S>(
         pipeline,
     )
 }
+// Unmounted production prerequisite: only a future allocated Human RPC may use
+// this adapter. Existing Service/Workload mounts retain their exact semantics.
+#[allow(dead_code)]
+fn bounded_human_transport<S>(
+    service: S,
+    pipeline: Service,
+    slots: Arc<Semaphore>,
+    max_payload: usize,
+    owner: Arc<crate::verify::human::Owner>,
+    readiness: crate::app::Readiness,
+    budget: std::time::Duration,
+) -> tonic::service::interceptor::InterceptedService<
+    hangang_runtime::unary_ingress::UnaryIngress<S>,
+    impl tonic::service::Interceptor + Clone,
+> {
+    tonic::service::interceptor::InterceptedService::new(
+        hangang_runtime::unary_ingress::UnaryIngress::new(service, slots, max_payload),
+        move |mut request: Request<()>| {
+            // Original age starts before caller/key callbacks and protobuf work.
+            // Invalid callers may sample the clock, but never poll the body.
+            let admission = owner
+                .admit(budget)
+                .map_err(|_| Status::unavailable("Human ingress unavailable"))?;
+            pipeline.caller(request.metadata())?;
+            let capture = owner
+                .capture(admission, readiness.clone())
+                .map_err(|_| Status::unavailable("Human ingress unavailable"))?;
+            if request
+                .extensions()
+                .get::<crate::verify::human::Capture>()
+                .is_some()
+            {
+                return Err(Status::failed_precondition("duplicate Human ingress"));
+            }
+            request.extensions_mut().insert(capture);
+            Ok(request)
+        },
+    )
+}
 impl Service {
     pub(super) fn caller(
         &self,
@@ -84,7 +123,7 @@ impl Service {
         ),
         Status,
     > {
-        self.exchange_inner(request, None).await
+        self.exchange_inner(request, None, None).await
     }
     async fn exchange_workload(
         &self,
@@ -98,12 +137,12 @@ impl Service {
         ),
         Status,
     > {
-        self.exchange_inner(request, Some(attempt)).await
+        self.exchange_inner(request, Some(attempt), None).await
     }
-    async fn exchange_inner(
+    #[allow(dead_code)]
+    async fn exchange_human(
         &self,
         request: Request<VerifyRequest>,
-        attempt: Option<Arc<crate::auth_gateway::workload_owner::Attempt>>,
     ) -> Result<
         (
             u64,
@@ -112,6 +151,48 @@ impl Service {
         ),
         Status,
     > {
+        let capture = request
+            .extensions()
+            .get::<crate::verify::human::Capture>()
+            .cloned()
+            .ok_or_else(|| Status::failed_precondition("original Human admission required"))?;
+        self.exchange_inner(request, None, Some(capture)).await
+    }
+    async fn exchange_inner(
+        &self,
+        request: Request<VerifyRequest>,
+        attempt: Option<Arc<crate::auth_gateway::workload_owner::Attempt>>,
+        human: Option<crate::verify::human::Capture>,
+    ) -> Result<
+        (
+            u64,
+            axum::response::Response,
+            tokio::sync::OwnedSemaphorePermit,
+        ),
+        Status,
+    > {
+        if (request
+            .extensions()
+            .get::<crate::verify::human::Capture>()
+            .is_some()
+            && request
+                .extensions()
+                .get::<Arc<crate::auth_gateway::workload_owner::Attempt>>()
+                .is_some())
+            || (attempt.is_some() && human.is_some())
+            || (human.is_some()
+                && request
+                    .extensions()
+                    .get::<Arc<crate::auth_gateway::workload_owner::Attempt>>()
+                    .is_some())
+            || (attempt.is_some()
+                && request
+                    .extensions()
+                    .get::<crate::verify::human::Capture>()
+                    .is_some())
+        {
+            return Err(Status::failed_precondition("mixed native admission"));
+        }
         let key = self.caller(request.metadata())?;
         let _permit = self
             .requests
@@ -147,6 +228,9 @@ impl Service {
         *request.headers_mut() = headers;
         if let Some(attempt) = attempt {
             request.extensions_mut().insert(attempt);
+        }
+        if let Some(capture) = human {
+            request.extensions_mut().insert(capture);
         }
         let response = self
             .router
@@ -1885,3 +1969,121 @@ impl ReceiptService {
 #[cfg(all(test, target_os = "linux"))]
 #[path = "grpc_workload_tests.rs"]
 mod workload_tests;
+
+/// Test-only mount of the production unmounted Human ingress adapter around a
+/// generated existing service, not a declaration/activation of a Human RPC.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)] // Owned transport fixture inputs, not a production API.
+pub(crate) async fn human_transport_fixture(
+    router: Router,
+    keys: Arc<CallerKeys>,
+    owner: Arc<crate::verify::human::Owner>,
+    readiness: crate::app::Readiness,
+    budget: std::time::Duration,
+    body: Body,
+    credential: &str,
+    captured: Arc<std::sync::atomic::AtomicUsize>,
+    ingress: Arc<Semaphore>,
+) -> (u16, Vec<u8>) {
+    use axum::body::HttpBody as _;
+    #[derive(Clone)]
+    struct Native {
+        pipeline: Service,
+        captured: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[tonic::async_trait]
+    impl Authentication for Native {
+        async fn verify(
+            &self,
+            request: Request<VerifyRequest>,
+        ) -> Result<Response<VerifyReply>, Status> {
+            let (request_id, response, _permit) = self.pipeline.exchange_human(request).await?;
+            if response
+                .extensions()
+                .get::<Arc<crate::verify::human::Checked>>()
+                .is_some()
+            {
+                self.captured
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(Response::new(VerifyReply {
+                request_id,
+                status: response.status().as_u16().into(),
+                headers: vec![],
+                body: vec![],
+            }))
+        }
+    }
+    let pipeline = Service {
+        router,
+        keys,
+        requests: Arc::new(Semaphore::new(1)),
+    };
+    let service = AuthenticationServer::new(Native {
+        pipeline: pipeline.clone(),
+        captured,
+    })
+    .max_decoding_message_size(wire::MAX_FRAME);
+    let service = bounded_human_transport(
+        service,
+        pipeline,
+        ingress,
+        wire::MAX_FRAME,
+        owner,
+        readiness,
+        budget,
+    );
+    let request = HttpRequest::builder()
+        .method("POST")
+        .version(http::Version::HTTP_2)
+        .uri("/hangang.hopae.v1.Authentication/Verify")
+        .header("content-type", "application/grpc")
+        .header("te", "trailers")
+        .header("authorization", credential)
+        .body(body)
+        .unwrap();
+    let response = service.oneshot(request).await.unwrap();
+    let mut status = response
+        .headers()
+        .get("grpc-status")
+        .map(|v| v.to_str().unwrap().parse().unwrap());
+    let mut body = response.into_body();
+    let mut bytes = vec![];
+    while let Some(frame) =
+        std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+    {
+        let frame = frame.unwrap();
+        if let Some(data) = frame.data_ref() {
+            bytes.extend_from_slice(data);
+        }
+        if let Some(trailers) = frame.trailers_ref()
+            && let Some(code) = trailers.get("grpc-status")
+        {
+            status = Some(code.to_str().unwrap().parse().unwrap());
+        }
+    }
+    (status.unwrap(), bytes)
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn native_human_missing_original_token_refuses_before_caller_or_router() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = calls.clone();
+    let pipeline = Service {
+        router: Router::new(),
+        keys: Arc::new(
+            CallerKeys::new(None, None, false).with_counter(Arc::new(move |_, _| {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })),
+        ),
+        requests: Arc::new(Semaphore::new(1)),
+    };
+    let error = pipeline
+        .exchange_human(Request::new(VerifyRequest::default()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(pipeline.requests.available_permits(), 1);
+}

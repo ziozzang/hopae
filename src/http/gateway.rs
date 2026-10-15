@@ -174,11 +174,14 @@ async fn verify(
     human: Option<axum::extract::Extension<crate::verify::human::Capture>>,
     headers: HeaderMap,
 ) -> Response {
+    if human.is_some() && workload.is_some() {
+        return hangang::service_identity::unavailable("native-human");
+    }
     // Private adapter extension only; no client header selects this path.
-    let human_admission = if human.is_some() {
+    let human_admission = if let Some(axum::extract::Extension(capture)) = human {
         match st.human_owner.as_ref().and_then(|owner| {
-            owner
-                .admit(st.ctx.limits.budget)
+            capture
+                .take(owner)
                 .ok()
                 .map(|admission| (owner.clone(), admission))
         }) {

@@ -69,6 +69,7 @@ ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"
 test-hooks = []
 
 [dev-dependencies]
+http-body = "1"
 # Exercise the production observed client against native Hopae owners.
 hopae-grpc = { path = "crates/hopae-grpc", features = ["native-client"] }
 tokio = { version = "1", features = ["process", "io-util"] }

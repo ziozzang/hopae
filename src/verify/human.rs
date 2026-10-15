@@ -18,7 +18,31 @@ fn refused() -> StoreError {
 }
 /// Only an owning native adapter can request capture; never selected by a header.
 #[derive(Clone)]
-pub(crate) struct Capture;
+pub(crate) struct Capture {
+    owner: Weak<Owner>,
+    readiness: crate::app::Readiness,
+    pub(super) admission: Arc<std::sync::Mutex<Option<Admission>>>,
+}
+impl Capture {
+    pub(crate) fn take(&self, owner: &Arc<Owner>) -> StoreResult<Admission> {
+        // Consume before checking even a wrong owner; a refused attempt cannot
+        // resurrect this request's admission through another extension clone.
+        let admission = self
+            .admission
+            .lock()
+            .map_err(|_| refused())?
+            .take()
+            .ok_or_else(refused)?;
+        if !Weak::ptr_eq(&self.owner, &Arc::downgrade(owner)) || !self.readiness.is_ready() {
+            return Err(refused());
+        }
+        admission.now(owner)?;
+        if !self.readiness.is_ready() {
+            return Err(refused());
+        }
+        Ok(admission)
+    }
+}
 pub(crate) struct Owner {
     pub(super) store: Store,
     pub(super) registry: Arc<Registry>,
@@ -35,6 +59,7 @@ struct TimeSample {
     ticks: u64,
 }
 pub(crate) struct Admission {
+    readiness: Option<crate::app::Readiness>,
     owner: Weak<Owner>,
     started: u64,
     limit_ms: u64,
@@ -168,6 +193,24 @@ impl Owner {
         }
     }
     /// The first clock read precedes wall sampling and all request work.
+    /// Only trusted native ingress may wrap an admission sampled BEFORE caller
+    /// authentication. No wire payload or public marker constructs this holder.
+    pub(crate) fn capture(
+        self: &Arc<Self>,
+        mut admission: Admission,
+        readiness: crate::app::Readiness,
+    ) -> StoreResult<Capture> {
+        admission.readiness = Some(readiness.clone());
+        admission.now(self)?;
+        if !readiness.is_ready() {
+            return Err(refused());
+        }
+        Ok(Capture {
+            owner: Arc::downgrade(self),
+            readiness,
+            admission: Arc::new(std::sync::Mutex::new(Some(admission))),
+        })
+    }
     pub(crate) fn admit(self: &Arc<Self>, budget: std::time::Duration) -> StoreResult<Admission> {
         let limit_ms = u64::try_from(budget.as_millis().min(1000))
             .map_err(|_| refused())?
@@ -177,6 +220,7 @@ impl Owner {
         let started = self.read()?;
         let wall = self.wall.now();
         let admission = Admission {
+            readiness: None,
             owner: Arc::downgrade(self),
             started,
             limit_ms,
@@ -261,6 +305,11 @@ impl Owner {
     }
 }
 impl Admission {
+    fn ready(&self) -> bool {
+        self.readiness
+            .as_ref()
+            .is_none_or(crate::app::Readiness::is_ready)
+    }
     fn now(&self, owner: &Arc<Owner>) -> StoreResult<Timestamp> {
         Ok(self.sample(owner)?.now)
     }
@@ -268,7 +317,8 @@ impl Admission {
     fn after(&self, owner: &Arc<Owner>, sample: &TimeSample) -> StoreResult<Timestamp> {
         let result = (|| {
             let ticks = owner.read()?;
-            if self.failed.load(Ordering::Acquire)
+            if !self.ready()
+                || self.failed.load(Ordering::Acquire)
                 || std::time::Instant::now() >= self.deadline
                 || ticks.checked_sub(self.started).ok_or_else(refused)? >= self.limit_ms
             {
@@ -286,7 +336,8 @@ impl Admission {
     }
     fn sample(&self, owner: &Arc<Owner>) -> StoreResult<TimeSample> {
         let result = (|| {
-            if self.failed.load(Ordering::Acquire)
+            if !self.ready()
+                || self.failed.load(Ordering::Acquire)
                 || !Weak::ptr_eq(&self.owner, &Arc::downgrade(owner))
                 || std::time::Instant::now() >= self.deadline
             {
@@ -321,7 +372,7 @@ impl Admission {
                 .checked_add(i64::try_from(sample_gap + 1).map_err(|_| refused())?)
                 .ok_or_else(refused)?;
             let now = Timestamp(wall_floor.max(floor));
-            if self.failed.load(Ordering::Acquire) {
+            if !self.ready() || self.failed.load(Ordering::Acquire) {
                 return Err(refused());
             }
             Ok(TimeSample { now, ticks })
@@ -371,7 +422,7 @@ impl Witness {
         {
             return Err(refused());
         }
-        if self.retired.load(Ordering::Acquire) {
+        if self.retired.load(Ordering::Acquire) || !self.admission.ready() {
             return Err(refused());
         }
         Ok(())

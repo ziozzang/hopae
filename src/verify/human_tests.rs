@@ -582,7 +582,13 @@ async fn assert_gateway_capture(f: &Fx, cookie: &Secret) {
             .body(axum::body::Body::empty())
             .unwrap();
         if marker {
-            request.extensions_mut().insert(human::Capture);
+            let readiness = crate::app::Readiness::default();
+            readiness.set(true);
+            request.extensions_mut().insert(
+                f.owner
+                    .capture(f.owner.admit(f.ctx.limits.budget).unwrap(), readiness)
+                    .unwrap(),
+            );
         }
         request
     };
@@ -601,6 +607,24 @@ async fn assert_gateway_capture(f: &Fx, cookie: &Secret) {
             .get::<Arc<human::Checked>>()
             .is_none()
     );
+    let mut mixed = request(true, "native-owned-gateway-key");
+    let original = mixed.extensions().get::<human::Capture>().unwrap().clone();
+    let workload_owner = crate::auth_gateway::workload_owner::Owner::new(
+        crate::auth_gateway::workload_owner::Configuration {
+            scopes: vec![],
+            capacity: 1,
+        },
+        [0x31; 16],
+    )
+    .unwrap();
+    mixed
+        .extensions_mut()
+        .insert(workload_owner.begin(f.clock.as_ref()).unwrap());
+    let refused = app.clone().oneshot(mixed).await.unwrap();
+    assert_eq!(refused.status(), http::StatusCode::SERVICE_UNAVAILABLE);
+    assert!(refused.extensions().get::<Arc<human::Checked>>().is_none());
+    // Collision is rejected before admission consumption or any native Engine bind.
+    assert!(original.take(&f.owner).is_ok());
     let captured = app
         .oneshot(request(true, "native-owned-gateway-key"))
         .await
@@ -1585,4 +1609,300 @@ async fn native_human_current_includes_same_transaction_realm_and_latches_retire
         .execute("UPDATE human_authority_realm SET realm=?1", [original])
         .unwrap();
     assert!(checked.require_current(&f.input(&cookie)).await.is_err());
+}
+
+#[tokio::test]
+async fn native_human_generated_ingress_original_decode_age_and_caller_pause() {
+    use prost::Message;
+    use std::sync::atomic::AtomicUsize;
+    struct Chunks {
+        chunks: std::collections::VecDeque<bytes::Bytes>,
+        polls: Arc<AtomicUsize>,
+        ticks: Arc<AtomicU64>,
+        mode: &'static str,
+    }
+    impl axum::body::HttpBody for Chunks {
+        type Data = bytes::Bytes;
+        type Error = std::io::Error;
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            if self.mode == "cancel" {
+                return std::task::Poll::Pending;
+            }
+            if self.mode == "decode-age" {
+                self.ticks.store(2000, Ordering::SeqCst);
+            }
+            std::task::Poll::Ready(
+                self.chunks
+                    .pop_front()
+                    .map(|data| Ok(http_body::Frame::data(data))),
+            )
+        }
+    }
+    for mode in [
+        "green",
+        "decode-age",
+        "caller-age",
+        "invalid-caller",
+        "cancel",
+    ] {
+        let mut f = Fx::new(None).await;
+        let ticks = Arc::new(AtomicU64::new(100));
+        let observed = ticks.clone();
+        Arc::get_mut(&mut f.owner).unwrap().ticks =
+            Some(Arc::new(move || Ok(observed.load(Ordering::SeqCst))));
+        let (cookie, _) = f.login().await;
+        let keys = Arc::new(
+            crate::app::CallerKeys::new(
+                Some(Secret::new("native-owned-gateway-key".into())),
+                None,
+                false,
+            )
+            .with_counter({
+                let ticks = ticks.clone();
+                Arc::new(move |_, _| {
+                    if mode == "caller-age" {
+                        ticks.store(2000, Ordering::SeqCst);
+                    }
+                })
+            }),
+        );
+        let state = crate::http::gateway::GatewayState::new(
+            crate::gateway::hangang::GatewayConfig::from_config(&f.config),
+            f.ctx.clone(),
+            keys.clone(),
+            8,
+            None,
+            None,
+        )
+        .with_human_owner(f.owner.clone())
+        .unwrap();
+        let fields = [
+            ("x-hopae-contract", "1".to_owned()),
+            ("x-original-url", "https://app.example.test/data".into()),
+            ("x-forwarded-proto", "https".into()),
+            ("x-forwarded-host", "app.example.test".into()),
+            ("x-forwarded-for", "192.0.2.10".into()),
+            ("x-original-method", "GET".into()),
+            ("x-hangang-canonical-path", "/data".into()),
+            ("x-hangang-route-id", "owned-route".into()),
+            ("cookie", format!("__Host-hopae={}", cookie.expose())),
+        ];
+        let input = hopae_grpc::v1::VerifyRequest {
+            request_id: 1,
+            headers: fields
+                .into_iter()
+                .map(|(name, value)| hopae_grpc::v1::Header {
+                    name: name.into(),
+                    value: value.into_bytes(),
+                })
+                .collect(),
+        };
+        let payload = input.encode_to_vec();
+        let mut frame = vec![0];
+        frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&payload);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let calls = polls.clone();
+        let time = ticks.clone();
+        let body = axum::body::Body::new(Chunks {
+            chunks: vec![
+                bytes::Bytes::copy_from_slice(&frame[..3]),
+                bytes::Bytes::copy_from_slice(&frame[3..]),
+            ]
+            .into(),
+            polls: calls,
+            ticks: time,
+            mode,
+        });
+        let readiness = crate::app::Readiness::default();
+        readiness.set(true);
+        let captured = Arc::new(AtomicUsize::new(0));
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let credential = if mode == "invalid-caller" {
+            "Bearer wrong"
+        } else {
+            "Bearer native-owned-gateway-key"
+        };
+        let future = crate::http::grpc_gateway::human_transport_fixture(
+            crate::http::gateway::router(state),
+            keys,
+            f.owner.clone(),
+            readiness,
+            f.ctx.limits.budget,
+            body,
+            credential,
+            captured.clone(),
+            slots.clone(),
+        );
+        let mut future = Box::pin(future);
+        if mode == "cancel" {
+            std::future::poll_fn(|cx| {
+                assert!(std::future::Future::poll(future.as_mut(), cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            assert!(polls.load(Ordering::SeqCst) > 0);
+            assert_eq!(slots.available_permits(), 0);
+            drop(future);
+            assert_eq!(slots.available_permits(), 1);
+            assert_eq!(captured.load(Ordering::SeqCst), 0);
+            continue;
+        }
+        let (code, data) = future.await;
+        assert_eq!(slots.available_permits(), 1);
+        match mode {
+            "green" => {
+                assert_eq!(code, 0);
+                let reply = hopae_grpc::v1::VerifyReply::decode(&data[5..]).unwrap();
+                assert_eq!(reply.status, 200);
+                assert_eq!(captured.load(Ordering::SeqCst), 1);
+            }
+            "decode-age" => {
+                assert_eq!(code, 0);
+                let reply = hopae_grpc::v1::VerifyReply::decode(&data[5..]).unwrap();
+                assert_eq!(reply.status, 503);
+                assert_eq!(captured.load(Ordering::SeqCst), 0);
+                assert!(polls.load(Ordering::SeqCst) > 0);
+            }
+            "caller-age" => {
+                assert_eq!(code, 14);
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                assert_eq!(captured.load(Ordering::SeqCst), 0);
+            }
+            _ => {
+                assert_eq!(code, 16);
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                assert_eq!(captured.load(Ordering::SeqCst), 0);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_human_original_admission_one_shot_wrong_owner_readiness_and_cancel() {
+    let f = Fx::new(None).await;
+    let ready = crate::app::Readiness::default();
+    ready.set(true);
+    let capture = f
+        .owner
+        .capture(f.owner.admit(f.ctx.limits.budget).unwrap(), ready.clone())
+        .unwrap();
+    let duplicate = capture.clone();
+    assert!(capture.take(&f.owner).is_ok());
+    assert!(duplicate.take(&f.owner).is_err());
+    let other = human::Owner::new(
+        f.store.clone(),
+        f.owner.registry.clone(),
+        f.ctx.snapshot.clone(),
+        f.ctx.clock.clone(),
+        f.rng.as_ref(),
+    );
+    let capture = f
+        .owner
+        .capture(f.owner.admit(f.ctx.limits.budget).unwrap(), ready.clone())
+        .unwrap();
+    assert!(capture.take(&other).is_err());
+    assert!(capture.take(&f.owner).is_err());
+    let capture = f
+        .owner
+        .capture(f.owner.admit(f.ctx.limits.budget).unwrap(), ready.clone())
+        .unwrap();
+    ready.set(false);
+    assert!(capture.take(&f.owner).is_err());
+    ready.set(true);
+    assert!(capture.take(&f.owner).is_err());
+    let capture = f
+        .owner
+        .capture(f.owner.admit(f.ctx.limits.budget).unwrap(), ready)
+        .unwrap();
+    let weak = Arc::downgrade(&capture.admission);
+    let task = tokio::spawn(async move {
+        let _capture = capture;
+        std::future::pending::<()>().await;
+    });
+    tokio::task::yield_now().await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(weak.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn native_human_readiness_retained_after_take_and_checked_current() {
+    let f = Fx::new(None).await;
+    let (cookie, _) = f.login().await;
+    let ready = crate::app::Readiness::default();
+    ready.set(true);
+    let capture = f
+        .owner
+        .capture(f.owner.admit(f.ctx.limits.budget).unwrap(), ready.clone())
+        .unwrap();
+    let admission = capture.take(&f.owner).unwrap();
+    ready.set(false);
+    let (decision, _, witness) =
+        decide_for_human(&f.ctx, &f.input(&cookie), f.owner.clone(), admission).await;
+    assert!(!matches!(decision, Decision::Allow { .. }));
+    assert!(witness.is_none());
+    ready.set(true);
+    let capture = f
+        .owner
+        .capture(f.owner.admit(f.ctx.limits.budget).unwrap(), ready.clone())
+        .unwrap();
+    let (decision, _, witness) = decide_for_human(
+        &f.ctx,
+        &f.input(&cookie),
+        f.owner.clone(),
+        capture.take(&f.owner).unwrap(),
+    )
+    .await;
+    assert!(matches!(decision, Decision::Allow { .. }));
+    let checked = witness.unwrap().finish(&f.input(&cookie)).await.unwrap();
+    ready.set(false);
+    assert!(checked.require_current(&f.input(&cookie)).await.is_err());
+    ready.set(true);
+    assert!(checked.require_current(&f.input(&cookie)).await.is_err());
+}
+
+#[test]
+fn native_human_readiness_withdrawn_while_actual_engine_store_awaits() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let f = Fx::new(None).await;
+        let (cookie, _) = f.login().await;
+        let ready = crate::app::Readiness::default();
+        ready.set(true);
+        let capture = f
+            .owner
+            .capture(f.owner.admit(f.ctx.limits.budget).unwrap(), ready.clone())
+            .unwrap();
+        let admission = capture.take(&f.owner).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = tokio::task::spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let input = f.input(&cookie);
+        let mut pending = Box::pin(decide_for_human(&f.ctx, &input, f.owner.clone(), admission));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(pending.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        ready.set(false);
+        release_tx.send(()).unwrap();
+        blocker.await.unwrap();
+        let (decision, _, witness) = pending.await;
+        assert!(!matches!(decision, Decision::Allow { .. }));
+        assert!(witness.is_none());
+    });
 }
