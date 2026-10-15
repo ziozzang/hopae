@@ -166,7 +166,32 @@ fn framed(hash: &mut Sha256, bytes: &[u8]) {
 }
 /// Compute v2 from actual complete body bytes; no raw-body-digest entry point.
 /// Binding data is untrusted metadata, not authentication/authorization evidence.
+/// Computed public binding metadata, not authentication or permission evidence.
+/// Constructed only by hashing actual complete body bytes.
+pub struct ActualBinding {
+    request_sha256: [u8; 32],
+    body_sha256: [u8; 32],
+    body_length: u64,
+}
+impl ActualBinding {
+    pub fn request_sha256(&self) -> &[u8; 32] {
+        &self.request_sha256
+    }
+    pub fn body_sha256(&self) -> &[u8; 32] {
+        &self.body_sha256
+    }
+    pub fn body_length(&self) -> u64 {
+        self.body_length
+    }
+}
 pub fn digest(policy: &HeaderPolicy, request: &Request<'_>) -> Result<[u8; 32], InvalidRequest> {
+    Ok(*bind_actual(policy, request)?.request_sha256())
+}
+/// Hash the actual body once and return its digest plus the canonical request digest.
+pub fn bind_actual(
+    policy: &HeaderPolicy,
+    request: &Request<'_>,
+) -> Result<ActualBinding, InvalidRequest> {
     if !valid_request(request) || request.bound_headers.len() != policy.names.len() {
         return Err(InvalidRequest);
     }
@@ -204,7 +229,8 @@ pub fn digest(policy: &HeaderPolicy, request: &Request<'_>) -> Result<[u8; 32], 
     framed(&mut hash, request.method.as_bytes());
     framed(&mut hash, request.target.as_bytes());
     hash.update((request.body.len() as u64).to_be_bytes());
-    hash.update(Sha256::digest(request.body));
+    let body_sha256: [u8; 32] = Sha256::digest(request.body).into();
+    hash.update(body_sha256);
     hash.update(policy.revision.to_be_bytes());
     hash.update((policy.names.len() as u16).to_be_bytes());
     // Exact descriptor count plus uniqueness proves every fixed slot is present.
@@ -216,7 +242,11 @@ pub fn digest(policy: &HeaderPolicy, request: &Request<'_>) -> Result<[u8; 32], 
             framed(&mut hash, value);
         }
     }
-    Ok(hash.finalize().into())
+    Ok(ActualBinding {
+        request_sha256: hash.finalize().into(),
+        body_sha256,
+        body_length: request.body.len() as u64,
+    })
 }
 
 #[cfg(test)]
@@ -233,6 +263,18 @@ mod tests {
             target: "/api/orders?x=1&x=2",
             body,
             bound_headers: headers,
+        }
+    }
+    #[test]
+    fn computed_body_metadata_matches_actual_empty_and_nonempty_bytes() {
+        let policy = HeaderPolicy::new(1, &[], &[]).unwrap();
+        for body in [b"".as_slice(), b"actual bytes".as_slice()] {
+            let r = request(body, &[]);
+            let bound = bind_actual(&policy, &r).unwrap();
+            assert_eq!(bound.body_length(), body.len() as u64);
+            let expected: [u8; 32] = Sha256::digest(body).into();
+            assert_eq!(bound.body_sha256(), &expected);
+            assert_eq!(bound.request_sha256(), &digest(&policy, &r).unwrap());
         }
     }
     #[test]

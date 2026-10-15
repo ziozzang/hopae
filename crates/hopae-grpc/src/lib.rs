@@ -127,3 +127,6 @@ redacted_human_debug!(
     v1::HumanReceiptObservedReply,
     v1::HumanReceiptObservationRequest
 );
+
+#[cfg(feature = "native-client")]
+pub mod human_observed_client;
