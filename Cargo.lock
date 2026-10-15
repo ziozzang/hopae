@@ -985,7 +985,7 @@ dependencies = [
  "form_urlencoded",
  "hangang-runtime",
  "hmac",
- "hopae-grpc",
+ "hopae-grpc 0.0.3",
  "http",
  "ipnet",
  "jsonwebtoken",
@@ -993,6 +993,8 @@ dependencies = [
  "libc",
  "mlua",
  "percent-encoding",
+ "prost",
+ "pumgye-grpc",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
  "reqwest",
@@ -1021,6 +1023,22 @@ dependencies = [
 [[package]]
 name = "hopae-grpc"
 version = "0.0.3"
+dependencies = [
+ "ed25519-dalek",
+ "prost",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "hopae-grpc"
+version = "0.0.3"
+source = "git+https://github.com/ziozzang/hopae?rev=fd0605361165235086df70e9105ca276327ccb27#fd0605361165235086df70e9105ca276327ccb27"
 dependencies = [
  "ed25519-dalek",
  "prost",
@@ -1905,6 +1923,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "84bbb29c624230c4bd1047bbdb2aa47e41c860e9665ce62ba9504eebe91bf867"
 dependencies = [
  "pulldown-cmark",
+]
+
+[[package]]
+name = "pumgye-grpc"
+version = "0.1.6"
+source = "git+https://github.com/ziozzang/pumgye?rev=b4b7f18210f61c9e2f3bfce804cb87591746389b#b4b7f18210f61c9e2f3bfce804cb87591746389b"
+dependencies = [
+ "hopae-grpc 0.0.3 (git+https://github.com/ziozzang/hopae?rev=fd0605361165235086df70e9105ca276327ccb27)",
+ "prost",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
 ]
 
 [[package]]

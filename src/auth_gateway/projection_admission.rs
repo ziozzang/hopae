@@ -71,6 +71,14 @@ pub fn verify(verifier: &Verifier, input: Input<'_>, now: u64) -> Result<Admissi
     })
 }
 impl Admission {
+    pub(crate) fn restrict_expiry(&mut self, expiry: u64) -> Result<(), Refused> {
+        self.scope.expires_ms = self.scope.expires_ms.min(expiry);
+        if self.scope.expires_ms <= self.scope.issued_ms {
+            return Err(Refused);
+        }
+        Ok(())
+    }
+
     /// Consume both receipts and associated owner DB work in one transaction.
     /// Guard must inspect authoritative current state twice. Credential output and
     /// irreversible network effects must occur only after this returns success.

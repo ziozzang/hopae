@@ -250,3 +250,39 @@ channel and original elapsed timeout budget and adopts the shorter verified
 owner deadline. The actual four-server permit and no-permit modes both pass,
 including durable withdrawal and trust/outage refusals. Hopae receiver paired
 replay and credential projection remain open; this validation is not consumption.
+
+## Native receiver library: live permission and paired admission
+
+The unreleased `permission_live` client calls a fixed configured Pumgye
+`ProjectionPermits/Validate` over a lazy persistent mTLS channel. Admission is
+bounded at 128, exchange time at one second and wire sizes at 8192/128 bytes.
+Opaque observations retain the exact immutable request Arc and configured-client
+identity, conservative elapsed time, and the shorter signed/owner deadline.
+Wrong peer/caller, correlation, positive cache TTL, expiry/clock reversal,
+capacity and sequence exhaustion refuse. Input shape checking is not proof
+verification; the actual configured authority must accept the RPC.
+
+`projection_receiver::verify` additionally checks both native receipt signatures
+and their canonical identity/request/permission chain against the owning receipt
+key registry. Its private admission consumes authentication and permission nonces
+in the same existing transaction as native projection. The native plan snapshot
+and caller-supplied live local identity/caller guard are checked before and after
+work. Output expiry is capped by the live permission observation; it remains
+bound to service, audience and final request hash. Crypto/key retirement/replay
+or late local guard failure prevents output, and failed transactions roll back
+both nonce records.
+
+Six focused tests cover these library boundaries, including an owned real mTLS
+**protocol fixture**, independently signed chains, paired consumption, late guard
+rollback and key retirement before secret resolution. The protocol peer is a
+mock acknowledgement owner; these tests do not prove actual Pumgye-to-Hopae
+runtime projection. Configuration/key bootstrap, the real Hopae issuer/profile/
+application/caller guards, bounded blocking-store execution, receiver gRPC and
+Hangang final credential delivery remain required before activation or release.
+The library API is not an ordinary gateway authentication endpoint.
+
+Library 528 tests (one existing ignore), all workspace tests and strict Clippy
+pass. Rebuilt Hopae also passes the existing actual four-server permit/route/
+plan regression with durable withdrawal and authority outages. That regression
+keeps the new receiver library inactive and therefore proves compatibility,
+not runtime projection or replay consumption across the four servers.
