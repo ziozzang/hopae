@@ -641,3 +641,65 @@ async fn native_human_rpc_verify_metadata_is_canonical_for_ordinary_and_private_
         );
     }
 }
+
+#[tokio::test]
+async fn native_human_rpc_legacy_uid_verify_allows_without_metadata_source_refuses() {
+    use tower::ServiceExt;
+    let f = Fx::new(None).await;
+    let (_, original) = f.login().await;
+    let legacy = "u_legacy\n";
+    {
+        let conn = f.store.conn();
+        conn.execute(
+            "INSERT INTO users(user_id,created_at,updated_at) VALUES(?1,0,0)",
+            [legacy],
+        )
+        .unwrap();
+        assert_eq!(
+            conn.execute(
+                "UPDATE identities SET user_id=?1 WHERE user_id=?2",
+                rusqlite::params![legacy, original.session.user_id.as_str()]
+            )
+            .unwrap(),
+            1
+        );
+    }
+    // Fresh actual provider authentication creates the native session/provenance.
+    let (cookie, view) = f.login().await;
+    assert_eq!(view.session.user_id.as_str(), legacy);
+    let (_bound, services) = services(&f).await;
+    let router = crate::app::build_routers(&services).unwrap().gateway;
+    let mut request = axum::http::Request::builder()
+        .uri("/_hopae/verify")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    for header in headers(&cookie) {
+        request.headers_mut().append(
+            axum::http::HeaderName::from_bytes(header.name.as_bytes()).unwrap(),
+            axum::http::HeaderValue::from_bytes(&header.value).unwrap(),
+        );
+    }
+    request
+        .headers_mut()
+        .insert("x-hopae-gateway-key", CALLER.parse().unwrap());
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert!(
+        !response
+            .headers()
+            .contains_key("x-hopae-human-policy-subject")
+    );
+    assert!(
+        !response
+            .headers()
+            .contains_key("x-hopae-human-policy-issuer")
+    );
+    assert!(response.headers().contains_key("x-forwarded-user"));
+    let mut request = raw(&cookie);
+    request.extensions_mut().insert(capture(&f, &services));
+    assert!(
+        crate::http::grpc_human::direct_issue_fixture(&services, request)
+            .await
+            .is_err()
+    );
+}

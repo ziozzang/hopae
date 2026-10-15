@@ -92,8 +92,9 @@ When Human receipts are configured, ordinary authenticated native Human Verify
 also returns `x-hopae-human-policy-subject` and `x-hopae-human-policy-issuer`.
 They derive from the actual verified UID, configured issuer and durable Store
 realm/reservation under the existing request deadline. They never replace the
-forwarded UID, source proof, independent observation or final permit. Missing
-or unsupported coordinates refuse on this authorization path; administrator
-metadata continues to omit unsupported legacy labels without hiding accounts.
+forwarded UID, source proof, independent observation or final permit. Unsupported legacy UID coordinates omit these optional headers while ordinary
+verification remains compatible. Store failures still refuse. Human consumers
+require the headers and actual source issuance remains strict; administrator
+metadata likewise omits unsupported legacy labels without hiding accounts.
 The PEP must pin issuer/class/AAL, remove client lookalikes, and compare the final
 opaque source observation rather than treating metadata as a capability.

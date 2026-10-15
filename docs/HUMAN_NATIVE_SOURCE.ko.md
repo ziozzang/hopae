@@ -81,6 +81,7 @@ postreceiver event/counter를 유지하고 마지막 pure 검사만 제거한다
 Human receipts 설정 시 일반 네이티브 Human Verify는 실제 인증 UID·설정 issuer·
 Store realm/사용자 예약으로 정책 식별자와 issuer 헤더도 계산한다. 기존 deadline을
 재사용하고 forwarded UID는 바꾸지 않는다. 이는 source proof/독립 관측/permit이
-아니다. 해당 인증 경로의 지원하지 않는 좌표는 거부하지만 관리자 메타데이터의 기존
-ID 생략 규칙은 유지한다. PEP는 issuer/class/AAL을 고정하고 클라이언트 유사 헤더를
+아니다. 지원하지 않는 레거시 UID는 선택 헤더를 생략하며 일반 인증은 유지한다.
+Store 오류는 거부한다. Human 소비자는 헤더를 필수로 요구하고 실제 Source 발급은
+엄격히 거부한다. 관리자 메타데이터도 기존 ID 생략 규칙을 유지한다. PEP는 issuer/class/AAL을 고정하고 클라이언트 유사 헤더를
 제거하며 최종 opaque Source 관측의 동일성도 검증해야 한다.

@@ -110,7 +110,7 @@ impl GatewayState {
             return Ok(None);
         };
         let deadline = ctx.deadline.ok_or(())?;
-        let subject = store
+        let Some(subject) = store
             .admin_human_subject(
                 issuer.clone(),
                 identity.user_id.as_str().to_owned(),
@@ -118,7 +118,11 @@ impl GatewayState {
             )
             .await
             .map_err(|_| ())?
-            .ok_or(())?;
+        else {
+            // Legacy verification remains compatible; Human consumers require
+            // these coordinates independently and source derivation stays strict.
+            return Ok(None);
+        };
         let subject = axum::http::HeaderValue::from_str(&subject).map_err(|_| ())?;
         let issuer = axum::http::HeaderValue::from_str(issuer).map_err(|_| ())?;
         if tokio::time::Instant::now() >= deadline {
