@@ -6,6 +6,7 @@ pub mod v1 {
 pub mod request_binding;
 
 pub mod receipt;
+pub mod receipt_time;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrincipalKind {

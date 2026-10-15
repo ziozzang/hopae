@@ -1,6 +1,7 @@
 //! Projection receipt crypto primitive. Signature validation is not a permission
 //! grant: live state, authority/key selection and atomic replay admission remain required.
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 const DOMAIN: &[u8] = b"hangang-zerotrust:projection-receipt:v1\0";
 const PAYLOAD: usize = 82;
@@ -23,10 +24,17 @@ pub struct Claims {
     pub nonce: [u8; 32],
 }
 /// Authenticated bytes only, not live authorization; cannot be directly constructed.
-pub struct VerifiedReceipt(Claims);
+pub struct VerifiedReceipt {
+    claims: Claims,
+    sha256: [u8; 32],
+}
 impl VerifiedReceipt {
     pub fn claims(&self) -> &Claims {
-        &self.0
+        &self.claims
+    }
+    /// Digest of the exact bytes whose signature and binding were checked.
+    pub fn sha256(&self) -> &[u8; 32] {
+        &self.sha256
     }
 }
 fn valid(claims: &Claims) -> bool {
@@ -80,7 +88,10 @@ pub fn verify(
     {
         return Err(InvalidReceipt);
     }
-    Ok(VerifiedReceipt(claims))
+    Ok(VerifiedReceipt {
+        claims,
+        sha256: Sha256::digest(bytes).into(),
+    })
 }
 #[cfg(test)]
 mod tests {

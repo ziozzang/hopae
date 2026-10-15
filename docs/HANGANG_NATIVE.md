@@ -403,3 +403,33 @@ configuration and information-class restoration, durable permission withdrawal
 and issuer tombstones after restart. This supersedes the earlier statement that
 the four-server fixture did not invoke projection. It does not qualify coordinated
 signer rotation, fleet restore, Kubernetes/operating deployment or throughput.
+
+
+### Authority-relative interval arithmetic (source foundation)
+
+The shared `hopae-grpc::receipt_time` module implements numeric bounds for draft
+ADR 0018. Cryptographically verified receipts retain the SHA-256 of their exact
+wire bytes. A report must match that digest, remain inside its issuer-domain
+signed lifetime, and fit a bounded local wall/monotonic RPC sample. Foreign
+absolute clocks are not compared with the receiver's wall time.
+
+Final admission uses local RPC start plus the shortened reported remaining
+lifetime minus one millisecond of sampling uncertainty. Replay retention uses local RPC finish plus the **full signed receipt
+remaining lifetime** plus one millisecond, even when a current prerequisite
+shortens admission. This outward rounding only tightens permission and preserves
+nonces longer; it adds no clock grace. A
+later observation of the same proof can otherwise outlive an early cleanup.
+Revalidation intersects admission and retains the later retention ceiling;
+different receipt digests cannot be merged. Overflow, expiry, forged/missing
+digests and sampled clock discontinuities refuse. The arithmetic allocates no
+per-call heap storage and performs no SQL or remote work.
+
+SDK tests pass 21 cases, including 2,601 asymmetric-latency samples and 405
+independent submillisecond clock-phase/offset samples. The full workspace passes
+958 tests (42 existing exclusions), with strict all-target Clippy. This is not a
+transport-authenticated observation or permission
+capability. Native adapters must still authenticate the fixed owner and bind the
+request/client/generation; wire issuance/live-validation fields, runtime adoption
+and replay/final-output integration are not implemented by this module. The
+legacy strict receipt API remains strict, and cross-host K8s release qualification
+remains open.
