@@ -132,6 +132,63 @@ impl Authentication for Service {
     }
 }
 
+struct PlanService {
+    pipeline: Service,
+    plans: Arc<arc_swap::ArcSwap<crate::auth_gateway::projection_authority::Snapshot>>,
+}
+#[tonic::async_trait]
+impl v1::projection_plans_server::ProjectionPlans for PlanService {
+    async fn observe(
+        &self,
+        request: Request<v1::ProjectionPlanRequest>,
+    ) -> Result<Response<v1::ProjectionPlanReply>, Status> {
+        self.pipeline.caller(request.metadata())?;
+        let _permit = self
+            .pipeline
+            .requests
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("verification capacity"))?;
+        let metadata = request.metadata().clone();
+        let input = request.into_inner();
+        let valid_scope = |value: &str| {
+            !value.is_empty() && value.len() <= 128 && value.bytes().all(|b| b.is_ascii_graphic())
+        };
+        if input.request_id == 0
+            || input.request_id > 9_007_199_254_740_991
+            || !valid_scope(&input.service)
+            || !valid_scope(&input.audience)
+        {
+            return Err(Status::invalid_argument("invalid plan request"));
+        }
+        let observed = crate::auth_gateway::projection_authority::observe(
+            self.plans.clone(),
+            &input.service,
+            &input.audience,
+            input.minimum_revision,
+        )
+        .map_err(|_| Status::unavailable("projection plan unavailable"))?;
+        let plan = observed
+            .metadata()
+            .map_err(|_| Status::unavailable("projection plan retired"))?;
+        let reply = v1::ProjectionPlanReply {
+            request_id: input.request_id,
+            revision: observed.revision(),
+            service: plan.service.into(),
+            audience: plan.audience.into(),
+            resource: plan.resource.into(),
+            action: plan.action.into(),
+            minimum_aal: u32::from(plan.minimum_aal),
+            cache_ttl_ms: 0,
+        };
+        self.pipeline.caller(&metadata)?;
+        if !observed.current() {
+            return Err(Status::unavailable("projection plan retired"));
+        }
+        Ok(Response::new(reply))
+    }
+}
+
 struct ReceiptService {
     pipeline: Service,
     issuer: Arc<crate::auth_gateway::receipt_issuer::Issuer>,
@@ -311,6 +368,24 @@ pub async fn serve_with_receipts(
         keys,
         requests: Arc::new(Semaphore::new(4096)),
     };
+    let plan_service = services
+        .as_ref()
+        .map(|services| {
+            let plans = services
+                .projection_authority
+                .lock()
+                .map_err(|_| anyhow::anyhow!("projection plan owner unavailable"))?
+                .reader();
+            Ok::<_, anyhow::Error>(
+                v1::projection_plans_server::ProjectionPlansServer::new(PlanService {
+                    pipeline: pipeline.clone(),
+                    plans,
+                })
+                .max_decoding_message_size(512)
+                .max_encoding_message_size(1024),
+            )
+        })
+        .transpose()?;
     let receipt_service = services
         .map(|services| receipt_resources(pipeline.clone(), services))
         .transpose()?
@@ -327,6 +402,7 @@ pub async fn serve_with_receipts(
                 .max_encoding_message_size(wire::MAX_FRAME),
         )
         .add_optional_service(receipt_service)
+        .add_optional_service(plan_service)
         .serve_with_incoming_shutdown(hangang_runtime::incoming(listener), async move {
             let _ = stop.wait_for(|v| *v).await;
         })
@@ -381,4 +457,112 @@ pub(crate) async fn issue_service_for_test(
         .ok_or_else(|| Status::failed_precondition("receipt disabled"))?
         .issue_service(request)
         .await
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+    use crate::auth_gateway::{
+        projection::{Configuration, Credential, Plan},
+        projection_authority::Authority,
+    };
+    use v1::projection_plans_server::ProjectionPlans;
+
+    fn request() -> Request<v1::ProjectionPlanRequest> {
+        let mut request = Request::new(v1::ProjectionPlanRequest {
+            request_id: 1,
+            service: "orders".into(),
+            audience: "orders-api".into(),
+            minimum_revision: 1,
+        });
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer owned-key".parse().unwrap());
+        request
+    }
+
+    #[tokio::test]
+    async fn native_plan_endpoint_authenticates_bounds_and_observes_retirement() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .unwrap();
+        let mut owner = Authority::load(&db, 0).unwrap();
+        let service = PlanService {
+            pipeline: Service {
+                router: Router::new(),
+                keys: Arc::new(CallerKeys::new(
+                    Some(crate::crypto::Secret::new("owned-key".into())),
+                    None,
+                    false,
+                )),
+                requests: Arc::new(Semaphore::new(1)),
+            },
+            plans: owner.reader(),
+        };
+        let mut unauthorized = request();
+        unauthorized.metadata_mut().remove("authorization");
+        assert_eq!(
+            service.observe(unauthorized).await.unwrap_err().code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            service.observe(request()).await.unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+        owner
+            .publish(
+                &mut db,
+                0,
+                Some(Configuration {
+                    revision: 1,
+                    plans: vec![Plan {
+                        service: "orders".into(),
+                        audience: "orders-api".into(),
+                        resource: "orders".into(),
+                        action: "read".into(),
+                        minimum_aal: 2,
+                        credential: Credential::BearerReference {
+                            secret_ref: "vault:never-resolved".into(),
+                        },
+                    }],
+                }),
+                "operator",
+                &|_| Ok(()),
+            )
+            .unwrap();
+        let result = service.observe(request()).await.unwrap().into_inner();
+        assert_eq!(
+            (result.revision, result.minimum_aal, result.cache_ttl_ms),
+            (1, 2, 0)
+        );
+        assert_eq!(
+            (result.resource.as_str(), result.action.as_str()),
+            ("orders", "read")
+        );
+        let mut invalid = request();
+        invalid.get_mut().request_id = 0;
+        assert_eq!(
+            service.observe(invalid).await.unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        let permit = service
+            .pipeline
+            .requests
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        assert_eq!(
+            service.observe(request()).await.unwrap_err().code(),
+            tonic::Code::ResourceExhausted
+        );
+        drop(permit);
+        owner
+            .publish(&mut db, 1, None, "operator", &|_| Ok(()))
+            .unwrap();
+        assert_eq!(
+            service.observe(request()).await.unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+    }
 }

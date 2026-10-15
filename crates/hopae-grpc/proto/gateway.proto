@@ -14,3 +14,8 @@ message ServiceReceiptReply { uint64 request_id = 1; AuthenticationReceiptContex
 
 message ServiceReceiptValidationRequest { uint64 request_id = 1; AuthenticationReceiptContext context = 2; bytes receipt = 3; bytes request_sha256 = 4; }
 message ServiceReceiptValidationReply { uint64 request_id = 1; uint64 expires_ms = 2; }
+
+// Native owner metadata only. This observation grants no access and contains no secrets.
+service ProjectionPlans { rpc Observe(ProjectionPlanRequest) returns (ProjectionPlanReply); }
+message ProjectionPlanRequest { uint64 request_id = 1; string service = 2; string audience = 3; uint64 minimum_revision = 4; }
+message ProjectionPlanReply { uint64 request_id = 1; uint64 revision = 2; string service = 3; string audience = 4; string resource = 5; string action = 6; uint32 minimum_aal = 7; uint32 cache_ttl_ms = 8; }

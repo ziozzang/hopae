@@ -2145,6 +2145,86 @@ mod tests {
             .connect()
             .await
             .unwrap();
+        let mut plan_client =
+            crate::http::grpc_gateway::v1::projection_plans_client::ProjectionPlansClient::new(
+                channel.clone(),
+            );
+        let plan_call = || {
+            let mut call =
+                tonic::Request::new(crate::http::grpc_gateway::v1::ProjectionPlanRequest {
+                    request_id: 91,
+                    service: "orders".into(),
+                    audience: "orders-api".into(),
+                    minimum_revision: 1,
+                });
+            call.metadata_mut()
+                .insert("authorization", format!("Bearer {KEY}").parse().unwrap());
+            call
+        };
+        assert_eq!(
+            plan_client.observe(plan_call()).await.unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
+        {
+            use crate::auth_gateway::projection::{Configuration, Credential, Plan};
+            let mut owner = bound.services.projection_authority.lock().unwrap();
+            owner
+                .publish(
+                    &mut bound.services.store.conn(),
+                    0,
+                    Some(Configuration {
+                        revision: 1,
+                        plans: vec![Plan {
+                            service: "orders".into(),
+                            audience: "orders-api".into(),
+                            resource: "orders".into(),
+                            action: "read".into(),
+                            minimum_aal: 2,
+                            credential: Credential::BearerReference {
+                                secret_ref: "vault:unresolved".into(),
+                            },
+                        }],
+                    }),
+                    "operator",
+                    &|_| Ok(()),
+                )
+                .unwrap();
+        }
+        let plan = plan_client.observe(plan_call()).await.unwrap().into_inner();
+        assert_eq!(
+            (
+                plan.request_id,
+                plan.revision,
+                plan.minimum_aal,
+                plan.cache_ttl_ms
+            ),
+            (91, 1, 2, 0)
+        );
+        let mut wrong_key = plan_call();
+        wrong_key
+            .metadata_mut()
+            .insert("authorization", "Bearer wrong".parse().unwrap());
+        assert_eq!(
+            plan_client.observe(wrong_key).await.unwrap_err().code(),
+            tonic::Code::Unauthenticated
+        );
+        bound
+            .services
+            .projection_authority
+            .lock()
+            .unwrap()
+            .publish(
+                &mut bound.services.store.conn(),
+                1,
+                None,
+                "operator",
+                &|_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            plan_client.observe(plan_call()).await.unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
         let mut client=crate::http::grpc_gateway::v1::authentication_receipts_client::AuthenticationReceiptsClient::new(channel);
         let message = crate::http::grpc_gateway::v1::ServiceReceiptRequest {
             verification: Some(crate::http::grpc_gateway::v1::VerifyRequest {

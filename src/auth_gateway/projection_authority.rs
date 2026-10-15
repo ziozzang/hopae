@@ -9,7 +9,10 @@ use arc_swap::ArcSwap;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use zeroize::Zeroizing;
 const KEY: &str = "projection_plan_authority_v1";
 const LIMIT: usize = 128 * 1024;
@@ -59,6 +62,7 @@ fn read_encoded(db: &Connection) -> Result<Option<(Document, String)>, Refused> 
         .transpose()
 }
 pub struct Snapshot {
+    available: AtomicBool,
     revision: u64,
     document: Option<String>,
     projector: Option<Projector>,
@@ -80,6 +84,9 @@ impl Snapshot {
         guard: &dyn Fn(&Connection) -> Result<(), Refused>,
         resolve: &dyn Fn(&str) -> Result<Zeroizing<String>, Refused>,
     ) -> Result<Output, Refused> {
+        if !self.available.load(Ordering::Acquire) {
+            return Err(Refused);
+        }
         let projector = self.projector.as_ref().ok_or(Refused)?;
         projector.project(
             admission,
@@ -87,6 +94,9 @@ impl Snapshot {
             clock,
             &|db| {
                 guard(db)?;
+                if !self.available.load(Ordering::Acquire) {
+                    return Err(Refused);
+                }
                 let expected = self.document.as_deref().ok_or(Refused)?;
                 // Borrow SQLite's row bytes: no JSON decoding, plan compilation
                 // or temporary document allocation on the request path.
@@ -105,6 +115,54 @@ impl Snapshot {
             resolve,
         )
     }
+}
+/// Opaque native plan observation. It does not authorize credential issuance.
+pub struct Observation<'a> {
+    reader: Arc<ArcSwap<Snapshot>>,
+    snapshot: Arc<Snapshot>,
+    service: &'a str,
+    audience: &'a str,
+}
+impl Observation<'_> {
+    pub fn current(&self) -> bool {
+        self.snapshot.available.load(Ordering::Acquire)
+            && Arc::ptr_eq(&self.reader.load(), &self.snapshot)
+    }
+    pub fn revision(&self) -> u64 {
+        self.snapshot.revision
+    }
+    pub fn metadata(&self) -> Result<super::projection::PlanMetadata<'_>, Refused> {
+        if !self.current() {
+            return Err(Refused);
+        }
+        self.snapshot
+            .projector
+            .as_ref()
+            .and_then(|projector| projector.metadata(self.service, self.audience))
+            .ok_or(Refused)
+    }
+}
+pub fn observe<'a>(
+    reader: Arc<ArcSwap<Snapshot>>,
+    service: &'a str,
+    audience: &'a str,
+    minimum_revision: u64,
+) -> Result<Observation<'a>, Refused> {
+    let snapshot = reader.load_full();
+    if minimum_revision > MAX_REVISION || snapshot.revision < minimum_revision {
+        return Err(Refused);
+    }
+    let observed = Observation {
+        reader,
+        snapshot,
+        service,
+        audience,
+    };
+    observed.metadata()?;
+    if !observed.current() {
+        return Err(Refused);
+    }
+    Ok(observed)
 }
 pub struct Authority {
     snapshot: Arc<ArcSwap<Snapshot>>,
@@ -128,6 +186,7 @@ impl Authority {
             .transpose()?;
         Ok(Self {
             snapshot: Arc::new(ArcSwap::from_pointee(Snapshot {
+                available: AtomicBool::new(true),
                 revision,
                 document: encoded_document,
                 projector,
@@ -151,6 +210,7 @@ impl Authority {
             || actor.len() > 128
             || actor.chars().any(char::is_control)
             || self.snapshot.load().revision != expected
+            || !self.snapshot.load().available.load(Ordering::Acquire)
         {
             return Err(Refused);
         }
@@ -173,35 +233,59 @@ impl Authority {
         let value = serde_json::to_string(&document).map_err(|_| Refused)?;
         // Prepare all allocations before successful commit and live installation.
         let prepared = Arc::new(Snapshot {
+            available: AtomicBool::new(true),
             revision,
             document: Some(value.clone()),
             projector,
         });
         let audit = serde_json::json!({"revision": revision,"actor": actor,"digest": document.digest,"disabled": document.configuration.is_none()}).to_string();
-        let tx = db
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|_| Refused)?;
-        guard(&tx)?;
-        if read(&tx)?.as_ref().map_or(0, |d| d.revision) != expected {
+        let previous = self.snapshot.load_full();
+        // Close memory readers before SQL mutation. Panic/uncertain commit stays
+        // fenced; only a definite rollback to the exact prior document reopens.
+        if !previous.available.swap(false, Ordering::AcqRel) {
             return Err(Refused);
         }
-        tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", rusqlite::params![KEY,value]).map_err(|_| Refused)?;
-        tx.execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2)",
-            rusqlite::params![
-                format!("projection_plan_publication_audit:{revision}"),
-                audit
-            ],
-        )
-        .map_err(|_| Refused)?;
-        guard(&tx)?;
-        let final_value: String = tx
-            .query_row("SELECT value FROM meta WHERE key=?1", [KEY], |r| r.get(0))
+        let commit_attempted = std::cell::Cell::new(false);
+        let result = (|| -> Result<(), Refused> {
+            let tx = db
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|_| Refused)?;
+            guard(&tx)?;
+            if read(&tx)?.as_ref().map_or(0, |d| d.revision) != expected {
+                return Err(Refused);
+            }
+            tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", rusqlite::params![KEY,value]).map_err(|_| Refused)?;
+            tx.execute(
+                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                rusqlite::params![
+                    format!("projection_plan_publication_audit:{revision}"),
+                    audit
+                ],
+            )
             .map_err(|_| Refused)?;
-        if final_value != value {
-            return Err(Refused);
+            guard(&tx)?;
+            let final_value: String = tx
+                .query_row("SELECT value FROM meta WHERE key=?1", [KEY], |r| r.get(0))
+                .map_err(|_| Refused)?;
+            if final_value != value {
+                return Err(Refused);
+            }
+            commit_attempted.set(true);
+            tx.commit().map_err(|_| Refused)?;
+            Ok(())
+        })();
+        if let Err(refusal) = result {
+            if !commit_attempted.get()
+                && db.is_autocommit()
+                && read_encoded(db).ok().is_some_and(|document| {
+                    document.as_ref().map(|(_, bytes)| bytes.as_str())
+                        == previous.document.as_deref()
+                })
+            {
+                previous.available.store(true, Ordering::Release);
+            }
+            return Err(refusal);
         }
-        tx.commit().map_err(|_| Refused)?;
         self.snapshot.store(prepared);
         Ok(document)
     }
@@ -225,6 +309,78 @@ mod tests {
                 },
             }],
         }
+    }
+    #[test]
+    fn observations_close_during_publication_reopen_on_rollback_and_retire_on_commit() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .unwrap();
+        let mut owner = Authority::load(&db, 0).unwrap();
+        let reader = owner.reader();
+        assert!(observe(reader.clone(), "orders", "orders-api", 0).is_err());
+        owner
+            .publish(&mut db, 0, Some(config(1)), "operator", &|_| Ok(()))
+            .unwrap();
+        let old = observe(reader.clone(), "orders", "orders-api", 1).unwrap();
+        assert_eq!(old.metadata().unwrap().minimum_aal, 2);
+        assert!(observe(reader.clone(), "other", "orders-api", 1).is_err());
+        assert!(observe(reader.clone(), "orders", "orders-api", 2).is_err());
+        assert!(
+            owner
+                .publish(&mut db, 1, None, "operator", &|_| {
+                    assert!(!old.current());
+                    assert!(old.metadata().is_err());
+                    assert!(observe(reader.clone(), "orders", "orders-api", 1).is_err());
+                    Err(Refused)
+                })
+                .is_err()
+        );
+        assert!(old.current());
+        owner
+            .publish(&mut db, 1, None, "operator", &|_| {
+                assert!(!old.current());
+                Ok(())
+            })
+            .unwrap();
+        assert!(!old.current());
+        assert!(observe(reader.clone(), "orders", "orders-api", 1).is_err());
+        owner
+            .publish(&mut db, 2, Some(config(3)), "operator", &|_| Ok(()))
+            .unwrap();
+        assert!(!old.current());
+        assert_eq!(
+            observe(reader, "orders", "orders-api", 3)
+                .unwrap()
+                .revision(),
+            3
+        );
+    }
+    #[test]
+    fn failed_commit_fences_observations_until_durable_reload() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);").unwrap();
+        let mut owner = Authority::load(&db, 0).unwrap();
+        owner
+            .publish(&mut db, 0, Some(config(1)), "operator", &|_| Ok(()))
+            .unwrap();
+        let reader = owner.reader();
+        let old = observe(reader.clone(), "orders", "orders-api", 1).unwrap();
+        assert!(
+            owner
+                .publish(&mut db, 1, None, "operator", &|tx| {
+                    tx.execute("INSERT INTO child(parent_id) VALUES(42)", [])
+                        .map_err(|_| Refused)?;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(db.is_autocommit());
+        assert_eq!(read(&db).unwrap().unwrap().revision, 1);
+        assert!(!old.current());
+        assert!(observe(reader, "orders", "orders-api", 1).is_err());
+        let recovered = Authority::load(&db, 1).unwrap();
+        assert!(observe(recovered.reader(), "orders", "orders-api", 1).is_ok());
+        assert!(!old.current());
     }
     #[test]
     fn restart_keeps_tombstone_floor_and_rejects_stale_owner_publication() {

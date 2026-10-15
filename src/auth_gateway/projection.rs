@@ -41,6 +41,14 @@ pub enum Credential {
     IdentityHeader,
     BearerReference { secret_ref: String },
 }
+/// Public scope facts only; no secret reference or credential material.
+pub struct PlanMetadata<'a> {
+    pub service: &'a str,
+    pub audience: &'a str,
+    pub resource: &'a str,
+    pub action: &'a str,
+    pub minimum_aal: u8,
+}
 pub struct Projector {
     revision: u64,
     plans: HashMap<String, HashMap<String, Plan>>,
@@ -127,6 +135,16 @@ impl Projector {
         Ok(Self {
             revision: config.revision,
             plans,
+        })
+    }
+    pub(crate) fn metadata(&self, service: &str, audience: &str) -> Option<PlanMetadata<'_>> {
+        let plan = self.plans.get(service)?.get(audience)?;
+        Some(PlanMetadata {
+            service: &plan.service,
+            audience: &plan.audience,
+            resource: &plan.resource,
+            action: &plan.action,
+            minimum_aal: plan.minimum_aal,
         })
     }
     /// `resolve` is a native vault capability, never a script callback. Guard must

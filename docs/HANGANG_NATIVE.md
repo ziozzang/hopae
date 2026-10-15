@@ -203,3 +203,21 @@ withdrawal and authority outages. Existing no-owner mode also passes. All keys,
 identities and state are generated in private owned temporary directories. These
 are local source functional checks, not static release, Kubernetes, operating
 adoption, signed permit/projection/replay or throughput qualification.
+
+## Native projection-plan observation
+
+`ProjectionPlans/Observe` shares the mandatory-mTLS gateway gRPC listener and
+requires an accepted gateway caller credential. It reports only the native
+compiled plan's service, audience, resource, action, minimum AAL and revision.
+It never resolves or returns a secret reference or credential. The reply has
+zero cache TTL and grants no access. Pumgye's signed permission issuance still
+needs its own authenticated owner client and final retirement checks.
+
+The service captures an ArcSwap reader at startup. Requests use memory only,
+with shared bounded admission and 512/1024-byte request/reply transport limits.
+Publication fences the previous snapshot before SQL mutation; exact rollback
+can reopen it, successful replacement retires it, and uncertain commit leaves
+it fenced until durable reload. Native owner and handler tests cover these
+boundaries. An owned real mTLS socket also proves absent-plan refusal, native
+publication, successful observation, wrong caller refusal and withdrawal on the
+same retained channel. This alone does not qualify cross-process permit or projection.
