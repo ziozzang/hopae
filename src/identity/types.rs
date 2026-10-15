@@ -56,6 +56,10 @@ fn is_atext(c: char) -> bool {
 }
 
 impl NormalizedEmail {
+    pub(crate) fn heap_capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
     /// Parse and normalize. Leading/trailing whitespace is not trimmed: it is an error.
     pub fn parse(input: &str) -> Result<Self, EmailError> {
         if input.is_empty() || input.len() > MAX_EMAIL_BYTES {
@@ -159,5 +163,18 @@ mod tests {
         assert_eq!(NormalizedEmail::parse(&long), Err(EmailError::LocalPart));
         let huge = format!("a@{}.test", "a".repeat(260));
         assert_eq!(NormalizedEmail::parse(&huge), Err(EmailError::Length));
+    }
+}
+
+#[cfg(test)]
+mod retained_heap_tests {
+    use super::*;
+    #[test]
+    fn retained_heap_email_reports_backing_capacity() {
+        let mut email = NormalizedEmail::parse("a@example.test").unwrap();
+        let len = email.0.len();
+        email.0.reserve(256);
+        assert_eq!(email.heap_capacity(), email.0.capacity());
+        assert!(email.heap_capacity() > len);
     }
 }

@@ -171,3 +171,16 @@ impl Current {
         ))
     }
 }
+
+impl Current {
+    #[allow(dead_code)] // Used by the additive native Human retained-record quota.
+    pub(crate) fn owned_heap_bytes(&self) -> StoreResult<usize> {
+        crate::store::types::heap_sum([
+            self.realm.capacity(),
+            self.primary.owned_heap_bytes()?,
+            self.factor
+                .as_ref()
+                .map_or(Ok(0), |factor| factor.owned_heap_bytes())?,
+        ])
+    }
+}

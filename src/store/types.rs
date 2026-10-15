@@ -897,3 +897,150 @@ pub struct ExternalFactorSnapshot {
     pub(crate) config_generation: u64,
     pub(crate) expected_revision: u64,
 }
+
+/// Heap backing only; callers count inline values exactly once. Overflow refuses.
+pub(crate) fn heap_sum(values: impl IntoIterator<Item = usize>) -> super::StoreResult<usize> {
+    values.into_iter().try_fold(0usize, |sum, value| {
+        sum.checked_add(value)
+            .ok_or(super::StoreError::Conflict("retained allocation overflow"))
+    })
+}
+pub(crate) fn heap_vec<T>(capacity: usize) -> super::StoreResult<usize> {
+    capacity
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or(super::StoreError::Conflict("retained allocation overflow"))
+}
+impl HandleView {
+    #[allow(dead_code)] // Used by the additive native Human retained-record quota.
+    pub(crate) fn owned_heap_bytes(&self) -> super::StoreResult<usize> {
+        let h = &self.handle;
+        let s = &self.session;
+        let i = &s.snapshot;
+        let mut total = heap_sum([
+            h.session_id.heap_capacity(),
+            h.host.heap_capacity(),
+            h.revoked_reason.as_ref().map_or(0, String::capacity),
+            s.session_id.heap_capacity(),
+            s.user_id.heap_capacity(),
+            s.provider_id.heap_capacity(),
+            heap_vec::<FactorEntry>(s.factors.capacity())?,
+            i.email.as_ref().map_or(0, NormalizedEmail::heap_capacity),
+            i.display_name.as_ref().map_or(0, String::capacity),
+            i.username.as_ref().map_or(0, String::capacity),
+            heap_vec::<String>(i.groups.capacity())?,
+            heap_vec::<String>(self.user.groups.capacity())?,
+            s.terminated_reason.as_ref().map_or(0, String::capacity),
+            s.bound_ua_prefix.as_ref().map_or(0, String::capacity),
+        ])?;
+        for factor in &s.factors {
+            total = heap_sum([
+                total,
+                factor
+                    .provider
+                    .as_ref()
+                    .map_or(0, ProviderId::heap_capacity),
+            ])?;
+        }
+        for group in i.groups.iter().chain(&self.user.groups) {
+            total = heap_sum([total, group.capacity()])?;
+        }
+        Ok(total)
+    }
+}
+
+#[cfg(test)]
+mod retained_heap_tests {
+    use super::*;
+    fn view() -> HandleView {
+        HandleView {
+            handle: HandleRow {
+                handle_sha256: Digest([0; 32]),
+                session_id: SessionId::new("s"),
+                host: Host::parse("app.test").unwrap(),
+                issued_aal: Aal::One,
+                created_at: Timestamp(0),
+                last_seen_at: Timestamp(0),
+                absolute_expires_at: Timestamp(100),
+                revoked_at: None,
+                revoked_reason: None,
+            },
+            session: SessionRow {
+                session_id: SessionId::new("s"),
+                user_id: UserId::new("u"),
+                provider_id: ProviderId::new("p"),
+                auth_time: Timestamp(0),
+                factors: vec![],
+                aal: Aal::One,
+                authz_version: 1,
+                cred_gen: 1,
+                snapshot: IdentitySnapshot {
+                    email: None,
+                    display_name: None,
+                    username: None,
+                    groups: vec![],
+                },
+                bound_ip: "127.0.0.1".parse().unwrap(),
+                bound_ua_sha256: None,
+                created_at: Timestamp(0),
+                last_seen_at: Timestamp(0),
+                absolute_expires_at: Timestamp(100),
+                terminated_at: None,
+                terminated_reason: None,
+                authz_version_at_auth: 1,
+                auth_time_source: AuthTimeSource::HopaeCompletion,
+                bound_ua_prefix: None,
+            },
+            user: UserAuthz {
+                status: UserStatus::Active,
+                authz_version: 1,
+                groups: vec![],
+            },
+        }
+    }
+    #[test]
+    fn retained_heap_counts_nested_capacity_not_length() {
+        let mut v = view();
+        let before = v.owned_heap_bytes().unwrap();
+        let mut name = String::with_capacity(128);
+        name.push('x');
+        let mut groups = Vec::with_capacity(7);
+        groups.push(name);
+        let delta = groups.capacity() * std::mem::size_of::<String>() + groups[0].capacity();
+        v.session.snapshot.groups = groups;
+        assert_eq!(v.owned_heap_bytes().unwrap(), before + delta);
+        let before = v.owned_heap_bytes().unwrap();
+        let mut name = String::with_capacity(256);
+        name.push('x');
+        let mut groups = Vec::with_capacity(9);
+        groups.push(name);
+        let delta = groups.capacity() * std::mem::size_of::<String>() + groups[0].capacity();
+        v.user.groups = groups;
+        assert_eq!(v.owned_heap_bytes().unwrap(), before + delta);
+        let before = v.owned_heap_bytes().unwrap();
+        let mut provider = String::with_capacity(96);
+        provider.push('p');
+        let capacity = provider.capacity();
+        let mut factors = Vec::with_capacity(5);
+        factors.push(FactorEntry {
+            kind: crate::session::FactorKind::Oidc,
+            provider: Some(ProviderId::new(provider)),
+            at: Timestamp(0),
+        });
+        let delta = factors.capacity() * std::mem::size_of::<FactorEntry>() + capacity;
+        v.session.factors = factors;
+        assert_eq!(v.owned_heap_bytes().unwrap(), before + delta);
+        let before = v.owned_heap_bytes().unwrap();
+        let mut reason = String::with_capacity(80);
+        reason.push('r');
+        let capacity = reason.capacity();
+        v.handle.revoked_reason = Some(reason);
+        assert_eq!(v.owned_heap_bytes().unwrap(), before + capacity);
+    }
+    #[test]
+    fn retained_heap_checked_arithmetic_refuses_overflow_without_allocation() {
+        assert_eq!(heap_sum([usize::MAX, 0]).unwrap(), usize::MAX);
+        assert!(heap_sum([usize::MAX, 1]).is_err());
+        assert!(heap_vec::<String>(usize::MAX).is_err());
+        assert_eq!(heap_vec::<u8>(usize::MAX).unwrap(), usize::MAX);
+    }
+}

@@ -23,6 +23,11 @@ macro_rules! string_newtype {
                 Self(s.into())
             }
 
+            #[allow(dead_code)] // Private retained-allocation accounting; not identifier validation.
+            pub(crate) fn heap_capacity(&self) -> usize {
+                self.0.capacity()
+            }
+
             pub fn as_str(&self) -> &str {
                 &self.0
             }

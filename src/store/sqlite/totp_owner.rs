@@ -123,3 +123,33 @@ impl Store {
         Ok(())
     }
 }
+
+impl Facts {
+    #[allow(dead_code)] // Used by the additive native Human retained-record quota.
+    pub(super) fn owned_heap_bytes(&self) -> StoreResult<usize> {
+        crate::store::types::heap_sum([self.user.capacity(), self.enrollment.capacity()])
+    }
+}
+
+#[cfg(test)]
+mod retained_heap_tests {
+    use super::*;
+    #[test]
+    fn retained_heap_totp_counts_both_capacities() {
+        let mut user = String::with_capacity(128);
+        user.push('u');
+        let mut enrollment = String::with_capacity(256);
+        enrollment.push('e');
+        let expected = user.capacity() + enrollment.capacity();
+        let facts = Facts {
+            user,
+            generation: 1,
+            enrollment,
+            revision: 1,
+            index: 0,
+            at_ms: 0,
+            config: 1,
+        };
+        assert_eq!(facts.owned_heap_bytes().unwrap(), expected);
+    }
+}

@@ -34,6 +34,10 @@ pub enum HostError {
 }
 
 impl Host {
+    pub(crate) fn heap_capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
     pub fn parse(input: &str) -> Result<Host, HostError> {
         if input.is_empty() {
             return Err(HostError::Empty);
@@ -341,5 +345,61 @@ mod tests {
         assert!(!snap.return_origin_allowed(&h("app.example.test"), 8443));
         assert!(!snap.return_origin_allowed(&h("off.example.test"), 443));
         assert!(!snap.return_origin_allowed(&h("old.example.test"), 443));
+    }
+}
+
+impl AppPolicy {
+    #[allow(dead_code)] // Used by the additive native Human retained-record quota.
+    pub(crate) fn owned_heap_bytes(&self) -> crate::store::StoreResult<usize> {
+        use crate::store::types::{heap_sum, heap_vec};
+        let mut total = heap_sum([
+            self.app_id.heap_capacity(),
+            self.display_name.capacity(),
+            heap_vec::<Host>(self.hosts.capacity())?,
+            heap_vec::<u16>(self.ports.capacity())?,
+            heap_vec::<StepUpRule>(self.step_up.capacity())?,
+        ])?;
+        for host in &self.hosts {
+            total = heap_sum([total, host.heap_capacity()])?;
+        }
+        for rule in &self.step_up {
+            total = heap_sum([total, rule.path_prefix.as_ref().map_or(0, String::capacity)])?;
+        }
+        Ok(total)
+    }
+}
+
+#[cfg(test)]
+mod retained_heap_tests {
+    use super::*;
+    #[test]
+    fn retained_heap_app_counts_vectors_and_nested_spare_capacity() {
+        let mut app = AppPolicy::default_app();
+        let before = app.owned_heap_bytes().unwrap();
+        let mut hosts = Vec::with_capacity(8);
+        let mut host = Host::parse("app.test").unwrap();
+        host.0.reserve(128);
+        let delta = hosts.capacity() * std::mem::size_of::<Host>() + host.heap_capacity();
+        hosts.push(host);
+        app.hosts = hosts;
+        assert_eq!(app.owned_heap_bytes().unwrap(), before + delta);
+        let before = app.owned_heap_bytes().unwrap();
+        let mut prefix = String::with_capacity(256);
+        prefix.push('/');
+        let mut rules = Vec::with_capacity(6);
+        let delta = rules.capacity() * std::mem::size_of::<StepUpRule>() + prefix.capacity();
+        rules.push(StepUpRule {
+            path_prefix: Some(prefix),
+            aal: Aal::Two,
+            max_age: None,
+        });
+        app.step_up = rules;
+        assert_eq!(app.owned_heap_bytes().unwrap(), before + delta);
+        let before = app.owned_heap_bytes().unwrap();
+        app.ports = Vec::with_capacity(13);
+        assert_eq!(
+            app.owned_heap_bytes().unwrap(),
+            before + app.ports.capacity() * std::mem::size_of::<u16>()
+        );
     }
 }

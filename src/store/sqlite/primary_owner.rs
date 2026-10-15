@@ -184,3 +184,48 @@ pub(super) fn validate_foundation(c: &rusqlite::Connection) -> StoreResult<()> {
     }
     Ok(())
 }
+
+impl Facts {
+    #[allow(dead_code)] // Used by the additive native Human retained-record quota.
+    pub(super) fn owned_heap_bytes(&self) -> StoreResult<usize> {
+        crate::store::types::heap_sum([
+            self.user.capacity(),
+            self.provider.capacity(),
+            self.subject.capacity(),
+            self.source.capacity(),
+            self.kind.capacity(),
+        ])
+    }
+}
+
+#[cfg(test)]
+mod retained_heap_tests {
+    use super::*;
+    #[test]
+    fn retained_heap_primary_counts_each_owned_fact() {
+        let mut value = String::with_capacity(128);
+        value.push('x');
+        let cap = value.capacity();
+        let facts = Facts {
+            user: value,
+            provider: String::new(),
+            revision: 1,
+            material: 1,
+            config: 1,
+            credential: 1,
+            subject: String::new(),
+            auth_time: 0,
+            source: String::new(),
+            index: 0,
+            kind: String::new(),
+            at: 0,
+        };
+        assert_eq!(facts.owned_heap_bytes().unwrap(), cap);
+        let mut next = facts.clone();
+        next.subject.reserve(256);
+        assert_eq!(
+            next.owned_heap_bytes().unwrap(),
+            next.user.capacity() + next.subject.capacity()
+        );
+    }
+}

@@ -772,3 +772,27 @@ mod tests {
 #[cfg(test)]
 #[path = "registry_owner_tests.rs"]
 mod owner_tests;
+
+impl RegistryProviderFence {
+    #[allow(dead_code)] // Used by the additive native Human retained-record quota.
+    pub(crate) fn owned_heap_bytes(&self) -> crate::store::StoreResult<usize> {
+        Ok(self.provider.heap_capacity())
+    }
+}
+
+#[cfg(test)]
+mod retained_heap_tests {
+    use super::*;
+    #[test]
+    fn retained_heap_fence_counts_owned_provider_capacity() {
+        let mut id = String::with_capacity(256);
+        id.push('p');
+        let capacity = id.capacity();
+        let fence = RegistryProviderFence {
+            registry: std::sync::Weak::new(),
+            provider: ProviderId::new(id),
+            retired: std::sync::atomic::AtomicBool::new(false),
+        };
+        assert_eq!(fence.owned_heap_bytes().unwrap(), capacity);
+    }
+}
