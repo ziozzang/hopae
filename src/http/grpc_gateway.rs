@@ -84,6 +84,34 @@ impl Service {
         ),
         Status,
     > {
+        self.exchange_inner(request, None).await
+    }
+    async fn exchange_workload(
+        &self,
+        request: Request<VerifyRequest>,
+        attempt: Arc<crate::auth_gateway::workload_owner::Attempt>,
+    ) -> Result<
+        (
+            u64,
+            axum::response::Response,
+            tokio::sync::OwnedSemaphorePermit,
+        ),
+        Status,
+    > {
+        self.exchange_inner(request, Some(attempt)).await
+    }
+    async fn exchange_inner(
+        &self,
+        request: Request<VerifyRequest>,
+        attempt: Option<Arc<crate::auth_gateway::workload_owner::Attempt>>,
+    ) -> Result<
+        (
+            u64,
+            axum::response::Response,
+            tokio::sync::OwnedSemaphorePermit,
+        ),
+        Status,
+    > {
         let key = self.caller(request.metadata())?;
         let _permit = self
             .requests
@@ -117,6 +145,9 @@ impl Service {
             .body(Body::empty())
             .map_err(|_| Status::internal("verification request"))?;
         *request.headers_mut() = headers;
+        if let Some(attempt) = attempt {
+            request.extensions_mut().insert(attempt);
+        }
         let response = self
             .router
             .clone()
@@ -218,6 +249,7 @@ impl v1::projection_plans_server::ProjectionPlans for PlanService {
     }
 }
 
+#[derive(Clone)]
 struct ReceiptService {
     pipeline: Service,
     issuer: Arc<crate::auth_gateway::receipt_issuer::Issuer>,
@@ -554,15 +586,25 @@ pub async fn serve_with_receipts(
             .max_decoding_message_size(8448)
             .max_encoding_message_size(8192)
     });
-    let receipt_service = services
+    let receipt_resources = services
         .map(|services| receipt_resources(pipeline.clone(), services))
         .transpose()?
-        .flatten()
+        .flatten();
+    let workload_receipt_service = receipt_resources
+        .as_ref()
+        .filter(|service| service.issuer.workloads_enabled())
         .map(|service| {
-            v1::authentication_receipts_server::AuthenticationReceiptsServer::new(service)
-                .max_decoding_message_size(wire::MAX_FRAME)
-                .max_encoding_message_size(2048)
+            v1::workload_authentication_receipts_server::WorkloadAuthenticationReceiptsServer::new(
+                service.clone(),
+            )
+            .max_decoding_message_size(wire::MAX_FRAME)
+            .max_encoding_message_size(2048)
         });
+    let receipt_service = receipt_resources.map(|service| {
+        v1::authentication_receipts_server::AuthenticationReceiptsServer::new(service)
+            .max_decoding_message_size(wire::MAX_FRAME)
+            .max_encoding_message_size(2048)
+    });
     hangang_runtime::server(tls)?
         .add_service(bounded_transport(
             AuthenticationServer::new(pipeline.clone())
@@ -572,6 +614,9 @@ pub async fn serve_with_receipts(
             ingress.clone(),
             wire::MAX_FRAME,
         ))
+        .add_optional_service(workload_receipt_service.map(|service| {
+            bounded_transport(service, pipeline.clone(), ingress.clone(), wire::MAX_FRAME)
+        }))
         .add_optional_service(receipt_service.map(|service| {
             bounded_transport(service, pipeline.clone(), ingress.clone(), wire::MAX_FRAME)
         }))
@@ -1655,3 +1700,183 @@ mod observed_boundary_tests {
         }
     }
 }
+
+#[tonic::async_trait]
+impl v1::workload_authentication_receipts_server::WorkloadAuthenticationReceipts
+    for ReceiptService
+{
+    async fn issue_observed(
+        &self,
+        request: Request<v1::WorkloadReceiptRequest>,
+    ) -> Result<Response<v1::WorkloadReceiptObservedReply>, Status> {
+        self.pipeline.caller(request.metadata())?;
+        let metadata = request.metadata().clone();
+        let input = request.into_inner();
+        let digest: [u8; 32] = input
+            .request_sha256
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("request digest required"))?;
+        let verification = input
+            .verification
+            .ok_or_else(|| Status::invalid_argument("verification required"))?;
+        if !(1..=9_007_199_254_740_991).contains(&verification.request_id) {
+            return Err(Status::invalid_argument("invalid correlation"));
+        }
+        let attempt = self
+            .issuer
+            .begin_workload(&input.service, &input.audience)
+            .map_err(|_| Status::unavailable("workload source unavailable"))?;
+        let mut request = Request::new(verification);
+        *request.metadata_mut() = metadata.clone();
+        let (request_id, response, _permit) =
+            self.pipeline.exchange_workload(request, attempt).await?;
+        if !response.status().is_success() {
+            return Err(Status::permission_denied(
+                "native workload authentication refused",
+            ));
+        }
+        let captured = response
+            .extensions()
+            .get::<Arc<crate::auth_gateway::receipt_issuer::CapturedWorkload>>()
+            .ok_or_else(|| Status::failed_precondition("native workload source required"))?;
+        let (issued, record) = captured
+            .issue(
+                &self.issuer,
+                &self.profiles,
+                &self.applications,
+                &self.key_verifier,
+                crate::auth_gateway::receipt_issuer::Request {
+                    service: &input.service,
+                    audience: &input.audience,
+                    request_sha256: digest,
+                },
+                &|| {
+                    self.pipeline
+                        .caller(&metadata)
+                        .map(|_| ())
+                        .map_err(|_| crate::auth_gateway::receipt_keys::Refused)
+                },
+            )
+            .map_err(|_| Status::unavailable("workload source retired"))?;
+        let c = issued.context();
+        let context = v1::AuthenticationReceiptContext {
+            issuer_ref: c.issuer_ref.into(),
+            key_epoch: c.key_epoch,
+            identity_authority_epoch: c.identity_authority_epoch.into(),
+            identity: Some(v1::ReceiptIdentity {
+                subject_ref: c.identity.subject_ref.into(),
+                kind: 3,
+                aal: 0,
+                revision: c.identity.revision,
+                credential_generation: c.identity.credential_generation,
+            }),
+            service: c.service.into(),
+            audience: c.audience.into(),
+            request_sha256: c.request_sha256.to_vec(),
+        };
+        self.pipeline.caller(&metadata)?;
+        let observation = self.workload_report(request_id, &record)?;
+        Ok(Response::new(v1::WorkloadReceiptObservedReply {
+            receipt: Some(v1::WorkloadReceiptReply {
+                request_id,
+                context: Some(context),
+                receipt: issued.bytes().to_vec(),
+            }),
+            observation: Some(observation),
+        }))
+    }
+    async fn observe_time(
+        &self,
+        request: Request<v1::WorkloadReceiptObservationRequest>,
+    ) -> Result<Response<v1::WorkloadReceiptTimeReply>, Status> {
+        self.pipeline.caller(request.metadata())?;
+        let _permit = self
+            .pipeline
+            .requests
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("observation capacity"))?;
+        let metadata = request.metadata().clone();
+        let input = request.into_inner();
+        if !(1..=9_007_199_254_740_991).contains(&input.request_id)
+            || input.receipt.len() != hopae_grpc::receipt::LENGTH
+        {
+            return Err(Status::invalid_argument("invalid observation"));
+        }
+        let c = input
+            .context
+            .ok_or_else(|| Status::invalid_argument("context required"))?;
+        let i = c
+            .identity
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("identity required"))?;
+        if i.kind != 3 || i.aal != 0 {
+            return Err(Status::permission_denied("workload proof required"));
+        }
+        let context = hopae_grpc::receipt_binding::Context {
+            issuer_ref: &c.issuer_ref,
+            key_epoch: c.key_epoch,
+            identity_authority_epoch: &c.identity_authority_epoch,
+            identity: hopae_grpc::receipt_binding::Identity {
+                subject_ref: &i.subject_ref,
+                kind: hopae_grpc::PrincipalKind::Workload,
+                aal: 0,
+                revision: i.revision,
+                credential_generation: i.credential_generation,
+            },
+            service: &c.service,
+            audience: &c.audience,
+            request_sha256: c
+                .request_sha256
+                .as_slice()
+                .try_into()
+                .map_err(|_| Status::invalid_argument("digest required"))?,
+        };
+        let expected = input
+            .request_sha256
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("digest required"))?;
+        let record = self
+            .issuer
+            .observe_workload(&context, &input.receipt, &expected, &self.key_verifier)
+            .map_err(|_| Status::permission_denied("workload source retired"))?;
+        self.pipeline.caller(&metadata)?;
+        Ok(Response::new(
+            self.workload_report(input.request_id, &record)?,
+        ))
+    }
+}
+impl ReceiptService {
+    fn workload_report(
+        &self,
+        request_id: u64,
+        record: &crate::auth_gateway::workload_owner::Record,
+    ) -> Result<v1::WorkloadReceiptTimeReply, Status> {
+        let (now, remaining) = self
+            .issuer
+            .workload_time(record)
+            .map_err(|_| Status::unavailable("workload time retired"))?;
+        Ok(v1::WorkloadReceiptTimeReply {
+            request_id,
+            owner_now_ms: now,
+            remaining_ms: remaining,
+            receipt_sha256: record.hash.to_vec(),
+            clock_domain: record
+                .attempt
+                .owner()
+                .map_err(|_| Status::unavailable("workload owner retired"))?
+                .domain()
+                .into(),
+            profile_revision: record.profile.revision,
+            application_generation: record.application.generation,
+            key_registry_revision: record.keys.revision(),
+            cache_ttl_ms: 0,
+        })
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "grpc_workload_tests.rs"]
+mod workload_tests;

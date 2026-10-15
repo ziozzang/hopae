@@ -43,3 +43,5 @@
 - [네이티브 관측형 paired projection](OBSERVED_PROJECTION.md) — 명시적 소스 시계 예산, 원자적 재생 방지와 재시작 보존.
 
 - [Workload observed 프로토콜 선언](WORKLOAD_OBSERVED_PROTOCOL.md) — additive RPC/epoch와 갱신 불가 원천/replay 계약, 서버 활성화 제외.
+
+- [네이티브 Workload receipt owner](WORKLOAD_NATIVE_OWNER.md) — 선택적 실제 발급/관측, 후속 Workload 체인은 별도 게이트.

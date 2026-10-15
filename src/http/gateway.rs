@@ -153,7 +153,13 @@ pub fn router(state: Arc<GatewayState>) -> Router {
         .with_state(state)
 }
 
-async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Response {
+async fn verify(
+    State(st): State<Arc<GatewayState>>,
+    workload: Option<axum::extract::Extension<Arc<crate::auth_gateway::workload_owner::Attempt>>>,
+    headers: HeaderMap,
+) -> Response {
+    let workload = workload.map(|axum::extract::Extension(attempt)| attempt);
+    let workload_application = workload.as_ref().map(|_| st.ctx.snapshot.load_full());
     let request_id = st.request_id();
     // Denials before the forwarded client address is parsed have no client
     // to attribute them to (the TCP peer is the gateway itself).
@@ -241,6 +247,11 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
         let fallback = matches!(presented, Ok(None))
             && runtime.session_fallback(input.host.as_str(), input.port);
         if !fallback {
+            if let Some(attempt) = &workload
+                && attempt.now(st.ctx.clock.as_ref()).is_err()
+            {
+                return hangang::service_identity::unavailable(&request_id);
+            }
             // Keep the paired native clock capability through final HTTP output,
             // including non-receipt callers and callbacks after provider return.
             let entry_stamp = if matches!(
@@ -335,6 +346,14 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
             let mut validated_application = None;
             if evidence.is_some() {
                 let policy = st.ctx.snapshot.load_full();
+                if let Some(captured) = &workload_application
+                    && !Arc::ptr_eq(captured, &policy)
+                {
+                    if let Some(attempt) = &workload {
+                        attempt.retire();
+                    }
+                    return hangang::service_identity::unavailable(&request_id);
+                }
                 if st.capture_service_receipts || entry_stamp.is_some() {
                     validated_application = Some(policy.clone());
                 }
@@ -384,13 +403,27 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
                     validated_application.clone(),
                 )
             {
-                response.extensions_mut().insert(Arc::new(
-                    crate::auth_gateway::receipt_issuer::CapturedService {
-                        authentication: proof,
-                        profile: profile.clone(),
+                if let Some(attempt) = &workload {
+                    match crate::auth_gateway::receipt_issuer::CapturedWorkload::new(
+                        proof,
+                        profile.clone(),
                         application,
-                    },
-                ));
+                        attempt.clone(),
+                    ) {
+                        Ok(captured) => {
+                            response.extensions_mut().insert(Arc::new(captured));
+                        }
+                        Err(_) => return hangang::service_identity::unavailable(&request_id),
+                    }
+                } else {
+                    response.extensions_mut().insert(Arc::new(
+                        crate::auth_gateway::receipt_issuer::CapturedService {
+                            authentication: proof,
+                            profile: profile.clone(),
+                            application,
+                        },
+                    ));
+                }
             }
             if response.status().is_success()
                 && let (Some(time), Some(evidence)) = (entry_stamp.as_ref(), evidence.as_ref())

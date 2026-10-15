@@ -17,6 +17,8 @@ pub struct NativeIssuer {
     pub public_key: String,
     pub seed_env: String,
     pub scopes: Vec<Scope>,
+    #[serde(default)]
+    pub workload_receipts: Option<super::workload_owner::Configuration>,
 }
 impl NativeIssuer {
     pub fn validate(&self) -> Result<Configuration, Refused> {
@@ -61,6 +63,9 @@ impl NativeIssuer {
                 return Err(Refused);
             }
         }
+        if let Some(workloads) = &self.workload_receipts {
+            workloads.validate(&self.identity_authority_epoch, &self.scopes)?;
+        }
         Ok(Configuration {
             issuer_ref: self.issuer_ref.clone(),
             key_epoch: self.key_epoch,
@@ -86,7 +91,11 @@ impl NativeIssuer {
         }
         let mut seed = Zeroizing::new([0; 32]);
         seed.copy_from_slice(&bytes);
-        Issuer::new(configuration, seed, clock, rng)
+        let issuer = Issuer::new(configuration, seed, clock, rng)?;
+        match &self.workload_receipts {
+            Some(configuration) => issuer.enable_workloads(configuration.clone()),
+            None => Ok(issuer),
+        }
     }
 }
 /// Public receiver-owned permit descriptor; signing resources stay in Pumgye.
@@ -144,6 +153,78 @@ pub fn receiver_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workload_file_activation_requires_native_profile_scope_and_mtls() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]).verifying_key();
+        let base = serde_json::json!({"state_dir":"owned","portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_CALLER"},"apps":[{"app_id":"orders","hosts":["orders.example.test"]}],
+            "listen":{"grpc_gateway":"127.0.0.1:0","native_gateway_tls":{"certificate":"/owned/server.pem","key":"/owned/server.key","client_ca":"/owned/ca.pem"}},
+            "authentication_gateway":{"authority_id":"owned","profiles":[{"service_id":"orders","host":"orders.example.test","ports":[443],"realm":"example-cluster","api_keys":[],"kubernetes_tokenreview":{"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"k8s:"}}]},
+            "receipt_issuer":{"issuer_ref":"owned","key_epoch":1,"identity_authority_epoch":"owned-workload","public_key":STANDARD.encode(key.to_bytes()),"seed_env":"OWNED_SEED","scopes":[{"service":"orders","audience":"orders-api"}],"workload_receipts":{"scopes":[{"service":"orders","audience":"orders-api"}]}}});
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.json");
+        std::fs::write(&file, base.to_string()).unwrap();
+        crate::config::load(&file).unwrap();
+        for field in ["authentication_gateway", "listen"] {
+            let mut raw = base.clone();
+            raw.as_object_mut().unwrap().remove(field);
+            assert!(crate::config::parse(&raw.to_string()).is_err());
+        }
+        let mut unknown = base.clone();
+        unknown["receipt_issuer"]["workload_receipts"]["client_aal"] = 2.into();
+        std::fs::write(&file, unknown.to_string()).unwrap();
+        assert!(crate::config::load(&file).is_err());
+        let mut legacy = base;
+        legacy["receipt_issuer"]
+            .as_object_mut()
+            .unwrap()
+            .remove("workload_receipts");
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("authentication_gateway");
+        legacy.as_object_mut().unwrap().remove("listen");
+        assert!(crate::config::parse(&legacy.to_string()).is_ok());
+    }
+    #[test]
+    fn workload_configuration_is_opt_in_bounded_and_scope_pinned() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]).verifying_key();
+        let base = serde_json::json!({"issuer_ref":"owned","key_epoch":1,"identity_authority_epoch":"owned-workload","public_key":STANDARD.encode(key.to_bytes()),"seed_env":"OWNED_SEED","scopes":[{"service":"orders","audience":"orders-api"}]});
+        let disabled: NativeIssuer = serde_json::from_value(base.clone()).unwrap();
+        assert!(disabled.workload_receipts.is_none());
+        for capacity in [0, 1048577] {
+            let mut raw = base.clone();
+            raw["workload_receipts"] = serde_json::json!({"capacity":capacity,"scopes":[{"service":"orders","audience":"orders-api"}]});
+            assert!(
+                serde_json::from_value::<NativeIssuer>(raw)
+                    .unwrap()
+                    .validate()
+                    .is_err()
+            );
+        }
+        let mut raw = base.clone();
+        raw["workload_receipts"] =
+            serde_json::json!({"scopes":[{"service":"orders","audience":"orders-api"}]});
+        let enabled: NativeIssuer = serde_json::from_value(raw.clone()).unwrap();
+        assert!(enabled.validate().is_ok());
+        assert_eq!(enabled.workload_receipts.unwrap().capacity, 131072);
+        raw["workload_receipts"]["scopes"][0]["audience"] = "unowned".into();
+        assert!(
+            serde_json::from_value::<NativeIssuer>(raw)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        let mut raw = base;
+        raw["identity_authority_epoch"] = "a".repeat(41).into();
+        raw["workload_receipts"] =
+            serde_json::json!({"scopes":[{"service":"orders","audience":"orders-api"}]});
+        assert!(
+            serde_json::from_value::<NativeIssuer>(raw)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
     #[test]
     fn receiver_public_keys_require_native_issuer_and_independent_bounded_descriptors() {
         let auth = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
@@ -235,6 +316,7 @@ mod tests {
             identity_authority_epoch: "epoch1".into(),
             public_key: STANDARD.encode(key.verifying_key().to_bytes()),
             seed_env: "OWNED_RECEIPT_SEED".into(),
+            workload_receipts: None,
             scopes: vec![Scope {
                 service: "orders".into(),
                 audience: "orders-api".into(),

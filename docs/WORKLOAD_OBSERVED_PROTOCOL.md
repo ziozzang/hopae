@@ -1,9 +1,11 @@
-# Workload observed protocol: declarations only
+# Workload observed protocol
 
-This is an additive protocol contract, not an activated Workload authentication,
-permission or projection implementation. No server registers the new services in
-this change. Existing Service RPCs, messages, method paths, trust, epochs and
-default configuration keep their existing meaning. Workload is wire kind3/AAL0;
+The initial protocol stage added declarations without server activation. The
+[native Workload owner](WORKLOAD_NATIVE_OWNER.md) now optionally registers the
+authentication IssueObserved/ObserveTime service through explicit configuration.
+Workload permission and consuming projection remain separate implementation gates.
+Existing Service RPCs, messages, method paths, trust, epochs and default
+configuration keep their existing meaning. Workload is wire kind3/AAL0;
 Service stays kind2/AAL0. Neither a parser nor generated protobuf message is an
 authentication capability. There is no new strict/UTC Workload endpoint.
 

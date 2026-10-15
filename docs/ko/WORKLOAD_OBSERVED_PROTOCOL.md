@@ -1,8 +1,10 @@
-# Workload observed 프로토콜: 선언만 추가
+# Workload observed 프로토콜
 
-이번 변경은 additive 계약이며 Workload 인증·권한·projection 서버 구현이나 활성화가
-아닙니다. 새 RPC를 서버에 등록하지 않습니다. 기존 Service RPC/message/method path,
-trust, epoch 및 기본 설정의 의미를 유지합니다. Workload는 wire kind3/AAL0,
+최초 프로토콜 단계는 서버 활성화 없이 additive 선언만 추가했습니다. 현재는
+[네이티브 Workload owner](WORKLOAD_NATIVE_OWNER.md)가 명시적 설정으로 인증
+IssueObserved/ObserveTime 서비스를 선택 등록합니다. Workload 권한·소비형 projection은
+별도 후속 구현 게이트입니다. 기존 Service RPC/message/method path, trust, epoch 및
+기본 설정의 의미를 유지합니다. Workload는 wire kind3/AAL0,
 Service는 kind2/AAL0입니다. Parser와 protobuf message는 인증 capability가 아니며
 strict/UTC Workload endpoint를 추가하지 않습니다. Human 세션·팩터는 별도 후속 계약입니다.
 
