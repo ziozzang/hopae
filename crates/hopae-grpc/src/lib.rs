@@ -102,3 +102,7 @@ impl std::fmt::Debug for v1::WorkloadReceiptObservationRequest {
             .finish_non_exhaustive()
     }
 }
+
+/// Workload-only opaque observed authentication; never a permission grant.
+#[cfg(feature = "native-client")]
+pub mod workload_observed_client;
