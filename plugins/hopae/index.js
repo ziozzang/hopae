@@ -2,6 +2,9 @@
 export async function mount(host) {
   const root=host.root, ko=()=>host.locale()==='ko', unified=host.authentication==='hangang';
   let paused=false, disposed=false, busy=false, canWrite=false, view='status', cursor=null, next=null, history=[];
+  let generation=0, resumePending=false;
+  const drafts=new Map();
+  const scrub=()=>{for(const d of drafts.values()){d.text='';d.original='';d.latest=null;d.message='';}drafts.clear();content.querySelectorAll('textarea').forEach(e=>e.value='');};
   const label=(en,kr)=>ko()?kr:en;
   const node=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(tag==='button')e.className='button button-secondary';if(cls)e.className=cls;return e;};
   root.classList.add('hopae-console');
@@ -38,17 +41,61 @@ export async function mount(host) {
       }body.append(tr);
     }t.append(body);return t;
   }
+  const validRevision=value=>Number.isSafeInteger(value)&&value>=0&&!Object.is(value,-0);
+  const canAdvance=value=>validRevision(value)&&Number.isSafeInteger(value+1);
+  // Drafts stay in this mounted administrator session only; never browser storage.
+  function bindDraft(key,data,editor,save,summarize){
+    const fresh=JSON.stringify(data.configuration??null,null,2);
+    if(!canWrite){editor.value=fresh;editor.disabled=true;save.disabled=true;return [];}
+    let d=drafts.get(key);
+    if(!d){d={text:fresh,base:data.revision,original:fresh,latest:data,message:'',needsReconcile:false};drafts.set(key,d);}
+    d.latest=data;if(d.needsReconcile)d.message='';d.needsReconcile=false;
+    if(d.text===d.original){d.text=fresh;d.original=fresh;d.base=data.revision;}
+    editor.value=d.text;editor.disabled=!canWrite;
+    let publishing=false;
+    const state=node('p');state.setAttribute('role','status');
+    const discard=node('button',label('Discard draft and use latest revision','초안을 버리고 최신 리비전 사용'));
+    const update=()=>{if(!drafts.has(key)){editor.value='';editor.disabled=true;save.disabled=true;discard.disabled=true;return;}const dirty=d.text!==d.original, conflict=d.base!==d.latest.revision;
+      state.textContent=(d.message?d.message+' · ':'')+label('Base revision: ','기준 리비전: ')+show(d.base)+(dirty?label(' · Unsaved draft',' · 저장하지 않은 초안'):'')+(conflict?label(' · Conflict: server revision ',' · 충돌: 서버 리비전 ')+show(d.latest.revision):'');
+      discard.disabled=publishing||!canWrite||d.needsReconcile||(!dirty&&!conflict);save.disabled=publishing||!canWrite||d.needsReconcile||conflict||!canAdvance(d.base);};
+    const preview=()=>{try{summarize(JSON.parse(editor.value));}catch{summarize(undefined);}};
+    preview();update();
+    editor.oninput=()=>{d.text=editor.value;d.message='';preview();update();};
+    discard.onclick=()=>{if(busy||!canWrite||d.needsReconcile||!window.confirm(label('Discard this unsaved draft?','저장하지 않은 초안을 버릴까요?')))return;
+      d.text=JSON.stringify(d.latest.configuration??null,null,2);d.original=d.text;d.base=d.latest.revision;d.message='';editor.value=d.text;preview();update();};
+    save.onclick=async()=>{
+      if(busy||disposed||paused||!canWrite||d.needsReconcile||d.base!==d.latest.revision||!canAdvance(d.base))return;
+      let configuration;try{configuration=JSON.parse(d.text);}catch(e){d.message=e.message;update();return;}
+      const submitted=d.text,base=d.base,epoch=generation;
+      if(key==='projections'&&configuration&&typeof configuration==='object'&&!Array.isArray(configuration))configuration.revision=base+1;
+      busy=true;publishing=true;editor.disabled=true;save.disabled=true;discard.disabled=true;refresh.disabled=true;
+      state.textContent=label('Publishing…','게시 중…');
+      try{
+        const {data:result}=await host.api('authentication/'+key+'/publish',{method:'POST',json:{revision:base,configuration}});
+        if(disposed||epoch!==generation)return;
+        if(!validRevision(result?.revision)||result.revision!==base+1)throw Error(label('Invalid publication acknowledgement revision.','게시 확인 리비전이 올바르지 않습니다.'));
+        // Even synthetic input during publication cannot be replaced by the response.
+        d.original=submitted;
+        d.base=result.revision;d.latest={revision:d.base,configuration};
+        d.message=label('Saved revision: ','저장한 리비전: ')+show(d.base);
+      }catch(e){d.needsReconcile=true;if(e.status===401||e.status===403){canWrite=false;scrub();}if(!disposed&&epoch===generation)d.message=(e.status===409?label('Revision conflict; refresh to compare with the latest revision. Draft retained. ','리비전 충돌: 새로고침하여 최신 리비전과 비교하세요. 초안을 보존했습니다. '):label('Publication failed or outcome unknown; refresh to reconcile. Draft retained. ','게시 실패 또는 결과 불명: 새로고침으로 확인하세요. 초안을 보존했습니다. '))+e.message;}
+      finally{busy=false;publishing=false;if(!disposed&&!paused){editor.disabled=!canWrite;refresh.disabled=false;update();if(resumePending){resumePending=false;load();}}}
+    };
+    return [state,discard];
+  }
   async function load(){
-    if(busy||disposed||paused)return;busy=true;refresh.disabled=true;error.textContent='';
+    if(busy||disposed||paused)return;const epoch=++generation;busy=true;refresh.disabled=true;error.textContent='';
     try{
-      const {data:me}=await host.api('me');if(disposed||paused)return;canWrite=me.role==='admin';login.hidden=true;logout.hidden=false;
+      const {data:me}=await host.api('me');if(disposed||paused||epoch!==generation)return;canWrite=me.role==='admin';login.hidden=true;logout.hidden=false;if(!canWrite)scrub();
       const {data}=await host.api(view==='projections'?'authentication/projections':view==='profiles'?'authentication/profiles':view==='status'?'status':view+'/query',(view==='status'||view==='profiles'||view==='projections')?{}:{method:'POST',json:{cursor,limit:50}});
-      if(disposed||paused)return;
+      if(disposed||paused||epoch!==generation)return;
+      if((view==='profiles'||view==='projections')&&!validRevision(data?.revision))throw Error(label('Invalid configuration revision; refresh to reconcile.','설정 리비전이 올바르지 않습니다. 새로고침으로 확인하세요.'));
       content.replaceChildren();
       if(view==='projections'){
         const summary=node('div');
         const summarize=(configuration)=>{
           summary.replaceChildren();
+          if(configuration===undefined){summary.append(node('p',label('Invalid JSON; preview unavailable.','JSON 오류로 미리보기를 표시할 수 없습니다.')));return;}
           if(configuration==null){summary.append(node('p',label('Credential projection is disabled.','자격 변환이 비활성 상태입니다.')));return;}
           if(!Array.isArray(configuration.plans)){summary.append(node('p',label('No preview; the server validates the configuration.','미리보기가 없습니다. 서버가 설정을 검증합니다.')));return;}
           const table=node('table'),head=node('tr'),body=node('tbody');
@@ -65,16 +112,8 @@ export async function mount(host) {
         summarize(data.configuration??null);
         editor.oninput=()=>{try{summarize(JSON.parse(editor.value));}catch{summary.replaceChildren(node('p',label('Invalid JSON; preview unavailable.','JSON 오류로 미리보기를 표시할 수 없습니다.')));}};
         const save=node('button',label('Save projection plans','변환 설정 저장'));save.disabled=!canWrite;
-        save.onclick=async()=>{if(busy||disposed||paused||!canWrite)return;busy=true;save.disabled=true;refresh.disabled=true;error.textContent='';let saved=false;
-          try{
-            const configuration=JSON.parse(editor.value);
-            if(configuration&&typeof configuration==='object'&&!Array.isArray(configuration))configuration.revision=data.revision+1;
-            await host.api('authentication/projections/publish',{method:'POST',json:{revision:data.revision,configuration}});saved=true;
-          }catch(e){if(!disposed&&!paused)error.textContent=e.message;}
-          finally{busy=false;if(!disposed&&!paused){save.disabled=!canWrite;refresh.disabled=false;}}
-          if(saved&&!disposed&&!paused)await load();
-        };
-        content.append(node('p',label('Revision: ','Revision: ')+show(data.revision)),node('p',label('Configure service credential conversion using declared references. Enter no passwords or token values. Set null to disable; saving replaces all plans.','선언된 참조로 서비스 자격 변환을 설정합니다. 비밀번호·토큰 값을 입력하지 마세요. null은 비활성화이며 저장하면 전체 설정을 교체합니다.')),node('p',label('Only declared credential references are accepted. Assurance requirements cannot be lowered. Saving these settings alone does not enable credential delivery.','등록된 자격 참조만 사용할 수 있고 최소 인증 수준을 낮출 수 없습니다. 설정 저장만으로 자격 전달이 활성화되지는 않습니다.')),summary,editor,save);next=null;
+        const draftControls=bindDraft('projections',data,editor,save,summarize);
+        content.append(node('p',label('Revision: ','Revision: ')+show(data.revision)),node('p',label('Configure service credential conversion using declared references. Enter no passwords or token values. Set null to disable; saving replaces all plans.','선언된 참조로 서비스 자격 변환을 설정합니다. 비밀번호·토큰 값을 입력하지 마세요. null은 비활성화이며 저장하면 전체 설정을 교체합니다.')),node('p',label('Only declared credential references are accepted. Assurance requirements cannot be lowered. Saving these settings alone does not enable credential delivery.','등록된 자격 참조만 사용할 수 있고 최소 인증 수준을 낮출 수 없습니다. 설정 저장만으로 자격 전달이 활성화되지는 않습니다.')),summary,editor,save,...draftControls);next=null;
       }
       else if(view==='profiles'){
         const help=node('p',label('Edit service authentication profiles. Use declared credential references; enter no passwords or token values. Saving replaces the complete profile configuration.','서비스 인증 프로필을 편집합니다. 선언된 자격 정보 참조를 사용하고 비밀번호·토큰 값을 입력하지 마세요. 저장하면 프로필 설정 전체를 교체합니다.'));
@@ -83,6 +122,7 @@ export async function mount(host) {
         const summary=node('div');
         const summarize=(configuration)=>{
           summary.replaceChildren();
+          if(configuration===undefined){summary.append(node('p',label('Invalid JSON; preview unavailable.','JSON 오류로 미리보기를 표시할 수 없습니다.')));return;}
           if(configuration==null){summary.append(node('p',label('Service authentication is disabled.','서비스 인증이 비활성 상태입니다.')));return;}
           if(!Array.isArray(configuration.profiles)){summary.append(node('p',label('No preview; the server validates the configuration.','미리보기가 없습니다. 서버가 설정을 검증합니다.')));return;}
           const t=node('table'),head=node('thead'),tr=node('tr');
@@ -101,13 +141,8 @@ export async function mount(host) {
         summarize(data.configuration??null);
         editor.oninput=()=>{try{summarize(JSON.parse(editor.value));}catch{summary.replaceChildren(node('p',label('Invalid JSON; preview unavailable.','JSON 오류로 미리보기를 표시할 수 없습니다.')));}};
         const save=node('button',label('Save profiles','프로필 저장'));save.disabled=!canWrite;
-        save.onclick=async()=>{if(busy||disposed||paused||!canWrite)return;busy=true;save.disabled=true;refresh.disabled=true;error.textContent='';let saved=false;
-          try{const configuration=JSON.parse(editor.value);await host.api('authentication/profiles/publish',{method:'POST',json:{revision:data.revision,configuration}});saved=true;}
-          catch(e){if(!disposed&&!paused)error.textContent=e.message;}
-          finally{busy=false;if(!disposed&&!paused){save.disabled=!canWrite;refresh.disabled=false;}}
-          if(saved&&!disposed&&!paused)await load();
-        };
-        content.append(node('p',label('Revision: ','Revision: ')+show(data.revision)),help,routing,expiry,summary,editor,save);next=null;
+        const draftControls=bindDraft('profiles',data,editor,save,summarize);
+        content.append(node('p',label('Revision: ','Revision: ')+show(data.revision)),help,routing,expiry,summary,editor,save,...draftControls);next=null;
       }
       else if(view==='status'){
         const grid=node('div',undefined,'hopae-metrics');
@@ -126,9 +161,9 @@ export async function mount(host) {
       else {content.append(table(Array.isArray(data.items)?data.items:[]));next=data.next_cursor??null;if(!data.items?.length)content.append(node('p',label('No records','조회 결과 없음')));}
       for(const tab of tabs.querySelectorAll('[data-tab]'))tab.classList.toggle('button-primary',tab.dataset.tab===view);
       pager.hidden=view==='status'||view==='profiles'||view==='projections';previous.disabled=!history.length;more.disabled=!next;
-    }catch(e){if(!disposed&&!paused){canWrite=false;login.hidden=false;content.querySelectorAll('button').forEach(b=>b.disabled=true);error.textContent=e.message;}}finally{busy=false;refresh.disabled=false;}
+    }catch(e){if(!disposed&&!paused){canWrite=false;if(e.status===401||e.status===403)scrub();login.hidden=unified;content.querySelectorAll('button').forEach(b=>b.disabled=true);error.textContent=e.message;}}finally{busy=false;refresh.disabled=false;if(resumePending&&!disposed&&!paused){resumePending=false;load();}}
   }
-  const timer=setInterval(()=>{if(view==='status')load();},30000);host.signal.addEventListener('abort',()=>{disposed=true;clearInterval(timer);root.replaceChildren();},{once:true});
+  const timer=setInterval(()=>{if(view==='status')load();},30000);host.signal.addEventListener('abort',()=>{disposed=true;generation++;scrub();clearInterval(timer);root.replaceChildren();},{once:true});
   await load();
-  return {pause(){paused=true;},resume(){paused=false;load();},dispose(){disposed=true;clearInterval(timer);root.replaceChildren();}};
+  return {pause(){paused=true;},resume(){paused=false;if(busy)resumePending=true;else load();},dispose(){disposed=true;generation++;scrub();clearInterval(timer);root.replaceChildren();}};
 }

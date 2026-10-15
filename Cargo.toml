@@ -19,7 +19,7 @@ path = "src/main.rs"
 pumgye-grpc = { git = "https://github.com/ziozzang/pumgye", rev = "b4b7f18210f61c9e2f3bfce804cb87591746389b" }
 prost = "0.14"
 hopae-grpc = { path = "crates/hopae-grpc" }
-hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "819177c631acb43dcdac8662403e80a13bb6c636" }
+hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "ed2eee4b02397fd2ef74a95ed743a84d1baf33e6" }
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 libc = "0.2"
 tower = { version = "0.5", features = ["util"] }

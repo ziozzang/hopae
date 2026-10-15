@@ -240,7 +240,7 @@ pub struct Issuer {
     rng: Arc<dyn Rng>,
     observed_time: AtomicU64,
     clock_domain: String,
-    clock_started: std::time::Instant,
+    clock_started: Option<hangang_runtime::time::ElapsedStamp>,
     clock_offset: AtomicU64,
     clock_floor: AtomicU64,
     scopes: std::collections::HashMap<String, std::collections::HashSet<String>>,
@@ -429,7 +429,7 @@ impl Issuer {
         }
         let clock_domain = clock_bytes.iter().map(|b| format!("{b:02x}")).collect();
         Ok(Self {
-            clock_started: std::time::Instant::now(),
+            clock_started: hangang_runtime::time::ElapsedStamp::now().ok(),
             clock_offset: AtomicU64::new(0),
             clock_floor: AtomicU64::new(0),
             clock_domain,
@@ -444,9 +444,21 @@ impl Issuer {
     /// Clock-domain time never freezes after wall rollback: retain the largest
     /// observed wall-minus-monotonic offset, then advance with process elapsed.
     fn clock_now(&self) -> Result<u64, Refused> {
-        let elapsed =
-            u64::try_from(self.clock_started.elapsed().as_millis()).map_err(|_| Refused)?;
+        // The external wall dependency may overlap host suspend. Sample the
+        // suspend-inclusive age after it, before the final native owner fences.
         let wall = u64::try_from(self.clock.now().0).map_err(|_| Refused)?;
+        let elapsed = u64::try_from(
+            self.clock_started
+                .as_ref()
+                .ok_or(Refused)?
+                .elapsed()
+                .map_err(|_| Refused)?
+                .as_millis(),
+        )
+        .map_err(|_| Refused)?;
+        self.clock_sample(wall, elapsed)
+    }
+    fn clock_sample(&self, wall: u64, elapsed: u64) -> Result<u64, Refused> {
         let offset = wall.checked_sub(elapsed).ok_or(Refused)?;
         let offset = self
             .clock_offset
@@ -595,28 +607,12 @@ impl Issuer {
             // UTC credential expiry and issuer-domain time are distinct clocks.
             // Translate a capped remaining budget; never add fresh lifetime to
             // a captured proof or compare foreign absolute timestamps directly.
-            let wall = self.now()?.max(authentication.verified_ms);
-            let age_ms = u64::try_from(
-                authentication
-                    .verified_started
-                    .elapsed()
-                    .as_nanos()
-                    .div_ceil(1_000_000),
-            )
-            .map_err(|_| Refused)?;
-            let original = evidence
-                .expires_at
-                .checked_sub(authentication.verified_ms)
+            let remaining = authentication
+                .observed_remaining_ms(self.now()?)
+                .ok_or(Refused)?;
+            now.checked_add(remaining)
+                .filter(|v| *v <= 9_007_199_254_740_991)
                 .ok_or(Refused)?
-                .min(1000);
-            let remaining = original
-                .checked_sub(age_ms)
-                .ok_or(Refused)?
-                .min(evidence.expires_at.checked_sub(wall).ok_or(Refused)?);
-            if remaining == 0 {
-                return Err(Refused);
-            }
-            now.checked_add(remaining).ok_or(Refused)?
         } else {
             let expires = evidence
                 .expires_at
@@ -793,6 +789,55 @@ mod tests {
         clock.set(Timestamp(9_000));
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         assert!(issuer.clock_now().unwrap() >= jumped + 5);
+    }
+
+    #[test]
+    fn observed_source_progress_includes_suspended_age_even_when_utc_rolls_back() {
+        let clock = Arc::new(crate::crypto::TestClock::new(Timestamp(10_000)));
+        let issuer = issuer(clock.clone());
+        assert_eq!(issuer.clock_sample(10_000, 0).unwrap(), 10_000);
+        // Equal active time with rolled-back UTC models the previous freeze.
+        assert_eq!(issuer.clock_sample(9_000, 0).unwrap(), 10_000);
+        // Native BOOTTIME instead charges the two suspended seconds.
+        assert_eq!(issuer.clock_sample(9_000, 2000).unwrap(), 12_000);
+        assert_eq!(issuer.clock_sample(20_000, 2001).unwrap(), 20_000);
+        assert_eq!(issuer.clock_sample(9_000, 4001).unwrap(), 22_000);
+        // The original strict UTC API has a separate floor and semantics.
+        assert_eq!(issuer.now().unwrap(), 10_000);
+    }
+
+    #[tokio::test]
+    async fn unavailable_observed_clock_does_not_upgrade_or_break_legacy_issuance() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let mut configuration = config(None);
+        configuration.profiles[0].api_keys[0].expires_at = None;
+        let owner = owner(&mut db, configuration);
+        let authentication = owner
+            .snapshot()
+            .authenticate_for_receipt(
+                "orders.example.test",
+                443,
+                Some(TOKEN),
+                "203.0.113.9".parse().unwrap(),
+                1000,
+            )
+            .await
+            .unwrap();
+        let mut signer = issuer(Arc::new(crate::crypto::TestClock::new(Timestamp(
+            authentication.verified_ms as i64,
+        ))));
+        signer.clock_started = None;
+        assert!(
+            signer
+                .issue_service(&authentication, request(), &|| Ok(()))
+                .is_ok()
+        );
+        assert!(
+            signer
+                .issue_service_owned(&authentication, request(), Some(1), true, &|| Ok(()))
+                .is_err()
+        );
+        assert!(signer.clock_now().is_err());
     }
 
     fn request() -> Request<'static> {

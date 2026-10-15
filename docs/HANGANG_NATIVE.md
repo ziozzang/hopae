@@ -508,5 +508,24 @@ tests pass, including 6,912 exact rate/phase/latency cases and physical
 counterexamples to an equal-rate assumption. Existing entry points preserve the
 original equal-rate numeric contract. Native observed clients must choose and
 qualify their clock model; quantization alone does not bound rate error, source
-suspension or restore. Source issuer/proof age still uses `Instant` in this source
-milestone; suspend-inclusive source-budget adoption remains a release gate.
+suspension or restore. The source issuer and observed proof budget now use the
+shared suspend-inclusive elapsed clock (Linux `CLOCK_BOOTTIME`). Authentication
+charges time from before the provider call, then retains a private completion
+stamp; publication subtracts elapsed age and intersects the original credential
+expiry. Clock unavailability refuses observed issuance without an `Instant`
+fallback; legacy strict UTC issuance remains separate. Modeled suspend, rollback,
+rounding, expiry and overflow regressions cover the arithmetic. Native receiver
+adoption, end-to-end suspend qualification and rebuilt release artifacts remain
+release gates.
+
+
+The integrated Hopae editors retain raw drafts, including invalid JSON, in memory
+across tab changes, refresh and mounted-console navigation. Publishing freezes
+controls and sends the captured revision once. Conflicts, transport failures and
+malformed acknowledgements preserve the draft and require a successful fresh
+resource read before another publication; the UI never invents an acknowledged
+revision. A valid acknowledgement must advance the submitted revision by exactly
+one within the safe integer range. Explicit discard uses the freshly read revision.
+Role loss, logout and plugin disposal scrub drafts; full page reload also clears
+them. These are source-level protections, covered by 35 mocked Chromium cases,
+not evidence of a deployed package or end-to-end authentication qualification.

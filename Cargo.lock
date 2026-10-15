@@ -904,12 +904,13 @@ dependencies = [
 [[package]]
 name = "hangang-runtime"
 version = "0.1.2"
-source = "git+https://github.com/ziozzang/hangang-runtime?rev=819177c631acb43dcdac8662403e80a13bb6c636#819177c631acb43dcdac8662403e80a13bb6c636"
+source = "git+https://github.com/ziozzang/hangang-runtime?rev=ed2eee4b02397fd2ef74a95ed743a84d1baf33e6#ed2eee4b02397fd2ef74a95ed743a84d1baf33e6"
 dependencies = [
  "anyhow",
  "axum",
  "hyper",
  "hyper-util",
+ "rustix",
  "rustls",
  "rustls-pemfile",
  "tokio",

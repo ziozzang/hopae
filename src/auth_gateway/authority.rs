@@ -14,11 +14,42 @@ pub struct ServiceAuthentication {
     pub(crate) evidence: super::VerifiedEvidence,
     pub(crate) revision: u64,
     pub(crate) verified_ms: u64,
-    pub(crate) verified_started: std::time::Instant,
+    observed: Option<ObservedBudget>,
+}
+struct ObservedBudget {
+    verified_ms: u64,
+    started: hangang_runtime::time::ElapsedStamp,
+}
+fn observed_completion(start_ms: u64, floor_ms: u64, elapsed: std::time::Duration) -> Option<u64> {
+    let elapsed_ms = u64::try_from(elapsed.as_nanos().div_ceil(1_000_000)).ok()?;
+    let now = start_ms.checked_add(elapsed_ms)?.max(floor_ms);
+    (1..=9_007_199_254_740_991).contains(&now).then_some(now)
+}
+fn observed_remaining(
+    verified_ms: u64,
+    expires_ms: u64,
+    wall_ms: u64,
+    elapsed: std::time::Duration,
+) -> Option<u64> {
+    let age_ms = u64::try_from(elapsed.as_nanos().div_ceil(1_000_000)).ok()?;
+    let original = expires_ms.checked_sub(verified_ms)?.min(1000);
+    let remaining = original
+        .checked_sub(age_ms)?
+        .min(expires_ms.checked_sub(wall_ms.max(verified_ms))?);
+    (remaining > 0).then_some(remaining)
 }
 impl ServiceAuthentication {
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+    pub(crate) fn observed_remaining_ms(&self, wall_ms: u64) -> Option<u64> {
+        let budget = self.observed.as_ref()?;
+        observed_remaining(
+            budget.verified_ms,
+            self.evidence.expires_at,
+            wall_ms,
+            budget.started.elapsed().ok()?,
+        )
     }
 }
 impl Snapshot {
@@ -40,11 +71,16 @@ impl Snapshot {
             return Err(runtime::Error::Unavailable);
         }
         let runtime = self.runtime.as_ref().ok_or(runtime::Error::Unavailable)?;
+        // Optional only for legacy compatibility on unsupported platforms. The
+        // observed contract never falls back to Instant or a fresh age origin.
+        let observed_start = hangang_runtime::time::ElapsedStamp::now().ok();
         let begun = std::time::Instant::now();
         let evidence = runtime
             .authenticate_async(host, port, token, ip, now)
             .await?;
-        let verified_started = std::time::Instant::now();
+        // Capture completion age before sampling pre-await elapsed: a pause
+        // between them is charged conservatively rather than lost on reset.
+        let completion_stamp = hangang_runtime::time::ElapsedStamp::now().ok();
         let verified_ms = runtime
             .observed_time
             .load(std::sync::atomic::Ordering::Acquire)
@@ -55,11 +91,20 @@ impl Snapshot {
         if evidence.expires_at <= verified_ms {
             return Err(runtime::Error::Expired);
         }
+        let observed = observed_start.and_then(|start| {
+            let started = completion_stamp?;
+            let elapsed = start.elapsed().ok()?;
+            let observed_ms = observed_completion(now, verified_ms, elapsed)?;
+            (observed_ms < evidence.expires_at).then_some(ObservedBudget {
+                verified_ms: observed_ms,
+                started,
+            })
+        });
         Ok(ServiceAuthentication {
             evidence,
             revision: self.revision,
             verified_ms,
-            verified_started,
+            observed,
         })
     }
 }
@@ -201,6 +246,79 @@ impl Authority {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn observed_completion_charges_pre_auth_suspend_before_starting_a_new_budget() {
+        use std::time::Duration;
+        let suspended = super::observed_completion(10_000, 10_000, Duration::from_secs(2)).unwrap();
+        assert_eq!(suspended, 12_000);
+        assert_eq!(
+            super::observed_remaining(suspended, 11_000, 10_000, Duration::ZERO),
+            None
+        );
+        // A post-await stamp alone would have incorrectly renewed this proof.
+        assert_eq!(
+            super::observed_remaining(10_000, 11_000, 10_000, Duration::ZERO),
+            Some(1000)
+        );
+        assert_eq!(
+            super::observed_completion(10_000, 10_050, Duration::from_nanos(1)),
+            Some(10_050)
+        );
+        assert_eq!(
+            super::observed_completion(10_000, 10_000, Duration::from_nanos(1)),
+            Some(10_001)
+        );
+    }
+
+    #[test]
+    fn observed_original_budget_cannot_renew_through_suspend_rollback_or_rounding() {
+        use std::time::Duration;
+        for (age, expected) in [
+            (Duration::ZERO, Some(1000)),
+            (Duration::from_nanos(1), Some(999)),
+            (Duration::from_millis(999), Some(1)),
+            (Duration::from_nanos(999_000_001), None),
+            (Duration::from_millis(1000), None),
+            (Duration::from_secs(2), None),
+        ] {
+            for wall in [1, 9000, 10_000] {
+                assert_eq!(
+                    super::observed_remaining(10_000, 11_000, wall, age),
+                    expected
+                );
+            }
+        }
+        assert_eq!(
+            super::observed_remaining(10_000, 11_000, 10_700, Duration::from_millis(100)),
+            Some(300)
+        );
+        assert_eq!(
+            super::observed_remaining(10_000, 11_000, 11_000, Duration::ZERO),
+            None
+        );
+    }
+
+    #[test]
+    fn observed_native_budget_overflow_and_invalid_lifetime_refuse() {
+        use std::time::Duration;
+        assert_eq!(
+            super::observed_completion(u64::MAX, 1, Duration::from_nanos(1)),
+            None
+        );
+        assert_eq!(
+            super::observed_completion(9_007_199_254_740_991, 1, Duration::from_nanos(1)),
+            None
+        );
+        assert_eq!(super::observed_completion(1, 1, Duration::MAX), None);
+        assert_eq!(
+            super::observed_remaining(1000, 999, 1000, Duration::ZERO),
+            None
+        );
+        assert_eq!(
+            super::observed_remaining(1000, 2000, 1000, Duration::MAX),
+            None
+        );
+    }
     use super::*;
     fn config() -> runtime::Config {
         serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{
