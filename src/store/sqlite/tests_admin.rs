@@ -3295,6 +3295,89 @@ async fn a_slow_scan_is_interrupted_inside_sqlite_and_the_connection_is_restored
 }
 
 #[tokio::test]
+async fn response_deadline_precedes_worker_interruption_and_rollback() {
+    let f = fx();
+    f.store
+        .write("probe", |env| {
+            env.conn
+                .execute_batch("CREATE TABLE deadline_probe (value INTEGER)")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let (completed, completion) = tokio::sync::oneshot::channel();
+    let store = f.store.clone();
+    let request = tokio::spawn(async move {
+        super::super::with_deadline(
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            store.write_checked("probe", None, move |env, _| {
+                let tx = env.conn.transaction()?;
+                tx.execute("INSERT INTO deadline_probe VALUES (1)", [])?;
+                let _ = entered.send(());
+                // Hold the worker across the response deadline. The installed
+                // SQLite progress handler must still interrupt after release.
+                held.recv_timeout(Duration::from_secs(5)).unwrap();
+                let result = tx.query_row(
+                    "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 50000000) SELECT COUNT(*) FROM n",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                );
+                let interrupted = matches!(
+                    &result,
+                    Err(rusqlite::Error::SqliteFailure(e, _))
+                        if e.code == rusqlite::ErrorCode::OperationInterrupted
+                );
+                drop(tx);
+                let _ = completed.send(interrupted);
+                Ok(result?)
+            }),
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), started)
+        .await
+        .expect("the worker must enter the owned transaction")
+        .unwrap();
+    let out = tokio::time::timeout(Duration::from_secs(2), request)
+        .await
+        .expect("the response must not await the held worker")
+        .unwrap();
+    release.send(()).unwrap();
+    assert!(
+        matches!(out, Err(StoreError::Unavailable(ref m)) if m == "deadline exceeded"),
+        "{out:?}"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), completion)
+            .await
+            .unwrap()
+            .unwrap(),
+        "the detached job must receive real SQLITE_INTERRUPT"
+    );
+    // Queue behind the worker so rollback, error mapping and disarm have all
+    // finished before checking that the next job can use the connection.
+    let count = f
+        .store
+        .write("probe", |env| {
+            assert!(env.conn.is_autocommit());
+            let busy: i64 = env
+                .conn
+                .pragma_query_value(None, "busy_timeout", |r| r.get(0))?;
+            assert_eq!(busy, 5000);
+            Ok(env
+                .conn
+                .query_row("SELECT COUNT(*) FROM deadline_probe", [], |r| {
+                    r.get::<_, i64>(0)
+                })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(count, 0, "the detached mutation must roll back");
+}
+
+#[tokio::test]
 async fn admin_denials_and_csrf_rejections_are_appended_alone_with_their_delivery_rows() {
     let f = fx();
     let denied = EventBuilder::new(

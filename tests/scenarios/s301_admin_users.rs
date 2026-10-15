@@ -1256,10 +1256,18 @@ fn s301_a4_budget_interrupts_and_rolls_back() {
         r.body
     );
     assert!(t.elapsed() < std::time::Duration::from_millis(1500));
-    assert!(
-        k.metric("hopae_store_interrupts_total") > before,
-        "interrupted, not merely abandoned"
-    );
+    // The response budget can expire before the blocking SQLite worker has
+    // returned from its progress callback and recorded SQLITE_INTERRUPT. Keep
+    // the slowdown armed until that completion is observed; response latency
+    // above and actual interruption below are separate requirements.
+    let completion_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while k.metric("hopae_store_interrupts_total") <= before {
+        assert!(
+            std::time::Instant::now() < completion_deadline,
+            "interrupted, not merely abandoned"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     k.h.hooks.slow_scan_off();
     // A mutation under the same budget: interrupted between statements, rolled back.
     k.add_user("u_big", "big@example.test", "Big");
