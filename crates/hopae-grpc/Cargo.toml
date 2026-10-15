@@ -8,7 +8,7 @@ default = []
 native-client = ["dep:hangang-runtime", "dep:tokio", "tonic/tls-ring"]
 
 [dependencies]
-hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "0cdbd1660cefe46eed8bab3c0deb1b62c560ecf6", optional = true }
+hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "bf3ba2c0ccfb8603a34b14a30bc52d5112f0677a", optional = true }
 tokio = { version = "1", features = ["sync", "time"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

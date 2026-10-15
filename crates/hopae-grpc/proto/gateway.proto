@@ -35,3 +35,20 @@ message ServiceReceiptTimeReply {
   uint64 profile_revision = 6; uint64 application_generation = 7;
   uint64 key_registry_revision = 8; uint32 cache_ttl_ms = 9;
 }
+
+// Contract 2 contains the observed Pumgye PermitValidationRequest. This service
+// must authenticate current fixed owners and atomically consume both nonces.
+// No UTC expiry is meaningful across the authentication/permit/output domains.
+service ObservedCredentialProjection { rpc Project(ProjectionRequest) returns (ObservedProjectionReply); }
+message ObservedProjectionReply {
+  uint64 request_id = 1; string service = 2; string audience = 3;
+  bytes request_sha256 = 4; string header_name = 5; bytes header_value = 6;
+  // SHA256 of the exact bounded ProjectionRequest.permission_query bytes.
+  bytes chain_sha256 = 7; string output_clock_domain = 8;
+  // Own output-source ticks, never auth/permit absolute expiries. remaining_ms
+  // floors actual local Duration after final callbacks and secret work.
+  uint64 owner_now_ms = 9; uint32 remaining_ms = 10;
+  uint64 profile_revision = 11; uint64 application_generation = 12;
+  uint64 key_registry_revision = 13; uint64 plan_revision = 14;
+  uint32 cache_ttl_ms = 15;
+}
