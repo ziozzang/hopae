@@ -22,6 +22,23 @@ pub fn publish(
     actor: &str,
     guard: &dyn Fn(&Connection) -> Result<(), Refused>,
 ) -> Result<std::sync::Arc<Registry>, Refused> {
+    publish_with_commit_state(
+        connection,
+        expected,
+        desired,
+        actor,
+        guard,
+        &std::cell::Cell::new(false),
+    )
+}
+pub(crate) fn publish_with_commit_state(
+    connection: &mut Connection,
+    expected: u64,
+    desired: &[Key],
+    actor: &str,
+    guard: &dyn Fn(&Connection) -> Result<(), Refused>,
+    commit_attempted: &std::cell::Cell<bool>,
+) -> Result<std::sync::Arc<Registry>, Refused> {
     if actor.is_empty() || actor.len() > 128 || actor.chars().any(char::is_control) {
         return Err(Refused);
     }
@@ -51,7 +68,26 @@ pub fn publish(
         )
         .map_err(|_| Refused)?;
     guard(&transaction)?;
+    let final_value: String = transaction
+        .query_row("SELECT value FROM meta WHERE key=?1", [KEY], |row| {
+            row.get(0)
+        })
+        .map_err(|_| Refused)?;
+    let final_audit: String = transaction
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            [format!(
+                "projection_receipt_registry_audit:{}",
+                next.revision()
+            )],
+            |row| row.get(0),
+        )
+        .map_err(|_| Refused)?;
+    if final_value != encoded || final_audit != audit {
+        return Err(Refused);
+    }
     let next = std::sync::Arc::new(next);
+    commit_attempted.set(true);
     transaction.commit().map_err(|_| Refused)?;
     Ok(next)
 }

@@ -46,6 +46,9 @@ pub(crate) fn consume_group<T>(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| Refused)?;
     guard(&tx)?;
+    if receipts.iter().any(|item| !item.current()) {
+        return Err(Refused);
+    }
     let current = receipt_key_store::load(&tx, checked.revision())?.ok_or(Refused)?;
     if current.revision() != checked.revision() {
         return Err(Refused);
@@ -131,6 +134,9 @@ pub(crate) fn consume_group<T>(
     put(&tx, CLOCK, &now.to_string())?;
     let result = operation(&tx)?;
     guard(&tx)?;
+    if receipts.iter().any(|item| !item.current()) {
+        return Err(Refused);
+    }
     let final_registry = receipt_key_store::load(&tx, checked.revision())?.ok_or(Refused)?;
     if final_registry.revision() != checked.revision() {
         return Err(Refused);

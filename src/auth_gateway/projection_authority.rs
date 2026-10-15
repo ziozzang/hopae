@@ -68,6 +68,9 @@ pub struct Snapshot {
     projector: Option<Projector>,
 }
 impl Snapshot {
+    pub fn available(&self) -> bool {
+        self.available.load(Ordering::Acquire)
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }

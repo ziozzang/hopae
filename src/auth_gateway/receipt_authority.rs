@@ -8,20 +8,49 @@ use super::{
 };
 use arc_swap::ArcSwapOption;
 use rusqlite::Connection;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 pub struct Authority {
+    available: Arc<AtomicBool>,
     snapshot: Arc<ArcSwapOption<Registry>>,
 }
 #[derive(Clone)]
 pub struct Verifier {
+    available: Arc<AtomicBool>,
     snapshot: Arc<ArcSwapOption<Registry>>,
 }
+/// Exact immutable receiver generation, not a remote permission lease.
+pub struct Current {
+    available: Arc<AtomicBool>,
+    snapshot: Arc<ArcSwapOption<Registry>>,
+    registry: Arc<Registry>,
+}
+impl Current {
+    pub fn current(&self) -> bool {
+        self.available.load(Ordering::Acquire)
+            && self
+                .snapshot
+                .load_full()
+                .is_some_and(|registry| Arc::ptr_eq(&registry, &self.registry))
+    }
+}
 pub struct Checked {
+    available: Arc<AtomicBool>,
+    snapshot: Arc<ArcSwapOption<Registry>>,
     registry: Arc<Registry>,
     receipt: VerifiedReceipt,
     replay_key: [u8; 32],
 }
 impl Checked {
+    pub fn current(&self) -> bool {
+        self.available.load(Ordering::Acquire)
+            && self
+                .snapshot
+                .load_full()
+                .is_some_and(|registry| Arc::ptr_eq(&registry, &self.registry))
+    }
     pub(crate) fn replay_key(&self) -> &[u8; 32] {
         &self.replay_key
     }
@@ -36,11 +65,13 @@ impl Authority {
     pub fn load(connection: &Connection, minimum_revision: u64) -> Result<Self, Refused> {
         let registry = receipt_key_store::load(connection, minimum_revision)?.map(Arc::new);
         Ok(Self {
+            available: Arc::new(AtomicBool::new(true)),
             snapshot: Arc::new(ArcSwapOption::from(registry)),
         })
     }
     pub fn verifier(&self) -> Verifier {
         Verifier {
+            available: self.available.clone(),
             snapshot: self.snapshot.clone(),
         }
     }
@@ -53,7 +84,11 @@ impl Authority {
         actor: &str,
         guard: &dyn Fn(&Connection) -> Result<(), Refused>,
     ) -> Result<u64, Refused> {
-        if actor.is_empty() || actor.len() > 128 || actor.chars().any(char::is_control) {
+        if !self.available.load(Ordering::Acquire)
+            || actor.is_empty()
+            || actor.len() > 128
+            || actor.chars().any(char::is_control)
+        {
             return Err(Refused);
         }
         let current = self.snapshot.load_full();
@@ -97,15 +132,61 @@ impl Authority {
         actor: &str,
         guard: &dyn Fn(&Connection) -> Result<(), Refused>,
     ) -> Result<u64, Refused> {
-        let registry = receipt_key_store::publish(connection, expected, desired, actor, guard)?;
+        let previous = self.snapshot.load_full();
+        if previous.as_ref().map_or(0, |registry| registry.revision()) != expected
+            || actor.is_empty()
+            || actor.len() > 128
+            || actor.chars().any(char::is_control)
+        {
+            return Err(Refused);
+        }
+        let before = previous
+            .as_ref()
+            .map(|registry| registry.encode())
+            .transpose()?;
+        if !self.available.swap(false, Ordering::AcqRel) {
+            return Err(Refused);
+        }
+        let commit_attempted = std::cell::Cell::new(false);
+        let registry = match receipt_key_store::publish_with_commit_state(
+            connection,
+            expected,
+            desired,
+            actor,
+            guard,
+            &commit_attempted,
+        ) {
+            Ok(registry) => registry,
+            Err(error) => {
+                if !commit_attempted.get()
+                    && connection.is_autocommit()
+                    && receipt_key_store::load(connection, expected)
+                        .and_then(|registry| registry.map(|registry| registry.encode()).transpose())
+                        .is_ok_and(|current| current == before)
+                {
+                    self.available.store(true, Ordering::Release);
+                }
+                return Err(error);
+            }
+        };
         let revision = registry.revision();
-        // The Arc is allocated inside the transaction. No await or fallible
-        // operation separates successful commit and snapshot installation.
         self.snapshot.store(Some(registry));
+        self.available.store(true, Ordering::Release);
         Ok(revision)
     }
 }
 impl Verifier {
+    pub fn capture(&self) -> Result<Current, Refused> {
+        let current = Current {
+            available: self.available.clone(),
+            snapshot: self.snapshot.clone(),
+            registry: self.snapshot.load_full().ok_or(Refused)?,
+        };
+        if !current.current() {
+            return Err(Refused);
+        }
+        Ok(current)
+    }
     pub fn verify(
         &self,
         context: &Context<'_>,
@@ -113,6 +194,9 @@ impl Verifier {
         bytes: &[u8],
         now: u64,
     ) -> Result<Checked, Refused> {
+        if !self.available.load(Ordering::Acquire) {
+            return Err(Refused);
+        }
         let registry = self.snapshot.load_full().ok_or(Refused)?;
         let receipt = registry.verify(context, permit, bytes, now)?;
         use sha2::{Digest as _, Sha256};
@@ -122,17 +206,25 @@ impl Verifier {
         hash.update(context.issuer_ref.as_bytes());
         hash.update([receipt.claims().purpose as u8]);
         hash.update(receipt.claims().nonce);
-        Ok(Checked {
+        let checked = Checked {
+            available: self.available.clone(),
+            snapshot: self.snapshot.clone(),
             registry,
             receipt,
             replay_key: hash.finalize().into(),
-        })
+        };
+        if !self.is_current(&checked) {
+            return Err(Refused);
+        }
+        Ok(checked)
     }
     /// Advisory local-current check, not a transactional issuance fence.
     pub fn is_current(&self, checked: &Checked) -> bool {
-        self.snapshot
-            .load_full()
-            .is_some_and(|registry| Arc::ptr_eq(&registry, &checked.registry))
+        self.available.load(Ordering::Acquire)
+            && self
+                .snapshot
+                .load_full()
+                .is_some_and(|registry| Arc::ptr_eq(&registry, &checked.registry))
     }
 }
 #[cfg(test)]
@@ -152,6 +244,72 @@ mod tests {
                 .verifying_key()
                 .to_bytes(),
         }
+    }
+    #[test]
+    fn publication_closes_exact_tags_and_only_definite_rollback_reopens() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .unwrap();
+        let mut owner = Authority::load(&db, 0).unwrap();
+        owner
+            .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|_| Ok(()))
+            .unwrap();
+        let verifier = owner.verifier();
+        let tag = verifier.capture().unwrap();
+        assert!(
+            owner
+                .publish(&mut db, 1, &[], "operator", &|_| {
+                    assert!(!tag.current());
+                    assert!(verifier.capture().is_err());
+                    Err(Refused)
+                })
+                .is_err()
+        );
+        assert!(tag.current());
+        owner
+            .publish(&mut db, 1, &[], "operator", &|_| {
+                assert!(!tag.current());
+                Ok(())
+            })
+            .unwrap();
+        assert!(!tag.current());
+        assert!(verifier.capture().unwrap().current());
+    }
+    #[test]
+    fn uncertain_key_commit_stays_closed_until_a_durable_reload() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("PRAGMA foreign_keys=ON;CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);CREATE TABLE parent(id INTEGER PRIMARY KEY);CREATE TABLE child(id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);").unwrap();
+        let mut owner = Authority::load(&db, 0).unwrap();
+        owner
+            .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|_| Ok(()))
+            .unwrap();
+        let verifier = owner.verifier();
+        let tag = verifier.capture().unwrap();
+        assert!(
+            owner
+                .publish(&mut db, 1, &[], "operator", &|tx| {
+                    tx.execute("INSERT INTO child(id) VALUES(42)", [])
+                        .map_err(|_| Refused)?;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!tag.current());
+        assert!(verifier.capture().is_err());
+        assert!(
+            owner
+                .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|_| Ok(()))
+                .is_err()
+        );
+        assert!(
+            Authority::load(&db, 1)
+                .unwrap()
+                .verifier()
+                .capture()
+                .unwrap()
+                .current()
+        );
+        assert!(!tag.current());
     }
     #[test]
     fn reconciliation_preserves_noop_tags_rejects_stale_owners_and_retains_restart_floors() {

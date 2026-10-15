@@ -355,3 +355,30 @@ four-server permit fixture prepares resources before Pumgye starts, rejects a
 missing CA with the owned database unchanged, restores without advancing key
 history and retains the existing durable withdrawal/outage checks. Receiver RPC
 and actual credential projection remain inactive in this qualification.
+
+
+### Guarded receiver RPC (source implementation)
+
+With `projection_receiver` configured, the mTLS gateway now registers
+`CredentialProjection/Project`. Contract 1 carries the domain-owned Pumgye
+`PermitValidationRequest` protobuf in `permission_query`; its outer request ID
+must match the Hopae envelope. This avoids duplicating Pumgye's permission
+schema. Requests cannot supply an authority endpoint or secret reference. Caller
+authentication precedes bounded decoding, with shared request admission.
+
+The runtime captures native issuer/profile/application/plan owners, independently
+checks both signatures, and calls the configured Pumgye live validator. Four
+blocking workers bound paired nonce admission and secret resolution. Cancellation
+and timeout close the worker's admission guard; publication, retirement, caller
+changes and exact snapshot replacement invalidate final output. Key publication
+closes readers before mutation; only a verified rollback reopens them, while an
+uncertain commit requires durable reload. Reply debug formatting redacts bytes.
+
+The real Hopae receiver RPC test uses a Pumgye protocol mock over mTLS. It covers
+caller rejection, invalid contract, successful scoped output, duplicate refusal,
+cancellation, worker saturation, snapshot replacement and key retirement. The
+full workspace passes 952 tests with 42 existing exclusions. These checks do not
+prove final Hangang-to-origin delivery: the four-server fixture still does not
+invoke this RPC. Hangang client integration and real four-server credential
+projection remain required before release. The earlier resource-preparation
+qualification above describes its historical scope.

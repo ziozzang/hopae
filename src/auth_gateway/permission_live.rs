@@ -51,6 +51,39 @@ impl Request {
         }
         Ok(Arc::new(Self { native, permit }))
     }
+    pub(crate) fn authentication_context(
+        &self,
+    ) -> Result<super::receipt_binding::Context<'_>, super::receipt_keys::Refused> {
+        use super::{
+            PrincipalKind,
+            receipt_binding::{Context, Identity},
+            receipt_keys::Refused,
+        };
+        let context = self.native.context.as_ref().ok_or(Refused)?;
+        let identity = context.identity.as_ref().ok_or(Refused)?;
+        if identity.kind != 2 || identity.aal != 0 {
+            return Err(Refused);
+        }
+        Ok(Context {
+            issuer_ref: &context.issuer_ref,
+            key_epoch: context.key_epoch,
+            identity_authority_epoch: &context.identity_authority_epoch,
+            identity: Identity {
+                subject_ref: &identity.subject_ref,
+                kind: PrincipalKind::Service,
+                aal: 0,
+                revision: identity.revision,
+                credential_generation: identity.credential_generation,
+            },
+            service: &context.service,
+            audience: &context.audience,
+            request_sha256: context
+                .request_sha256
+                .as_slice()
+                .try_into()
+                .map_err(|_| Refused)?,
+        })
+    }
     pub fn native(&self) -> &AuthenticatedResourceRequest {
         &self.native
     }

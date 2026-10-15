@@ -33,3 +33,5 @@ async fn healthz() -> (StatusCode, &'static str) {
 pub mod native_gateway;
 
 pub mod grpc_gateway;
+
+pub(crate) mod grpc_projection;

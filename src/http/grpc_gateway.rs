@@ -22,13 +22,16 @@ use v1::{
     authentication_server::{Authentication, AuthenticationServer},
 };
 #[derive(Clone)]
-struct Service {
-    router: Router,
-    keys: Arc<CallerKeys>,
-    requests: Arc<Semaphore>,
+pub(super) struct Service {
+    pub(super) router: Router,
+    pub(super) keys: Arc<CallerKeys>,
+    pub(super) requests: Arc<Semaphore>,
 }
 impl Service {
-    fn caller(&self, metadata: &tonic::metadata::MetadataMap) -> Result<HeaderValue, Status> {
+    pub(super) fn caller(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<HeaderValue, Status> {
         let mut entries = metadata.get_all("authorization").iter();
         let token = entries
             .next()
@@ -386,6 +389,19 @@ pub async fn serve_with_receipts(
             )
         })
         .transpose()?;
+    let projection_service = services
+        .as_ref()
+        .map(|services| {
+            super::grpc_projection::Projection::new(pipeline.clone(), services)
+                .map_err(|_| anyhow::anyhow!("native projection owners unavailable"))
+        })
+        .transpose()?
+        .flatten()
+        .map(|service| {
+            v1::credential_projection_server::CredentialProjectionServer::new(service)
+                .max_decoding_message_size(8448)
+                .max_encoding_message_size(8192)
+        });
     let receipt_service = services
         .map(|services| receipt_resources(pipeline.clone(), services))
         .transpose()?
@@ -403,6 +419,7 @@ pub async fn serve_with_receipts(
         )
         .add_optional_service(receipt_service)
         .add_optional_service(plan_service)
+        .add_optional_service(projection_service)
         .serve_with_incoming_shutdown(hangang_runtime::incoming(listener), async move {
             let _ = stop.wait_for(|v| *v).await;
         })

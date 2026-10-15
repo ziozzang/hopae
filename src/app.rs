@@ -2274,6 +2274,14 @@ mod tests {
             audience: "orders-api".into(),
             request_sha256: vec![3; 32],
         };
+        crate::auth_gateway::projection_runtime::tests::qualify(
+            bound.services.clone(),
+            router.clone(),
+            message.clone(),
+            KEY,
+            &tlsdir,
+        )
+        .await;
         let call = |key: &str| {
             let mut call = tonic::Request::new(message.clone());
             call.metadata_mut()

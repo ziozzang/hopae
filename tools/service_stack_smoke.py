@@ -347,7 +347,7 @@ def main():
                     hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-key-rotated');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae-key-rotated')
                     state,audits=receiver_keys();assert state['revision']==3 and audits==3
                     assert any(f['issuer']=='owned-pumgye' and f['epoch']==2 and f['active'] for f in state['floors'])
-                    print('PASS: actual Hopae receiver-key bootstrap is idempotent; removal retires, stale restart refuses and fresh material/epoch activates. Receiver RPC/projection remains inactive.')
+                    print('PASS: actual Hopae receiver-key bootstrap is idempotent; removal retires, stale restart refuses and fresh material/epoch activates. Configured receiver RPC is registered; this fixture does not invoke final credential projection.')
                     hopae.terminate();hopae.wait(timeout=5)
                     before=hashlib.sha256((root/'hopae-state'/'hopae.db').read_bytes()).digest()
                     hop['projection_receiver']['authority']['ca']=str(root/'missing-authority-ca.pem')
@@ -359,7 +359,7 @@ def main():
                     (root/'hopae.json').write_text(json.dumps(hop))
                     hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-resources-restored');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae-resources-restored')
                     state,audits=receiver_keys();assert state['revision']==3 and audits==3
-                    print('PASS: native receiver resources prepare without an online Pumgye startup dependency; missing CA refuses before state changes, restoration preserves key history. Receiver RPC remains inactive.')
+                    print('PASS: native receiver resources prepare without an online Pumgye startup dependency; missing CA refuses before state changes, restoration preserves key history. Configured receiver RPC is registered; final credential projection is not exercised.')
 
 
             label='four' if args.sumunjang_binary else 'three'

@@ -19,3 +19,10 @@ message ServiceReceiptValidationReply { uint64 request_id = 1; uint64 expires_ms
 service ProjectionPlans { rpc Observe(ProjectionPlanRequest) returns (ProjectionPlanReply); }
 message ProjectionPlanRequest { uint64 request_id = 1; string service = 2; string audience = 3; uint64 minimum_revision = 4; }
 message ProjectionPlanReply { uint64 request_id = 1; uint64 revision = 2; string service = 3; string audience = 4; string resource = 5; string action = 6; uint32 minimum_aal = 7; uint32 cache_ttl_ms = 8; }
+
+// Explicit native credential phase, separate from ordinary authentication.
+// Contract 1 contains a bounded Pumgye PermitValidationRequest protobuf, with
+// its correlation equal to request_id. No request-selected peer or secret ref.
+service CredentialProjection { rpc Project(ProjectionRequest) returns (ProjectionReply); }
+message ProjectionRequest { uint64 request_id = 1; uint32 permission_contract = 2; bytes permission_query = 3; }
+message ProjectionReply { uint64 request_id = 1; string service = 2; string audience = 3; bytes request_sha256 = 4; string header_name = 5; bytes header_value = 6; uint64 expires_ms = 7; uint64 plan_revision = 8; }
