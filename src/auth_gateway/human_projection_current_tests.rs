@@ -167,3 +167,27 @@ async fn native_human_projection_post_prepare_original_readiness_withdrawal() {
             .is_err()
     );
 }
+
+#[tokio::test]
+#[ignore = "requires private owned LDAP TLS fixture, executed separately"]
+async fn native_human_projection_actual_ldap_primary_totp_same_writer() {
+    let ldap = serde_json::json!({"ldap":{"endpoint":std::env::var("OWNED_LDAP_ENDPOINT").unwrap(),"starttls":std::env::var("OWNED_LDAP_STARTTLS").is_ok_and(|s|s=="1"),"ca":std::env::var("OWNED_LDAP_CA").unwrap(),"base_dn":"dc=example,dc=test","bind_dn":"cn=reader,dc=example,dc=test","bind_password_env":"OWNED_LDAP_BIND_KEY","username_attribute":"uid","subject_attribute":"entryUUID","timeout_ms":1000}});
+    let f = Fx::new(Some(ldap)).await;
+    let (mut cookie, _) = f.login().await;
+    for aal in [1, 2] {
+        if aal == 2 {
+            cookie = f.elevate(&cookie).await;
+        }
+        let checked = Arc::new(captured(&f, &cookie).await);
+        let current = checked.prepare_projection_current().unwrap();
+        f.store
+            .human_ledger(
+                crate::store::Deadline(std::time::Instant::now() + Duration::from_secs(1)),
+                move |ledger| {
+                    ledger.test_transaction(|snapshot| current.current_on(&checked, snapshot))
+                },
+            )
+            .await
+            .unwrap();
+    }
+}
