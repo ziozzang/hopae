@@ -243,3 +243,10 @@ routing, independent signature pins, recovery and durable withdrawal/outages.
 It qualifies signed evidence issuance and gateway checks; receiver consumption
 and upstream credential projection remain open. The no-permit plan-owner mode
 is checked separately for compatibility.
+
+Hangang b326f03 now requires Pumgye b4b7f18's `ProjectionPermits/Validate` after
+local permit signature checks in this mode. It reuses the same admitted mTLS
+channel and original elapsed timeout budget and adopts the shorter verified
+owner deadline. The actual four-server permit and no-permit modes both pass,
+including durable withdrawal and trust/outage refusals. Hopae receiver paired
+replay and credential projection remain open; this validation is not consumption.
