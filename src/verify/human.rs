@@ -306,6 +306,47 @@ impl Owner {
     }
 }
 impl Admission {
+    /// Shorten this query at the source's exact final sample, without a clock callback.
+    pub(crate) fn remaining_at(
+        &self,
+        owner: &Arc<Owner>,
+        sample: &SourceTime,
+    ) -> StoreResult<u64> {
+        let result = (|| {
+            if !self.ready()
+                || self.failed.load(Ordering::Acquire)
+                || owner.failed.load(Ordering::Acquire)
+                || !Weak::ptr_eq(&self.owner, &Arc::downgrade(owner))
+                || sample.clock_domain
+                    != *owner.clock.as_ref().ok_or_else(refused)?.generation()
+                || std::time::Instant::now() >= self.deadline
+            {
+                return Err(refused());
+            }
+            let elapsed = sample
+                .owner_now_ms
+                .checked_sub(self.started)
+                .ok_or_else(refused)?;
+            let remaining = self
+                .limit_ms
+                .checked_sub(elapsed)
+                .and_then(|value| value.checked_sub(1))
+                .filter(|value| *value > 0)
+                .ok_or_else(refused)?;
+            if !self.ready()
+                || self.failed.load(Ordering::Acquire)
+                || owner.failed.load(Ordering::Acquire)
+                || std::time::Instant::now() >= self.deadline
+            {
+                return Err(refused());
+            }
+            Ok(remaining)
+        })();
+        if result.is_err() {
+            self.failed.store(true, Ordering::Release);
+        }
+        result
+    }
     /// Initial query validation may read the native wall clock before SQL.
     #[allow(dead_code)] // Additive Human RPC ingress integration.
     pub(crate) fn require_current(&self, owner: &Arc<Owner>) -> StoreResult<()> {
