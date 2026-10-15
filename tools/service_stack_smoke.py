@@ -11,11 +11,15 @@ def main():
     p.add_argument('--grpc',action='store_true')
     p.add_argument('--resource-catalog',action='store_true')
     p.add_argument('--native-resource',action='store_true')
+    p.add_argument('--route-owner',action='store_true')
+    p.add_argument('--legacy-pumgye-binary',type=Path)
     p.add_argument('--external-verifier',action='store_true')
     p.add_argument('--durable-restart',action='store_true')
     args=p.parse_args()
     if args.resource_catalog and not args.grpc:p.error('--resource-catalog requires --grpc')
     if args.native_resource and not (args.grpc and args.resource_catalog and args.sumunjang_binary):p.error('--native-resource requires --grpc --resource-catalog and --sumunjang-binary')
+    if args.route_owner and not args.native_resource:p.error('--route-owner requires --native-resource')
+    if args.legacy_pumgye_binary and not args.route_owner:p.error('--legacy-pumgye-binary requires --route-owner')
     processes=[];seen=[];seen_bodies=[];seen_paths=[];verifier_state={'unavailable':False,'calls':0}
     class Origin(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -38,13 +42,15 @@ def main():
         with tempfile.TemporaryDirectory(prefix='owned-service-stack-') as tmp:
             root=Path(tmp);public,admin,portal,http_verify,hop_native,pum_http,pum_native=[port() for _ in range(7)]
             hop_grpc,pum_grpc,guard_http,guard_native,guard_grpc=[port() for _ in range(5)]
+            route_port=port()
             api_key,caller,system,pum_decision,pum_admin,guard_collector,guard_admin=[secrets.token_hex(32) for _ in range(7)]
             env=dict(os.environ,OWNED_API_KEY=api_key,HOPAE_TEST_GATEWAY_KEY=caller,FIXTURE_KEY=caller,HANGANG_ADMIN_TOKEN=system,PUMGYE_DECISION_TOKEN=pum_decision,PUMGYE_ADMIN_TOKEN=pum_admin,HANGANG_GUARD_COLLECTOR_TOKEN=guard_collector,HANGANG_GUARD_ADMIN_TOKEN=guard_admin)
+            env['OWNED_ROUTE_CALLER']=secrets.token_hex(32)
             def openssl(*a):subprocess.run(['openssl',*a],cwd=root,check=True,capture_output=True)
             openssl('req','-x509','-newkey','rsa:2048','-nodes','-keyout','ca.key','-out','ca.pem','-days','1','-subj','/CN=Owned CA','-addext','basicConstraints=critical,CA:TRUE')
             for name,usage in [('server','serverAuth'),('client','clientAuth')]:
                 openssl('req','-new','-newkey','rsa:2048','-nodes','-keyout',name+'.key','-out',name+'.csr','-subj','/CN='+name)
-                (root/(name+'.ext')).write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage='+usage+'\nsubjectAltName=DNS:hopae.example.test,DNS:pumgye.example.test,DNS:sumunjang.example.test,IP:127.0.0.1\n')
+                (root/(name+'.ext')).write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage='+usage+'\nsubjectAltName=DNS:hopae.example.test,DNS:pumgye.example.test,DNS:sumunjang.example.test,DNS:hangang.example.test,IP:127.0.0.1\n')
                 openssl('x509','-req','-in',name+'.csr','-CA','ca.pem','-CAkey','ca.key','-CAcreateserial','-days','1','-extfile',name+'.ext','-out',name+'.pem')
             digest=hashlib.sha256(bytes([1]))
             for value in ['owned-external' if args.external_verifier else 'hopae:owned','services','worker']:
@@ -110,9 +116,14 @@ def main():
                 assert guard_api('/v1/policy','PUT',{'mode':'enforce','allow':[]})==200
                 guard_args=['--guard-url',f'http://127.0.0.1:{guard_http}','--guard-decision-tcp',f'localhost:{guard_grpc if args.grpc else guard_native}','--guard-decision-server-name','sumunjang.example.test','--guard-decision-ca',str(root/'ca.pem'),'--guard-decision-cert',str(root/'client.pem'),'--guard-decision-key',str(root/'client.key'),'--guard-timeout-ms','1000']
                 if args.grpc:guard_args+=['--guard-decision-grpc']
+            if args.route_owner:
+                (root/'route-owner.json').write_text(json.dumps({'listen':f'127.0.0.1:{route_port}','certificate':str(root/'server.pem'),'key':str(root/'server.key'),'client_ca':str(root/'ca.pem'),'token_env':'OWNED_ROUTE_CALLER'}))
+                route_config=dict(tls('hangang.example.test'),address=f'https://127.0.0.1:{route_port}',token_env='OWNED_ROUTE_CALLER')
+                (root/'route-live.json').write_text(json.dumps(route_config))
+                pum_args+=['--route-live',str(root/'route-live.json')]
             if args.native_resource:pum_args+=['--authentication-trust',str(root/'authentication-trust.json'),'--authentication-live',str(root/'authentication-live.json'),'--network-live',str(root/'network-live.json')]
             owner=start(args.pumgye_binary,pum_args,'pumgye');wait(f'https://127.0.0.1:{pum_http}/healthz',owner,'pumgye',context)
-            gateway=start(args.gateway_binary,['--config',str(root/'hangang.json'),'--listen',f'127.0.0.1:{public}','--admin',f'127.0.0.1:{admin}','--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--threads','2','--lua-workers','1','--drain-seconds','1',*guard_args],'hangang');wait(f'http://127.0.0.1:{admin}/v1/config',gateway,'hangang',token=system)
+            gateway=start(args.gateway_binary,['--config',str(root/'hangang.json'),'--listen',f'127.0.0.1:{public}','--admin',f'127.0.0.1:{admin}','--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--threads','2','--lua-workers','1','--drain-seconds','1',*guard_args,*(['--route-owner-config',str(root/'route-owner.json')] if args.route_owner else [])],'hangang');wait(f'http://127.0.0.1:{admin}/v1/config',gateway,'hangang',token=system)
             def request(method='GET',key=api_key):
                 c=http.client.HTTPSConnection('127.0.0.1',public,context=ssl.create_default_context(cafile=str(root/'ca.pem')),timeout=3)
                 headers={'Host':'app.example.test','x-forwarded-user':'u_forged','x-hopae-aal':'3'}
@@ -142,6 +153,37 @@ def main():
                     api('/v1/config','PUT',changed,{'If-Match':f'"{changed["revision"]}"'})
                     assert request()==200,'native configuration restoration failed'
                 print('PASS: actual final native dispatch refuses wrong pin/issuer/audience and oversized entity without upstream effects; restoration succeeds.')
+            if args.route_owner:
+                def restart_route_authority(binary,argv):
+                    nonlocal owner
+                    owner.terminate();owner.wait(timeout=8)
+                    owner=start(binary,argv,'pumgye-route-recheck')
+                    wait(f'https://127.0.0.1:{pum_http}/healthz',owner,'pumgye-route-recheck',context)
+                for field,value in [('server_name','wrong.example.test'),('token_env','PUMGYE_ADMIN_TOKEN')]:
+                    changed=copy.deepcopy(route_config);changed[field]=value
+                    (root/'route-live.json').write_text(json.dumps(changed))
+                    restart_route_authority(args.pumgye_binary,pum_args)
+                    before=len(seen);assert request()==503,'route source trust refusal failed: '+field
+                    assert len(seen)==before,'untrusted route lookup reached backend'
+                    (root/'route-live.json').write_text(json.dumps(route_config))
+                    restart_route_authority(args.pumgye_binary,pum_args)
+                    for _ in range(30):
+                        status=request();assert status in (200,503),'route source recovery changed authorization'
+                        if status==200:break
+                        time.sleep(.1)
+                    else:raise AssertionError('route source recovery deadline')
+                if args.legacy_pumgye_binary:
+                    legacy_args=list(pum_args);position=legacy_args.index('--route-live');del legacy_args[position:position+2]
+                    restart_route_authority(args.legacy_pumgye_binary,legacy_args)
+                    before=len(seen);assert request()==503,'legacy endpoint silently bypassed required route ownership'
+                    assert len(seen)==before,'legacy downgrade reached backend'
+                    restart_route_authority(args.pumgye_binary,pum_args)
+                    for _ in range(30):
+                        status=request();assert status in (200,503),'route-aware recovery changed authorization'
+                        if status==200:break
+                        time.sleep(.1)
+                    else:raise AssertionError('route-aware authority recovery deadline')
+                print('PASS: actual gateway route reference delivery and two authenticated owner queries; wrong peer/caller and optional legacy downgrade refuse without backend effects; recovery passes.')
             assert request('POST')==403 and request(key=None)==401 and request(key='invalid-service-key-at-least-thirty-two-bytes')==401
             root_config,_=api();current,headers=api('/v1/pumgye/policy');original=copy.deepcopy(current);current['policy']['services']['orders']['users']={}
             updated,_=api('/v1/pumgye/policy','PUT',current,{'If-Match':f'"{current["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==403

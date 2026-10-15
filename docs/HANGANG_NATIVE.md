@@ -186,3 +186,20 @@ and durable permission/authentication withdrawal pass. The old gRPC resource
 fixture without this option passes too. These are local candidate functional
 gates; signed release, Kubernetes/operating adoption, signed permission/projection
 and throughput remain separate qualifications.
+
+## Live gateway route owner qualification
+
+The owned four-process fixture supports `--route-owner` together with `--grpc
+--resource-catalog --native-resource`. It starts the private Hangang observation
+listener and configures Pumgye's fixed mTLS client. Actual native references and
+destination hashes reach Pumgye, whose before/after queries validate owner scope
+and IP. Wrong server identity and wrong caller credential refuse without origin
+effects; recovery succeeds. Optional `--legacy-pumgye-binary` replaces only the
+owned permission process with a compatible older executable and proves that a
+missing route acknowledgement cannot silently downgrade gateway enforcement.
+
+The complete debug four-server case passes with durable permission/profile
+withdrawal and authority outages. Existing no-owner mode also passes. All keys,
+identities and state are generated in private owned temporary directories. These
+are local source functional checks, not static release, Kubernetes, operating
+adoption, signed permit/projection/replay or throughput qualification.
