@@ -4,6 +4,7 @@ pub mod v1 {
 }
 
 pub mod request_binding;
+pub mod request_binding_v2;
 
 pub mod receipt;
 pub mod receipt_time;
