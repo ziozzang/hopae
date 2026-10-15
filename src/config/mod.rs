@@ -970,6 +970,21 @@ impl Config {
             {
                 errs.push("workload_receipts requires mTLS gRPC and native TokenReview profiles for every scope".into());
             }
+            if let Some(humans) = &config.human_receipts {
+                if self.listen.grpc_gateway.is_none() || self.listen.native_gateway_tls.is_none() {
+                    errs.push("human_receipts requires authenticated mTLS gRPC".into());
+                }
+                if humans.scopes.iter().any(|scope| {
+                    !self
+                        .apps
+                        .iter()
+                        .any(|app| app.app_id.as_str() == scope.application)
+                }) {
+                    errs.push(
+                        "human_receipts application must match a configured application".into(),
+                    );
+                }
+            }
             if config.validate().is_err() {
                 errs.push("receipt_issuer: invalid native resources".into());
             }
@@ -981,6 +996,16 @@ impl Config {
                     .apps
                     .iter()
                     .any(|app| app.app_id.as_str() == scope.service)
+                    && !config.human_receipts.as_ref().is_some_and(|humans| {
+                        humans.scopes.iter().any(|human| {
+                            human.service == scope.service
+                                && human.audience == scope.audience
+                                && self
+                                    .apps
+                                    .iter()
+                                    .any(|app| app.app_id.as_str() == human.application)
+                        })
+                    })
             }) {
                 errs.push("receipt_issuer service must match a configured application".into());
             }

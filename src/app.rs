@@ -2102,6 +2102,7 @@ mod tests {
             ),
             seed_env: "OWNED_CAPTURE_SEED".into(),
             workload_receipts: None,
+            human_receipts: None,
             scopes: vec![crate::auth_gateway::receipt_issuer::Scope {
                 service: "orders".into(),
                 audience: "orders-api".into(),

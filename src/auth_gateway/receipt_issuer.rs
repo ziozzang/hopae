@@ -115,6 +115,14 @@ impl CapturedService {
         clocked: bool,
         guard: &dyn Fn() -> Result<(), Refused>,
     ) -> Result<Issued, Refused> {
+        if !self
+            .application
+            .apps
+            .iter()
+            .any(|app| app.app_id.as_str() == request.service)
+        {
+            return Err(Refused);
+        }
         issuer.issue_service_owned(
             &self.authentication,
             request,
@@ -664,6 +672,97 @@ impl Issuer {
         };
         self.sign_checked(issued, now, expires, begun, clocked, guard)
     }
+    pub(crate) fn matches_human_configuration(
+        &self,
+        native: &super::receipt_config::NativeIssuer,
+    ) -> bool {
+        native.validate().is_ok_and(|c| {
+            c.issuer_ref == self.config.issuer_ref
+                && c.key_epoch == self.config.key_epoch
+                && c.identity_authority_epoch == self.config.identity_authority_epoch
+                && c.public_key == self.config.public_key
+                && c.scopes.len() == self.config.scopes.len()
+                && c.scopes
+                    .iter()
+                    .zip(&self.config.scopes)
+                    .all(|(a, b)| a.service == b.service && a.audience == b.audience)
+        })
+    }
+    /// Only actual native Human Checked can reach this signer. Numeric times,
+    /// identity and realm are read from that retained owner, never caller claims.
+    pub(crate) async fn issue_native_human(
+        &self,
+        checked: &crate::verify::human::Checked,
+        binding: &super::human_request::Binding,
+        source_revision: u64,
+    ) -> Result<Issued, Refused> {
+        if !self.permits_service_audience(binding.service(), binding.audience()) {
+            return Err(Refused);
+        }
+        let facts = checked
+            .source_facts(&self.config.issuer_ref, binding)
+            .await
+            .map_err(|_| Refused)?;
+        if !(1..=2).contains(&facts.aal) {
+            return Err(Refused);
+        }
+        let stamp = checked.source_time().map_err(|_| Refused)?;
+        let domain = stamp
+            .clock_domain
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let identity_epoch = hopae_grpc::human_epoch::encode(
+            &self.config.identity_authority_epoch,
+            source_revision,
+            facts.application_generation,
+            &domain,
+        )
+        .map_err(|_| Refused)?;
+        let mut issued = Issued {
+            config: self.config.clone(),
+            identity_epoch,
+            subject: facts.subject,
+            kind: PrincipalKind::Human,
+            aal: facts.aal,
+            revision: facts.user_revision,
+            credential_generation: facts.credential_generation,
+            service: binding.service().to_owned(),
+            audience: binding.audience().to_owned(),
+            request_sha256: binding.sha256(),
+            bytes: [0; receipt::LENGTH],
+        };
+        let digest =
+            super::receipt_binding::digest(&issued.context(), None).map_err(|_| Refused)?;
+        let mut nonce = [0; 32];
+        self.rng.fill(&mut nonce);
+        if nonce == [0; 32] {
+            return Err(Refused);
+        }
+        issued.bytes = receipt::sign(
+            &self.signer,
+            &Claims {
+                purpose: Purpose::Authentication,
+                issued_ms: stamp.owner_now_ms,
+                expires_ms: stamp.expires_ms,
+                binding: digest,
+                nonce,
+            },
+        )
+        .map_err(|_| Refused)?;
+        checked
+            .require_current_retained()
+            .await
+            .map_err(|_| Refused)?;
+        checked.require_publication_current().map_err(|_| Refused)?;
+        let final_time = checked.source_time().map_err(|_| Refused)?;
+        if final_time.clock_domain != stamp.clock_domain
+            || final_time.owner_now_ms >= stamp.expires_ms
+        {
+            return Err(Refused);
+        }
+        Ok(issued)
+    }
     fn sign_checked(
         &self,
         mut issued: Issued,
@@ -707,6 +806,16 @@ impl Issuer {
     }
 }
 impl Issued {
+    pub(crate) fn human_owned_heap_bytes(&self) -> Result<usize, Refused> {
+        [
+            &self.identity_epoch,
+            &self.subject,
+            &self.service,
+            &self.audience,
+        ]
+        .into_iter()
+        .try_fold(0usize, |n, s| n.checked_add(s.capacity()).ok_or(Refused))
+    }
     pub fn bytes(&self) -> &[u8; receipt::LENGTH] {
         &self.bytes
     }
@@ -767,6 +876,14 @@ impl CapturedWorkload {
         request: Request<'_>,
         guard: &dyn Fn() -> Result<(), Refused>,
     ) -> Result<(Issued, Arc<super::workload_owner::Record>), Refused> {
+        if !self
+            .application
+            .apps
+            .iter()
+            .any(|app| app.app_id.as_str() == request.service)
+        {
+            return Err(self.attempt.retire());
+        }
         let owner = issuer.workloads.as_ref().ok_or(Refused)?;
         if !Arc::ptr_eq(owner, &self.attempt.owner()?)
             || !owner.permits(request.service, request.audience)
@@ -1192,7 +1309,7 @@ mod tests {
                 .await
                 .unwrap();
             let cfg = crate::config::parse(
-                r#"{"state_dir":"owned","portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_GATEWAY"}}"#,
+                r#"{"state_dir":"owned","portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_GATEWAY"},"apps":[{"app_id":"orders","hosts":["orders.example.test"]}]}"#,
             )
             .unwrap();
             let application = Arc::new(cfg.snapshot(1));
@@ -1297,7 +1414,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let cfg=crate::config::parse(r#"{"state_dir":"owned","portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_GATEWAY"}}"#).unwrap();
+        let cfg=crate::config::parse(r#"{"state_dir":"owned","portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_GATEWAY"},"apps":[{"app_id":"orders","hosts":["orders.example.test"]}]}"#).unwrap();
         let application = Arc::new(cfg.snapshot(1));
         let applications = Arc::new(arc_swap::ArcSwap::from(application.clone()));
         let captured = CapturedService {

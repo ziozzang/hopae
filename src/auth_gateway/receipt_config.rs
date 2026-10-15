@@ -19,6 +19,8 @@ pub struct NativeIssuer {
     pub scopes: Vec<Scope>,
     #[serde(default)]
     pub workload_receipts: Option<super::workload_owner::Configuration>,
+    #[serde(default)]
+    pub human_receipts: Option<super::human_source::Configuration>,
 }
 impl NativeIssuer {
     pub fn validate(&self) -> Result<Configuration, Refused> {
@@ -65,6 +67,9 @@ impl NativeIssuer {
         }
         if let Some(workloads) = &self.workload_receipts {
             workloads.validate(&self.identity_authority_epoch, &self.scopes)?;
+        }
+        if let Some(humans) = &self.human_receipts {
+            humans.validate(self)?;
         }
         Ok(Configuration {
             issuer_ref: self.issuer_ref.clone(),
@@ -317,6 +322,7 @@ mod tests {
             public_key: STANDARD.encode(key.verifying_key().to_bytes()),
             seed_env: "OWNED_RECEIPT_SEED".into(),
             workload_receipts: None,
+            human_receipts: None,
             scopes: vec![Scope {
                 service: "orders".into(),
                 audience: "orders-api".into(),

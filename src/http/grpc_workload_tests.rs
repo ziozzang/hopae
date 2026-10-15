@@ -12,15 +12,16 @@ use base64::{
 use std::{
     sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 use v1::workload_authentication_receipts_client::WorkloadAuthenticationReceiptsClient;
 const CALLER: &str = "owned-workload-gateway-caller-at-least-thirty-two";
-struct DelayRng(AtomicBool);
+struct DelayRng(AtomicBool, AtomicUsize);
 impl Rng for DelayRng {
     fn fill(&self, bytes: &mut [u8]) {
+        self.1.fetch_add(1, Ordering::Relaxed);
         if self.0.swap(false, Ordering::AcqRel) {
             std::thread::sleep(Duration::from_millis(300));
         }
@@ -33,6 +34,8 @@ struct Fixture {
     api: std::process::Child,
     services: crate::app::Services,
     client: WorkloadAuthenticationReceiptsClient<tonic::transport::Channel>,
+    service_client:
+        v1::authentication_receipts_client::AuthenticationReceiptsClient<tonic::transport::Channel>,
     stop: watch::Sender<bool>,
     server: tokio::task::JoinHandle<anyhow::Result<()>>,
     rng: Arc<DelayRng>,
@@ -49,6 +52,9 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn start(capacity: usize) -> Self {
+        Self::start_mapping(capacity, false).await
+    }
+    async fn start_mapping(capacity: usize, human_only: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let openssl = |args: &[&str]| {
             assert!(
@@ -128,7 +134,10 @@ impl Fixture {
         }
         let port = std::fs::read_to_string(root.path().join("ready")).unwrap();
         let ca = std::fs::read_to_string(root.path().join("ca.pem")).unwrap();
-        let value = serde_json::json!({"state_dir":root.path().join("state"),"listen":{"portal":"127.0.0.1:0","gateway":"127.0.0.1:0"},"portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_CALLER","verify_budget_ms":2000},"apps":[{"app_id":"orders","hosts":["orders.example.test"]}]});
+        let mut value = serde_json::json!({"state_dir":root.path().join("state"),"listen":{"portal":"127.0.0.1:0","gateway":"127.0.0.1:0"},"portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_CALLER","verify_budget_ms":2000},"apps":[{"app_id":"orders","hosts":["orders.example.test"]}]});
+        if human_only {
+            value["apps"][0]["app_id"] = "human-app".into();
+        }
         let config = crate::config::parse(&value.to_string()).unwrap();
         let bound = crate::app::bind(&config).await.unwrap();
         let mut services = bound.services().clone();
@@ -151,8 +160,12 @@ impl Fixture {
         let public = ed25519_dalek::SigningKey::from_bytes(&[7; 32])
             .verifying_key()
             .to_bytes();
-        let issuer:receipt_config::NativeIssuer=serde_json::from_value(serde_json::json!({"issuer_ref":"owned-workload","key_epoch":1,"identity_authority_epoch":"owned-workload-authority","public_key":STANDARD.encode(public),"seed_env":"OWNED_SYNTHETIC_SEED","scopes":[{"service":"orders","audience":"orders-api"}],"workload_receipts":{"scopes":[{"service":"orders","audience":"orders-api"}],"capacity":capacity}})).unwrap();
-        let rng = Arc::new(DelayRng(AtomicBool::new(false)));
+        let mut issuer_value = serde_json::json!({"issuer_ref":"owned-workload","key_epoch":1,"identity_authority_epoch":"owned-workload-authority","public_key":STANDARD.encode(public),"seed_env":"OWNED_SYNTHETIC_SEED","scopes":[{"service":"orders","audience":"orders-api"}],"workload_receipts":{"scopes":[{"service":"orders","audience":"orders-api"}],"capacity":capacity}});
+        if human_only {
+            issuer_value["human_receipts"] = serde_json::json!({"source_revision":1,"scopes":[{"service":"orders","audience":"orders-api","application":"human-app","route":"human-route","route_revision":1,"destination_sha256":"11".repeat(32),"header_revision":1,"headers":[],"reserved_headers":[],"maximum_entity_bytes":16777216}]});
+        }
+        let issuer: receipt_config::NativeIssuer = serde_json::from_value(issuer_value).unwrap();
+        let rng = Arc::new(DelayRng(AtomicBool::new(false), AtomicUsize::new(0)));
         services.receipt_issuer = Some(Arc::new(
             issuer
                 .load(
@@ -221,7 +234,10 @@ impl Fixture {
             root,
             api,
             services,
-            client: WorkloadAuthenticationReceiptsClient::new(channel),
+            client: WorkloadAuthenticationReceiptsClient::new(channel.clone()),
+            service_client: v1::authentication_receipts_client::AuthenticationReceiptsClient::new(
+                channel,
+            ),
             stop,
             server,
             rng,
@@ -490,9 +506,12 @@ async fn native_source_denial_and_profile_retirement_during_tokenreview_cannot_p
         .enumerate()
     {
         std::fs::write(f.root.path().join("mode"), mode).unwrap();
-        assert!(f.client.issue_observed(f.request()).await.is_err());
+        let denied = f.client.issue_observed(f.request()).await.unwrap_err();
         assert_eq!(
-            std::fs::read_to_string(f.root.path().join("calls")).unwrap(),
+            std::fs::read_to_string(f.root.path().join("calls")).unwrap_or_else(|_| panic!(
+                "owned TokenReview not reached: tonicCode={:?}, mode={mode}",
+                denied.code()
+            )),
             (index + 1).to_string()
         );
     }
@@ -816,3 +835,61 @@ async fn public_sdk_actual_slow_reply_without_a_conservative_admission_interval_
 
 #[path = "grpc_workload_projection_tests.rs"]
 mod projection_tests;
+
+#[tokio::test]
+async fn native_human_source_mapping_cannot_mint_actual_workload_receipt() {
+    let mut fixture = Fixture::start_mapping(4, true).await;
+    let before = fixture.rng.1.load(Ordering::Acquire);
+    let request = fixture.request();
+    let error = fixture.client.issue_observed(request).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unavailable);
+    assert_eq!(
+        fixture.rng.1.load(Ordering::Acquire),
+        before,
+        "Human-only app mapping reached Workload signer"
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.path().join("calls"))
+            .unwrap()
+            .trim(),
+        "1",
+        "actual successful TokenReview required"
+    );
+}
+
+#[tokio::test]
+async fn native_human_source_mapping_cannot_mint_actual_service_receipt() {
+    let mut fixture = Fixture::start_mapping(4, true).await;
+    let before = fixture.rng.1.load(Ordering::Acquire);
+    let mut verification = fixture.request().into_inner().verification.unwrap();
+    verification
+        .headers
+        .iter_mut()
+        .find(|h| h.name == "authorization")
+        .unwrap()
+        .value = b"Bearer owned-local-service-key-at-least-thirty-two".to_vec();
+    let mut request = Request::new(v1::ServiceReceiptRequest {
+        verification: Some(verification),
+        service: "orders".into(),
+        audience: "orders-api".into(),
+        request_sha256: vec![9; 32],
+    });
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {CALLER}").parse().unwrap());
+    let error = fixture
+        .service_client
+        .issue_service_observed(request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Unavailable);
+    assert_eq!(
+        fixture.rng.1.load(Ordering::Acquire),
+        before,
+        "Human-only app mapping reached Service signer"
+    );
+    assert!(
+        !fixture.root.path().join("calls").exists(),
+        "API-key proof must not switch to TokenReview"
+    );
+}

@@ -676,6 +676,7 @@ async fn composition_actual_http_and_generated_mtls_native_ingress_duplicate_ref
         public_key: STANDARD.encode(signer.verifying_key().to_bytes()),
         seed_env: "OWNED_SYNTHETIC_SEED".into(),
         workload_receipts: None,
+        human_receipts: None,
         scopes: vec![super::super::receipt_issuer::Scope {
             service: "orders".into(),
             audience: "orders-api".into(),

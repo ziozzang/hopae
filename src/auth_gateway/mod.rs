@@ -4,6 +4,7 @@ pub mod authority;
 pub mod breaker;
 pub mod composition;
 pub(crate) mod human_request;
+pub(crate) mod human_source;
 pub mod kubernetes;
 pub mod lua;
 pub mod permission_live;

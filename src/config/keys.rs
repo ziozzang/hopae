@@ -273,6 +273,29 @@ pub(super) const ROOT: Node = Obj(&[
             ("public_key", Leaf),
             ("seed_env", Leaf),
             (
+                "human_receipts",
+                Obj(&[
+                    ("source_revision", Leaf),
+                    ("capacity", Leaf),
+                    ("retained_bytes", Leaf),
+                    (
+                        "scopes",
+                        Arr(&Obj(&[
+                            ("service", Leaf),
+                            ("audience", Leaf),
+                            ("application", Leaf),
+                            ("route", Leaf),
+                            ("route_revision", Leaf),
+                            ("destination_sha256", Leaf),
+                            ("header_revision", Leaf),
+                            ("headers", Leaf),
+                            ("reserved_headers", Leaf),
+                            ("maximum_entity_bytes", Leaf),
+                        ])),
+                    ),
+                ]),
+            ),
+            (
                 "workload_receipts",
                 Obj(&[
                     ("capacity", Leaf),

@@ -2193,7 +2193,7 @@ async fn native_human_source_facts_never_promote_aal_from_session_alone() {
         .conn()
         .execute(
             "UPDATE session_handles SET issued_aal=1 WHERE handle_sha256=?1",
-            [cookie.digest().as_slice()],
+            [cookie.digest().0.as_slice()],
         )
         .unwrap();
     let witness = f.witness(&cookie).await;
@@ -2251,3 +2251,6 @@ async fn native_human_source_final_fences_do_not_call_wall_after_durable_check()
     checked.require_current_retained().await.unwrap();
     assert!(calls.load(Ordering::Acquire) > before);
 }
+
+#[path = "../auth_gateway/human_source_tests.rs"]
+mod native_source_tests;
