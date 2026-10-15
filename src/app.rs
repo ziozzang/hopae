@@ -190,6 +190,7 @@ impl Readiness {
 /// Everything the routers and services are built from.
 #[derive(Clone)]
 pub struct Services {
+    pub receipt_authority: Arc<std::sync::Mutex<crate::auth_gateway::receipt_authority::Authority>>,
     pub receipt_issuer: Option<Arc<crate::auth_gateway::receipt_issuer::Issuer>>,
     pub projection_authority:
         Arc<std::sync::Mutex<crate::auth_gateway::projection_authority::Authority>>,
@@ -496,6 +497,12 @@ fn provider_rows(cfg: &Config) -> Vec<ProviderRow> {
 /// listeners. Failing here is a start failure.
 pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     let real_env = |n: &str| std::env::var(n).ok();
+    let receiver_keys = crate::auth_gateway::receipt_config::receiver_keys(
+        cfg.receipt_issuer.as_ref(),
+        &cfg.receipt_permit_keys,
+    )
+    .map_err(|_| anyhow::anyhow!("native receiver key configuration refused"))?;
+
     let external_verifiers = Arc::new(
         crate::factor::external_registry::Registry::compile(
             &cfg.external_verifiers,
@@ -578,6 +585,17 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
             .await
             .context("store open task")?
             .with_context(|| format!("opening store {}", store_path.display()))?
+    };
+    let receipt_authority = {
+        let mut connection = store.conn();
+        let mut authority = crate::auth_gateway::receipt_authority::Authority::load(&connection, 0)
+            .map_err(|_| anyhow::anyhow!("native receipt key history unavailable"))?;
+        // Native validated configuration owns startup publication; the instance
+        // lock is held. Request-role publication must use its real actor guard.
+        authority
+            .reconcile(&mut connection, &receiver_keys, "startup", &|_| Ok(()))
+            .map_err(|_| anyhow::anyhow!("native receipt key history refused configuration"))?;
+        Arc::new(std::sync::Mutex::new(authority))
     };
     store.set_rng(env.rng.clone());
     tracing::info!(
@@ -754,6 +772,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         Arc::new(std::sync::Mutex::new(owner))
     };
     let services = Services {
+        receipt_authority,
         receipt_issuer,
         projection_authority,
         external_verifiers,

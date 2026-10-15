@@ -31,6 +31,8 @@ pub struct Config {
     #[serde(default)]
     pub receipt_issuer: Option<crate::auth_gateway::receipt_config::NativeIssuer>,
     #[serde(default)]
+    pub receipt_permit_keys: Vec<crate::auth_gateway::receipt_config::PermitKey>,
+    #[serde(default)]
     pub external_verifiers: Vec<crate::factor::external_transport::Config>,
     #[serde(default)]
     pub totp_keyring: Option<crate::factor::keyring::Configuration>,
@@ -900,6 +902,14 @@ impl Config {
             }
         }
 
+        if crate::auth_gateway::receipt_config::receiver_keys(
+            self.receipt_issuer.as_ref(),
+            &self.receipt_permit_keys,
+        )
+        .is_err()
+        {
+            errs.push("receipt_permit_keys: invalid native receiver keys".into());
+        }
         if let Some(config) = &self.receipt_issuer {
             if config.validate().is_err() {
                 errs.push("receipt_issuer: invalid native resources".into());

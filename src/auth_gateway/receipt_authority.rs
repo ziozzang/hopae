@@ -44,6 +44,49 @@ impl Authority {
             snapshot: self.snapshot.clone(),
         }
     }
+    /// Startup/configuration reconciliation preserves the exact reader on an
+    /// unchanged set. Durable retirement floors still govern every transition.
+    pub fn reconcile(
+        &mut self,
+        connection: &mut Connection,
+        desired: &[Key],
+        actor: &str,
+        guard: &dyn Fn(&Connection) -> Result<(), Refused>,
+    ) -> Result<u64, Refused> {
+        if actor.is_empty() || actor.len() > 128 || actor.chars().any(char::is_control) {
+            return Err(Refused);
+        }
+        let current = self.snapshot.load_full();
+        let revision = current.as_ref().map_or(0, |registry| registry.revision());
+        let unchanged = current.as_ref().map_or(desired.is_empty(), |registry| {
+            registry.active_matches(desired)
+        });
+        if !unchanged {
+            return self.publish(connection, revision, desired, actor, guard);
+        }
+        let expected = current
+            .as_ref()
+            .map(|registry| registry.encode())
+            .transpose()?;
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| Refused)?;
+        let matches = |db: &Connection| -> Result<(), Refused> {
+            let actual = receipt_key_store::load(db, revision)?
+                .map(|registry| registry.encode())
+                .transpose()?;
+            if actual != expected {
+                return Err(Refused);
+            }
+            Ok(())
+        };
+        guard(&transaction)?;
+        matches(&transaction)?;
+        guard(&transaction)?;
+        matches(&transaction)?;
+        transaction.commit().map_err(|_| Refused)?;
+        Ok(revision)
+    }
     /// Exclusive mutable ownership serializes commit/install order. Caller must
     /// retain this authority rather than constructing independent DB writers.
     pub fn publish(
@@ -100,6 +143,179 @@ mod tests {
         receipt_binding::{self, Identity},
     };
     use super::*;
+    fn descriptor(seed: u8, epoch: u64) -> Key {
+        Key {
+            issuer_ref: "owned".into(),
+            purpose: Purpose::Authentication,
+            epoch,
+            public_key: ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+                .verifying_key()
+                .to_bytes(),
+        }
+    }
+    #[test]
+    fn reconciliation_preserves_noop_tags_rejects_stale_owners_and_retains_restart_floors() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut db = Connection::open(file.path()).unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .unwrap();
+        let mut owner = Authority::load(&db, 0).unwrap();
+        let mut stale = Authority::load(&db, 0).unwrap();
+        assert_eq!(
+            owner
+                .reconcile(&mut db, &[], "startup", &|_| Ok(()))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            owner
+                .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|_| Ok(()))
+                .unwrap(),
+            1
+        );
+        let before = owner.snapshot.load_full().unwrap();
+        let guards = std::cell::Cell::new(0);
+        assert_eq!(
+            owner
+                .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|_| {
+                    guards.set(guards.get() + 1);
+                    Ok(())
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(guards.get(), 2);
+        assert!(Arc::ptr_eq(&before, &owner.snapshot.load_full().unwrap()));
+        let audits: u64 = db
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key LIKE 'projection_receipt_registry_audit:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(audits, 1);
+        assert!(
+            stale
+                .reconcile(&mut db, &[], "startup", &|_| Ok(()))
+                .is_err()
+        );
+        assert!(
+            owner
+                .reconcile(&mut db, &[descriptor(7, 1)], "", &|_| panic!(
+                    "invalid actor cannot inspect store"
+                ))
+                .is_err()
+        );
+        drop(db);
+        let mut db = Connection::open(file.path()).unwrap();
+        let mut restarted = Authority::load(&db, 1).unwrap();
+        assert_eq!(
+            restarted
+                .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|_| Ok(()))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            restarted
+                .reconcile(&mut db, &[], "startup", &|_| Ok(()))
+                .unwrap(),
+            2
+        );
+        drop(db);
+        let mut db = Connection::open(file.path()).unwrap();
+        let mut restarted = Authority::load(&db, 2).unwrap();
+        assert!(
+            restarted
+                .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|_| Ok(()))
+                .is_err()
+        );
+        assert!(
+            restarted
+                .reconcile(&mut db, &[descriptor(7, 2)], "startup", &|_| Ok(()))
+                .is_err()
+        );
+        assert_eq!(
+            restarted
+                .reconcile(&mut db, &[descriptor(8, 2)], "startup", &|_| Ok(()))
+                .unwrap(),
+            3
+        );
+    }
+    #[test]
+    fn noop_guards_cannot_mutate_history_or_commit_after_late_revocation() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .unwrap();
+        let mut owner = Authority::load(&db, 0).unwrap();
+        owner
+            .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|_| Ok(()))
+            .unwrap();
+        let before = owner.snapshot.load_full().unwrap();
+        let calls = std::cell::Cell::new(0);
+        assert!(owner.reconcile(&mut db,&[descriptor(7,1)],"startup",&|tx| {
+            calls.set(calls.get()+1);
+            if calls.get()==2 {tx.execute("UPDATE meta SET value='null' WHERE key='projection_receipt_registry_v1'",[]).map_err(|_|Refused)?;}
+            Ok(())
+        }).is_err());
+        assert!(Arc::ptr_eq(&before, &owner.snapshot.load_full().unwrap()));
+        assert_eq!(
+            receipt_key_store::load(&db, 1)
+                .unwrap()
+                .unwrap()
+                .encode()
+                .unwrap(),
+            before.encode().unwrap()
+        );
+        // A valid document with the same revision but different key material
+        // must also fail; decoding/revision checks alone are insufficient.
+        let forged = Registry::compile(1, &[descriptor(8, 1)], None)
+            .unwrap()
+            .encode()
+            .unwrap();
+        let calls = std::cell::Cell::new(0);
+        assert!(
+            owner
+                .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|tx| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 2 {
+                        tx.execute(
+                            "UPDATE meta SET value=?1 WHERE key='projection_receipt_registry_v1'",
+                            [&forged],
+                        )
+                        .map_err(|_| Refused)?;
+                    }
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(
+            receipt_key_store::load(&db, 1)
+                .unwrap()
+                .unwrap()
+                .encode()
+                .unwrap(),
+            before.encode().unwrap()
+        );
+        let calls = std::cell::Cell::new(0);
+        assert!(
+            owner
+                .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|_| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 2 {
+                        Err(Refused)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .is_err()
+        );
+        assert_eq!(
+            owner
+                .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|_| Ok(()))
+                .unwrap(),
+            1
+        );
+    }
     #[test]
     fn live_removal_invalidates_shared_verifiers_and_checked_tags() {
         let mut db = Connection::open_in_memory().unwrap();

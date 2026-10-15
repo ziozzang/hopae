@@ -58,6 +58,22 @@ fn valid_issuer(issuer: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
 }
 impl Registry {
+    /// Exact active descriptors only; retirement history remains owned by this
+    /// registry. Duplicated descriptors can never qualify as an unchanged set.
+    pub fn active_matches(&self, desired: &[Key]) -> bool {
+        if desired.len() != self.keys.values().map(BTreeMap::len).sum::<usize>() {
+            return false;
+        }
+        let mut seen = BTreeSet::new();
+        desired.iter().all(|key| {
+            seen.insert((key.issuer_ref.as_str(), key.purpose as u8, key.epoch))
+                && self
+                    .keys
+                    .get(&key.issuer_ref)
+                    .and_then(|keys| keys.get(&(key.purpose as u8, key.epoch)))
+                    .is_some_and(|public| public.to_bytes() == key.public_key)
+        })
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }
@@ -277,6 +293,36 @@ mod tests {
                 .verifying_key()
                 .to_bytes(),
         }
+    }
+    #[test]
+    fn active_matching_rejects_duplicates_and_preserves_retired_history() {
+        let current = Registry::compile(
+            1,
+            &[
+                key(7, Purpose::Authentication, 1),
+                key(8, Purpose::Permit, 1),
+            ],
+            None,
+        )
+        .unwrap();
+        assert!(current.active_matches(&[
+            key(8, Purpose::Permit, 1),
+            key(7, Purpose::Authentication, 1)
+        ]));
+        assert!(!current.active_matches(&[
+            key(7, Purpose::Authentication, 1),
+            key(7, Purpose::Authentication, 1)
+        ]));
+        assert!(!current.active_matches(&[key(7, Purpose::Authentication, 1)]));
+        assert!(!current.active_matches(&[
+            key(7, Purpose::Authentication, 1),
+            key(9, Purpose::Permit, 1)
+        ]));
+        let retired = Registry::compile(2, &[], Some(&current)).unwrap();
+        let restarted = Registry::decode(&retired.encode().unwrap(), 2).unwrap();
+        assert!(restarted.active_matches(&[]));
+        assert!(!restarted.active_matches(&[key(8, Purpose::Permit, 1)]));
+        assert!(Registry::compile(3, &[key(8, Purpose::Permit, 2)], Some(&restarted)).is_err());
     }
     #[test]
     fn historical_material_cannot_rotate_or_resurrect_at_a_larger_epoch_after_restart() {

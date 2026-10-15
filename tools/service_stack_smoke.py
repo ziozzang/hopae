@@ -105,6 +105,8 @@ def main():
                 assert len(permit_seed)==48 and len(permit_public)==44
                 env['OWNED_PERMIT_SEED']=base64.b64encode(permit_seed[-32:]).decode()
                 permit_pin={'issuer_ref':'owned-pumgye','key_epoch':1,'public_key':base64.b64encode(permit_public[-32:]).decode()}
+                hop['receipt_permit_keys']=[permit_pin]
+                (root/'hopae.json').write_text(json.dumps(hop))
                 config['http'][0]['auth']['native_resource']['permission_permit']=permit_pin
                 (root/'permit-key.json').write_text(json.dumps(dict(permit_pin,seed_env='OWNED_PERMIT_SEED')))
             (root/'hangang.json').write_text(json.dumps(config))
@@ -316,6 +318,34 @@ def main():
                 # The first borrowed connection can be stale after process replacement; it must fail closed.
                 for _ in range(3):assert request()==401,'reconnected authority resurrected the disabled profile'
                 print('PASS: owned offline tombstone survives actual Hopae restart despite unchanged bootstrap file.')
+                if args.permit_issuance:
+                    def receiver_keys():
+                        path=root/'hopae-state'/'hopae.db'
+                        with sqlite3.connect(f'file:{path}?mode=ro',uri=True) as db:
+                            value=db.execute("SELECT value FROM meta WHERE key='projection_receipt_registry_v1'").fetchone()
+                            assert value,'receiver keys were not imported'
+                            audits=db.execute("SELECT count(*) FROM meta WHERE key LIKE 'projection_receipt_registry_audit:%'").fetchone()[0]
+                            return json.loads(value[0]),audits
+                    state,audits=receiver_keys();assert state['revision']==1 and audits==1,'unchanged restart advanced receiver trust'
+                    hopae.terminate();hopae.wait(timeout=5)
+                    hop['receipt_permit_keys']=[];(root/'hopae.json').write_text(json.dumps(hop))
+                    hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-key-retired');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae-key-retired')
+                    state,audits=receiver_keys();assert state['revision']==2 and audits==2
+                    assert any(f['issuer']=='owned-pumgye' and not f['active'] for f in state['floors'])
+                    hopae.terminate();hopae.wait(timeout=5)
+                    hop['receipt_permit_keys']=[permit_pin];(root/'hopae.json').write_text(json.dumps(hop))
+                    stale=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-stale-key')
+                    stale.wait(timeout=8);assert stale.returncode!=0,'retired receiver key resurrected at restart'
+                    state,audits=receiver_keys();assert state['revision']==2 and audits==2
+                    openssl('genpkey','-algorithm','ED25519','-out','permit-next.key')
+                    openssl('pkey','-in','permit-next.key','-pubout','-outform','DER','-out','permit-next.pub')
+                    hop['receipt_permit_keys']=[dict(permit_pin,key_epoch=2,public_key=base64.b64encode((root/'permit-next.pub').read_bytes()[-32:]).decode())]
+                    (root/'hopae.json').write_text(json.dumps(hop))
+                    hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-key-rotated');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae-key-rotated')
+                    state,audits=receiver_keys();assert state['revision']==3 and audits==3
+                    assert any(f['issuer']=='owned-pumgye' and f['epoch']==2 and f['active'] for f in state['floors'])
+                    print('PASS: actual Hopae receiver-key bootstrap is idempotent; removal retires, stale restart refuses and fresh material/epoch activates. Receiver RPC/projection remains inactive.')
+
             label='four' if args.sumunjang_binary else 'three'
             transport='gRPC' if args.grpc else ('HOP1/PPG1/HGD1' if args.sumunjang_binary else 'HOP1/PPG1')
             print(f'PASS: {label} actual processes over mTLS {transport}; scoped API authentication, service/IP/class/method rights, guest denial, durable revocation/restoration, audience isolation, credential consumption and authority-outage fail-closed. Network authority included when configured; no full-stack throughput claim.')

@@ -291,3 +291,31 @@ Projected output also retains its own entry timestamp and monotonic elapsed-time
 anchor through final header conversion. Post-commit storage cannot extend its
 shortened expiry by supplying a reversed or stalled wall clock. A focused output
 test covers reversal and elapsed expiry after successful construction.
+
+## Native receipt key startup ownership
+
+`receipt_permit_keys` is an optional array of public-only `issuer_ref`,
+`key_epoch` and canonical Base64 Ed25519 `public_key` descriptors. Each entry is
+permit-purpose; a native `receipt_issuer` is required. Up to 63 permit keys plus
+the issuer's own authentication key are validated together. Duplicate contexts,
+weak keys, key material reused across purposes and inline signing material refuse
+before store/listener setup. Signing resources remain with their native owners.
+
+After opening its store and before provider/application imports or listeners,
+Hopae reconciles the desired keys against durable receiver history and retains
+the owner in `Services.receipt_authority`. This is startup configuration ownership,
+not request-role authorization. An unchanged set preserves revision, audit count
+and the exact in-process reader. The no-op still checks actor guards and the
+complete durable document twice inside a transaction, rejecting same-revision
+replacement or a stale owner. Changed sets use the existing audited publication
+and irreversible retirement rules; removal does not erase old public material.
+Retired material is refused even at a larger epoch. Reactivation requires fresh
+material and a valid higher epoch.
+
+Library 532 tests (one existing ignore), workspace, SDK matching tests and strict
+Clippy pass. The actual four-server fixture verifies initial import, unchanged
+restart, permit-key removal, stale startup refusal and fresh material/epoch
+registration. Existing no-permit mode also passes. The key-rotation check runs
+after the owned identity/permission tombstones and qualifies receiver trust
+startup, not coordinated signer rotation or runtime projection. Receiver RPC,
+local guard wiring and final credential dispatch remain required.

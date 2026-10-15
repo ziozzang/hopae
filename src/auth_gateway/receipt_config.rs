@@ -89,9 +89,108 @@ impl NativeIssuer {
         Issuer::new(configuration, seed, clock, rng)
     }
 }
+/// Public receiver-owned permit descriptor; signing resources stay in Pumgye.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermitKey {
+    pub issuer_ref: String,
+    pub key_epoch: u64,
+    pub public_key: String,
+}
+/// Validates all purpose separation/duplicate constraints before persistence.
+pub fn receiver_keys(
+    issuer: Option<&NativeIssuer>,
+    permits: &[PermitKey],
+) -> Result<Vec<super::receipt_keys::Key>, Refused> {
+    use super::{
+        receipt::Purpose,
+        receipt_keys::{Key, Registry},
+    };
+    if permits.len() > 63 || (!permits.is_empty() && issuer.is_none()) {
+        return Err(Refused);
+    }
+    let mut keys = Vec::with_capacity(permits.len() + usize::from(issuer.is_some()));
+    if let Some(issuer) = issuer {
+        let issuer = issuer.validate()?;
+        keys.push(Key {
+            issuer_ref: issuer.issuer_ref,
+            purpose: Purpose::Authentication,
+            epoch: issuer.key_epoch,
+            public_key: issuer.public_key,
+        });
+    }
+    for permit in permits {
+        if permit.public_key.len() != 44 {
+            return Err(Refused);
+        }
+        let bytes: [u8; 32] = STANDARD
+            .decode(&permit.public_key)
+            .map_err(|_| Refused)?
+            .try_into()
+            .map_err(|_| Refused)?;
+        if STANDARD.encode(bytes) != permit.public_key {
+            return Err(Refused);
+        }
+        keys.push(Key {
+            issuer_ref: permit.issuer_ref.clone(),
+            purpose: Purpose::Permit,
+            epoch: permit.key_epoch,
+            public_key: bytes,
+        });
+    }
+    Registry::compile(1, &keys, None)?;
+    Ok(keys)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn receiver_public_keys_require_native_issuer_and_independent_bounded_descriptors() {
+        let auth = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+        let permit = ed25519_dalek::SigningKey::from_bytes(&[8; 32]);
+        let base = serde_json::json!({"state_dir":"owned-state","portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_CALLER_REFERENCE"},"apps":[{"app_id":"orders","hosts":["app.example.test"]}],"receipt_issuer":{"issuer_ref":"owned","key_epoch":1,"identity_authority_epoch":"epoch1","public_key":STANDARD.encode(auth.verifying_key().to_bytes()),"seed_env":"OWNED_RECEIPT_SEED","scopes":[{"service":"orders","audience":"orders-api"}]},"receipt_permit_keys":[{"issuer_ref":"pumgye","key_epoch":1,"public_key":STANDARD.encode(permit.verifying_key().to_bytes())}]});
+        let parsed = crate::config::parse(&base.to_string()).unwrap();
+        assert_eq!(
+            receiver_keys(parsed.receipt_issuer.as_ref(), &parsed.receipt_permit_keys)
+                .unwrap()
+                .len(),
+            2
+        );
+        for mutate in [
+            |v: &mut serde_json::Value| {
+                v["receipt_permit_keys"][0]["key_epoch"] = serde_json::json!(0)
+            },
+            |v: &mut serde_json::Value| {
+                v["receipt_permit_keys"][0]["public_key"] =
+                    serde_json::json!(STANDARD.encode([0; 32]))
+            },
+            |v: &mut serde_json::Value| {
+                v["receipt_permit_keys"][0]["public_key"] =
+                    v["receipt_issuer"]["public_key"].clone()
+            },
+            |v: &mut serde_json::Value| {
+                let repeated = v["receipt_permit_keys"][0].clone();
+                v["receipt_permit_keys"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(repeated);
+            },
+            |v: &mut serde_json::Value| {
+                v.as_object_mut().unwrap().remove("receipt_issuer");
+            },
+            |v: &mut serde_json::Value| {
+                v["receipt_permit_keys"][0]["seed"] =
+                    serde_json::json!("owned-inline-fixture-secret")
+            },
+        ] {
+            let mut bad = base.clone();
+            mutate(&mut bad);
+            let error = crate::config::parse(&bad.to_string())
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("owned-inline-fixture-secret"));
+        }
+    }
     #[test]
     fn startup_configuration_refuses_untrusted_scope_and_invalid_key_generations() {
         let signer = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);

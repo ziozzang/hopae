@@ -203,6 +203,14 @@ pub(super) const ROOT: Node = Obj(&[
         ]),
     ),
     (
+        "receipt_permit_keys",
+        Arr(&Obj(&[
+            ("issuer_ref", Leaf),
+            ("key_epoch", Leaf),
+            ("public_key", Leaf),
+        ])),
+    ),
+    (
         "receipt_issuer",
         Obj(&[
             ("issuer_ref", Leaf),
