@@ -566,3 +566,25 @@ Feature tests use a real generated mTLS fixture to check successful issuance and
 refresh, fresh correlations, previous-ID replies, wrong caller/SNI/client/request,
 modified digest/domain/generations/cache policy, timeout/cancellation and retirement
 during issue/refresh. This fixture is not the actual deployed Hopae owner.
+
+
+### Stable native trust and digest preparation
+
+`Client::new_service` adds a server-compiled `ServiceTrustPolicy` beside the exact
+pin constructor. One persistent mTLS transport accepts dynamically verified service
+subjects and source-process domains within fixed issuer/key/base identity/scope
+and configured profile/application/registry floors. `prepare_issue_digest` binds
+the final owner's already computed request hash; `prepare_observation` freezes
+public context only after policy and expected-digest checks. Neither preparation
+is authentication. Only signature verification plus the current fixed-owner RPC
+creates observation evidence. This avoids inventing HTTP bytes in Pumgye or
+creating connections from incoming identity claims.
+
+New source domains are learned from signed context and must match the live owner's
+report; refresh never changes a proof's domain. Owner/configuration registry floors
+advance monotonically and invalidate older observations locally. Ordinary requests
+read the unchanged floor without an atomic write. Configuration replacement still
+requires retirement and final native owner checks. Generated mTLS tests exercise
+multiple subjects/revisions on one client, new-process proofs, old-proof refusal,
+policy mismatches and registry downgrade. This does not qualify arbitrary replica
+routing, durable replay, permit issuance or final credential output.

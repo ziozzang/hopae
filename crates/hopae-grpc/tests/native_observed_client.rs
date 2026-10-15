@@ -35,6 +35,23 @@ fn context() -> v1::AuthenticationReceiptContext {
         request_sha256: vec![],
     }
 }
+fn peer_context(mode: u8) -> v1::AuthenticationReceiptContext {
+    let mut c = context();
+    if mode >= 12 {
+        let (subject, revision, domain) = if mode == 13 {
+            ('b', 3, "22222222222222222222222222222222")
+        } else {
+            ('a', 7, "11111111111111111111111111111111")
+        };
+        let i = c.identity.as_mut().unwrap();
+        i.subject_ref = format!("s_{}", subject.to_string().repeat(48));
+        i.revision = revision;
+        i.credential_generation = revision;
+        c.identity_authority_epoch =
+            service_epoch::encode_clock("owner", revision, 9, domain).unwrap();
+    }
+    c
+}
 fn context_binding(c: &v1::AuthenticationReceiptContext) -> [u8; 32] {
     let i = c.identity.as_ref().unwrap();
     receipt_binding::digest(
@@ -92,7 +109,7 @@ impl v1::authentication_receipts_server::AuthenticationReceipts for Peer {
         }
         let q = request.into_inner();
         let id = q.verification.unwrap().request_id;
-        let mut c = context();
+        let mut c = peer_context(self.0.load(Ordering::Acquire));
         c.request_sha256 = q.request_sha256;
         let binding = context_binding(&c);
         let raw = receipt::sign(
@@ -133,7 +150,7 @@ impl v1::authentication_receipts_server::AuthenticationReceipts for Peer {
             .context
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("context"))?;
-        let mut expected = context();
+        let mut expected = peer_context(self.0.load(Ordering::Acquire));
         expected.request_sha256 = q.request_sha256;
         if c != &expected {
             return Err(Status::permission_denied("context pin"));
@@ -173,15 +190,21 @@ impl Peer {
             } else {
                 Sha256::digest(raw).to_vec()
             },
-            clock_domain: if mode == 2 {
+            clock_domain: if mode == 2 || mode == 13 {
                 "22222222222222222222222222222222"
             } else {
                 "11111111111111111111111111111111"
             }
             .into(),
-            profile_revision: if mode == 7 { 8 } else { 7 },
+            profile_revision: if mode == 7 {
+                8
+            } else if mode == 13 {
+                3
+            } else {
+                7
+            },
             application_generation: if mode == 8 { 10 } else { 9 },
-            key_registry_revision: if mode == 9 { 2 } else { 1 },
+            key_registry_revision: if mode == 9 || mode == 14 { 2 } else { 1 },
             cache_ttl_ms: u32::from(mode == 4),
         }
     }
@@ -467,6 +490,111 @@ async fn authenticated_owner_success_refresh_and_hostile_replies() {
         mode.store(0, Ordering::Release);
         assert!(client.issue(request.clone()).await.is_ok());
     }
+    // The same fixed mTLS client resolves dynamic subjects and owner restarts.
+    let stable = Client::new_service(
+        EndpointConfig {
+            address: &address,
+            server_name: "hopae.test",
+            ca: &ca,
+            certificate: &cert,
+            private_key: &key,
+            caller_key: CALLER,
+        },
+        ServiceTrustPolicy {
+            issuer_ref: "issuer".into(),
+            key_epoch: 1,
+            verifying_key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]).verifying_key(),
+            identity_authority: "owner".into(),
+            scopes: vec![ServiceScope {
+                service: "orders".into(),
+                audience: "api".into(),
+            }],
+            minimum_profile_revision: 1,
+            minimum_application_generation: 9,
+            minimum_key_registry_revision: 1,
+        },
+        clock.clone(),
+        ClockRates::new(50, 50).unwrap(),
+        Limits {
+            concurrent: 1,
+            timeout: Duration::from_millis(200),
+        },
+    )
+    .unwrap();
+    let digest = hopae_grpc::request_binding::digest(&hopae_grpc::request_binding::Request {
+        service: "orders",
+        audience: "api",
+        method: "GET",
+        target: "/",
+        body_sha256: &[0; 32],
+    })
+    .unwrap();
+    let intent = stable
+        .prepare_issue_digest(
+            ServiceScope {
+                service: "orders".into(),
+                audience: "api".into(),
+            },
+            digest,
+            vec![],
+        )
+        .unwrap();
+    mode.store(12, Ordering::Release);
+    let first = stable.issue(intent.clone()).await.unwrap();
+    assert_eq!(first.context().request_sha256, digest);
+    let canonical = stable.issue(prepare(&stable)).await.unwrap();
+    assert_eq!(canonical.context(), first.context());
+    let q = stable
+        .prepare_observation(first.context().clone(), digest)
+        .unwrap();
+    assert!(stable.observe(q.clone(), first.receipt()).await.is_ok());
+    assert!(
+        stable
+            .prepare_observation(first.context().clone(), [99; 32])
+            .is_err()
+    );
+    for field in 0..8 {
+        let mut c = first.context().clone();
+        match field {
+            0 => c.issuer_ref = "other".into(),
+            1 => c.key_epoch = 2,
+            2 => {
+                c.identity_authority_epoch =
+                    service_epoch::encode_clock("other", 7, 9, "11111111111111111111111111111111")
+                        .unwrap()
+            }
+            3 => c.service = "other".into(),
+            4 => c.audience = "other".into(),
+            5 => c.identity.as_mut().unwrap().subject_ref = "worker".into(),
+            6 => c.identity.as_mut().unwrap().credential_generation = 8,
+            _ => {
+                c.identity_authority_epoch =
+                    service_epoch::encode_clock("owner", 7, 8, "11111111111111111111111111111111")
+                        .unwrap()
+            }
+        }
+        assert!(
+            stable.prepare_observation(c, digest).is_err(),
+            "policy field {field}"
+        );
+    }
+    mode.store(13, Ordering::Release);
+    let second = stable.issue(intent.clone()).await.unwrap();
+    assert_ne!(first.context().identity, second.context().identity);
+    assert!(stable.check(&second, second.request()).is_ok());
+    assert!(stable.observe(q, first.receipt()).await.is_err());
+    assert!(stable.refresh(first).await.is_err());
+    assert!(stable.refresh(second).await.is_ok());
+    // Registry floor belongs to this owner/configuration, not a profile subject.
+    mode.store(12, Ordering::Release);
+    let older = stable.issue(intent.clone()).await.unwrap();
+    mode.store(14, Ordering::Release);
+    assert!(stable.issue(intent.clone()).await.is_ok());
+    assert!(stable.check(&older, older.request()).is_err());
+    assert!(stable.refresh(older).await.is_err());
+    mode.store(12, Ordering::Release);
+    assert!(stable.issue(intent).await.is_err());
+    stable.retire();
     clock.retire();
     assert!(client.issue(prepare(&client)).await.is_err());
     server.abort();

@@ -28,6 +28,72 @@ pub struct OwnerPin {
     pub verifying_key: VerifyingKey,
     pub key_registry_revision: u64,
 }
+/// Compiled native configuration, never built from incoming receipt fields.
+/// One policy/client serves dynamic subjects and source process domains.
+pub struct ServiceTrustPolicy {
+    pub issuer_ref: String,
+    pub key_epoch: u64,
+    pub verifying_key: VerifyingKey,
+    pub identity_authority: String,
+    pub scopes: Vec<ServiceScope>,
+    pub minimum_profile_revision: u64,
+    pub minimum_application_generation: u64,
+    pub minimum_key_registry_revision: u64,
+}
+#[derive(Clone, PartialEq, Eq)]
+pub struct ServiceScope {
+    pub service: String,
+    pub audience: String,
+}
+enum Trust {
+    Exact(OwnerPin),
+    Service(ServiceTrustPolicy),
+}
+impl Trust {
+    fn key(&self) -> &VerifyingKey {
+        match self {
+            Self::Exact(p) => &p.verifying_key,
+            Self::Service(p) => &p.verifying_key,
+        }
+    }
+    fn validate(&self, c: &v1::AuthenticationReceiptContext) -> Result<(), Refused> {
+        binding(c)?;
+        match self {
+            Self::Exact(p) => {
+                let mut expected = p.context.clone();
+                expected.request_sha256 = c.request_sha256.clone();
+                if expected != *c {
+                    return Err(Refused);
+                }
+            }
+            Self::Service(p) => {
+                let epoch = service_epoch::decode_clock(&c.identity_authority_epoch)
+                    .map_err(|_| Refused)?;
+                let i = c.identity.as_ref().ok_or(Refused)?;
+                let subject = i.subject_ref.strip_prefix("s_").ok_or(Refused)?;
+                if c.issuer_ref != p.issuer_ref
+                    || c.key_epoch != p.key_epoch
+                    || epoch.epoch.authority != p.identity_authority
+                    || epoch.epoch.profile_revision < p.minimum_profile_revision
+                    || epoch.epoch.application_generation < p.minimum_application_generation
+                    || i.revision != epoch.epoch.profile_revision
+                    || i.credential_generation != i.revision
+                    || subject.len() != 48
+                    || !subject
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    || !p
+                        .scopes
+                        .iter()
+                        .any(|s| s.service == c.service && s.audience == c.audience)
+                {
+                    return Err(Refused);
+                }
+            }
+        }
+        Ok(())
+    }
+}
 pub struct EndpointConfig<'a> {
     pub address: &'a str,
     pub server_name: &'a str,
@@ -46,6 +112,7 @@ pub struct PreparedRequest {
     owner: Arc<()>,
     context: v1::AuthenticationReceiptContext,
     issue: v1::ServiceReceiptRequest,
+    resolved: bool,
 }
 /// Signature and transport/time evidence only. No Clone, serde or permission API.
 pub struct Observation {
@@ -54,6 +121,7 @@ pub struct Observation {
     evidence: receipt::SignatureEvidence,
     deadline: LocalDeadline,
     retention: ReplayRetention,
+    registry_revision: u64,
 }
 impl Observation {
     /// Exact signed public proof for a downstream owner to verify independently.
@@ -73,7 +141,8 @@ impl Observation {
 pub struct Client {
     rpc: v1::authentication_receipts_client::AuthenticationReceiptsClient<Channel>,
     credential: MetadataValue<Ascii>,
-    pin: OwnerPin,
+    trust: Trust,
+    registry_floor: AtomicU64,
     clock: Arc<ReceiverClock>,
     rates: receipt_time::ClockRates,
     timeout: Duration,
@@ -131,6 +200,59 @@ impl Client {
         rates: receipt_time::ClockRates,
         limits: Limits,
     ) -> Result<Self, Refused> {
+        Self::connect(config, Trust::Exact(pin), clock, rates, limits)
+    }
+    pub fn new_service(
+        config: EndpointConfig<'_>,
+        policy: ServiceTrustPolicy,
+        clock: Arc<ReceiverClock>,
+        rates: receipt_time::ClockRates,
+        limits: Limits,
+    ) -> Result<Self, Refused> {
+        let valid_revision = |v| (1..=9_007_199_254_740_991).contains(&v);
+        if policy.verifying_key.is_weak()
+            || !valid_revision(policy.key_epoch)
+            || !valid_revision(policy.minimum_profile_revision)
+            || !valid_revision(policy.minimum_application_generation)
+            || !valid_revision(policy.minimum_key_registry_revision)
+            || policy.scopes.is_empty()
+            || policy.scopes.len() > 128
+        {
+            return Err(Refused);
+        }
+        for scope in &policy.scopes {
+            let c = v1::AuthenticationReceiptContext {
+                issuer_ref: policy.issuer_ref.clone(),
+                key_epoch: policy.key_epoch,
+                identity_authority_epoch: service_epoch::encode_clock(
+                    &policy.identity_authority,
+                    policy.minimum_profile_revision,
+                    policy.minimum_application_generation,
+                    "11111111111111111111111111111111",
+                )
+                .map_err(|_| Refused)?,
+                identity: Some(v1::ReceiptIdentity {
+                    subject_ref: format!("s_{}", "a".repeat(48)),
+                    kind: 2,
+                    aal: 0,
+                    revision: policy.minimum_profile_revision,
+                    credential_generation: policy.minimum_profile_revision,
+                }),
+                service: scope.service.clone(),
+                audience: scope.audience.clone(),
+                request_sha256: vec![1; 32],
+            };
+            binding(&c)?;
+        }
+        Self::connect(config, Trust::Service(policy), clock, rates, limits)
+    }
+    fn connect(
+        config: EndpointConfig<'_>,
+        trust: Trust,
+        clock: Arc<ReceiverClock>,
+        rates: receipt_time::ClockRates,
+        limits: Limits,
+    ) -> Result<Self, Refused> {
         let uri: tonic::codegen::http::Uri = config.address.parse().map_err(|_| Refused)?;
         if config.address.len() > 256
             || uri.scheme_str() != Some("https")
@@ -151,23 +273,32 @@ impl Client {
             || !(1..=1024).contains(&limits.concurrent)
             || limits.timeout < Duration::from_millis(1)
             || limits.timeout > Duration::from_secs(1)
-            || !pin.context.request_sha256.is_empty()
-            || !(1..=9_007_199_254_740_991).contains(&pin.key_registry_revision)
-            || pin.verifying_key.is_weak()
         {
             return Err(Refused);
         }
-        let epoch = service_epoch::decode_clock(&pin.context.identity_authority_epoch)
-            .map_err(|_| Refused)?;
-        if pin.context.identity.as_ref().is_none_or(|i| {
-            i.revision != epoch.epoch.profile_revision
-                || i.credential_generation != epoch.epoch.profile_revision
-        }) {
-            return Err(Refused);
-        }
-        let mut check = pin.context.clone();
-        check.request_sha256 = vec![1; 32];
-        binding(&check)?;
+        let floor = match &trust {
+            Trust::Exact(pin) => {
+                if !pin.context.request_sha256.is_empty()
+                    || pin.verifying_key.is_weak()
+                    || !(1..=9_007_199_254_740_991).contains(&pin.key_registry_revision)
+                {
+                    return Err(Refused);
+                }
+                let epoch = service_epoch::decode_clock(&pin.context.identity_authority_epoch)
+                    .map_err(|_| Refused)?;
+                if pin.context.identity.as_ref().is_none_or(|i| {
+                    i.revision != epoch.epoch.profile_revision
+                        || i.credential_generation != epoch.epoch.profile_revision
+                }) {
+                    return Err(Refused);
+                }
+                let mut check = pin.context.clone();
+                check.request_sha256 = vec![1; 32];
+                binding(&check)?;
+                pin.key_registry_revision
+            }
+            Trust::Service(p) => p.minimum_key_registry_revision,
+        };
         let mut credential: MetadataValue<Ascii> = format!("Bearer {}", config.caller_key)
             .parse()
             .map_err(|_| Refused)?;
@@ -188,7 +319,8 @@ impl Client {
                 .max_encoding_message_size(16384)
                 .max_decoding_message_size(4096),
             credential,
-            pin,
+            trust,
+            registry_floor: AtomicU64::new(floor),
             clock,
             rates,
             timeout: limits.timeout,
@@ -203,10 +335,25 @@ impl Client {
         request: &crate::request_binding::Request<'_>,
         headers: Vec<v1::Header>,
     ) -> Result<Arc<PreparedRequest>, Refused> {
+        let digest = crate::request_binding::digest(request).map_err(|_| Refused)?;
+        self.prepare_issue_digest(
+            ServiceScope {
+                service: request.service.into(),
+                audience: request.audience.into(),
+            },
+            digest,
+            headers,
+        )
+    }
+    /// Binds an already computed final digest; this does not inspect HTTP bytes.
+    pub fn prepare_issue_digest(
+        &self,
+        scope: ServiceScope,
+        digest: [u8; 32],
+        headers: Vec<v1::Header>,
+    ) -> Result<Arc<PreparedRequest>, Refused> {
         self.current()?;
-        if request.service != self.pin.context.service
-            || request.audience != self.pin.context.audience
-            || headers.len() > 32
+        if headers.len() > 32
             || headers
                 .iter()
                 .map(|h| h.name.len() + h.value.len())
@@ -218,22 +365,54 @@ impl Client {
         {
             return Err(Refused);
         }
-        let digest = crate::request_binding::digest(request).map_err(|_| Refused)?;
-        let mut context = self.pin.context.clone();
+        let (mut context, resolved) = match &self.trust {
+            Trust::Exact(p) => {
+                if p.context.service != scope.service || p.context.audience != scope.audience {
+                    return Err(Refused);
+                }
+                (p.context.clone(), true)
+            }
+            Trust::Service(p) => {
+                if !p.scopes.contains(&scope) {
+                    return Err(Refused);
+                }
+                (v1::AuthenticationReceiptContext::default(), false)
+            }
+        };
+        context.service = scope.service.clone();
+        context.audience = scope.audience.clone();
         context.request_sha256 = digest.to_vec();
-        binding(&context)?;
         Ok(Arc::new(PreparedRequest {
             owner: self.owner.clone(),
             context,
+            resolved,
             issue: v1::ServiceReceiptRequest {
                 verification: Some(v1::VerifyRequest {
                     request_id: 0,
                     headers,
                 }),
-                service: request.service.into(),
-                audience: request.audience.into(),
+                service: scope.service,
+                audience: scope.audience,
                 request_sha256: digest.to_vec(),
             },
+        }))
+    }
+    /// Freezes untrusted public context. Preparation grants no time evidence.
+    pub fn prepare_observation(
+        &self,
+        context: v1::AuthenticationReceiptContext,
+        expected_final_digest: [u8; 32],
+    ) -> Result<Arc<PreparedRequest>, Refused> {
+        self.current()?;
+        if context.request_sha256 != expected_final_digest {
+            return Err(Refused);
+        }
+        self.trust.validate(&context)?;
+        Ok(Arc::new(PreparedRequest {
+            owner: self.owner.clone(),
+            context,
+            resolved: true,
+            issue: v1::ServiceReceiptRequest::default(),
         }))
     }
     fn next_id(&self) -> Result<u64, Refused> {
@@ -276,9 +455,26 @@ impl Client {
             return Err(Refused);
         }
         let reply = response.receipt.ok_or(Refused)?;
-        if reply.request_id != id || reply.context.as_ref() != Some(&request.context) {
+        let context = reply.context.ok_or(Refused)?;
+        if reply.request_id != id
+            || context.service != request.context.service
+            || context.audience != request.context.audience
+            || context.request_sha256 != request.context.request_sha256
+            || (request.resolved && context != request.context)
+        {
             return Err(Refused);
         }
+        self.trust.validate(&context)?;
+        let request = if request.resolved {
+            request
+        } else {
+            Arc::new(PreparedRequest {
+                owner: request.owner.clone(),
+                context,
+                issue: request.issue.clone(),
+                resolved: true,
+            })
+        };
         let result = self.finish(
             request,
             reply.receipt,
@@ -290,7 +486,7 @@ impl Client {
             return Err(Refused);
         }
         result.deadline.check(&self.clock).map_err(|_| Refused)?;
-        self.current()?;
+        self.check(&result, &result.request)?;
         Ok(result)
     }
     /// Independently observe an externally issued public proof at this fixed owner.
@@ -304,14 +500,17 @@ impl Client {
         receipt: &[u8],
     ) -> Result<Observation, Refused> {
         self.current()?;
-        if !Arc::ptr_eq(&self.owner, &request.owner) || receipt.len() != receipt::LENGTH {
+        if !request.resolved
+            || !Arc::ptr_eq(&self.owner, &request.owner)
+            || receipt.len() != receipt::LENGTH
+        {
             return Err(Refused);
         }
         let begun = hangang_runtime::time::ElapsedStamp::now().map_err(|_| Refused)?;
         let _slot = self.admission.try_acquire().map_err(|_| Refused)?;
         let raw = receipt.to_vec();
         let evidence = receipt::verify_signature(
-            &self.pin.verifying_key,
+            self.trust.key(),
             &raw,
             receipt::Purpose::Authentication,
             &binding(&request.context)?,
@@ -344,7 +543,7 @@ impl Client {
             return Err(Refused);
         }
         result.deadline.check(&self.clock).map_err(|_| Refused)?;
-        self.current()?;
+        self.check(&result, &result.request)?;
         Ok(result)
     }
     fn finish(
@@ -356,7 +555,7 @@ impl Client {
         exchange: ExchangeSample,
     ) -> Result<Observation, Refused> {
         let evidence = receipt::verify_signature(
-            &self.pin.verifying_key,
+            self.trust.key(),
             &raw,
             receipt::Purpose::Authentication,
             &binding(&request.context)?,
@@ -379,11 +578,14 @@ impl Client {
             || report.clock_domain != epoch.clock_domain
             || report.profile_revision != epoch.epoch.profile_revision
             || report.application_generation != epoch.epoch.application_generation
-            || report.key_registry_revision != self.pin.key_registry_revision
+            || !(1..=9_007_199_254_740_991).contains(&report.key_registry_revision)
+            || report.key_registry_revision < self.registry_floor.load(Ordering::Acquire)
+            || matches!(&self.trust, Trust::Exact(p) if report.key_registry_revision != p.key_registry_revision)
             || report.cache_ttl_ms != 0
         {
             return Err(Refused);
         }
+        self.trust.validate(&request.context)?;
         let bounds = receipt_time::Bounds::from_signature_with_rates(
             &evidence,
             &receipt_time::Report {
@@ -406,12 +608,22 @@ impl Client {
         let (deadline, retention) = exchange
             .bind_bounds(bounds.admit_until_ms(), bounds.retain_until_ms())
             .map_err(|_| Refused)?;
+        // Ordinary requests only read the shared floor; reserve the cache-line
+        // write for an actual authenticated registry advance.
+        if report.key_registry_revision > self.registry_floor.load(Ordering::Acquire) {
+            self.registry_floor
+                .fetch_max(report.key_registry_revision, Ordering::AcqRel);
+        }
+        if report.key_registry_revision < self.registry_floor.load(Ordering::Acquire) {
+            return Err(Refused);
+        }
         Ok(Observation {
             request,
             receipt: raw,
             evidence,
             deadline,
             retention,
+            registry_revision: report.key_registry_revision,
         })
     }
     pub fn check(
@@ -419,15 +631,21 @@ impl Client {
         observation: &Observation,
         request: &Arc<PreparedRequest>,
     ) -> Result<Duration, Refused> {
-        self.current()?;
         if !Arc::ptr_eq(&self.owner, &request.owner) || !Arc::ptr_eq(request, &observation.request)
         {
             return Err(Refused);
         }
-        observation
+        // Clock sampling may overlap retirement or a newer authenticated report.
+        // Finish with native lifecycle/floor checks, not an external time read.
+        let remaining = observation
             .deadline
             .remaining(&self.clock)
-            .map_err(|_| Refused)
+            .map_err(|_| Refused)?;
+        if observation.registry_revision < self.registry_floor.load(Ordering::Acquire) {
+            return Err(Refused);
+        }
+        self.current()?;
+        Ok(remaining)
     }
     /// Retention remains distinct from admission, including after clock retirement.
     pub fn retention_elapsed(&self, observation: &Observation) -> Result<bool, Refused> {
@@ -475,7 +693,7 @@ impl Client {
         if begun.elapsed().map_err(|_| Refused)? > timeout {
             return Err(Refused);
         }
-        self.current()?;
+        self.check(&updated, &updated.request)?;
         Ok(updated)
     }
 }
