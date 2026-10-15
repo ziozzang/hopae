@@ -221,3 +221,11 @@ it fenced until durable reload. Native owner and handler tests cover these
 boundaries. An owned real mTLS socket also proves absent-plan refusal, native
 publication, successful observation, wrong caller refusal and withdrawal on the
 same retained channel. This alone does not qualify cross-process permit or projection.
+
+The owned fixture also supports `--projection-owner` with `--native-resource`.
+It bootstraps an owned native plan, enables Pumgye's fixed mTLS plan client,
+and passes actual four-server final dispatch with route ownership, durable
+permission/profile withdrawal and authority outages. Wrong Hopae server name
+and caller credential refuse without origin effects; restoration succeeds.
+This mode cannot be combined with a legacy Pumgye binary. It exercises native
+plan checks, not signed projection permits or upstream credential issuance.

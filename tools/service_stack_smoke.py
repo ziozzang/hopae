@@ -12,12 +12,15 @@ def main():
     p.add_argument('--resource-catalog',action='store_true')
     p.add_argument('--native-resource',action='store_true')
     p.add_argument('--route-owner',action='store_true')
+    p.add_argument('--projection-owner',action='store_true')
     p.add_argument('--legacy-pumgye-binary',type=Path)
     p.add_argument('--external-verifier',action='store_true')
     p.add_argument('--durable-restart',action='store_true')
     args=p.parse_args()
     if args.resource_catalog and not args.grpc:p.error('--resource-catalog requires --grpc')
     if args.native_resource and not (args.grpc and args.resource_catalog and args.sumunjang_binary):p.error('--native-resource requires --grpc --resource-catalog and --sumunjang-binary')
+    if args.projection_owner and not args.native_resource:p.error('--projection-owner requires --native-resource')
+    if args.projection_owner and args.legacy_pumgye_binary:p.error('--projection-owner cannot use a legacy permission server')
     if args.route_owner and not args.native_resource:p.error('--route-owner requires --native-resource')
     if args.legacy_pumgye_binary and not args.route_owner:p.error('--legacy-pumgye-binary requires --route-owner')
     processes=[];seen=[];seen_bodies=[];seen_paths=[];verifier_state={'unavailable':False,'calls':0}
@@ -76,6 +79,7 @@ def main():
                 env['OWNED_RECEIPT_SEED']=base64.b64encode(seed[-32:]).decode()
                 issuer_pin=base64.b64encode(public_key[-32:]).decode()
                 hop['receipt_issuer']={'issuer_ref':'owned','key_epoch':1,'identity_authority_epoch':'epoch1','public_key':issuer_pin,'seed_env':'OWNED_RECEIPT_SEED','scopes':[{'service':'orders','audience':'orders-api'}]}
+            if args.projection_owner:hop['credential_projection']={'revision':1,'plans':[{'service':'orders','audience':'orders-api','resource':'db:orders','action':'select','minimum_aal':0,'credential':{'type':'identity_header'}}]}
             (root/'hopae.json').write_text(json.dumps(hop))
             def tls(name):return {'server_name':name,'ca':str(root/'ca.pem'),'certificate':str(root/'client.pem'),'key':str(root/'client.key')}
             config={'http':[{'id':'orders','host':'app.example.test','path_prefix':'/secure','path_match':'segment_prefix','access_mode':'protected','backends':[f'http://127.0.0.1:{origin.server_port}'],'auth':{'url':f'http://127.0.0.1:{http_verify}/_hopae/verify','native':{'address':f'127.0.0.1:{hop_native}','tls':tls('hopae.example.test')},'request_headers':['authorization'],'response_headers':['x-forwarded-user','x-hopae-aal','x-hopae-principal-kind'],'static_request_headers':{'x-hopae-gateway-key':{'env':'FIXTURE_KEY'},'x-hopae-contract':'1'},'forward_response':True},'resource_policy':{'resource_id':'orders','principal':{'source':'external','subject_header':'x-forwarded-user'},'allow':[],'pumgye':{'service_id':'orders','information_class':'internal','permissions':{'GET':['read'],'POST':['write']}}}}],'pumgye_authority':{'decision_address':f'127.0.0.1:{pum_native}','management_address':f'127.0.0.1:{pum_http}','decision_token_env':'PUMGYE_DECISION_TOKEN','admin_token_env':'PUMGYE_ADMIN_TOKEN','tls':tls('pumgye.example.test'),'timeout_ms':1000}}
@@ -122,6 +126,10 @@ def main():
                 (root/'route-live.json').write_text(json.dumps(route_config))
                 pum_args+=['--route-live',str(root/'route-live.json')]
             if args.native_resource:pum_args+=['--authentication-trust',str(root/'authentication-trust.json'),'--authentication-live',str(root/'authentication-live.json'),'--network-live',str(root/'network-live.json')]
+            if args.projection_owner:
+                projection_config=dict(tls('hopae.example.test'),address=f'https://127.0.0.1:{hop_grpc}',token_env='HOPAE_TEST_GATEWAY_KEY')
+                (root/'projection-live.json').write_text(json.dumps(projection_config))
+                pum_args+=['--projection-live',str(root/'projection-live.json')]
             owner=start(args.pumgye_binary,pum_args,'pumgye');wait(f'https://127.0.0.1:{pum_http}/healthz',owner,'pumgye',context)
             gateway=start(args.gateway_binary,['--config',str(root/'hangang.json'),'--listen',f'127.0.0.1:{public}','--admin',f'127.0.0.1:{admin}','--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--threads','2','--lua-workers','1','--drain-seconds','1',*guard_args,*(['--route-owner-config',str(root/'route-owner.json')] if args.route_owner else [])],'hangang');wait(f'http://127.0.0.1:{admin}/v1/config',gateway,'hangang',token=system)
             def request(method='GET',key=api_key):
@@ -184,6 +192,25 @@ def main():
                         time.sleep(.1)
                     else:raise AssertionError('route-aware authority recovery deadline')
                 print('PASS: actual gateway route reference delivery and two authenticated owner queries; wrong peer/caller and optional legacy downgrade refuse without backend effects; recovery passes.')
+            if args.projection_owner:
+                for field,value in [('server_name','wrong.example.test'),('token_env','PUMGYE_ADMIN_TOKEN')]:
+                    changed=copy.deepcopy(projection_config);changed[field]=value
+                    (root/'projection-live.json').write_text(json.dumps(changed))
+                    owner.terminate();owner.wait(timeout=8)
+                    owner=start(args.pumgye_binary,pum_args,'pumgye-plan-refusal')
+                    wait(f'https://127.0.0.1:{pum_http}/healthz',owner,'pumgye-plan-refusal',context)
+                    before=len(seen);assert request()==503,'plan owner trust refusal failed: '+field
+                    assert len(seen)==before,'untrusted plan owner reached origin'
+                    (root/'projection-live.json').write_text(json.dumps(projection_config))
+                    owner.terminate();owner.wait(timeout=8)
+                    owner=start(args.pumgye_binary,pum_args,'pumgye-plan-recovery')
+                    wait(f'https://127.0.0.1:{pum_http}/healthz',owner,'pumgye-plan-recovery',context)
+                    for _ in range(30):
+                        status=request();assert status in (200,503)
+                        if status==200:break
+                        time.sleep(.1)
+                    else:raise AssertionError('plan owner recovery deadline')
+                print('PASS: native plan owner required, wrong TLS identity/caller refused without origin effects, restoration passed; no projection credential issued.')
             assert request('POST')==403 and request(key=None)==401 and request(key='invalid-service-key-at-least-thirty-two-bytes')==401
             root_config,_=api();current,headers=api('/v1/pumgye/policy');original=copy.deepcopy(current);current['policy']['services']['orders']['users']={}
             updated,_=api('/v1/pumgye/policy','PUT',current,{'If-Match':f'"{current["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==403
