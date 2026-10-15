@@ -90,3 +90,54 @@ message WorkloadReceiptTimeReply {
 service WorkloadObservedCredentialProjection {
   rpc Project(ProjectionRequest) returns (ObservedProjectionReply);
 }
+
+// Additive Human observed metadata contract; production activation is separate.
+service HumanAuthenticationReceipts {
+  rpc IssueObserved(HumanReceiptRequest) returns (HumanReceiptObservedReply);
+  rpc ObserveTime(HumanReceiptObservationRequest) returns (HumanReceiptTimeReply);
+}
+message HumanBoundHeader { string name = 1; bool present = 2; bytes value = 3; }
+message HumanFinalRequest {
+  uint32 binding_contract = 1;
+  string method = 2;
+  string target = 3;
+  bytes entity_sha256 = 4;
+  uint64 entity_length = 5;
+  string route_id = 6;
+  uint64 route_revision = 7;
+  bytes destination_sha256 = 8;
+  uint64 header_policy_revision = 9;
+  repeated HumanBoundHeader headers = 10;
+}
+message HumanReceiptRequest {
+  VerifyRequest verification = 1;
+  string service = 2;
+  string audience = 3;
+  HumanFinalRequest final_request = 4;
+}
+message HumanReceiptReply {
+  uint64 request_id = 1;
+  AuthenticationReceiptContext context = 2;
+  bytes receipt = 3;
+}
+message HumanReceiptObservedReply {
+  HumanReceiptReply receipt = 1;
+  HumanReceiptTimeReply observation = 2;
+}
+message HumanReceiptObservationRequest {
+  uint64 request_id = 1;
+  AuthenticationReceiptContext context = 2;
+  bytes receipt = 3;
+  bytes request_sha256 = 4;
+}
+message HumanReceiptTimeReply {
+  uint64 request_id = 1;
+  uint64 owner_now_ms = 2;
+  uint32 remaining_ms = 3;
+  bytes receipt_sha256 = 4;
+  string clock_domain = 5;
+  uint64 source_revision = 6;
+  uint64 application_generation = 7;
+  uint64 key_registry_revision = 8;
+  uint32 cache_ttl_ms = 9;
+}
