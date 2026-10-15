@@ -52,3 +52,41 @@ message ObservedProjectionReply {
   uint64 key_registry_revision = 13; uint64 plan_revision = 14;
   uint32 cache_ttl_ms = 15;
 }
+
+// Additive Workload-only observed protocol. These declarations do not register
+// handlers or activate a source. Existing Service RPCs stay Service-only.
+service WorkloadAuthenticationReceipts {
+  rpc IssueObserved(WorkloadReceiptRequest) returns (WorkloadReceiptObservedReply);
+  rpc ObserveTime(WorkloadReceiptObservationRequest) returns (WorkloadReceiptTimeReply);
+}
+message WorkloadReceiptRequest {
+  VerifyRequest verification = 1; string service = 2; string audience = 3;
+  bytes request_sha256 = 4;
+}
+message WorkloadReceiptReply {
+  uint64 request_id = 1;
+  AuthenticationReceiptContext context = 2; // Native Workload kind3, AAL0 only.
+  bytes receipt = 3;
+}
+message WorkloadReceiptObservedReply {
+  WorkloadReceiptReply receipt = 1; WorkloadReceiptTimeReply observation = 2;
+}
+message WorkloadReceiptObservationRequest {
+  uint64 request_id = 1; AuthenticationReceiptContext context = 2;
+  bytes receipt = 3; bytes request_sha256 = 4;
+}
+message WorkloadReceiptTimeReply {
+  uint64 request_id = 1; uint64 owner_now_ms = 2;
+  // Admission only: original pre-authentication maximum1second, never renewed.
+  uint32 remaining_ms = 3; bytes receipt_sha256 = 4;
+  // Exactly the32 lowercase nonzero hex nonce in signed wobs1 epoch. No prefix.
+  string clock_domain = 5;
+  uint64 profile_revision = 6; uint64 application_generation = 7;
+  uint64 key_registry_revision = 8; uint32 cache_ttl_ms = 9; // Always zero.
+}
+// Contract3 only; exact bounded Pum Workload PermitValidationRequest bytes.
+// Same durable paired auth/permit nonce ledger as existing contracts, never a
+// new replay namespace based on RPC method, contract number or principal kind.
+service WorkloadObservedCredentialProjection {
+  rpc Project(ProjectionRequest) returns (ObservedProjectionReply);
+}
