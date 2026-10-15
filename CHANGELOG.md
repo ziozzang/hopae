@@ -8,33 +8,20 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ## Unreleased
 
+## 0.0.8 — 2026-10-15
+
 ### Added
 
-- Atomic checked-receipt nonce consumption with durable registry/time fences, bounded indexed expiry cleanup and rollback of associated owner DB work. Credential endpoint/throughput integration remains unfinished.
-
-- Receipt registry owner with serialized durable commit/ArcSwap activation, shared immutable verifiers and revision-tagged non-Clone results. Transactional issuance rechecks and live endpoints remain required.
-
-- Atomic owner persistence for public receipt registry/history with revision CAS, repeated authorization checks and reference-only audit. Restart reconstruction and trusted minimum revision validation; live activation and whole-DB restore fences remain unfinished.
-
-- Immutable receiver-owned receipt key registry with native authority/purpose/epoch selection, removal and rollback fences, retained cross-purpose key ownership and bounded state. Durable publication and live issuance integration remain unfinished.
-
-- Canonical authentication/permit receipt bindings for identity and authority epochs, request/audience, credential generation, full policy/route/plan revisions and signed authentication chains; signed cross-context rejection tests. Live issuance integration remains unfinished.
-
-- Purpose-separated short Ed25519 projection receipt primitive with strict signature, size, binding and time validation; immutable verification wrapper. Live authority, replay/revocation and issuance integration remain unfinished.
-
-- Native domain-separated projection request digest with explicit field lengths, exact target/entity binding and an independently generated fixed vector. Projection signing/issuance integration remains unfinished.
-
-- Hangang console package 0.1.4 shows active profile methods, issuer namespaces, mixed routing and Lua/fallback state with a local JSON preview, read-only controls and English/Korean owner-publication guidance.
-
-- Explicit mixed native API-key/external relay credential routing with a bounded prefix discriminator. Local expired/revoked/unknown keys never fall through to relay; issuer namespaces and native authorization boundaries remain distinct.
-
-- Optional bounded Lua eligibility after native service API-key/relay verification, preserving namespaced service evidence, AAL 0 and expiry. Invalid credentials and networks remain native refusals; scripts cannot issue or translate identity.
-
-- Embedded bounded Lua 5.4 eligibility for external second factors. Operator-approved scripts can restrict native verifier use, with isolated context, heap/instruction/time limits and strict boolean results; native proof/session authority remains mandatory. General connector orchestration and credential translation remain unfinished.
-
-### Fixed
-
-- Native macOS qualification harness: actual process RSS, portable failed-evidence output, bounded loopback verifier startup and complete-frame handling after HTTP connection reset. Truncated/ambiguous responses remain errors; release authentication behavior is unchanged.
+- Opt-in mTLS credential projection RPC with fixed Pumgye authority, native
+  issuer/profile/application/plan/caller guards and bounded blocking admission.
+- Independent authentication and permit signature verification with paired atomic
+  replay consumption, transactional secret resolution and guarded final output.
+- Durable public receipt-key history, startup reconciliation, irreversible
+  retirement and publication fences that close on uncertain commits.
+- Reference-only secret capabilities and lazily prepared persistent mTLS transport;
+  missing/invalid resources refuse before creating state.
+- Actual four-server credential-delivery fixture with separate origin bearer,
+  request scope checks, trust/caller failures, durable withdrawal and restart tests.
 
 ## 0.0.3 — 2026-10-14
 
