@@ -439,6 +439,43 @@ impl Registry {
         result
     }
 
+    /// Prepare the same durable comparison for a caller-owned native ledger transaction.
+    /// Publication remains checked separately at every use; this is not a grant.
+    pub(crate) fn prepare_human_current(
+        self: &Arc<Self>,
+        store: &crate::store::Store,
+        fence: &RegistryProviderFence,
+        witness: &crate::verify::human::Witness,
+    ) -> crate::store::StoreResult<crate::store::sqlite::human_owner::SnapshotCheck> {
+        let result = (|| {
+            self.require_human_publication(fence, &witness.snapshot)?;
+            if fence.provider != witness.view.session.provider_id {
+                return Err(crate::store::StoreError::Conflict(
+                    "Human provider mismatch",
+                ));
+            }
+            let owners = self.owners()?;
+            let checked = store.prepare_human_snapshot(
+                &owners.prepared,
+                owners
+                    .materials
+                    .get()
+                    .ok_or(crate::store::StoreError::Conflict(
+                        "compiled material unqualified",
+                    ))?,
+                witness,
+            )?;
+            self.require_human_publication(fence, &witness.snapshot)?;
+            Ok(checked)
+        })();
+        if result.is_err() {
+            fence
+                .retired
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
     pub(crate) async fn require_human_current(
         self: &Arc<Self>,
         store: &crate::store::Store,

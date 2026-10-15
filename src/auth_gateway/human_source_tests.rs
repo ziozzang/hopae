@@ -718,3 +718,6 @@ async fn native_human_source_same_sample_constraint_only_shortens_and_keeps_reco
     assert_eq!(unchanged.receipt_sha256, before.receipt_sha256);
     assert_eq!(source.usage_for_test().0, 1);
 }
+
+#[path = "human_projection_current_tests.rs"]
+mod projection_current_tests;

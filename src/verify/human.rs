@@ -547,7 +547,150 @@ pub(crate) struct SourceTime {
     pub clock_domain: [u8; 16],
 }
 #[allow(dead_code)] // Native source integration consumes these private interfaces.
+/// Native pre-writer snapshot; construct only from the actual retained Checked.
+/// Its elapsed source is the production suspend-aware system clock, not a wall
+/// callback or the cfg(test) Owner ticks callback. It never renews its anchor.
+pub(crate) struct ProjectionCurrent {
+    durable: crate::store::sqlite::human_owner::SnapshotCheck,
+    anchor: hangang_runtime::time::ElapsedStamp,
+    sample: TimeSample,
+    owner: Arc<Owner>,
+    application: Arc<ConfigSnapshot>,
+    handle: crate::crypto::Digest,
+    started: u64,
+    limit_ms: u64,
+    last_elapsed: AtomicU64,
+    failed: AtomicBool,
+    #[cfg(test)]
+    elapsed_for_test: Option<Arc<AtomicU64>>,
+}
+#[allow(dead_code)] // H4 orchestration follows the native checker qualification.
+impl ProjectionCurrent {
+    fn sample_for(&self, checked: &Checked) -> StoreResult<Timestamp> {
+        let w = &checked.witness;
+        if self.failed.load(Ordering::Acquire)
+            || !Arc::ptr_eq(&self.owner, &w.owner)
+            || !Arc::ptr_eq(&self.application, &w.snapshot)
+            || self.handle != w.view.handle.handle_sha256
+            || self.started != w.admission.started
+            || self.limit_ms != w.admission.limit_ms
+            || w.retired.load(Ordering::Acquire)
+            || !w.admission.ready()
+            || w.admission.failed.load(Ordering::Acquire)
+            || w.owner.failed.load(Ordering::Acquire)
+            || std::time::Instant::now() >= w.admission.deadline
+        {
+            return Err(refused());
+        }
+        let floor = self.last_elapsed.load(Ordering::Acquire);
+        let native_elapsed = u64::try_from(
+            self.anchor
+                .elapsed()
+                .map_err(|_| refused())?
+                .as_nanos()
+                .div_ceil(1_000_000),
+        )
+        .map_err(|_| refused())?;
+        #[cfg(test)]
+        let elapsed = self
+            .elapsed_for_test
+            .as_ref()
+            .map_or(native_elapsed, |n| n.load(Ordering::Acquire));
+        #[cfg(not(test))]
+        let elapsed = native_elapsed;
+        if elapsed < floor {
+            return Err(refused());
+        }
+        if elapsed > floor {
+            self.last_elapsed.fetch_max(elapsed, Ordering::AcqRel);
+        }
+        let charge = elapsed.checked_add(1).ok_or_else(refused)?;
+        let ticks = self.sample.ticks.checked_add(charge).ok_or_else(refused)?;
+        if ticks
+            .checked_sub(self.started)
+            .is_none_or(|age| age >= self.limit_ms)
+        {
+            return Err(refused());
+        }
+        let now = Timestamp(
+            self.sample
+                .now
+                .0
+                .checked_add(i64::try_from(charge).map_err(|_| refused())?)
+                .ok_or_else(refused)?,
+        );
+        w.owner
+            .registry
+            .require_human_publication(&w.provider, &w.snapshot)?;
+        if now >= w.expires
+            || w.retired.load(Ordering::Acquire)
+            || !w.admission.ready()
+            || w.owner.failed.load(Ordering::Acquire)
+            || !Arc::ptr_eq(&w.snapshot, &w.owner.applications.load_full())
+        {
+            return Err(refused());
+        }
+        Ok(now)
+    }
+    #[cfg(test)]
+    pub(crate) fn elapsed_for_test(&mut self, value: Arc<AtomicU64>) {
+        self.elapsed_for_test = Some(value);
+    }
+    pub(crate) fn current_on(
+        &self,
+        checked: &Checked,
+        ledger: &crate::store::sqlite::human_owner::LedgerSnapshot<'_>,
+    ) -> StoreResult<()> {
+        let result = (|| {
+            if !ledger.belongs_to(&self.owner.store) {
+                return Err(refused());
+            }
+            let now = self.sample_for(checked)?;
+            self.durable.current_on(ledger.connection(), now)?;
+            self.sample_for(checked)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.failed.store(true, Ordering::Release);
+            checked.witness.retired.store(true, Ordering::Release);
+        }
+        result
+    }
+}
 impl Checked {
+    #[allow(dead_code)] // Only the future native H4 adapter may prepare this check.
+    pub(crate) fn prepare_projection_current(&self) -> StoreResult<ProjectionCurrent> {
+        let result = (|| {
+            // Anchor before the native sample so every preparation delay is charged.
+            let anchor = hangang_runtime::time::ElapsedStamp::now().map_err(|_| refused())?;
+            let w = &self.witness;
+            self.require_publication_current()?;
+            let sample = w.admission.final_sample(&w.owner)?;
+            let durable = w
+                .owner
+                .registry
+                .prepare_human_current(&w.owner.store, &w.provider, w)?;
+            Ok(ProjectionCurrent {
+                durable,
+                anchor,
+                sample,
+                owner: w.owner.clone(),
+                application: w.snapshot.clone(),
+                handle: w.view.handle.handle_sha256,
+                started: w.admission.started,
+                limit_ms: w.admission.limit_ms,
+                last_elapsed: AtomicU64::new(0),
+                failed: AtomicBool::new(false),
+                #[cfg(test)]
+                elapsed_for_test: None,
+            })
+        })();
+        if result.is_err() {
+            self.witness.retired.store(true, Ordering::Release);
+        }
+        result
+    }
+
     pub(crate) fn belongs_to(&self, owner: &Arc<Owner>) -> bool {
         Arc::ptr_eq(&self.witness.owner, owner)
     }
@@ -754,6 +897,7 @@ impl Checked {
 
 /// Exact immutable publication location established from Engine's borrowed app.
 /// No AppPolicy deep clone or per-record scan of every configured application.
+#[derive(Clone, Copy)]
 enum AppLocator {
     Default,
     Index(usize),
@@ -788,7 +932,23 @@ impl AppLocator {
         }
     }
 }
+/// Shared exact native application location; no deep policy copy or raw index API.
+pub(crate) struct RetainedApp {
+    snapshot: Arc<ConfigSnapshot>,
+    location: AppLocator,
+}
+impl RetainedApp {
+    pub(crate) fn policy(&self) -> &AppPolicy {
+        self.location.get(&self.snapshot)
+    }
+}
 impl Witness {
+    pub(crate) fn retained_app(&self) -> RetainedApp {
+        RetainedApp {
+            snapshot: self.snapshot.clone(),
+            location: self.app,
+        }
+    }
     pub(crate) fn app(&self) -> &AppPolicy {
         self.app.get(&self.snapshot)
     }
