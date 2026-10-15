@@ -53,9 +53,8 @@ fn bounded_transport<S>(
         pipeline,
     )
 }
-// Unmounted production prerequisite: only a future allocated Human RPC may use
-// this adapter. Existing Service/Workload mounts retain their exact semantics.
-#[allow(dead_code)]
+// Human-only original admission before caller/decode. Existing Service/Workload
+// mounts retain their exact semantics.
 fn bounded_human_transport<S>(
     service: S,
     pipeline: Service,
@@ -112,6 +111,28 @@ impl Service {
         HeaderValue::from_str(token.unwrap())
             .map_err(|_| Status::unauthenticated("invalid gateway credential"))
     }
+    /// Callback-free final caller fence over the same immutable key owner.
+    pub(super) fn caller_current(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<(), Status> {
+        let mut entries = metadata.get_all("authorization").iter();
+        let token = entries
+            .next()
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        if entries.next().is_some()
+            || !token.is_some_and(|v| {
+                matches!(
+                    self.keys.check_untracked(Some(v.as_bytes())),
+                    KeyVerdict::Accepted(_)
+                )
+            })
+        {
+            return Err(Status::unauthenticated("gateway credential required"));
+        }
+        Ok(())
+    }
     async fn exchange(
         &self,
         request: Request<VerifyRequest>,
@@ -139,8 +160,7 @@ impl Service {
     > {
         self.exchange_inner(request, Some(attempt), None).await
     }
-    #[allow(dead_code)]
-    async fn exchange_human(
+    pub(super) async fn exchange_human(
         &self,
         request: Request<VerifyRequest>,
     ) -> Result<
@@ -671,6 +691,15 @@ pub async fn serve_with_receipts(
             .max_decoding_message_size(8448)
             .max_encoding_message_size(8192)
     });
+    let human_service=services.as_ref().map(|services| {
+        super::grpc_human::Human::from_services(pipeline.clone(),services).map(|human|human.map(|human| {
+            let service=v1::human_authentication_receipts_server::HumanAuthenticationReceiptsServer::new(human)
+                .max_decoding_message_size(wire::MAX_FRAME).max_encoding_message_size(wire::MAX_FRAME);
+            bounded_human_transport(service,pipeline.clone(),ingress.clone(),wire::MAX_FRAME,
+                services.human_owner.clone(),services.readiness.clone(),
+                services.config.verify_limits().budget.min(std::time::Duration::from_secs(1)))
+        }))
+    }).transpose()?.flatten();
     let receipt_resources = services
         .map(|services| receipt_resources(pipeline.clone(), services))
         .transpose()?
@@ -691,6 +720,7 @@ pub async fn serve_with_receipts(
             .max_encoding_message_size(2048)
     });
     hangang_runtime::server(tls)?
+        .add_optional_service(human_service)
         .add_service(bounded_transport(
             AuthenticationServer::new(pipeline.clone())
                 .max_decoding_message_size(wire::MAX_FRAME)
@@ -1168,6 +1198,10 @@ mod observed_boundary_tests {
     }
 
     fn fixture() -> Fixture {
+        fixture_with_application(true)
+    }
+
+    fn fixture_with_application(declared: bool) -> Fixture {
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
             .unwrap();
@@ -1190,7 +1224,14 @@ mod observed_boundary_tests {
         let cfg = crate::config::parse(
             r#"{"state_dir":"owned","portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_GATEWAY"}}"#,
         ).unwrap();
-        let application = Arc::new(cfg.snapshot(1));
+        let mut application_snapshot = cfg.snapshot(1);
+        if declared {
+            let declared_cfg = crate::config::parse(
+                r#"{"state_dir":"owned","portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_GATEWAY"},"apps":[{"app_id":"orders","hosts":["orders.example.test"]}]}"#,
+            ).unwrap();
+            application_snapshot = declared_cfg.snapshot(1);
+        }
+        let application = Arc::new(application_snapshot);
         let applications = Arc::new(arc_swap::ArcSwap::from(application.clone()));
         let clock = Arc::new(CountedClock::default());
         let public_key = ed25519_dalek::SigningKey::from_bytes(&[7; 32])
@@ -1318,6 +1359,15 @@ mod observed_boundary_tests {
             receipt: reply.receipt,
             request_sha256: vec![3; 32],
         })
+    }
+
+    #[tokio::test]
+    async fn observed_issue_rejects_undeclared_application() {
+        let fixture = fixture_with_application(false);
+        let result = fixture.service.issue_service_observed(issue(1)).await;
+        assert_eq!(result.unwrap_err().code(), tonic::Code::Unavailable);
+        assert_eq!(fixture.router_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.service.pipeline.requests.available_permits(), 1);
     }
 
     #[tokio::test]

@@ -128,12 +128,25 @@ impl CallerKeys {
     /// and count the outcome: `hopae_verify_caller_key_total{slot}` or
     /// `hopae_verify_unauthorized_total`.
     pub fn check(&self, presented: Option<&[u8]>) -> KeyVerdict {
+        let verdict = self.check_untracked(presented);
+        match verdict {
+            KeyVerdict::Accepted(KeySlot::Current) => {
+                (self.counter)(counters::VERIFY_CALLER_KEY_TOTAL, &[("slot", "current")])
+            }
+            KeyVerdict::Accepted(KeySlot::Next) => {
+                (self.counter)(counters::VERIFY_CALLER_KEY_TOTAL, &[("slot", "next")])
+            }
+            KeyVerdict::Rejected => (self.counter)(counters::VERIFY_UNAUTHORIZED_TOTAL, &[]),
+            KeyVerdict::NotRequired => (),
+        }
+        verdict
+    }
+    /// Final native fence: immutable keys only, no metric/plugin callbacks.
+    pub(crate) fn check_untracked(&self, presented: Option<&[u8]>) -> KeyVerdict {
         if self.current.is_none() && self.next.is_none() {
             return if self.unauthenticated_allowed {
                 KeyVerdict::NotRequired
             } else {
-                // No key configured and none allowed: nothing can match.
-                (self.counter)(counters::VERIFY_UNAUTHORIZED_TOTAL, &[]);
                 KeyVerdict::Rejected
             };
         }
@@ -146,20 +159,10 @@ impl CallerKeys {
             .next
             .as_ref()
             .is_some_and(|k| ct_eq(k.expose().as_bytes(), probe));
-        let given = presented.is_some_and(|p| !p.is_empty());
-        match (given, cur, nxt) {
-            (true, true, _) => {
-                (self.counter)(counters::VERIFY_CALLER_KEY_TOTAL, &[("slot", "current")]);
-                KeyVerdict::Accepted(KeySlot::Current)
-            }
-            (true, false, true) => {
-                (self.counter)(counters::VERIFY_CALLER_KEY_TOTAL, &[("slot", "next")]);
-                KeyVerdict::Accepted(KeySlot::Next)
-            }
-            _ => {
-                (self.counter)(counters::VERIFY_UNAUTHORIZED_TOTAL, &[]);
-                KeyVerdict::Rejected
-            }
+        match (presented.is_some_and(|p| !p.is_empty()), cur, nxt) {
+            (true, true, _) => KeyVerdict::Accepted(KeySlot::Current),
+            (true, false, true) => KeyVerdict::Accepted(KeySlot::Next),
+            _ => KeyVerdict::Rejected,
         }
     }
 

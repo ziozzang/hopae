@@ -307,18 +307,13 @@ impl Owner {
 }
 impl Admission {
     /// Shorten this query at the source's exact final sample, without a clock callback.
-    pub(crate) fn remaining_at(
-        &self,
-        owner: &Arc<Owner>,
-        sample: &SourceTime,
-    ) -> StoreResult<u64> {
+    pub(crate) fn remaining_at(&self, owner: &Arc<Owner>, sample: &SourceTime) -> StoreResult<u64> {
         let result = (|| {
             if !self.ready()
                 || self.failed.load(Ordering::Acquire)
                 || owner.failed.load(Ordering::Acquire)
                 || !Weak::ptr_eq(&self.owner, &Arc::downgrade(owner))
-                || sample.clock_domain
-                    != *owner.clock.as_ref().ok_or_else(refused)?.generation()
+                || sample.clock_domain != *owner.clock.as_ref().ok_or_else(refused)?.generation()
                 || std::time::Instant::now() >= self.deadline
             {
                 return Err(refused());

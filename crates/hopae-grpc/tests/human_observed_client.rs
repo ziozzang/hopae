@@ -38,7 +38,7 @@ fn context() -> v1::AuthenticationReceiptContext {
 }
 fn peer_context(mode: u8) -> v1::AuthenticationReceiptContext {
     let mut c = context();
-    if mode >= 12 {
+    if mode == 13 {
         let (subject, revision, domain) = if mode == 13 {
             ('b', 3, "22222222222222222222222222222222")
         } else {
@@ -233,6 +233,23 @@ impl Peer {
             application_generation: if mode == 8 { 10 } else { 9 },
             key_registry_revision: if mode == 9 || mode == 14 { 2 } else { 1 },
             cache_ttl_ms: u32::from(mode == 4),
+            scope_sha256: match mode {
+                26 => vec![],
+                27 => vec![0; 32],
+                28 => vec![9; 32],
+                29..=33 => {
+                    let mut sibling = scope();
+                    match mode {
+                        29 => sibling.route_id = "sibling-route".into(),
+                        30 => sibling.app_id = "sibling-app".into(),
+                        31 => sibling.destination_sha256 = [2; 32],
+                        32 => sibling.header_policy_revision = 2,
+                        _ => sibling.header_names = vec!["x-intent".into()],
+                    };
+                    sibling.fingerprint().unwrap().to_vec()
+                }
+                _ => scope().fingerprint().unwrap().to_vec(),
+            },
         }
     }
 }
@@ -333,7 +350,7 @@ async fn authenticated_owner_success_refresh_and_hostile_replies() {
             .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
     );
     let clock = Arc::new(hangang_runtime::time::ReceiverClock::new([7; 16]).unwrap());
-    let make = |token: &str, name: &str| {
+    let make_scopes = |token: &str, name: &str, scopes: Vec<HumanScope>| {
         Client::new_human(
             EndpointConfig {
                 address: &address,
@@ -348,7 +365,7 @@ async fn authenticated_owner_success_refresh_and_hostile_replies() {
                 key_epoch: 1,
                 verifying_key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]).verifying_key(),
                 identity_authority: "owner".into(),
-                scopes: vec![scope()],
+                scopes,
                 minimum_source_revision: 1,
                 minimum_application_generation: 9,
                 minimum_key_registry_revision: 1,
@@ -362,6 +379,7 @@ async fn authenticated_owner_success_refresh_and_hostile_replies() {
         )
         .unwrap()
     };
+    let make = |token: &str, name: &str| make_scopes(token, name, vec![scope()]);
     let prepare = |c: &Client| {
         c.prepare(
             &scope(),
@@ -411,7 +429,9 @@ async fn authenticated_owner_success_refresh_and_hostile_replies() {
     mode.store(6, Ordering::Release);
     let refreshed = client.refresh(first).await.unwrap();
     assert!(client.check(&refreshed, refreshed.request()).unwrap() <= before);
-    for attack in [1, 2, 3, 4, 5, 7, 8, 10, 16, 17, 18, 19, 20, 21] {
+    for attack in [
+        1, 2, 3, 4, 5, 7, 8, 10, 16, 17, 18, 19, 20, 21, 26, 27, 28, 29, 30, 31, 32, 33,
+    ] {
         mode.store(attack, Ordering::Release);
         assert!(
             client.issue(prepare(&client)).await.is_err(),
@@ -512,6 +532,28 @@ async fn authenticated_owner_success_refresh_and_hostile_replies() {
     mode.store(25, Ordering::Release);
     let mfa = client.issue(prepare(&client)).await.unwrap();
     assert_eq!(mfa.context().identity.as_ref().unwrap().aal, 2);
+    mode.store(0, Ordering::Release);
+    let mut sibling = scope();
+    sibling.route_id = "sibling-route".into();
+    let both = make_scopes(CALLER, "hopae.test", vec![scope(), sibling]);
+    let original = both.issue(prepare(&both)).await.unwrap();
+    assert!(original.scope() == &scope());
+    let observed = both
+        .observe(
+            both.prepare_observation(original.context().clone(), original.receipt(), digest)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    mode.store(29, Ordering::Release);
+    assert!(
+        both.issue(prepare(&both)).await.is_err(),
+        "Issue must match exact selected scope even when sibling configured"
+    );
+    assert!(
+        both.refresh(observed).await.is_err(),
+        "Refresh cannot switch previously observed scope"
+    );
     server.abort();
 }
 fn scope() -> HumanScope {

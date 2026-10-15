@@ -48,6 +48,32 @@ pub struct HumanScope {
     pub reserved_names: Vec<String>,
 }
 impl HumanScope {
+    /// Canonical public scope metadata only, not proof or permission.
+    pub fn fingerprint(&self) -> Result<[u8; 32], Refused> {
+        let names = self
+            .header_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let reserved = self
+            .reserved_names
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        crate::human_scope::fingerprint(crate::human_scope::Scope {
+            service: &self.service,
+            audience: &self.audience,
+            app_id: &self.app_id,
+            route_id: &self.route_id,
+            route_revision: self.route_revision,
+            destination_sha256: &self.destination_sha256,
+            header_policy_revision: self.header_policy_revision,
+            header_names: &names,
+            reserved_names: &reserved,
+        })
+        .map_err(|_| Refused)
+    }
+
     fn policy(&self) -> Result<crate::request_binding_v2::HeaderPolicy, Refused> {
         let names = self
             .header_names
@@ -151,6 +177,7 @@ pub struct PreparedRequest {
     context: v1::AuthenticationReceiptContext,
     issue: v1::HumanReceiptRequest,
     resolved: bool,
+    expected_scope_sha256: Option<[u8; 32]>,
 }
 /// Signature and transport/time evidence only. No Clone, serde or permission API.
 pub struct Observation {
@@ -160,8 +187,15 @@ pub struct Observation {
     deadline: LocalDeadline,
     retention: ReplayRetention,
     registry_revision: u64,
+    scope: Arc<HumanScope>,
+    scope_sha256: [u8; 32],
 }
 impl Observation {
+    /// Actual authenticated fixed source scope metadata, never a permission grant.
+    pub fn scope(&self) -> &HumanScope {
+        &self.scope
+    }
+
     /// Authenticated registry generation associated with this observation.
     /// Metadata alone does not establish current admission.
     pub fn key_registry_revision(&self) -> u64 {
@@ -182,11 +216,14 @@ impl Observation {
         &self.request
     }
 }
+type CompiledScope = (Arc<HumanScope>, [u8; 32]);
+
 pub struct Client {
     rpc: v1::human_authentication_receipts_client::HumanAuthenticationReceiptsClient<Channel>,
     credential: MetadataValue<Ascii>,
     trust: HumanTrustPolicy,
     policies: Vec<crate::request_binding_v2::HeaderPolicy>,
+    scope_data: Vec<CompiledScope>,
     registry_floor: AtomicU64,
     clock: Arc<ReceiverClock>,
     rates: receipt_time::ClockRates,
@@ -195,6 +232,19 @@ pub struct Client {
     sequence: AtomicU64,
     active: AtomicBool,
     owner: Arc<()>,
+}
+fn compile_scope_data(scopes: &[HumanScope]) -> Result<Vec<CompiledScope>, Refused> {
+    let mut seen = std::collections::HashSet::with_capacity(scopes.len());
+    scopes
+        .iter()
+        .map(|scope| {
+            let hash = scope.fingerprint()?;
+            if !seen.insert(hash) {
+                return Err(Refused);
+            }
+            Ok((Arc::new(scope.clone()), hash))
+        })
+        .collect()
 }
 fn verification_headers(headers: &[v1::Header]) -> Result<(), Refused> {
     use tonic::codegen::http::{HeaderName, HeaderValue};
@@ -362,6 +412,7 @@ impl Client {
             .iter()
             .map(HumanScope::policy)
             .collect::<Result<Vec<_>, _>>()?;
+        let scope_data = compile_scope_data(&trust.scopes)?;
         let mut credential: MetadataValue<Ascii> = format!("Bearer {}", config.caller_key)
             .parse()
             .map_err(|_| Refused)?;
@@ -386,6 +437,7 @@ impl Client {
             credential,
             trust,
             policies,
+            scope_data,
             registry_floor: AtomicU64::new(floor),
             clock,
             rates,
@@ -462,6 +514,7 @@ impl Client {
                 context,
                 issue,
                 resolved: false,
+                expected_scope_sha256: Some(self.scope_data[index].1),
             }),
         })
     }
@@ -482,6 +535,7 @@ impl Client {
                 owner: self.owner.clone(),
                 context,
                 resolved: true,
+                expected_scope_sha256: None,
                 issue: Default::default(),
             }),
             receipt: receipt.to_vec(),
@@ -544,6 +598,7 @@ impl Client {
                 context,
                 issue: request.issue.clone(),
                 resolved: true,
+                expected_scope_sha256: request.expected_scope_sha256,
             })
         };
         let result = self.finish(
@@ -654,6 +709,27 @@ impl Client {
             return Err(Refused);
         }
         self.trust.validate(&request.context)?;
+        let scope_sha256: [u8; 32] = report
+            .scope_sha256
+            .as_slice()
+            .try_into()
+            .map_err(|_| Refused)?;
+        if request
+            .expected_scope_sha256
+            .is_some_and(|expected| expected != scope_sha256)
+        {
+            return Err(Refused);
+        }
+        let scope = self
+            .scope_data
+            .iter()
+            .find(|(s, sha)| {
+                *sha == scope_sha256
+                    && s.service == request.context.service
+                    && s.audience == request.context.audience
+            })
+            .map(|(s, _)| s.clone())
+            .ok_or(Refused)?;
         let bounds = receipt_time::Bounds::from_signature_with_rates(
             &evidence,
             &receipt_time::Report {
@@ -692,6 +768,8 @@ impl Client {
             deadline,
             retention,
             registry_revision: report.key_registry_revision,
+            scope,
+            scope_sha256,
         })
     }
     pub fn check(
@@ -742,7 +820,11 @@ impl Client {
         if exchange.elapsed_ms() > timeout.as_millis() as u64 {
             return Err(Refused);
         }
+        let original_scope = previous.scope_sha256;
         let mut updated = self.finish(previous.request, previous.receipt, report, id, exchange)?;
+        if updated.scope_sha256 != original_scope {
+            return Err(Refused);
+        }
         updated.deadline = updated
             .deadline
             .restrict(previous.deadline)
@@ -763,6 +845,28 @@ impl Client {
 #[cfg(test)]
 mod header_tests {
     use super::*;
+    #[test]
+    fn startup_rejects_duplicate_canonical_scope_even_when_reserved_filters_differ() {
+        let a = HumanScope {
+            service: "orders".into(),
+            audience: "api".into(),
+            app_id: "app".into(),
+            route_id: "route".into(),
+            route_revision: 1,
+            destination_sha256: [1; 32],
+            header_policy_revision: 1,
+            header_names: vec!["x-intent".into(), "content-type".into()],
+            reserved_names: vec!["x-credential".into()],
+        };
+        assert!(compile_scope_data(std::slice::from_ref(&a)).is_ok());
+        let mut b = a.clone();
+        b.header_names.reverse();
+        b.reserved_names = vec!["x-other-credential".into()];
+        assert_eq!(a.fingerprint().unwrap(), b.fingerprint().unwrap());
+        assert!(compile_scope_data(&[a.clone(), b.clone()]).is_err());
+        b.route_id = "different".into();
+        assert!(compile_scope_data(&[a, b]).is_ok());
+    }
     fn h(name: &str, n: usize) -> v1::Header {
         v1::Header {
             name: name.into(),

@@ -2254,3 +2254,6 @@ async fn native_human_source_final_fences_do_not_call_wall_after_durable_check()
 
 #[path = "../auth_gateway/human_source_tests.rs"]
 mod native_source_tests;
+
+#[path = "../http/grpc_human_tests.rs"]
+mod native_rpc_tests;

@@ -1,8 +1,10 @@
 # Human observed SDK and additive protocol
 
-This stage adds pure wire/SDK mechanics only. No production Human RPC handler,
-source record, signing owner, permission, contract4 projection or Root activation
-is mounted. Authenticated test peers are fixture signers, not native Human proof.
+This document describes the wire/SDK boundary; these types alone activate no
+Human source or route. A separately qualified optional native source/RPC adapter
+uses the SDK contract. Permission, contract4 projection and Root activation remain
+separate work. SDK-only authenticated test peers are fixture signers, not native
+Human proof; actual Engine/session/provider RPC qualification is recorded separately.
 Existing Service/Workload RPCs, types and v1/v2 hash vectors remain unchanged.
 
 `HumanAuthenticationReceipts.IssueObserved/ObserveTime` use the appended descriptor
@@ -51,3 +53,27 @@ qualification is required before claiming Human wire or runtime completion.
 
 Sensitive new descriptor/proof DTO Debug is redacted. Examples/tests use reserved
 synthetic identities and private ephemeral credentials; no payload logging.
+
+## Authenticated source-scope report
+
+HumanReceiptTimeReply field10 `scope_sha256` is the canonical fixed scope
+fingerprint from the **exact source proof record**, not a request parameter. It
+binds service/audience/app/route/revision/destination/header-policy revision and
+sorted slot names under `human_scope`'s domain. Reserved names are validated but
+are not encoded; actual slot configuration remains fixed and validated. This
+metadata is not route ownership, permission or proof that a malicious PEP sent
+particular body bytes.
+
+Clients compile/cache fingerprints once with their fixed header policies and reject
+duplicate canonical fingerprints, including equivalent slot sets whose reserved
+filters differ, so every accepted report selects exactly one configuration. Issue
+requires the exact selected preparation scope; another configured scope sharing
+service/audience cannot substitute. Observe-only preparation retains its existing
+signature: the authenticated ObserveTime report selects a matching configured
+scope, with exact service/audience and proof/hash/time correlation checks before
+opaque evidence exists. Missing, malformed, unknown or unconfigured scope hashes
+refuse. `Observation::scope()` exposes that immutable validated configuration as
+metadata only. Consuming refresh must retain the same fingerprint, even if the
+client permits other scopes. Downstream native authorization must still match
+that scope to its own fixed resource/route/plan configuration and current owners.
+This additive unreleased Human field does not alter Service/Workload messages.
