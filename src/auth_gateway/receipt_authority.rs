@@ -232,6 +232,8 @@ impl Verifier {
         now: u64,
     ) -> Result<Checked, Refused> {
         if context.identity_authority_epoch.starts_with("clock1:")
+            || (context.identity.kind == super::PrincipalKind::Workload
+                && hopae_grpc::workload_epoch::decode(context.identity_authority_epoch).is_ok())
             || permit.is_some_and(|p| p.authority_epoch.starts_with("pobs1:"))
         {
             return Err(Refused);
@@ -308,6 +310,65 @@ mod tests {
                 .verifying_key()
                 .to_bytes(),
         }
+    }
+    #[test]
+    fn workload_ticks_refuse_strict_utc_without_changing_legacy_service_authority_names() {
+        let mut db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .unwrap();
+        let mut owner = Authority::load(&db, 0).unwrap();
+        owner
+            .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|_| Ok(()))
+            .unwrap();
+        let verifier = owner.verifier();
+        let mut context = Context {
+            issuer_ref: "owned",
+            key_epoch: 1,
+            identity_authority_epoch: "wobs1:legacy:service:1:app:1",
+            identity: Identity {
+                subject_ref: "s_529be5b595ab327853eabe2d1adf52256e262af036510607",
+                kind: PrincipalKind::Service,
+                aal: 0,
+                revision: 1,
+                credential_generation: 1,
+            },
+            service: "orders",
+            audience: "orders-api",
+            request_sha256: [9; 32],
+        };
+        let sign = |context: &Context<'_>| {
+            receipt::sign(
+                &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+                &Claims {
+                    purpose: Purpose::Authentication,
+                    issued_ms: 100,
+                    expires_ms: 1000,
+                    binding: receipt_binding::digest(context, None).unwrap(),
+                    nonce: [42; 32],
+                },
+            )
+            .unwrap()
+        };
+        let legacy = sign(&context);
+        assert!(verifier.verify(&context, None, &legacy, 101).is_ok());
+        context.identity.kind = PrincipalKind::Workload;
+        context.identity_authority_epoch = "wobs1:legacy";
+        let legacy_workload = sign(&context);
+        assert!(
+            verifier
+                .verify(&context, None, &legacy_workload, 101)
+                .is_ok()
+        );
+        context.identity_authority_epoch = "wobs1:11112222333344445555666677778888:owned:p:1:a:1";
+        let workload = sign(&context);
+        assert!(
+            verifier
+                .verify_observed_signature(&context, None, &workload)
+                .is_ok()
+        );
+        assert!(verifier.verify(&context, None, &workload, 101).is_err());
+        context.identity.kind = PrincipalKind::Service; // class spoof invalidates signed binding
+        assert!(verifier.verify(&context, None, &workload, 101).is_err());
     }
     #[test]
     fn publication_closes_exact_tags_and_only_definite_rollback_reopens() {

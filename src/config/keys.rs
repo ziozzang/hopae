@@ -268,6 +268,16 @@ pub(super) const ROOT: Node = Obj(&[
             ("public_key", Leaf),
             ("seed_env", Leaf),
             (
+                "workload_receipts",
+                Obj(&[
+                    ("capacity", Leaf),
+                    (
+                        "scopes",
+                        Arr(&Obj(&[("service", Leaf), ("audience", Leaf)])),
+                    ),
+                ]),
+            ),
+            (
                 "scopes",
                 Arr(&Obj(&[("service", Leaf), ("audience", Leaf)])),
             ),

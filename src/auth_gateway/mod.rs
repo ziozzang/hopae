@@ -24,6 +24,7 @@ pub mod receipt_replay;
 pub mod relay;
 pub mod request_binding;
 pub mod runtime;
+pub(crate) mod workload_owner;
 
 pub use hopae_grpc::PrincipalKind;
 

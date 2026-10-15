@@ -927,6 +927,20 @@ impl Config {
             errs.push("projection_receiver requires valid native issuer, permit keys, profiles, declared plans and mTLS gRPC".into());
         }
         if let Some(config) = &self.receipt_issuer {
+            if let Some(workloads) = &config.workload_receipts
+                && (self.listen.grpc_gateway.is_none()
+                    || self.listen.native_gateway_tls.is_none()
+                    || workloads.scopes.iter().any(|scope| {
+                        self.authentication_gateway.as_ref().is_none_or(|gateway| {
+                            !gateway.profiles.iter().any(|profile| {
+                                profile.service_id == scope.service
+                                    && profile.kubernetes_tokenreview.is_some()
+                            })
+                        })
+                    }))
+            {
+                errs.push("workload_receipts requires mTLS gRPC and native TokenReview profiles for every scope".into());
+            }
             if config.validate().is_err() {
                 errs.push("receipt_issuer: invalid native resources".into());
             }

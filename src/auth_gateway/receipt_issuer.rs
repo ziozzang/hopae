@@ -244,6 +244,7 @@ pub struct Issuer {
     clock_offset: AtomicU64,
     clock_floor: AtomicU64,
     scopes: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    workloads: Option<Arc<super::workload_owner::Owner>>,
 }
 /// No Clone/Debug/serde: adapters must expose this only through the authenticated
 /// receipt phase, never automatically through ordinary auth-response headers.
@@ -439,6 +440,7 @@ impl Issuer {
             rng,
             observed_time: AtomicU64::new(0),
             scopes,
+            workloads: None,
         })
     }
     /// Clock-domain time never freezes after wall rollback: retain the largest
@@ -724,6 +726,203 @@ impl Issued {
             audience: &self.audience,
             request_sha256: self.request_sha256,
         }
+    }
+}
+
+/// Actual gateway TokenReview capture. Never serialized or reconstructed from claims.
+pub(crate) struct CapturedWorkload {
+    authentication: super::authority::ServiceAuthentication,
+    profile: Arc<super::authority::Snapshot>,
+    application: Arc<crate::policy::types::ConfigSnapshot>,
+    attempt: Arc<super::workload_owner::Attempt>,
+}
+impl CapturedWorkload {
+    pub(crate) fn new(
+        authentication: super::authority::ServiceAuthentication,
+        profile: Arc<super::authority::Snapshot>,
+        application: Arc<crate::policy::types::ConfigSnapshot>,
+        attempt: Arc<super::workload_owner::Attempt>,
+    ) -> Result<Self, Refused> {
+        if authentication.evidence.subject.kind != PrincipalKind::Workload
+            || authentication.evidence.connector != "kubernetes-tokenreview"
+            || authentication.revision != profile.revision
+            || !profile.available()
+        {
+            return Err(attempt.retire());
+        }
+        attempt.restrict(authentication.evidence.expires_at)?;
+        Ok(Self {
+            authentication,
+            profile,
+            application,
+            attempt,
+        })
+    }
+    pub(crate) fn issue(
+        &self,
+        issuer: &Issuer,
+        profiles: &Arc<arc_swap::ArcSwap<super::authority::Snapshot>>,
+        applications: &Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
+        verifier: &super::receipt_authority::Verifier,
+        request: Request<'_>,
+        guard: &dyn Fn() -> Result<(), Refused>,
+    ) -> Result<(Issued, Arc<super::workload_owner::Record>), Refused> {
+        let owner = issuer.workloads.as_ref().ok_or(Refused)?;
+        if !Arc::ptr_eq(owner, &self.attempt.owner()?)
+            || !owner.permits(request.service, request.audience)
+            || self.authentication.evidence.service.as_deref() != Some(request.service)
+        {
+            return Err(self.attempt.retire());
+        }
+        let current = || {
+            guard().map_err(|_| self.attempt.retire())?;
+            let now = self.attempt.now(issuer.clock.as_ref())?;
+            let profile = profiles.load_full();
+            if !profile.available()
+                || !Arc::ptr_eq(&profile, &self.profile)
+                || !Arc::ptr_eq(&applications.load_full(), &self.application)
+            {
+                return Err(self.attempt.retire());
+            }
+            Ok(now)
+        };
+        let now = current()?;
+        let mut issued = Issued {
+            config: issuer.config.clone(),
+            identity_epoch: hopae_grpc::workload_epoch::encode(
+                &issuer.config.identity_authority_epoch,
+                self.profile.revision,
+                self.application.generation,
+                owner.domain(),
+            )
+            .map_err(|_| Refused)?,
+            subject: super::stable_subject(&self.authentication.evidence.subject),
+            kind: PrincipalKind::Workload,
+            aal: 0,
+            revision: self.profile.revision,
+            credential_generation: self.profile.revision,
+            service: request.service.into(),
+            audience: request.audience.into(),
+            request_sha256: request.request_sha256,
+            bytes: [0; receipt::LENGTH],
+        };
+        let binding =
+            super::receipt_binding::digest(&issued.context(), None).map_err(|_| Refused)?;
+        let mut nonce = [0; 32];
+        issuer.rng.fill(&mut nonce);
+        current()?; // RNG/caller callbacks cannot renew the original deadline.
+        issued.bytes = receipt::sign(
+            &issuer.signer,
+            &Claims {
+                purpose: Purpose::Authentication,
+                issued_ms: now,
+                expires_ms: self.attempt.expiry(),
+                binding,
+                nonce,
+            },
+        )
+        .map_err(|_| Refused)?;
+        current()?;
+        let keys = verifier.verify_observed_signature(&issued.context(), None, &issued.bytes)?;
+        let record = Arc::new(super::workload_owner::Record {
+            hash: *keys.evidence().sha256(),
+            binding,
+            attempt: self.attempt.clone(),
+            profile: self.profile.clone(),
+            application: self.application.clone(),
+            profiles: profiles.clone(),
+            applications: applications.clone(),
+            keys: Arc::new(keys),
+        });
+        record.current(issuer.clock.as_ref())?;
+        owner.insert(record.clone())?;
+        guard().map_err(|_| self.attempt.retire())?;
+        record.current(issuer.clock.as_ref())?;
+        Ok((issued, record))
+    }
+}
+impl Issuer {
+    pub(crate) fn enable_workloads(
+        mut self,
+        configuration: super::workload_owner::Configuration,
+    ) -> Result<Self, Refused> {
+        configuration.validate(&self.config.identity_authority_epoch, &self.config.scopes)?;
+        let mut generation = [0; 16];
+        self.rng.fill(&mut generation);
+        let owner = super::workload_owner::Owner::new(configuration, generation)?;
+        if owner.domain() == self.clock_domain {
+            return Err(Refused);
+        }
+        self.workloads = Some(owner);
+        Ok(self)
+    }
+    pub(crate) fn begin_workload(
+        &self,
+        service: &str,
+        audience: &str,
+    ) -> Result<Arc<super::workload_owner::Attempt>, Refused> {
+        let owner = self.workloads.as_ref().ok_or(Refused)?;
+        if !owner.permits(service, audience) {
+            return Err(Refused);
+        }
+        owner.begin(self.clock.as_ref())
+    }
+    pub(crate) fn workloads_enabled(&self) -> bool {
+        self.workloads.is_some()
+    }
+    pub(crate) fn observe_workload(
+        &self,
+        context: &Context<'_>,
+        bytes: &[u8],
+        request: &[u8; 32],
+        verifier: &super::receipt_authority::Verifier,
+    ) -> Result<Arc<super::workload_owner::Record>, Refused> {
+        let owner = self.workloads.as_ref().ok_or(Refused)?;
+        let epoch = hopae_grpc::workload_epoch::decode(context.identity_authority_epoch)
+            .map_err(|_| Refused)?;
+        if context.identity.kind != PrincipalKind::Workload
+            || context.identity.aal != 0
+            || context.issuer_ref != self.config.issuer_ref
+            || context.key_epoch != self.config.key_epoch
+            || epoch.authority != self.config.identity_authority_epoch
+            || epoch.clock_domain != owner.domain()
+            || context.request_sha256 != *request
+            || !owner.permits(context.service, context.audience)
+        {
+            return Err(Refused);
+        }
+        let binding = super::receipt_binding::digest(context, None).map_err(|_| Refused)?;
+        owner.ticks()?;
+        let checked = verifier.verify_observed_signature(context, None, bytes)?;
+        let record = owner.lookup(checked.evidence().sha256())?;
+        if record.binding != binding
+            || record.profile.revision != epoch.profile_revision
+            || record.application.generation != epoch.application_generation
+            || context.identity.revision != record.profile.revision
+            || context.identity.credential_generation != record.profile.revision
+            || checked.evidence().claims().expires_ms != record.attempt.expiry()
+            || !checked.current()
+        {
+            return Err(record.attempt.retire());
+        }
+        record.current(self.clock.as_ref())?;
+        Ok(record)
+    }
+    pub(crate) fn workload_time(
+        &self,
+        record: &super::workload_owner::Record,
+    ) -> Result<(u64, u32), Refused> {
+        let now = record.current(self.clock.as_ref())?;
+        // Ticks quantize down: remove one full millisecond before exporting any
+        // remaining admission. Signed expiry is the original entry bound itself.
+        let remaining = record
+            .attempt
+            .expiry()
+            .checked_sub(now)
+            .and_then(|n| n.checked_sub(1))
+            .filter(|n| (1..=1000).contains(n))
+            .ok_or_else(|| record.attempt.retire())?;
+        Ok((now, remaining as u32))
     }
 }
 
