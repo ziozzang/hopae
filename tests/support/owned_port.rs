@@ -13,6 +13,13 @@ pub(crate) fn parse(value: &str) -> Result<u16, &'static str> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn empty_readiness_would_select_https_default_without_the_fixture_guard() {
+        let empty_ready = "";
+        let endpoint = url::Url::parse(&format!("https://127.0.0.1:{empty_ready}")).unwrap();
+        assert_eq!(endpoint.port_or_known_default(), Some(443));
+        assert!(super::parse(empty_ready).is_err());
+    }
+    #[test]
     fn rejects_empty_default_port_fallback_and_noncanonical_ports() {
         for value in [
             "",
