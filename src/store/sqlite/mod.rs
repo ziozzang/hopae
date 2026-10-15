@@ -9,6 +9,9 @@ mod admin;
 mod directory;
 mod events;
 mod factors;
+// Internal infrastructure only; native Human candidate integration is queued.
+#[allow(dead_code)]
+pub(crate) mod provider_owner;
 mod rows;
 mod sessions;
 #[cfg(test)]
@@ -62,6 +65,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         6,
         "0006_external_factor_proofs",
         include_str!("../migrations/0006_external_factor_proofs.sql"),
+    ),
+    (
+        7,
+        "0007_human_provider_owners",
+        include_str!("../migrations/0007_human_provider_owners.sql"),
     ),
 ];
 
@@ -844,6 +852,9 @@ pub fn validate_foundation(conn: &Connection, version: u32) -> Result<(), StoreE
                 "schema v6 invalid external proof capacity".into(),
             ));
         }
+    }
+    if version >= 7 {
+        provider_owner::validate_foundation(conn)?;
     }
     Ok(())
 }

@@ -3953,7 +3953,10 @@ async fn owned_external_https_mfa_atomically_elevates_and_revokes_on_authority_d
         f.count("SELECT count(*) FROM events WHERE attrs LIKE '%owned-proof%'"),
         0
     );
-    assert_eq!(super::precheck(&f._dir.path().join("hopae.db")).unwrap(), 6);
+    assert_eq!(
+        super::precheck(&f._dir.path().join("hopae.db")).unwrap(),
+        super::LATEST_SCHEMA_VERSION
+    );
     disable_authorized_configuration(&f.store, "partner-push", 8, 1)
         .await
         .unwrap();

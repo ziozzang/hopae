@@ -58,6 +58,7 @@ fn open_applies_migration_and_sets_pragmas() {
             "external_factor_proofs",
             "external_factor_sessions",
             "handoff_codes",
+            "human_provider_owners",
             "identities",
             "login_txns",
             "meta",
