@@ -234,6 +234,8 @@ impl Verifier {
         if context.identity_authority_epoch.starts_with("clock1:")
             || (context.identity.kind == super::PrincipalKind::Workload
                 && hopae_grpc::workload_epoch::decode(context.identity_authority_epoch).is_ok())
+            || (context.identity.kind == super::PrincipalKind::Human
+                && hopae_grpc::human_epoch::decode(context.identity_authority_epoch).is_ok())
             || permit.is_some_and(|p| p.authority_epoch.starts_with("pobs1:"))
         {
             return Err(Refused);
@@ -369,6 +371,23 @@ mod tests {
         assert!(verifier.verify(&context, None, &workload, 101).is_err());
         context.identity.kind = PrincipalKind::Service; // class spoof invalidates signed binding
         assert!(verifier.verify(&context, None, &workload, 101).is_err());
+        context.identity.kind = PrincipalKind::Human;
+        context.identity.aal = 1;
+        context.identity.subject_ref =
+            "human1:1111222233334444555566667777888811112222333344445555666677778888";
+        context.identity_authority_epoch = "hobs1:legacy";
+        let legacy_human = sign(&context);
+        assert!(verifier.verify(&context, None, &legacy_human, 101).is_ok());
+        context.identity_authority_epoch = "hobs1:11112222333344445555666677778888:owned:s:1:a:1";
+        let human = sign(&context);
+        assert!(
+            verifier
+                .verify_observed_signature(&context, None, &human)
+                .is_ok()
+        );
+        assert!(verifier.verify(&context, None, &human, 101).is_err());
+        context.identity.kind = PrincipalKind::Service;
+        assert!(verifier.verify(&context, None, &human, 101).is_err());
     }
     #[test]
     fn publication_closes_exact_tags_and_only_definite_rollback_reopens() {
