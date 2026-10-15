@@ -78,7 +78,7 @@ impl Store {
         }
         let material = materials.expected(self, witness.view.session.provider_id.as_str())?;
         let expected = witness.view.clone();
-        let app = witness.app.clone();
+        let app = witness.app().clone();
         let policy = witness.session_policy;
         let path = witness.path.clone();
         let original_expiry = witness.expires;

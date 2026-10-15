@@ -2141,3 +2141,43 @@ async fn native_human_source_final_clock_callback_cannot_hide_publication_withdr
         assert!(checked.require_current_retained().await.is_err());
     }
 }
+
+#[tokio::test]
+async fn native_human_source_publication_is_fixed_and_final_check_has_no_clock_callback() {
+    let mut f = Fx::new(None).await;
+    let calls = Arc::new(AtomicU64::new(0));
+    let count = calls.clone();
+    Arc::get_mut(&mut f.owner).unwrap().ticks = Some(Arc::new(move || {
+        count.fetch_add(1, Ordering::AcqRel);
+        Ok(100)
+    }));
+    let publication = f.owner.source_publication().unwrap();
+    let (cookie, _) = f.login().await;
+    let checked = f
+        .witness(&cookie)
+        .await
+        .finish(&f.input(&cookie))
+        .await
+        .unwrap();
+    let before = calls.load(Ordering::Acquire);
+    publication.require_current().unwrap();
+    assert!(publication.accepts(&checked));
+    assert_eq!(calls.load(Ordering::Acquire), before);
+    assert!(publication.retained_bytes().unwrap() > 0);
+    assert!(checked.retained_bytes().unwrap() > std::mem::size_of::<human::Checked>());
+    let other = Fx::new(None).await;
+    let (other_cookie, _) = other.login().await;
+    let other_checked = other
+        .witness(&other_cookie)
+        .await
+        .finish(&other.input(&other_cookie))
+        .await
+        .unwrap();
+    assert!(!publication.accepts(&other_checked));
+    let original = f.ctx.snapshot.load_full();
+    f.ctx.snapshot.store(Arc::new(f.config.snapshot(1)));
+    assert!(publication.require_current().is_err());
+    f.ctx.snapshot.store(original);
+    assert!(publication.require_current().is_err());
+    assert!(!publication.accepts(&checked));
+}

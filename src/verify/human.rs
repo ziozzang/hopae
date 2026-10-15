@@ -68,10 +68,10 @@ pub(crate) struct Admission {
     deadline: std::time::Instant,
     failed: AtomicBool,
 }
-pub(super) struct Allowed {
+pub(super) struct Allowed<'a> {
     pub(super) view: HandleView,
     pub(super) expires: Timestamp,
-    pub(super) app: AppPolicy,
+    pub(super) app: &'a AppPolicy,
 }
 /// Only the Engine's final ordinary Allow creates this value.
 pub(crate) struct Witness {
@@ -79,7 +79,7 @@ pub(crate) struct Witness {
     admission: Admission,
     pub(crate) view: HandleView,
     pub(crate) snapshot: Arc<ConfigSnapshot>,
-    pub(crate) app: AppPolicy,
+    app: AppLocator,
     pub(crate) path: String,
     pub(crate) expires: Timestamp,
     pub(crate) durable: Option<crate::store::sqlite::human_owner::Current>,
@@ -250,12 +250,13 @@ impl Owner {
         ctx: &VerifyContext,
         input: &VerifyInput,
         snapshot: Arc<ConfigSnapshot>,
-        allowed: Allowed,
+        allowed: Allowed<'_>,
     ) -> StoreResult<Witness> {
         let Allowed { app, view, expires } = allowed;
         if !self.matches(ctx) || !Arc::ptr_eq(&snapshot, &self.applications.load_full()) {
             return Err(refused());
         }
+        let app = AppLocator::capture(&snapshot, app)?;
         let scope = Scope::from(input)?;
         if input
             .cookie_handle
@@ -477,7 +478,7 @@ impl Checked {
         let result = async {
             self.require_current_retained().await?;
             let w = &self.witness;
-            if w.app.app_id.as_str() != binding.application()
+            if w.app().app_id.as_str() != binding.application()
                 || w.scope.route.as_deref() != Some(binding.route())
                 || w.scope.method != binding.method()
             {
@@ -585,5 +586,159 @@ impl Checked {
             self.witness.retired.store(true, Ordering::Release);
         }
         result
+    }
+}
+
+/// Fixed actual service publication lease. Existing compiled provider clients,
+/// DB pools and configuration allocations remain the service baseline; this
+/// lease does not claim to measure their allocator footprint or process RSS.
+/// Only separately owned Human metadata and records enter their byte quota.
+pub(crate) struct SourcePublication {
+    owner: Arc<Owner>,
+    snapshot: Arc<ConfigSnapshot>,
+    retired: AtomicBool,
+}
+#[allow(dead_code)] // Actual native source integration consumes this lease.
+impl Owner {
+    pub(crate) fn source_publication(self: &Arc<Self>) -> StoreResult<SourcePublication> {
+        self.read()?;
+        let publication = SourcePublication {
+            owner: self.clone(),
+            snapshot: self.applications.load_full(),
+            retired: AtomicBool::new(false),
+        };
+        publication.require_current()?;
+        Ok(publication)
+    }
+}
+#[allow(dead_code)] // Actual native source integration consumes this lease.
+impl SourcePublication {
+    pub(crate) fn accepts(&self, checked: &Checked) -> bool {
+        checked.belongs_to(&self.owner)
+            && Arc::ptr_eq(&checked.witness.snapshot, &self.snapshot)
+            && self.require_current().is_ok()
+    }
+    pub(crate) fn require_current(&self) -> StoreResult<()> {
+        let result = (|| {
+            if self.retired.load(Ordering::Acquire) || self.owner.failed.load(Ordering::Acquire) {
+                return Err(refused());
+            }
+            // Callback-free publication fence for use after the final native
+            // time sample. It never substitutes for Checked's native checks.
+            if !Arc::ptr_eq(&self.snapshot, &self.owner.applications.load_full())
+                || self.owner.failed.load(Ordering::Acquire)
+                || self.retired.load(Ordering::Acquire)
+            {
+                return Err(refused());
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.retired.store(true, Ordering::Release);
+        }
+        result
+    }
+    pub(crate) fn retained_bytes(&self) -> StoreResult<usize> {
+        // Inline Arc handles only: these retain existing service allocations.
+        Ok(std::mem::size_of::<Self>())
+    }
+}
+#[allow(dead_code)] // Native source integration.
+impl Checked {
+    pub(crate) fn retained_bytes(&self) -> StoreResult<usize> {
+        let w = &self.witness;
+        let mut total = std::mem::size_of::<Self>();
+        let scope = &w.scope;
+        let mut add = |n: usize| -> StoreResult<()> {
+            total = total.checked_add(n).ok_or_else(refused)?;
+            Ok(())
+        };
+        add(w.view.owned_heap_bytes()?)?;
+        add(w.provider.owned_heap_bytes()?)?;
+        if let Some(current) = &w.durable {
+            add(current.owned_heap_bytes()?)?;
+        }
+        for value in [&w.path, &scope.url, &scope.method, &scope.host, &scope.path] {
+            add(value.capacity())?;
+        }
+        if let Some(value) = &scope.route {
+            add(value.capacity())?;
+        }
+        if let Some(value) = &scope.ua {
+            add(value.capacity())?;
+        }
+        Ok(total)
+    }
+}
+
+/// Exact immutable publication location established from Engine's borrowed app.
+/// No AppPolicy deep clone or per-record scan of every configured application.
+enum AppLocator {
+    Default,
+    Index(usize),
+}
+impl AppLocator {
+    fn capture(snapshot: &ConfigSnapshot, app: &AppPolicy) -> StoreResult<Self> {
+        if std::ptr::eq(app, &snapshot.default_app) {
+            return Ok(Self::Default);
+        }
+        let width = std::mem::size_of::<AppPolicy>();
+        let offset = (app as *const AppPolicy)
+            .addr()
+            .checked_sub(snapshot.apps.as_ptr().addr())
+            .ok_or_else(refused)?;
+        if !offset.is_multiple_of(width) {
+            return Err(refused());
+        }
+        let index = offset / width;
+        if !snapshot
+            .apps
+            .get(index)
+            .is_some_and(|owned| std::ptr::eq(owned, app))
+        {
+            return Err(refused());
+        }
+        Ok(Self::Index(index))
+    }
+    fn get<'a>(&self, snapshot: &'a ConfigSnapshot) -> &'a AppPolicy {
+        match self {
+            Self::Default => &snapshot.default_app,
+            Self::Index(index) => &snapshot.apps[*index],
+        }
+    }
+}
+impl Witness {
+    pub(crate) fn app(&self) -> &AppPolicy {
+        self.app.get(&self.snapshot)
+    }
+}
+
+#[cfg(test)]
+mod app_locator_tests {
+    use super::*;
+    #[test]
+    fn native_app_locator_accepts_only_exact_snapshot_locations() {
+        let snapshot = ConfigSnapshot {
+            generation: 1,
+            apps: vec![AppPolicy::default_app(), AppPolicy::default_app()],
+            default_app: AppPolicy::default_app(),
+            providers: vec![],
+            retained_reauth: Default::default(),
+        };
+        for app in [&snapshot.default_app, &snapshot.apps[0], &snapshot.apps[1]] {
+            let locator = AppLocator::capture(&snapshot, app).unwrap();
+            assert!(std::ptr::eq(app, locator.get(&snapshot)));
+            let copy = app.clone();
+            assert!(AppLocator::capture(&snapshot, &copy).is_err());
+        }
+        let empty = ConfigSnapshot {
+            generation: 1,
+            apps: vec![],
+            default_app: AppPolicy::default_app(),
+            providers: vec![],
+            retained_reauth: Default::default(),
+        };
+        assert!(AppLocator::capture(&empty, &snapshot.apps[0]).is_err());
+        assert!(AppLocator::capture(&empty, &empty.default_app).is_ok());
     }
 }

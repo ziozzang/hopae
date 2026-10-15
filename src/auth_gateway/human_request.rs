@@ -554,3 +554,40 @@ mod tests {
         assert!(Scope::compile(c).is_ok());
     }
 }
+
+#[allow(dead_code)] // Native source integration.
+impl Scope {
+    /// Requested retained allocation capacity, excluding allocator overhead.
+    pub(crate) fn retained_bytes(&self) -> Result<usize, Refused> {
+        let mut bytes = std::mem::size_of::<Self>();
+        for text in [
+            &self.service,
+            &self.audience,
+            &self.application,
+            &self.route,
+        ] {
+            bytes = bytes.checked_add(text.capacity()).ok_or(Refused)?;
+        }
+        bytes = bytes
+            .checked_add(
+                self.headers
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<String>())
+                    .ok_or(Refused)?,
+            )
+            .ok_or(Refused)?;
+        for header in &self.headers {
+            bytes = bytes.checked_add(header.capacity()).ok_or(Refused)?;
+        }
+        Ok(bytes)
+    }
+}
+#[allow(dead_code)] // Native source integration.
+impl Binding {
+    /// Shared compiled Scope is charged once by the source, not per record.
+    pub(crate) fn retained_bytes(&self) -> Result<usize, Refused> {
+        std::mem::size_of::<Self>()
+            .checked_add(self.method.capacity())
+            .ok_or(Refused)
+    }
+}

@@ -18,3 +18,26 @@ durable session/user/primary/factor checks and retirement apply unchanged.
 Explicit-input checks still require the exact original scope. A failed explicit
 check also retires subsequent retained checks, including overlapping awaits.
 This is a prerequisite for source records, not receipt issuance or RPC activation.
+
+## Fixed publication and retained capacity
+
+Human source preparation retains one exact native Owner/application publication.
+Its final publication check reads only local atomic state and snapshot identity;
+it does not invoke clocks after a final source time report. A witnessed withdrawal
+latches retirement. It is a local point-in-time fence, not atomic remote revocation.
+
+An Engine-produced witness retains an exact private application locator in its
+immutable snapshot. It does not deep-clone the application policy per record.
+The locator is established from the Engine's actual borrowed app with a checked
+candidate offset and exact pointer equality against the real snapshot entry;
+foreign equal-value copies cannot select an application. Store validation may
+still clone temporary app data within its existing bounded operation.
+
+Owned-capacity helpers sum nested String/Vec capacities with checked arithmetic.
+Record accounting excludes shared Scope/publication allocations; Human prepared
+metadata is charged once by the source. Existing compiled configuration/provider
+clients/DB pools remain service baseline. These counters describe requested
+retained allocation capacity, not process RSS or allocator metadata. The source
+must separately bound index/expiry entries, Arc/record layout, concurrent temporary
+work and lifetime of quota reservations. This prerequisite does not activate a
+Human endpoint or establish throughput qualification.

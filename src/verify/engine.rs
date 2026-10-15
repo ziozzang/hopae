@@ -355,7 +355,7 @@ async fn flow(
                             cx.input,
                             cx.snapshot.clone(),
                             super::human::Allowed {
-                                app: app.clone(),
+                                app,
                                 view: authed.expected_view(),
                                 expires: authed.expires_at,
                             },
