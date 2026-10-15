@@ -813,3 +813,6 @@ async fn public_sdk_actual_slow_reply_without_a_conservative_admission_interval_
     assert!(result.is_err());
     assert_eq!(f.provider_calls(), 1);
 }
+
+#[path = "grpc_workload_projection_tests.rs"]
+mod projection_tests;

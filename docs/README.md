@@ -45,3 +45,4 @@ milestones land. The [roadmap](ROADMAP.md) describes the intended shape.
 - [Workload observed protocol declarations](WORKLOAD_OBSERVED_PROTOCOL.md) — additive RPC/epoch and nonrenewable source/replay contract; no server activation.
 
 - [Native Workload receipt owner](WORKLOAD_NATIVE_OWNER.md) — optional native issuance/observation; downstream Workload chain remains a separate gate.
+- [Workload observed projection](WORKLOAD_OBSERVED_PROJECTION.md) — explicit output scopes, contract3 and shared paired replay; integration limits.

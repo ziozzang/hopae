@@ -10,6 +10,9 @@ pub(super) struct Projection {
     runtime: Arc<projection_runtime::Runtime>,
 }
 impl Projection {
+    pub(super) fn workloads_enabled(&self) -> bool {
+        self.runtime.workloads_enabled()
+    }
     pub(super) fn new(
         pipeline: Service,
         services: &crate::app::Services,
@@ -123,6 +126,52 @@ impl v1::observed_credential_projection_server::ObservedCredentialProjection for
         let output = self
             .runtime
             .project_observed(
+                request,
+                Arc::new(move || pipeline.caller(&metadata).is_ok()),
+            )
+            .await
+            .map_err(|_| Status::unavailable("native observed projection refused"))?;
+        let reply = output
+            .into_reply(input.request_id)
+            .map_err(|_| Status::unavailable("native observed projection retired"))?;
+        Ok(Response::new(reply))
+    }
+}
+#[tonic::async_trait]
+impl v1::workload_observed_credential_projection_server::WorkloadObservedCredentialProjection
+    for Projection
+{
+    async fn project(
+        &self,
+        request: Request<v1::ProjectionRequest>,
+    ) -> Result<Response<v1::ObservedProjectionReply>, Status> {
+        self.pipeline.caller(request.metadata())?;
+        let _permit = self
+            .pipeline
+            .requests
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("projection capacity"))?;
+        let metadata = request.metadata().clone();
+        let input = request.into_inner();
+        if !(1..=9_007_199_254_740_991).contains(&input.request_id)
+            || input.permission_contract != 3
+            || input.permission_query.len() > 8192
+        {
+            return Err(Status::invalid_argument(
+                "invalid Workload observed projection contract",
+            ));
+        }
+        let request =
+            crate::auth_gateway::workload_permission_live::Request::decode_observed_query(
+                &input.permission_query,
+                input.request_id,
+            )
+            .map_err(|_| Status::invalid_argument("invalid observed permission query"))?;
+        let pipeline = self.pipeline.clone();
+        let output = self
+            .runtime
+            .project_workload_observed(
                 request,
                 Arc::new(move || pipeline.caller(&metadata).is_ok()),
             )

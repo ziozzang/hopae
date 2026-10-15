@@ -114,8 +114,13 @@ impl ObservedFence {
         )?;
         live.current()?;
         self.runtime.receiver.sample_ticks().map_err(|_| Refused)?;
-        if !caller_current
-            || !self.active.0.load(Ordering::Acquire)
+        if !caller_current {
+            return Err(Refused);
+        }
+        self.check_local()
+    }
+    fn check_local(&self) -> Result<(), Refused> {
+        if !self.active.0.load(Ordering::Acquire)
             || !self.profile.available()
             || !self.plan.available()
             || !self.keys.current()
@@ -138,35 +143,21 @@ impl ObservedOutput {
         request_id: u64,
     ) -> Result<hopae_grpc::v1::ObservedProjectionReply, Refused> {
         let context = self.fence.request.authentication_context()?;
-        let service = context.service.to_owned();
-        let audience = context.audience.to_owned();
         let parsed = hopae_grpc::service_epoch::decode_clock(context.identity_authority_epoch)
             .map_err(|_| Refused)?;
-        let profile_revision = parsed.epoch.profile_revision;
-        let application_generation = parsed.epoch.application_generation;
-        let key_registry_revision = self.fence.keys.revision();
-        let (name, value, envelope) =
-            self.value
-                .into_header(&service, &audience, &context.request_sha256, &|| {
-                    self.fence.check()
-                })?;
-        Ok(hopae_grpc::v1::ObservedProjectionReply {
-            request_id,
-            service,
-            audience,
-            request_sha256: envelope.request_sha256.to_vec(),
-            header_name: name.to_string(),
-            header_value: value.as_bytes().to_vec(),
-            chain_sha256: envelope.chain_sha256.to_vec(),
-            output_clock_domain: envelope.output_clock_domain,
-            owner_now_ms: envelope.owner_now_ms,
-            remaining_ms: envelope.remaining_ms,
-            profile_revision,
-            application_generation,
-            key_registry_revision,
-            plan_revision: envelope.plan_revision,
-            cache_ttl_ms: 0,
-        })
+        self.value.into_reply(
+            super::projection_observed::ReplyMetadata {
+                service: context.service,
+                audience: context.audience,
+                request_sha256: context.request_sha256,
+                request_id,
+                profile_revision: parsed.epoch.profile_revision,
+                application_generation: parsed.epoch.application_generation,
+                key_registry_revision: self.fence.keys.revision(),
+            },
+            &|| self.fence.check(),
+            &|| self.fence.check_local(),
+        )
     }
 }
 impl Runtime {
@@ -820,6 +811,7 @@ pub(crate) mod tests {
         let observed_peer = Peer(calls.clone());
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let resources = projection_resources::Configuration {
+            workload_observed_scopes: vec![],
             observed_clock_rates: Some(projection_resources::ObservedClockRates {
                 source_ppm: 0,
                 receiver_ppm: 0,
@@ -1411,3 +1403,6 @@ pub(crate) mod tests {
             .unwrap();
     }
 }
+
+#[path = "projection_workload.rs"]
+pub(crate) mod workload;

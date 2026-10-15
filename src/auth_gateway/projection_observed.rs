@@ -1,6 +1,6 @@
-//! Observed paired projection foundation. Native adapters must obtain reports
-//! from the exact authenticated owners and retain their immutable owner fences.
-//! This is deliberately crate-private until the observed permit RPC is wired.
+//! Shared Service/Workload observed paired projection core. Fixed-class native
+//! adapters must authenticate exact owners and retain immutable owner fences.
+//! Signature/numeric bounds alone cannot enter the production adapters.
 use super::{
     projection,
     receipt_keys::Refused,
@@ -56,9 +56,20 @@ pub(crate) fn verify(
 ) -> Result<Admission, Refused> {
     projection_admission::validate_chain(&input)?;
     let a = input.authentication_context;
-    let parsed =
-        hopae_grpc::service_epoch::decode_clock(a.identity_authority_epoch).map_err(|_| Refused)?;
-    if parsed.clock_domain != authentication.domain
+    let domain = match a.identity.kind {
+        super::PrincipalKind::Service => {
+            hopae_grpc::service_epoch::decode_clock(a.identity_authority_epoch)
+                .map_err(|_| Refused)?
+                .clock_domain
+        }
+        super::PrincipalKind::Workload => {
+            hopae_grpc::workload_epoch::decode(a.identity_authority_epoch)
+                .map_err(|_| Refused)?
+                .clock_domain
+        }
+        _ => return Err(Refused),
+    };
+    if domain != authentication.domain
         || input.permit.authority_epoch != permission.domain
         || !permission.domain.starts_with("pobs1:")
     {
@@ -175,8 +186,107 @@ pub(crate) fn from_native(
         chain_sha256: request.observed_chain_sha256()?,
     })
 }
+/// Sealed actual local Workload Record; never a signature/numeric grant.
+pub(crate) struct LocalWorkloadAuthentication {
+    proof: ObservedProof,
+    record: Arc<super::workload_owner::Record>,
+}
+impl LocalWorkloadAuthentication {
+    pub(crate) fn record(&self) -> &Arc<super::workload_owner::Record> {
+        &self.record
+    }
+}
+pub(crate) fn observe_local_workload(
+    verifier: &super::receipt_authority::Verifier,
+    request: &super::workload_permission_live::Request,
+    issuer: &super::receipt_issuer::Issuer,
+    clock: &ReceiverClock,
+) -> Result<LocalWorkloadAuthentication, Refused> {
+    let start = clock.begin_exchange().map_err(|_| Refused)?;
+    let context = request.authentication_context()?;
+    let record = issuer.observe_workload(
+        &context,
+        &request.native().receipt,
+        &context.request_sha256,
+        verifier,
+    )?;
+    let (owner_now_ms, remaining_ms) = issuer.workload_time(&record)?;
+    let epoch = hopae_grpc::workload_epoch::decode(context.identity_authority_epoch)
+        .map_err(|_| Refused)?;
+    if epoch.clock_domain != record.attempt.owner()?.domain() {
+        return Err(Refused);
+    }
+    let checked = verifier.verify_observed_signature(&context, None, &request.native().receipt)?;
+    if checked.evidence().sha256() != &record.hash {
+        return Err(Refused);
+    }
+    let exchange = clock.finish_exchange(start).map_err(|_| Refused)?;
+    // Both clocks are actual BOOTTIME on this host; independent origins still
+    // require the normal pre-call anchor and millisecond quantum conversion.
+    let proof = ObservedProof::from_owner_report(
+        checked,
+        epoch.clock_domain.into(),
+        &hopae_grpc::receipt_time::Report {
+            owner_now_ms,
+            remaining_ms,
+            receipt_sha256: record.hash,
+        },
+        exchange,
+        &hopae_grpc::receipt_time::ClockRates::EQUAL,
+    )?;
+    issuer.workload_time(&record)?;
+    proof.remaining(clock)?;
+    Ok(LocalWorkloadAuthentication { proof, record })
+}
+pub(crate) fn from_workload(
+    request: &Arc<super::workload_permission_live::Request>,
+    authentication: LocalWorkloadAuthentication,
+    permission: super::workload_permission_live::ObservedObservation,
+    client: &super::workload_permission_live::Client,
+    issuer: &super::receipt_issuer::Issuer,
+    clock: &ReceiverClock,
+) -> Result<Admission, Refused> {
+    let a = request.authentication_context()?;
+    let p = request.permission_context()?;
+    let binding = request.binding()?;
+    super::projection_admission::validate_chain(&super::projection_admission::Input {
+        authentication_context: &a,
+        authentication_receipt: &request.native().receipt,
+        permission_context: &p,
+        permit: &binding,
+        permission_receipt: &request.permit().receipt,
+    })?;
+    if a.request_sha256.as_slice() != request.native().request_sha256.as_slice()
+        || binding.resource != request.native().resource
+        || binding.action != request.native().action
+        || !authentication
+            .proof
+            .matches_bytes(&request.native().receipt)
+    {
+        return Err(Refused);
+    }
+    let permission = permission.into_proof(request, client, clock)?;
+    issuer.workload_time(&authentication.record)?;
+    authentication.proof.remaining(clock)?;
+    Ok(Admission {
+        authentication: authentication.proof,
+        permission,
+        scope: Scope {
+            service: a.service.into(),
+            audience: a.audience.into(),
+            subject: a.identity.subject_ref.into(),
+            resource: binding.resource.into(),
+            action: binding.action.into(),
+            aal: 0,
+            request_sha256: a.request_sha256,
+            plan_revision: binding.plan_revision,
+        },
+        chain_sha256: request.observed_chain_sha256()?,
+    })
+}
 /// Distinct output-source report; no auth or permit absolute expiry is exported.
 /// This envelope must travel only on the authenticated projection owner RPC.
+#[cfg(test)]
 pub(crate) struct Envelope {
     pub(crate) request_sha256: [u8; 32],
     pub(crate) chain_sha256: [u8; 32],
@@ -192,6 +302,8 @@ pub(crate) struct Output {
     clock: Arc<ReceiverClock>,
     name: http::HeaderName,
     value: zeroize::Zeroizing<String>,
+    #[cfg(test)]
+    after_reply_allocation: Option<Box<dyn Fn() + Send + Sync>>,
 }
 impl Admission {
     pub(crate) fn remaining(&self, clock: &ReceiverClock) -> Result<std::time::Duration, Refused> {
@@ -220,12 +332,85 @@ impl Admission {
             clock,
             name,
             value,
+            #[cfg(test)]
+            after_reply_allocation: None,
         })
     }
 }
+pub(crate) struct ReplyMetadata<'a> {
+    pub(crate) service: &'a str,
+    pub(crate) audience: &'a str,
+    pub(crate) request_sha256: [u8; 32],
+    pub(crate) request_id: u64,
+    pub(crate) profile_revision: u64,
+    pub(crate) application_generation: u64,
+    pub(crate) key_registry_revision: u64,
+}
 impl Output {
+    /// Allocate all reply fields before the final callback/time/local-owner fences.
+    /// Pending secret bytes remain zeroizing until the checks have succeeded.
+    pub(crate) fn into_reply(
+        self,
+        metadata: ReplyMetadata<'_>,
+        guard: &dyn Fn() -> Result<(), Refused>,
+        local_guard: &dyn Fn() -> Result<(), Refused>,
+    ) -> Result<hopae_grpc::v1::ObservedProjectionReply, Refused> {
+        if self.admission.scope.service != metadata.service
+            || self.admission.scope.audience != metadata.audience
+            || self.admission.scope.request_sha256 != metadata.request_sha256
+        {
+            return Err(Refused);
+        }
+        let mut value = http::HeaderValue::from_str(&self.value).map_err(|_| Refused)?;
+        value.set_sensitive(true);
+        let mut secret = zeroize::Zeroizing::new(value.as_bytes().to_vec());
+        let mut reply = hopae_grpc::v1::ObservedProjectionReply {
+            request_id: metadata.request_id,
+            service: self.admission.scope.service.clone(),
+            audience: self.admission.scope.audience.clone(),
+            request_sha256: self.admission.scope.request_sha256.to_vec(),
+            header_name: self.name.to_string(),
+            header_value: vec![],
+            chain_sha256: self.admission.chain_sha256.to_vec(),
+            output_clock_domain: format!(
+                "hproj1:{}",
+                data_encoding::HEXLOWER.encode(self.clock.generation())
+            ),
+            owner_now_ms: 0,
+            remaining_ms: 0,
+            profile_revision: metadata.profile_revision,
+            application_generation: metadata.application_generation,
+            key_registry_revision: metadata.key_registry_revision,
+            plan_revision: self.admission.scope.plan_revision,
+            cache_ttl_ms: 0,
+        };
+        #[cfg(test)]
+        if let Some(hook) = &self.after_reply_allocation {
+            hook();
+        }
+        guard()?;
+        let sample = self
+            .clock
+            .finish_exchange(self.clock.begin_exchange().map_err(|_| Refused)?)
+            .map_err(|_| Refused)?;
+        let remaining = self
+            .admission
+            .authentication
+            .remaining(&self.clock)?
+            .min(self.admission.permission.remaining(&self.clock)?);
+        let remaining_ms = u32::try_from(remaining.as_millis())
+            .ok()
+            .filter(|v| *v > 0 && *v <= 1000)
+            .ok_or(Refused)?;
+        local_guard()?; // Pure owner checks only; no callback or allocation afterward.
+        reply.owner_now_ms = sample.after_ticks();
+        reply.remaining_ms = remaining_ms;
+        reply.header_value = std::mem::take(&mut *secret);
+        Ok(reply)
+    }
     /// Callback precedes the final BOOTTIME checks. Calling it twice fences any
     /// serialization/header work before returning the sensitive output.
+    #[cfg(test)]
     pub(crate) fn into_header(
         self,
         service: &str,
@@ -336,13 +521,38 @@ mod tests {
             permit_time: u64,
             remaining: u32,
         ) -> Admission {
+            self.class_admission(
+                nonce,
+                auth_time,
+                permit_time,
+                remaining,
+                PrincipalKind::Service,
+            )
+        }
+        fn class_admission(
+            &self,
+            nonce: u8,
+            auth_time: u64,
+            permit_time: u64,
+            remaining: u32,
+            kind: PrincipalKind,
+        ) -> Admission {
+            let epoch = if kind == PrincipalKind::Workload {
+                format!("wobs1:{AUTH_DOMAIN}:owned:p:1:a:1")
+            } else {
+                AUTH_EPOCH.into()
+            };
             let context = |issuer_ref| Context {
                 issuer_ref,
                 key_epoch: 1,
-                identity_authority_epoch: AUTH_EPOCH,
+                identity_authority_epoch: &epoch,
                 identity: Identity {
-                    subject_ref: "s_fixture",
-                    kind: PrincipalKind::Service,
+                    subject_ref: if kind == PrincipalKind::Workload {
+                        "s_529be5b595ab327853eabe2d1adf52256e262af036510607"
+                    } else {
+                        "s_fixture"
+                    },
+                    kind,
                     aal: 0,
                     revision: 1,
                     credential_generation: 1,
@@ -879,5 +1089,141 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+    #[test]
+    fn reply_finalizer_refuses_late_allocation_expiry_and_final_callback_retirement() {
+        for mode in 0..3 {
+            let mut fixture = Fixture::new();
+            let projector = Fixture::projector();
+            let mut output = fixture
+                .admission(180 + mode, 100, 900_000, 100)
+                .project(
+                    &projector,
+                    &mut fixture.db,
+                    fixture.clock.clone(),
+                    &|_| Ok(()),
+                    &|_| Ok(zeroize::Zeroizing::new("owned-secret".into())),
+                )
+                .unwrap();
+            assert_eq!(fixture.count(), 2);
+            if mode == 0 {
+                output.after_reply_allocation = Some(Box::new(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(120))
+                }));
+            }
+            if mode == 1 {
+                let clock = fixture.clock.clone();
+                output.after_reply_allocation = Some(Box::new(move || clock.retire()));
+            }
+            let metadata = ReplyMetadata {
+                request_id: 7,
+                service: "orders",
+                audience: "orders-api",
+                request_sha256: [3; 32],
+                profile_revision: 1,
+                application_generation: 1,
+                key_registry_revision: 1,
+            };
+            assert!(
+                output
+                    .into_reply(
+                        metadata,
+                        &|| {
+                            if mode == 2 {
+                                fixture.clock.retire();
+                            }
+                            Ok(())
+                        },
+                        &|| Ok(())
+                    )
+                    .is_err()
+            );
+            assert_eq!(fixture.count(), 2); // Committed consumption cannot be reset by late output failure.
+        }
+    }
+    #[test]
+    fn reply_finalizer_checks_pure_owner_after_time_and_keeps_exact_scope() {
+        let mut fixture = Fixture::new();
+        let projector = Fixture::projector();
+        let output = fixture
+            .admission(190, 100, 900_000, 700)
+            .project(
+                &projector,
+                &mut fixture.db,
+                fixture.clock.clone(),
+                &|_| Ok(()),
+                &|_| Ok(zeroize::Zeroizing::new("owned-secret".into())),
+            )
+            .unwrap();
+        let metadata = ReplyMetadata {
+            request_id: 7,
+            service: "orders",
+            audience: "orders-api",
+            request_sha256: [3; 32],
+            profile_revision: 1,
+            application_generation: 1,
+            key_registry_revision: 1,
+        };
+        assert!(
+            output
+                .into_reply(metadata, &|| Ok(()), &|| Err(Refused))
+                .is_err()
+        );
+        let output = fixture
+            .admission(191, 100, 900_000, 700)
+            .project(
+                &projector,
+                &mut fixture.db,
+                fixture.clock.clone(),
+                &|_| Ok(()),
+                &|_| Ok(zeroize::Zeroizing::new("owned-secret".into())),
+            )
+            .unwrap();
+        let metadata = ReplyMetadata {
+            request_id: 8,
+            service: "other",
+            audience: "orders-api",
+            request_sha256: [3; 32],
+            profile_revision: 1,
+            application_generation: 1,
+            key_registry_revision: 1,
+        };
+        assert!(output.into_reply(metadata, &|| Ok(()), &|| Ok(())).is_err());
+    }
+    #[test]
+    fn service_and_workload_auth_nonces_consume_the_same_durable_pair_namespace() {
+        for first in [PrincipalKind::Service, PrincipalKind::Workload] {
+            let mut fixture = Fixture::new();
+            let projector = Fixture::projector();
+            let second = if first == PrincipalKind::Service {
+                PrincipalKind::Workload
+            } else {
+                PrincipalKind::Service
+            };
+            fixture
+                .class_admission(210, 100, 900_000, 700, first)
+                .project(
+                    &projector,
+                    &mut fixture.db,
+                    fixture.clock.clone(),
+                    &|_| Ok(()),
+                    &|_| Ok(zeroize::Zeroizing::new("owned-secret".into())),
+                )
+                .unwrap();
+            assert_eq!(fixture.count(), 2);
+            assert!(
+                fixture
+                    .class_admission(210, 100, 900_000, 700, second)
+                    .project(
+                        &projector,
+                        &mut fixture.db,
+                        fixture.clock.clone(),
+                        &|_| Ok(()),
+                        &|_| panic!("already-consumed class must not fetch secrets")
+                    )
+                    .is_err()
+            );
+            assert_eq!(fixture.count(), 2);
+        }
     }
 }

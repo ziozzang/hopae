@@ -16,7 +16,7 @@ name = "hopae"
 path = "src/main.rs"
 
 [dependencies]
-pumgye-grpc = { git = "https://github.com/ziozzang/pumgye", rev = "401d72f8aef4b3167a7055f2c2b3e368a2379d04" }
+pumgye-grpc = { git = "https://github.com/ziozzang/pumgye", rev = "dd62d6559613923f421cb76f0e65aea48224ea76" }
 prost = "0.14"
 hopae-grpc = { path = "crates/hopae-grpc" }
 hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "bf3ba2c0ccfb8603a34b14a30bc52d5112f0677a" }

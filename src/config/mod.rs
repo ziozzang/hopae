@@ -926,6 +926,22 @@ impl Config {
         {
             errs.push("projection_receiver requires valid native issuer, permit keys, profiles, declared plans and mTLS gRPC".into());
         }
+        if let Some(receiver) = &self.projection_receiver {
+            for scope in &receiver.workload_observed_scopes {
+                if !self
+                    .receipt_issuer
+                    .as_ref()
+                    .and_then(|i| i.workload_receipts.as_ref())
+                    .is_some_and(|w| {
+                        w.scopes
+                            .iter()
+                            .any(|s| s.service == scope.service && s.audience == scope.audience)
+                    })
+                {
+                    errs.push("projection_receiver workload_observed_scopes requires declared native Workload issuer scopes".into());
+                }
+            }
+        }
         if let Some(config) = &self.receipt_issuer {
             if let Some(workloads) = &config.workload_receipts
                 && (self.listen.grpc_gateway.is_none()

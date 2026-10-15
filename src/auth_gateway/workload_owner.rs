@@ -294,12 +294,11 @@ pub(crate) struct Record {
     pub(crate) keys: Arc<receipt_authority::ObservedChecked>,
 }
 impl Record {
-    pub(crate) fn current(&self, clock: &dyn Clock) -> Result<u64, Refused> {
-        let now = self.attempt.now(clock)?;
+    /// Pure native publication/activity checks after final time sampling.
+    pub(crate) fn current_owners(&self) -> Result<(), Refused> {
         let profile = self.profiles.load_full();
-        let claims = self.keys.evidence().claims();
-        if now < claims.issued_ms
-            || now >= claims.expires_ms
+        if self.attempt.retired.load(Ordering::Acquire)
+            || self.attempt.owner()?.failed.load(Ordering::Acquire)
             || !profile.available()
             || !Arc::ptr_eq(&profile, &self.profile)
             || !Arc::ptr_eq(&self.applications.load_full(), &self.application)
@@ -307,6 +306,15 @@ impl Record {
         {
             return Err(self.attempt.retire());
         }
+        Ok(())
+    }
+    pub(crate) fn current(&self, clock: &dyn Clock) -> Result<u64, Refused> {
+        let now = self.attempt.now(clock)?;
+        let claims = self.keys.evidence().claims();
+        if now < claims.issued_ms || now >= claims.expires_ms {
+            return Err(self.attempt.retire());
+        }
+        self.current_owners()?;
         Ok(now)
     }
 }

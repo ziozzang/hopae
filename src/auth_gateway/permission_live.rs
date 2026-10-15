@@ -731,6 +731,7 @@ mod tests {
                 .as_millis() as u64
         };
         let resources = super::super::projection_resources::Configuration {
+            workload_observed_scopes: vec![],
             observed_clock_rates: None,
             authority: super::super::projection_resources::Authority {
                 address: address.clone(),

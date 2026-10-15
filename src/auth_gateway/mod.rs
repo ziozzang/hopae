@@ -25,6 +25,7 @@ pub mod relay;
 pub mod request_binding;
 pub mod runtime;
 pub(crate) mod workload_owner;
+pub(crate) mod workload_permission_live;
 
 pub use hopae_grpc::PrincipalKind;
 

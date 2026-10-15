@@ -2,8 +2,9 @@
 
 최초 프로토콜 단계는 서버 활성화 없이 additive 선언만 추가했습니다. 현재는
 [네이티브 Workload owner](WORKLOAD_NATIVE_OWNER.md)가 명시적 설정으로 인증
-IssueObserved/ObserveTime 서비스를 선택 등록합니다. Workload 권한·소비형 projection은
-별도 후속 구현 게이트입니다. 기존 Service RPC/message/method path, trust, epoch 및
+IssueObserved/ObserveTime 서비스를 선택 등록합니다. [Workload 출력 어댑터](WORKLOAD_OBSERVED_PROJECTION.md)는
+별도 활성화 contract3와 공유 소비 ledger를 추가합니다. 실제 Native Pum 권한 연결과
+Root/Kubernetes 전체 체인은 별도 통합 검증 게이트입니다. 기존 Service RPC/message/method path, trust, epoch 및
 기본 설정의 의미를 유지합니다. Workload는 wire kind3/AAL0,
 Service는 kind2/AAL0입니다. Parser와 protobuf message는 인증 capability가 아니며
 strict/UTC Workload endpoint를 추가하지 않습니다. Human 세션·팩터는 별도 후속 계약입니다.

@@ -3,7 +3,9 @@
 The initial protocol stage added declarations without server activation. The
 [native Workload owner](WORKLOAD_NATIVE_OWNER.md) now optionally registers the
 authentication IssueObserved/ObserveTime service through explicit configuration.
-Workload permission and consuming projection remain separate implementation gates.
+The [Workload output adapter](WORKLOAD_OBSERVED_PROJECTION.md) adds a separately
+opted-in contract3 and shared consuming ledger. Actual native Pum permission and
+full Root dispatch/Kubernetes integration remain separately qualified gates.
 Existing Service RPCs, messages, method paths, trust, epochs and default
 configuration keep their existing meaning. Workload is wire kind3/AAL0;
 Service stays kind2/AAL0. Neither a parser nor generated protobuf message is an

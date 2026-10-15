@@ -29,6 +29,8 @@ pub struct SecretReference {
 pub struct Configuration {
     pub authority: Authority,
     #[serde(default)]
+    pub workload_observed_scopes: Vec<super::receipt_issuer::Scope>,
+    #[serde(default)]
     pub observed_clock_rates: Option<ObservedClockRates>,
     #[serde(default)]
     pub secrets: Vec<SecretReference>,
@@ -48,7 +50,9 @@ impl ObservedClockRates {
 /// No Clone/Debug/serde. Only native plan-owned references may resolve values.
 pub struct Prepared {
     pub client: Arc<Client>,
+    pub(crate) workload_client: Option<Arc<super::workload_permission_live::Client>>,
     pub(crate) observed_rates: Option<hopae_grpc::receipt_time::ClockRates>,
+    pub(crate) workload_scopes: HashSet<(String, String)>,
     secrets: HashMap<String, Zeroizing<String>>,
 }
 fn id(value: &str) -> bool {
@@ -85,6 +89,20 @@ impl Configuration {
             .as_ref()
             .map(ObservedClockRates::compile)
             .transpose()?;
+        if self.workload_observed_scopes.len() > 128
+            || (!self.workload_observed_scopes.is_empty() && self.observed_clock_rates.is_none())
+        {
+            return Err(Refused);
+        }
+        let mut workload_seen = HashSet::new();
+        for scope in &self.workload_observed_scopes {
+            if !id(&scope.service)
+                || !id(&scope.audience)
+                || !workload_seen.insert((&scope.service, &scope.audience))
+            {
+                return Err(Refused);
+            }
+        }
         let a = &self.authority;
         let uri: tonic::codegen::http::Uri = a.address.parse().map_err(|_| Refused)?;
         if a.address.len() > 256
@@ -118,6 +136,13 @@ impl Configuration {
     pub fn validate_plans(&self, plans: &super::projection::Configuration) -> Result<(), Refused> {
         self.validate()?;
         super::projection::Projector::compile(plans.clone())?;
+        for scope in &self.workload_observed_scopes {
+            if !plans.plans.iter().any(|p| {
+                p.service == scope.service && p.audience == scope.audience && p.minimum_aal == 0
+            }) {
+                return Err(Refused);
+            }
+        }
         for plan in &plans.plans {
             if let super::projection::Credential::BearerReference { secret_ref } = &plan.credential
                 && !self
@@ -148,6 +173,18 @@ impl Configuration {
             &token,
         )
         .map_err(|_| Refused)?;
+        let workload_client = if self.workload_observed_scopes.is_empty() {
+            None
+        } else {
+            Some(Arc::new(super::workload_permission_live::Client::prepare(
+                &self.authority.address,
+                &self.authority.server_name,
+                &ca,
+                &certificate,
+                &key,
+                &token,
+            )?))
+        };
         let mut secrets = HashMap::with_capacity(self.secrets.len());
         for reference in &self.secrets {
             let value = Zeroizing::new(resolve(&reference.token_env).ok_or(Refused)?);
@@ -158,16 +195,27 @@ impl Configuration {
         }
         Ok(Prepared {
             client: Arc::new(client),
+            workload_client,
             observed_rates: self
                 .observed_clock_rates
                 .as_ref()
                 .map(ObservedClockRates::compile)
                 .transpose()?,
+            workload_scopes: self
+                .workload_observed_scopes
+                .iter()
+                .map(|s| (s.service.clone(), s.audience.clone()))
+                .collect(),
             secrets,
         })
     }
 }
 impl Prepared {
+    pub(crate) fn permits_workload(&self, service: &str, audience: &str) -> bool {
+        self.workload_scopes
+            .iter()
+            .any(|(s, a)| s == service && a == audience)
+    }
     /// Native vault capability only. Call after verified paired admission, never
     /// as an ordinary authentication response or a request-selected secret API.
     pub fn resolve(&self, reference: &str) -> Result<Zeroizing<String>, Refused> {
@@ -247,6 +295,41 @@ mod tests {
             serde_json::json!({"source_ppm":500,"receiver_ppm":500,"fabricated":1});
         let error = load(&value).err().unwrap().to_string();
         assert!(error.contains("projection_receiver.observed_clock_rates.fabricated"));
+    }
+    #[test]
+    fn workload_output_is_explicit_exact_and_requires_native_source_rates_and_aal0_plan() {
+        let mut value = config();
+        assert!(
+            crate::config::parse(&value.to_string())
+                .unwrap()
+                .projection_receiver
+                .unwrap()
+                .workload_observed_scopes
+                .is_empty()
+        );
+        let scope = serde_json::json!({"service":"orders","audience":"orders-api"});
+        value["projection_receiver"]["workload_observed_scopes"] =
+            serde_json::json!([scope.clone()]);
+        assert!(crate::config::parse(&value.to_string()).is_err());
+        value["projection_receiver"]["observed_clock_rates"] =
+            serde_json::json!({"source_ppm":500,"receiver_ppm":500});
+        assert!(crate::config::parse(&value.to_string()).is_err());
+        value["receipt_issuer"]["workload_receipts"] =
+            serde_json::json!({"scopes":[scope.clone()],"capacity":8});
+        value["authentication_gateway"]["profiles"][0]["kubernetes_tokenreview"] = serde_json::json!({"connection":{"api_origin":"https://kubernetes.example.test","issuer":"https://issuer.example.test","cluster_id":"services","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_KUBE_CA","reviewer_token_env":"OWNED_KUBE_REVIEWER","token_prefix":"k8s:"});
+        crate::config::parse(&value.to_string()).unwrap();
+        for scopes in [
+            serde_json::json!([scope.clone(), scope]),
+            serde_json::json!([{"service":"other","audience":"orders-api"}]),
+            serde_json::json!([{"service":"orders","audience":"other"}]),
+            serde_json::json!([{"service":"orders","audience":"orders-api","grant":true}]),
+        ] {
+            let mut bad = value.clone();
+            bad["projection_receiver"]["workload_observed_scopes"] = scopes;
+            assert!(crate::config::parse(&bad.to_string()).is_err());
+        }
+        value["credential_projection"]["plans"][0]["minimum_aal"] = serde_json::json!(1);
+        assert!(crate::config::parse(&value.to_string()).is_err());
     }
     #[test]
     fn receiver_configuration_requires_trusted_native_dependencies_and_reference_only_secrets() {

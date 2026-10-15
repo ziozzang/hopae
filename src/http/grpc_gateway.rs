@@ -576,6 +576,7 @@ pub async fn serve_with_receipts(
         })
         .transpose()?
         .flatten();
+    let workload_projection_service=projection_service.as_ref().filter(|s|s.workloads_enabled()).cloned().map(|service|v1::workload_observed_credential_projection_server::WorkloadObservedCredentialProjectionServer::new(service).max_decoding_message_size(8448).max_encoding_message_size(8192));
     let observed_projection_service = projection_service.clone().map(|service| {
         v1::observed_credential_projection_server::ObservedCredentialProjectionServer::new(service)
             .max_decoding_message_size(8448)
@@ -614,6 +615,10 @@ pub async fn serve_with_receipts(
             ingress.clone(),
             wire::MAX_FRAME,
         ))
+        .add_optional_service(
+            workload_projection_service
+                .map(|service| bounded_transport(service, pipeline.clone(), ingress.clone(), 8448)),
+        )
         .add_optional_service(workload_receipt_service.map(|service| {
             bounded_transport(service, pipeline.clone(), ingress.clone(), wire::MAX_FRAME)
         }))
