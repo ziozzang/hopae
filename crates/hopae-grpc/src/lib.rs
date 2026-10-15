@@ -21,6 +21,7 @@ pub mod receipt_binding;
 
 pub mod receipt_keys;
 
+pub mod human_epoch;
 pub mod service_epoch;
 pub mod workload_epoch;
 
@@ -107,3 +108,25 @@ impl std::fmt::Debug for v1::WorkloadReceiptObservationRequest {
 /// Workload-only opaque observed authentication; never a permission grant.
 #[cfg(feature = "native-client")]
 pub mod workload_observed_client;
+
+// Human descriptors and proof bytes must not appear in default debug logs.
+macro_rules! redacted_human_debug {
+    ($($ty:ty),+ $(,)?) => {$ (
+        impl std::fmt::Debug for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("Human wire metadata { [REDACTED] }")
+            }
+        }
+    )+};
+}
+redacted_human_debug!(
+    v1::HumanBoundHeader,
+    v1::HumanFinalRequest,
+    v1::HumanReceiptRequest,
+    v1::HumanReceiptReply,
+    v1::HumanReceiptObservedReply,
+    v1::HumanReceiptObservationRequest
+);
+
+#[cfg(feature = "native-client")]
+pub mod human_observed_client;
