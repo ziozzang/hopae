@@ -13,12 +13,14 @@ def main():
     p.add_argument('--native-resource',action='store_true')
     p.add_argument('--route-owner',action='store_true')
     p.add_argument('--projection-owner',action='store_true')
+    p.add_argument('--permit-issuance',action='store_true')
     p.add_argument('--legacy-pumgye-binary',type=Path)
     p.add_argument('--external-verifier',action='store_true')
     p.add_argument('--durable-restart',action='store_true')
     args=p.parse_args()
     if args.resource_catalog and not args.grpc:p.error('--resource-catalog requires --grpc')
     if args.native_resource and not (args.grpc and args.resource_catalog and args.sumunjang_binary):p.error('--native-resource requires --grpc --resource-catalog and --sumunjang-binary')
+    if args.permit_issuance and not (args.projection_owner and args.route_owner):p.error('--permit-issuance requires --projection-owner --route-owner')
     if args.projection_owner and not args.native_resource:p.error('--projection-owner requires --native-resource')
     if args.projection_owner and args.legacy_pumgye_binary:p.error('--projection-owner cannot use a legacy permission server')
     if args.route_owner and not args.native_resource:p.error('--route-owner requires --native-resource')
@@ -94,6 +96,17 @@ def main():
                 (root/'authentication-trust.json').write_text(json.dumps({'entries':[{'issuer_ref':'owned','key_epoch':1,'identity_epoch':'epoch1','service':'orders','audience':'orders-api','minimum_revision':1,'public_key':issuer_pin}]}))
                 (root/'authentication-live.json').write_text(json.dumps(dict(tls('hopae.example.test'),issuer_ref='owned',address=f'https://localhost:{hop_grpc}',token_env='FIXTURE_KEY')))
                 (root/'network-live.json').write_text(json.dumps(dict(tls('sumunjang.example.test'),address=f'https://localhost:{guard_grpc}',token_env='HANGANG_GUARD_COLLECTOR_TOKEN')))
+            if args.permit_issuance:
+                config['revision']=1
+                openssl('genpkey','-algorithm','ED25519','-out','permit.key')
+                openssl('pkey','-in','permit.key','-outform','DER','-out','permit.der')
+                openssl('pkey','-in','permit.key','-pubout','-outform','DER','-out','permit.pub')
+                permit_seed=(root/'permit.der').read_bytes();permit_public=(root/'permit.pub').read_bytes()
+                assert len(permit_seed)==48 and len(permit_public)==44
+                env['OWNED_PERMIT_SEED']=base64.b64encode(permit_seed[-32:]).decode()
+                permit_pin={'issuer_ref':'owned-pumgye','key_epoch':1,'public_key':base64.b64encode(permit_public[-32:]).decode()}
+                config['http'][0]['auth']['native_resource']['permission_permit']=permit_pin
+                (root/'permit-key.json').write_text(json.dumps(dict(permit_pin,seed_env='OWNED_PERMIT_SEED')))
             (root/'hangang.json').write_text(json.dumps(config))
             def start(binary,argv,name):
                 log=open(root/(name+'.log'),'ab');process=subprocess.Popen([str(binary.resolve()),*argv],env=env,stdout=log,stderr=log);processes.append(process);return process
@@ -107,6 +120,7 @@ def main():
                 raise RuntimeError(name+' readiness deadline')
             context=ssl.create_default_context(cafile=str(root/'ca.pem'));context.load_cert_chain(str(root/'client.pem'),str(root/'client.key'))
             pum_args=['--listen',f'0.0.0.0:{pum_http}','--decision-listen',f'0.0.0.0:{pum_native}','--database',str(root/'pumgye.db'),'--policy',str(root/'policy.json'),'--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--client-ca',str(root/'ca.pem'),*(['--grpc-listen',f'0.0.0.0:{pum_grpc}'] if args.grpc else [])]
+            if args.permit_issuance:pum_args+=['--permit-key',str(root/'permit-key.json')]
             hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae')
             guard_args=[]
             if args.sumunjang_binary:
@@ -161,6 +175,16 @@ def main():
                     api('/v1/config','PUT',changed,{'If-Match':f'"{changed["revision"]}"'})
                     assert request()==200,'native configuration restoration failed'
                 print('PASS: actual final native dispatch refuses wrong pin/issuer/audience and oversized entity without upstream effects; restoration succeeds.')
+            if args.permit_issuance:
+                for field,value in [('public_key',wrong_pin),('issuer_ref','wrong-permit-issuer'),('key_epoch',2)]:
+                    document,_=api();baseline=copy.deepcopy(document['http'][0]['auth']['native_resource']['permission_permit'])
+                    document['http'][0]['auth']['native_resource']['permission_permit'][field]=value
+                    changed,_=api('/v1/config','PUT',document,{'If-Match':f'"{document["revision"]}"'})
+                    assert request()==503,'native permit signature pin bypassed: '+field
+                    changed['http'][0]['auth']['native_resource']['permission_permit']=baseline
+                    api('/v1/config','PUT',changed,{'If-Match':f'"{changed["revision"]}"'})
+                    assert request()==200,'permit pin restoration failed'
+                print('PASS: actual native permit issuance and Hangang signature/binding checks; wrong purpose key/issuer/epoch refuse without origin effects; no paired replay or credential projection claim.')
             if args.route_owner:
                 def restart_route_authority(binary,argv):
                     nonlocal owner

@@ -229,3 +229,17 @@ permission/profile withdrawal and authority outages. Wrong Hopae server name
 and caller credential refuse without origin effects; restoration succeeds.
 This mode cannot be combined with a legacy Pumgye binary. It exercises native
 plan checks, not signed projection permits or upstream credential issuance.
+
+`--permit-issuance` requires both `--route-owner` and `--projection-owner`. It
+creates an independent owned Pumgye permit-purpose key and explicitly starts the
+gateway configuration at revision 1. The key seed stays in the private fixture
+environment; the route carries only the public pin. The fixture exercises actual
+`ProjectionPermits/Issue` and gateway verification, including wrong public key,
+issuer and epoch refusal/restoration. This mode does not exercise Hopae paired
+replay admission or projected upstream credentials.
+
+The complete local permit-issuance case passes with actual final URI/entity
+routing, independent signature pins, recovery and durable withdrawal/outages.
+It qualifies signed evidence issuance and gateway checks; receiver consumption
+and upstream credential projection remain open. The no-permit plan-owner mode
+is checked separately for compatibility.
