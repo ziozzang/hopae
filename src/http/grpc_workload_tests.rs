@@ -37,6 +37,7 @@ struct Fixture {
     server: tokio::task::JoinHandle<anyhow::Result<()>>,
     rng: Arc<DelayRng>,
     credential: String,
+    sdk_address: String,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -225,6 +226,7 @@ impl Fixture {
             server,
             rng,
             credential,
+            sdk_address: format!("https://{addr}"),
         }
     }
     fn request(&self) -> Request<v1::WorkloadReceiptRequest> {
@@ -530,4 +532,284 @@ async fn application_replacement_during_actual_tokenreview_refuses_old_capture()
     f.services.snapshot.store(Arc::new((*app).clone()));
     std::fs::write(f.root.path().join("release"), "yes").unwrap();
     assert!(task.await.unwrap().is_err());
+}
+
+// B+D qualification uses the public opaque SDK, never a private grant constructor.
+impl Fixture {
+    fn sdk(&self) -> hopae_grpc::workload_observed_client::Client {
+        use hopae_grpc::{receipt_time::ClockRates, workload_observed_client::*};
+        let ca = std::fs::read(self.root.path().join("ca.pem")).unwrap();
+        let cert = std::fs::read(self.root.path().join("server.pem")).unwrap();
+        let key = std::fs::read(self.root.path().join("server.key")).unwrap();
+        Client::new_workload(
+            EndpointConfig {
+                address: &self.sdk_address,
+                server_name: "localhost",
+                ca: &ca,
+                certificate: &cert,
+                private_key: &key,
+                caller_key: CALLER,
+            },
+            WorkloadTrustPolicy {
+                issuer_ref: "owned-workload".into(),
+                key_epoch: 1,
+                verifying_key: ed25519_dalek::SigningKey::from_bytes(&[7; 32]).verifying_key(),
+                identity_authority: "owned-workload-authority".into(),
+                scopes: vec![WorkloadScope {
+                    service: "orders".into(),
+                    audience: "orders-api".into(),
+                }],
+                minimum_profile_revision: 1,
+                minimum_application_generation: 1,
+                minimum_key_registry_revision: 1,
+            },
+            Arc::new(hangang_runtime::time::ReceiverClock::new([9; 16]).unwrap()),
+            ClockRates::new(500, 500).unwrap(),
+            Limits {
+                concurrent: 4,
+                timeout: Duration::from_secs(1),
+            },
+        )
+        .unwrap()
+    }
+    fn sdk_request(
+        &self,
+        sdk: &hopae_grpc::workload_observed_client::Client,
+    ) -> Arc<hopae_grpc::workload_observed_client::PreparedRequest> {
+        sdk.prepare(
+            &hopae_grpc::request_binding::Request {
+                service: "orders",
+                audience: "orders-api",
+                method: "GET",
+                target: "/reports",
+                body_sha256: &[0; 32],
+            },
+            self.request().into_inner().verification.unwrap().headers,
+        )
+        .unwrap()
+    }
+    fn provider_calls(&self) -> usize {
+        std::fs::read_to_string(self.root.path().join("calls"))
+            .unwrap_or_else(|_| "0".into())
+            .parse()
+            .unwrap()
+    }
+}
+#[tokio::test]
+async fn public_sdk_actual_native_issue_independent_observe_refresh_and_local_retire() {
+    let f = Fixture::start(8).await;
+    let sdk = f.sdk();
+    let observation = sdk.issue(f.sdk_request(&sdk)).await.unwrap();
+    assert_eq!(observation.context().identity.as_ref().unwrap().kind, 3);
+    assert_eq!(observation.context().identity.as_ref().unwrap().aal, 0);
+    assert_eq!(
+        observation.context().identity.as_ref().unwrap().subject_ref,
+        "s_529be5b595ab327853eabe2d1adf52256e262af036510607"
+    );
+    let expected_hash =
+        hopae_grpc::request_binding::digest(&hopae_grpc::request_binding::Request {
+            service: "orders",
+            audience: "orders-api",
+            method: "GET",
+            target: "/reports",
+            body_sha256: &[0; 32],
+        })
+        .unwrap();
+    assert_eq!(observation.context().request_sha256, expected_hash);
+    let original = sdk.check(&observation, observation.request()).unwrap();
+    assert!(original > Duration::ZERO && original < Duration::from_secs(1));
+    let digest = observation
+        .context()
+        .request_sha256
+        .as_slice()
+        .try_into()
+        .unwrap();
+    let observer = f.sdk();
+    let prepared = observer
+        .prepare_observation(observation.context().clone(), digest)
+        .unwrap();
+    let independent = observer
+        .observe(prepared.clone(), observation.receipt())
+        .await
+        .unwrap();
+    assert!(observer.check(&independent, &prepared).is_ok());
+    assert!(sdk.check(&independent, &prepared).is_err());
+    let refreshed = sdk.refresh(observation).await.unwrap();
+    assert!(sdk.check(&refreshed, refreshed.request()).unwrap() <= original);
+    assert_eq!(f.provider_calls(), 1); // Observe/refresh cannot secretly reauthenticate or renew.
+    sdk.retire();
+    assert!(sdk.check(&refreshed, refreshed.request()).is_err());
+    assert!(
+        sdk.prepare_observation(refreshed.context().clone(), digest)
+            .is_err()
+    );
+    assert!(sdk.retention_elapsed(&refreshed).is_ok());
+}
+#[tokio::test]
+async fn public_sdk_actual_native_missing_record_and_restart_cannot_reconstruct_source() {
+    let f = Fixture::start(8).await;
+    let restarted = Fixture::start(8).await;
+    let sdk = f.sdk();
+    let observed = sdk.issue(f.sdk_request(&sdk)).await.unwrap();
+    let digest = observed
+        .context()
+        .request_sha256
+        .as_slice()
+        .try_into()
+        .unwrap();
+    let prepared = sdk
+        .prepare_observation(observed.context().clone(), digest)
+        .unwrap();
+    let binding = hopae_grpc::receipt_binding::digest(&context(observed.context()), None).unwrap();
+    let signer = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let claims = observed.evidence().claims();
+    let missing = hopae_grpc::receipt::sign(
+        &signer,
+        &hopae_grpc::receipt::Claims {
+            purpose: hopae_grpc::receipt::Purpose::Authentication,
+            issued_ms: claims.issued_ms,
+            expires_ms: claims.expires_ms,
+            binding,
+            nonce: [42; 32],
+        },
+    )
+    .unwrap();
+    assert!(
+        hopae_grpc::receipt::verify_signature(
+            &signer.verifying_key(),
+            &missing,
+            hopae_grpc::receipt::Purpose::Authentication,
+            &binding
+        )
+        .is_ok()
+    );
+    assert!(sdk.observe(prepared.clone(), &missing).await.is_err());
+    assert!(sdk.observe(prepared, observed.receipt()).await.is_ok());
+    let next = restarted.sdk();
+    let prepared = next
+        .prepare_observation(observed.context().clone(), digest)
+        .unwrap();
+    assert!(next.observe(prepared, observed.receipt()).await.is_err());
+    let still_live = sdk
+        .prepare_observation(observed.context().clone(), digest)
+        .unwrap();
+    assert!(sdk.observe(still_live, observed.receipt()).await.is_ok());
+    assert_eq!(f.provider_calls(), 1);
+    assert_eq!(restarted.provider_calls(), 0);
+}
+#[tokio::test]
+async fn public_sdk_actual_native_owner_withdrawal_refuses_fresh_observation_and_refresh() {
+    for owner in 0..3 {
+        let f = Fixture::start(8).await;
+        let sdk = f.sdk();
+        let observed = sdk.issue(f.sdk_request(&sdk)).await.unwrap();
+        let digest = observed
+            .context()
+            .request_sha256
+            .as_slice()
+            .try_into()
+            .unwrap();
+        let prepared = sdk
+            .prepare_observation(observed.context().clone(), digest)
+            .unwrap();
+        let raw = observed.receipt().to_vec();
+        let app = f.services.snapshot.load_full();
+        match owner {
+            0 => f.services.snapshot.store(Arc::new((*app).clone())),
+            1 => {
+                f.services
+                    .authentication_authority
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .publish(
+                        &mut f.services.store.conn(),
+                        1,
+                        None,
+                        "owned-sdk-withdrawal",
+                        &|_| None,
+                        &|_| Ok(()),
+                    )
+                    .unwrap();
+            }
+            _ => {
+                f.services
+                    .receipt_authority
+                    .lock()
+                    .unwrap()
+                    .publish(
+                        &mut f.services.store.conn(),
+                        1,
+                        &[],
+                        "owned-sdk-key-withdrawal",
+                        &|_| Ok(()),
+                    )
+                    .unwrap();
+            }
+        }
+        assert!(
+            sdk.observe(prepared.clone(), &raw).await.is_err(),
+            "owner {owner}"
+        );
+        assert!(sdk.refresh(observed).await.is_err(), "owner {owner}");
+        if owner == 0 {
+            f.services.snapshot.store(app);
+            assert!(sdk.observe(prepared, &raw).await.is_err());
+        }
+        assert_eq!(f.provider_calls(), 1);
+    }
+}
+#[tokio::test]
+async fn public_sdk_actual_tokenreview_delay_and_expired_original_record_never_renew() {
+    let f = Fixture::start(8).await;
+    let sdk = f.sdk();
+    std::fs::write(f.root.path().join("mode"), "hold").unwrap();
+    let request = f.sdk_request(&sdk);
+    let issue = sdk.issue(request);
+    let release = async {
+        f.held().await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        std::fs::write(f.root.path().join("release"), "yes").unwrap();
+    };
+    let (result, ()) = tokio::join!(issue, release);
+    let observed = result.unwrap();
+    let before = sdk.check(&observed, observed.request()).unwrap();
+    assert!(before <= Duration::from_millis(800));
+    let digest = observed
+        .context()
+        .request_sha256
+        .as_slice()
+        .try_into()
+        .unwrap();
+    let raw = observed.receipt().to_vec();
+    let prepared = sdk
+        .prepare_observation(observed.context().clone(), digest)
+        .unwrap();
+    let observed = sdk.refresh(observed).await.unwrap();
+    assert!(sdk.check(&observed, observed.request()).unwrap() <= before);
+    tokio::time::sleep(Duration::from_millis(850)).await;
+    assert!(sdk.check(&observed, observed.request()).is_err());
+    assert!(sdk.observe(prepared, &raw).await.is_err());
+    assert!(sdk.refresh(observed).await.is_err());
+    assert_eq!(f.provider_calls(), 1);
+}
+
+#[tokio::test]
+async fn public_sdk_actual_slow_reply_without_a_conservative_admission_interval_refuses() {
+    let f = Fixture::start(8).await;
+    let sdk = f.sdk();
+    std::fs::write(f.root.path().join("mode"), "hold").unwrap();
+    let request = f.sdk_request(&sdk);
+    let issue = sdk.issue(request);
+    let release = async {
+        f.held().await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        std::fs::write(f.root.path().join("release"), "yes").unwrap();
+    };
+    let (result, ()) = tokio::join!(issue, release);
+    // Source~400ms remaining, receiver~600ms exchange: pre-RPC lower bound
+    // cannot survive. Refusal is required, even if raw owner RPC could succeed.
+    assert!(result.is_err());
+    assert_eq!(f.provider_calls(), 1);
 }
