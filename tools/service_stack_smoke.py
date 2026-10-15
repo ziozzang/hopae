@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Owned actual Hangang/Hopae/Pumgye, optional Sumunjang; no operational identities."""
-import argparse, base64, copy, hashlib, sqlite3, http.client, http.server, json, os, secrets, ssl, struct, subprocess, tempfile, threading, time, urllib.request
+import argparse, base64, contextlib, copy, hashlib, sqlite3, http.client, http.server, json, os, secrets, ssl, struct, subprocess, tempfile, threading, time, urllib.request
 from pathlib import Path
 from remote_hangang_smoke import port
 
@@ -15,10 +15,13 @@ def main():
     p.add_argument('--projection-owner',action='store_true')
     p.add_argument('--permit-issuance',action='store_true')
     p.add_argument('--credential-projection',action='store_true')
+    p.add_argument('--observed',action='store_true',help='Qualify actual observed authentication, permit and output owners')
+    p.add_argument('--keep-workdir',action='store_true',help='Retain private synthetic fixture state and logs for diagnosis')
     p.add_argument('--legacy-pumgye-binary',type=Path)
     p.add_argument('--external-verifier',action='store_true')
     p.add_argument('--durable-restart',action='store_true')
     args=p.parse_args()
+    if args.observed and not args.credential_projection:p.error('--observed requires --credential-projection')
     if args.credential_projection and not args.permit_issuance:p.error('--credential-projection requires --permit-issuance')
     if args.resource_catalog and not args.grpc:p.error('--resource-catalog requires --grpc')
     if args.native_resource and not (args.grpc and args.resource_catalog and args.sumunjang_binary):p.error('--native-resource requires --grpc --resource-catalog and --sumunjang-binary')
@@ -46,7 +49,10 @@ def main():
     verifier=http.server.ThreadingHTTPServer(('127.0.0.1',0),Verifier);threading.Thread(target=verifier.serve_forever,daemon=True).start()
     origin=http.server.ThreadingHTTPServer(('127.0.0.1',0),Origin);threading.Thread(target=origin.serve_forever,daemon=True).start()
     try:
-        with tempfile.TemporaryDirectory(prefix='owned-service-stack-') as tmp:
+        workspace = (contextlib.nullcontext(tempfile.mkdtemp(prefix='owned-service-stack-'))
+                     if args.keep_workdir else tempfile.TemporaryDirectory(prefix='owned-service-stack-'))
+        with workspace as tmp:
+            if args.keep_workdir:print('Private fixture workdir:',tmp,flush=True)
             root=Path(tmp);public,admin,portal,http_verify,hop_native,pum_http,pum_native=[port() for _ in range(7)]
             hop_grpc,pum_grpc,guard_http,guard_native,guard_grpc=[port() for _ in range(5)]
             route_port=port()
@@ -117,6 +123,21 @@ def main():
                 (root/'hopae.json').write_text(json.dumps(hop))
                 config['http'][0]['auth']['native_resource']['permission_permit']=permit_pin
                 (root/'permit-key.json').write_text(json.dumps(dict(permit_pin,seed_env='OWNED_PERMIT_SEED')))
+            if args.observed:
+                config['http'][0]['auth']['native_resource']['observed']={
+                    'identity_authority':'epoch1',
+                    'minimum_profile_revision':1,
+                    'minimum_application_generation':1,
+                    'minimum_key_registry_revision':1,
+                    'source_error_ppm':500,
+                    'receiver_error_ppm':500,
+                    'maximum_final_header_bytes':32768,
+                }
+                hop['projection_receiver']['observed_clock_rates']={'source_ppm':500,'receiver_ppm':500}
+                (root/'hopae.json').write_text(json.dumps(hop))
+                authentication_live=json.loads((root/'authentication-live.json').read_text())
+                authentication_live['observed_clock_rates']={'source_ppm':500,'receiver_ppm':500}
+                (root/'authentication-live.json').write_text(json.dumps(authentication_live))
             (root/'hangang.json').write_text(json.dumps(config))
             def start(binary,argv,name):
                 log=open(root/(name+'.log'),'ab');process=subprocess.Popen([str(binary.resolve()),*argv],env=env,stdout=log,stderr=log);processes.append(process);return process
@@ -131,6 +152,7 @@ def main():
             context=ssl.create_default_context(cafile=str(root/'ca.pem'));context.load_cert_chain(str(root/'client.pem'),str(root/'client.key'))
             pum_args=['--listen',f'0.0.0.0:{pum_http}','--decision-listen',f'0.0.0.0:{pum_native}','--database',str(root/'pumgye.db'),'--policy',str(root/'policy.json'),'--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--client-ca',str(root/'ca.pem'),*(['--grpc-listen',f'0.0.0.0:{pum_grpc}'] if args.grpc else [])]
             if args.permit_issuance:pum_args+=['--permit-key',str(root/'permit-key.json')]
+            if args.observed:pum_args+=['--observed-permits','--observed-authority','owned-pumgye']
             hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae')
             guard_args=[]
             if args.sumunjang_binary:
@@ -174,6 +196,7 @@ def main():
             assert request()==200,f'initial projection status={request.last_status}, elapsed_ms={request.last_elapsed_ms}'
             assert request()==200,f'repeated projection status={request.last_status}, elapsed_ms={request.last_elapsed_ms}'
             assert len(seen)==2
+            if args.observed:print('PASS: actual observed authentication, separate Pumgye permit and Hopae output clocks reach the final backend through Hangang.')
             if args.credential_projection:print('PASS: actual four-server final credential projection delivers only the separate referenced origin bearer; incoming API credential is absent.')
             if not args.credential_projection:assert all(not any(k.lower()=='authorization' for k in h) for h in seen)
             if args.native_resource:assert seen_paths==['/api/secure','/api/secure'] and seen_bodies==[b'owned final entity']*2, 'final target/entity mismatch'

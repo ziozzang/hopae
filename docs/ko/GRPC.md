@@ -45,3 +45,24 @@ permit 질의를 사용하며 기존 엄격 시간 계약 1과 분리됩니다. 
 
 네이티브 관측형 구현과 명시적 시계 오차 설정은
 [네이티브 관측형 paired projection](OBSERVED_PROJECTION.md)을 참고한다.
+
+## 실제 네 프로세스 관측 경로 검증
+
+`tools/service_stack_smoke.py --observed`는 실제 인증·품계 permit·호패 출력
+소유자를 사용하는 경로를 선택한다. 현재 바이너리와 전체 연결 옵션을 지정한다.
+
+```sh
+python3 tools/service_stack_smoke.py \
+  --gateway-binary /path/to/hangang --hopae-binary /path/to/hopae \
+  --pumgye-binary /path/to/pumgye --sumunjang-binary /path/to/sumunjang \
+  --grpc --resource-catalog --native-resource --route-owner \
+  --projection-owner --permit-issuance --credential-projection \
+  --observed --durable-restart
+```
+
+임시 신원·키·DB를 생성하고 변환된 자격증명 전달과 기존 자격증명 제거,
+최종 경로·본문 일치, 거부 요청의 백엔드 미도달, 잘못된 키·소유자 서버,
+권한·네트워크·guest 거부, 실제 재시작 후 회수 유지 등을 검사한다.
+`--keep-workdir`는 진단용 비공개 테스트 상태·로그를 보관한다. 확인 후 해당
+디렉터리를 보호·정리해야 한다. 기능 성공은 처리량·독립 호스트 시계·복원·복제·
+Kubernetes·운영 배포 검증을 의미하지 않는다.

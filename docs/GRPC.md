@@ -58,3 +58,26 @@ bytes for both strict and observed projection replies.
 
 The native observed implementation and explicit clock-rate configuration are
 described in [Native observed paired projection](OBSERVED_PROJECTION.md).
+
+## Owned four-process observed qualification
+
+`tools/service_stack_smoke.py --observed` selects actual observed authentication,
+Pumgye permit and Hopae output owners. Supply current binaries and the existing
+full-chain flags:
+
+```sh
+python3 tools/service_stack_smoke.py \
+  --gateway-binary /path/to/hangang --hopae-binary /path/to/hopae \
+  --pumgye-binary /path/to/pumgye --sumunjang-binary /path/to/sumunjang \
+  --grpc --resource-catalog --native-resource --route-owner \
+  --projection-owner --permit-issuance --credential-projection \
+  --observed --durable-restart
+```
+
+The fixture generates private temporary identities, keys and databases. It checks
+final transformed credential delivery and incoming credential removal, exact final
+path/body, refused requests producing no backend call, wrong pins/owner peers,
+permission/network/guest denial, and durable revocation across actual restarts.
+`--keep-workdir` retains private synthetic state/logs for diagnosis; protect and
+remove that directory after inspection. Functional success does not qualify
+throughput, independent-host clocks, restore/clone, Kubernetes or operating rollout.
