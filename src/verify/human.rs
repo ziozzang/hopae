@@ -306,6 +306,51 @@ impl Owner {
     }
 }
 impl Admission {
+    /// Initial query validation may read the native wall clock before SQL.
+    #[allow(dead_code)] // Additive Human RPC ingress integration.
+    pub(crate) fn require_current(&self, owner: &Arc<Owner>) -> StoreResult<()> {
+        self.now(owner).map(|_| ())
+    }
+    /// Final ingress fence: no wall-clock/metric/provider callback after SQL.
+    #[allow(dead_code)] // Additive Human RPC ingress integration.
+    pub(crate) fn require_final_current(&self, owner: &Arc<Owner>) -> StoreResult<()> {
+        self.final_sample(owner).map(|_| ())
+    }
+    fn final_sample(&self, owner: &Arc<Owner>) -> StoreResult<TimeSample> {
+        let result = (|| {
+            if !self.ready()
+                || self.failed.load(Ordering::Acquire)
+                || !Weak::ptr_eq(&self.owner, &Arc::downgrade(owner))
+                || std::time::Instant::now() >= self.deadline
+            {
+                return Err(refused());
+            }
+            let ticks = owner.read()?;
+            let elapsed = ticks.checked_sub(self.started).ok_or_else(refused)?;
+            if elapsed >= self.limit_ms {
+                return Err(refused());
+            }
+            // The last actual wall sample precedes this elapsed interval.
+            // Charging the full original elapsed interval again is conservative;
+            // it avoids another externally supplied wall callback after SQL.
+            let wall = self.last_wall.load(Ordering::Acquire).max(self.wall.0);
+            let extra = i64::try_from(elapsed.checked_add(1).ok_or_else(refused)?)
+                .map_err(|_| refused())?;
+            let now = Timestamp(wall.checked_add(extra).ok_or_else(refused)?);
+            if !self.ready()
+                || self.failed.load(Ordering::Acquire)
+                || owner.failed.load(Ordering::Acquire)
+                || std::time::Instant::now() >= self.deadline
+            {
+                return Err(refused());
+            }
+            Ok(TimeSample { now, ticks })
+        })();
+        if result.is_err() {
+            self.failed.store(true, Ordering::Release);
+        }
+        result
+    }
     fn ready(&self) -> bool {
         self.readiness
             .as_ref()
@@ -521,7 +566,7 @@ impl Checked {
             if w.retired.load(Ordering::Acquire) {
                 return Err(refused());
             }
-            let sample = w.admission.sample(&w.owner)?;
+            let sample = w.admission.final_sample(&w.owner)?;
             let now = w.admission.after(&w.owner, &sample)?;
             w.owner
                 .registry
@@ -544,7 +589,7 @@ impl Checked {
         let result = (|| {
             self.require_publication_current()?;
             let w = &self.witness;
-            let sample = w.admission.sample(&w.owner)?;
+            let sample = w.admission.final_sample(&w.owner)?;
             let elapsed = sample
                 .ticks
                 .checked_sub(w.admission.started)

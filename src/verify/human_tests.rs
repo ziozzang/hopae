@@ -2109,7 +2109,7 @@ async fn native_human_source_facts_refuse_scope_substitution_and_latch() {
 
 #[tokio::test]
 async fn native_human_source_final_clock_callback_cannot_hide_publication_withdrawal() {
-    for final_read in [3, 5] {
+    for final_read in [2, 3] {
         let mut f = Fx::new(None).await;
         let reads = Arc::new(AtomicU64::new(0));
         let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2133,7 +2133,7 @@ async fn native_human_source_final_clock_callback_cannot_hide_publication_withdr
             .await
             .unwrap();
         armed.store(true, Ordering::Release);
-        if final_read == 3 {
+        if final_read == 2 {
             assert!(checked.require_publication_current().is_err());
         } else {
             assert!(checked.source_time().is_err());
@@ -2208,4 +2208,46 @@ async fn native_human_source_facts_never_promote_aal_from_session_alone() {
         .await
         .unwrap();
     assert_eq!(facts.aal, 1);
+}
+
+#[tokio::test]
+async fn native_human_source_final_fences_do_not_call_wall_after_durable_check() {
+    struct CountWall {
+        base: Arc<TestClock>,
+        calls: Arc<AtomicU64>,
+    }
+    impl Clock for CountWall {
+        fn now(&self) -> Timestamp {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            self.base.now()
+        }
+    }
+    let mut f = Fx::new(None).await;
+    let calls = Arc::new(AtomicU64::new(0));
+    let wall: Arc<dyn Clock> = Arc::new(CountWall {
+        base: f.clock.clone(),
+        calls: calls.clone(),
+    });
+    f.ctx.clock = wall.clone();
+    f.owner = human::Owner::new(
+        f.store.clone(),
+        f.owner.registry.clone(),
+        f.ctx.snapshot.clone(),
+        wall,
+        f.rng.as_ref(),
+    );
+    let (cookie, _) = f.login().await;
+    let checked = f
+        .witness(&cookie)
+        .await
+        .finish(&f.input(&cookie))
+        .await
+        .unwrap();
+    let before = calls.load(Ordering::Acquire);
+    assert!(before > 0);
+    checked.require_publication_current().unwrap();
+    checked.source_time().unwrap();
+    assert_eq!(calls.load(Ordering::Acquire), before);
+    checked.require_current_retained().await.unwrap();
+    assert!(calls.load(Ordering::Acquire) > before);
 }
