@@ -31,6 +31,42 @@ impl ClockRates {
             receiver_ppm,
         })
     }
+    /// Convert an already authenticated output owner's remaining budget into a
+    /// conservative receiver-local lower expiry. This numeric result does not
+    /// authenticate the report, authorize access, or establish replay retention.
+    /// Anchor the exchange before sending the RPC, never after receiving it.
+    pub fn remaining_admission_until(
+        &self,
+        remaining_ms: u32,
+        exchange: &Exchange,
+    ) -> Result<u64, Refused> {
+        let wall_elapsed = exchange
+            .after_ms
+            .checked_sub(exchange.before_ms)
+            .ok_or(Refused)?;
+        if !(1..=1000).contains(&remaining_ms)
+            || exchange.before_ms == 0
+            || exchange.elapsed_ms > 1000
+            || wall_elapsed > 1000
+            || wall_elapsed.abs_diff(exchange.elapsed_ms) > 1
+        {
+            return Err(Refused);
+        }
+        let finish = exchange.after_ms.max(
+            exchange
+                .before_ms
+                .checked_add(exchange.elapsed_ms)
+                .ok_or(Refused)?,
+        );
+        let until = exchange
+            .before_ms
+            .checked_add(self.admission_delta(remaining_ms)?)
+            .ok_or(Refused)?;
+        if until <= finish || until > MAXIMUM {
+            return Err(Refused);
+        }
+        Ok(until)
+    }
     fn admission_delta(&self, remaining: u32) -> Result<u64, Refused> {
         let source_ticks = u64::from(remaining)
             .checked_sub(QUANTUM_MS)
@@ -369,5 +405,78 @@ mod tests {
         )
         .unwrap();
         assert!(swapped.intersect(first()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod remaining_tests {
+    use super::*;
+    #[test]
+    fn output_budget_charges_whole_exchange_and_rejects_exact_expiry() {
+        let exchange = Exchange {
+            before_ms: 100,
+            after_ms: 108,
+            elapsed_ms: 8,
+        };
+        assert_eq!(
+            ClockRates::EQUAL.remaining_admission_until(10, &exchange),
+            Ok(109)
+        );
+        for remaining in [0, 1, 9, 1001] {
+            assert!(
+                ClockRates::EQUAL
+                    .remaining_admission_until(remaining, &exchange)
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn malformed_and_overflowing_exchanges_close() {
+        for (before_ms, after_ms, elapsed_ms) in [
+            (0, 1, 1),
+            (10, 9, 0),
+            (10, 14, 1),
+            (10, 1011, 1001),
+            (u64::MAX - 1, u64::MAX, 2),
+            (MAXIMUM - 1, MAXIMUM, 1),
+        ] {
+            let exchange = Exchange {
+                before_ms,
+                after_ms,
+                elapsed_ms,
+            };
+            assert!(
+                ClockRates::EQUAL
+                    .remaining_admission_until(1000, &exchange)
+                    .is_err()
+            );
+        }
+    }
+    #[test]
+    fn lower_expiry_precedes_physical_expiry_at_independent_tick_phases() {
+        // Nanosecond rational model: fastest source and slowest receiver.
+        // Allow a full source quantization tick of report overstatement.
+        for (source_ppm, receiver_ppm) in [(0, 0), (100, 200), (200_000, 300_000)] {
+            let rates = ClockRates::new(source_ppm, receiver_ppm).unwrap();
+            for phase in [0_u128, 1, 499_999, 999_999] {
+                for outward_ms in [0_u64, 1, 7] {
+                    let exchange = Exchange {
+                        before_ms: 100,
+                        after_ms: 110,
+                        elapsed_ms: 10,
+                    };
+                    let until = rates.remaining_admission_until(100, &exchange).unwrap();
+                    let receiver_deadline = u128::from(until - 100) * 1_000_000;
+                    let actual_source_remaining = 99_u128 * 1_000_000 + phase;
+                    let physical_remaining_receiver = actual_source_remaining
+                        * (PARTS - u128::from(receiver_ppm))
+                        / (PARTS + u128::from(source_ppm));
+                    assert!(
+                        receiver_deadline
+                            <= physical_remaining_receiver + u128::from(outward_ms) * 1_000_000
+                    );
+                }
+            }
+        }
     }
 }

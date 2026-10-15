@@ -124,6 +124,12 @@ pub struct Observation {
     registry_revision: u64,
 }
 impl Observation {
+    /// Authenticated registry generation associated with this observation.
+    /// Metadata alone does not establish current admission.
+    pub fn key_registry_revision(&self) -> u64 {
+        self.registry_revision
+    }
+
     /// Exact signed public proof for a downstream owner to verify independently.
     pub fn receipt(&self) -> &[u8] {
         &self.receipt
