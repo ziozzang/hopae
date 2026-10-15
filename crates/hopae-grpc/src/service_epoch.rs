@@ -58,9 +58,85 @@ pub fn decode(value: &str) -> Result<Epoch<'_>, Refused> {
         application_generation: revision(application)?,
     })
 }
+/// Exact issuing process clock; a shared logical authority is not a clock domain.
+pub struct ClockEpoch<'a> {
+    pub epoch: Epoch<'a>,
+    pub clock_domain: &'a str,
+}
+fn clock_domain(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && value.bytes().any(|b| b != b'0')
+}
+pub fn encode_clock(
+    base: &str,
+    profile: u64,
+    application: u64,
+    clock: &str,
+) -> Result<String, Refused> {
+    if !clock_domain(clock) {
+        return Err(Refused);
+    }
+    let result = format!("clock1:{clock}:{}", encode(base, profile, application)?);
+    if result.len() > 128 {
+        return Err(Refused);
+    }
+    Ok(result)
+}
+pub fn decode_clock(value: &str) -> Result<ClockEpoch<'_>, Refused> {
+    if value.len() > 128 {
+        return Err(Refused);
+    }
+    let (clock, epoch) = value
+        .strip_prefix("clock1:")
+        .ok_or(Refused)?
+        .split_once(':')
+        .ok_or(Refused)?;
+    if !clock_domain(clock) {
+        return Err(Refused);
+    }
+    Ok(ClockEpoch {
+        epoch: decode(epoch)?,
+        clock_domain: clock,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clock_epoch_is_canonical_borrowed_bounded_and_changes_signed_identity() {
+        let first = "123456789abcdef0123456789abcdef0";
+        let value = encode_clock("owned", 7, 11, first).unwrap();
+        let parsed = decode_clock(&value).unwrap();
+        assert_eq!(parsed.epoch.authority, "owned");
+        assert_eq!(parsed.clock_domain, first);
+        assert_eq!(
+            (
+                parsed.epoch.profile_revision,
+                parsed.epoch.application_generation
+            ),
+            (7, 11)
+        );
+        assert_ne!(
+            value,
+            encode_clock("owned", 7, 11, "223456789abcdef0123456789abcdef0").unwrap()
+        );
+        assert!(decode_clock(&encode("owned", 7, 11).unwrap()).is_err());
+        for clock in [
+            "",
+            "0",
+            "00000000000000000000000000000000",
+            "123456789ABCDEF0123456789ABCDEF0",
+            "123456789abcdef0123456789abcdef0x",
+        ] {
+            assert!(encode_clock("owned", 7, 11, clock).is_err());
+        }
+        assert!(encode_clock(&"x".repeat(96), 7, 11, first).is_err());
+    }
+
     #[test]
     fn canonical_borrowed_epoch_binds_both_owners() {
         let value = encode("owned:realm", 7, 11).unwrap();

@@ -44,15 +44,23 @@ struct Fence {
 }
 impl Fence {
     fn check(&self) -> Result<(), Refused> {
+        // External callbacks can overlap publication or cancellation. Sample
+        // them before the final local owner and activity fences.
+        let now = self.runtime.now()?;
+        let sampled = std::time::Instant::now();
+        let caller_current = (self.caller)();
+        let elapsed =
+            u64::try_from(sampled.elapsed().as_nanos().div_ceil(1_000_000)).map_err(|_| Refused)?;
+        let now = now.checked_add(elapsed).ok_or(Refused)?;
         if !self.active.0.load(Ordering::Acquire)
-            || !(self.caller)()
+            || !caller_current
             || !self.profile.available()
             || !Arc::ptr_eq(&self.profile, &self.runtime.profiles.load_full())
             || !Arc::ptr_eq(&self.application, &self.runtime.applications.load_full())
             || !Arc::ptr_eq(&self.plan, &self.runtime.plans.load_full())
             || !self.keys.current()
             || !self.plan.available()
-            || self.runtime.now()? >= self.expires_ms
+            || now >= self.expires_ms
         {
             return Err(Refused);
         }
@@ -399,6 +407,79 @@ pub(crate) mod tests {
         services.rng.fill(&mut nonce);
         nonce
     }
+    fn qualify_final_fence_clock_changes(
+        runtime: &Arc<Runtime>,
+        request: Arc<Request>,
+        expires_ms: u64,
+    ) {
+        struct HookClock {
+            inner: Arc<dyn crate::crypto::Clock>,
+            on_read: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        }
+        impl crate::crypto::Clock for HookClock {
+            fn now(&self) -> crate::crypto::Timestamp {
+                let callback = self.on_read.lock().unwrap().take();
+                if let Some(callback) = callback {
+                    callback();
+                }
+                self.inner.now()
+            }
+        }
+        for revoke_caller in [false, true] {
+            let clock = Arc::new(HookClock {
+                inner: runtime.clock.clone(),
+                on_read: std::sync::Mutex::new(None),
+            });
+            // Share the real owners; only the native clock/caller dependencies
+            // are instrumented. No receipt is consumed or reissued by this check.
+            let checked_runtime = Arc::new(Runtime {
+                resources: runtime.resources.clone(),
+                issuer: runtime.issuer.clone(),
+                verifier: runtime.verifier.clone(),
+                profiles: runtime.profiles.clone(),
+                applications: runtime.applications.clone(),
+                plans: runtime.plans.clone(),
+                store: runtime.store.clone(),
+                clock: clock.clone(),
+                workers: runtime.workers.clone(),
+            });
+            let active = Arc::new(AtomicBool::new(true));
+            let caller_current = Arc::new(AtomicBool::new(true));
+            let caller_read = caller_current.clone();
+            let fence = Fence {
+                runtime: checked_runtime,
+                request: request.clone(),
+                profile: runtime.profiles.load_full(),
+                application: runtime.applications.load_full(),
+                plan: runtime.plans.load_full(),
+                keys: runtime.verifier.capture().unwrap(),
+                caller: Arc::new(move || caller_read.load(Ordering::Acquire)),
+                active: Active(active.clone()),
+                expires_ms,
+            };
+            assert!(fence.check().is_ok());
+            let changed = if revoke_caller {
+                caller_current
+            } else {
+                active
+            };
+            *clock.on_read.lock().unwrap() = Some(Box::new(move || {
+                changed.store(false, Ordering::Release);
+            }));
+            let result = fence.check();
+            assert!(
+                runtime.now().unwrap() < expires_ms,
+                "the test must not pass through incidental receipt expiry"
+            );
+            assert!(fence.keys.current());
+            assert!(Arc::ptr_eq(&fence.profile, &runtime.profiles.load_full()));
+            assert!(
+                result.is_err(),
+                "clock sampling must precede final caller/activity fences (revoke_caller={revoke_caller})"
+            );
+        }
+    }
+
     /// Real Hopae ownership/SQL with an explicit mTLS protocol mock for Pumgye.
     // Intentionally hold the owned store lock to test cancellation of queued work.
     #[allow(clippy::await_holding_lock)]
@@ -508,6 +589,8 @@ pub(crate) mod tests {
         let runtime = Runtime::from_services(&services).unwrap().unwrap();
         let projection =
             crate::http::grpc_projection::server(runtime.clone(), services.caller_keys.clone());
+        let receipts =
+            crate::http::grpc_gateway::receipt_server_for_test(services.clone(), router.clone());
         let running = tokio::spawn(async move {
             hangang_runtime::server(tls)
                 .unwrap()
@@ -517,6 +600,7 @@ pub(crate) mod tests {
                         .max_encoding_message_size(128),
                 )
                 .add_service(projection)
+                .add_service(receipts)
                 .serve_with_incoming_shutdown(hangang_runtime::incoming(listener), async {
                     let _ = stopped.await;
                 })
@@ -537,6 +621,7 @@ pub(crate) mod tests {
             .project(request.clone(), caller.clone())
             .await
             .unwrap();
+        qualify_final_fence_clock_changes(&runtime, request.clone(), output.expires_ms());
         let (name, value) = output.into_header().unwrap();
         assert_eq!(name, "authorization");
         assert!(value.is_sensitive());
@@ -617,9 +702,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let mut client =
-            hopae_grpc::v1::credential_projection_client::CredentialProjectionClient::new(channel)
-                .max_encoding_message_size(8448)
-                .max_decoding_message_size(8192);
+            hopae_grpc::v1::credential_projection_client::CredentialProjectionClient::new(
+                channel.clone(),
+            )
+            .max_encoding_message_size(8448)
+            .max_decoding_message_size(8192);
         let request_rpc = fresh(&services, &router, &message, key, plan_revision).await;
         let payload = PermitValidationRequest {
             request_id: 9001,
@@ -661,6 +748,13 @@ pub(crate) mod tests {
             tonic::Code::Unavailable
         );
         assert_eq!(count(), 6);
+        let observed_request = crate::http::grpc_gateway::qualify_observed_time_for_test(
+            &services,
+            message.clone(),
+            key,
+            channel.clone(),
+        )
+        .await;
         let request = fresh(&services, &router, &message, key, plan_revision).await;
         let output = runtime.project(request, caller).await.unwrap();
         services
@@ -670,6 +764,27 @@ pub(crate) mod tests {
             .publish(&mut services.store.conn(), 1, &[], "operator", &|_| Ok(()))
             .unwrap();
         assert!(output.into_header().is_err());
+        let signed_expiry =
+            u64::from_be_bytes(observed_request.receipt[10..18].try_into().unwrap());
+        assert!((services.clock.now().0 as u64) < signed_expiry);
+        let mut retired = tonic::Request::new(observed_request);
+        retired
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {key}").parse().unwrap());
+        let mut clocks =
+            hopae_grpc::v1::authentication_receipts_client::AuthenticationReceiptsClient::new(
+                channel,
+            );
+        assert_eq!(
+            clocks
+                .observe_service_time(retired)
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+
         stop.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(3), running)
             .await

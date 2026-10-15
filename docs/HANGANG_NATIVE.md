@@ -433,3 +433,39 @@ request/client/generation; wire issuance/live-validation fields, runtime adoptio
 and replay/final-output integration are not implemented by this module. The
 legacy strict receipt API remains strict, and cross-host K8s release qualification
 remains open.
+
+### Explicit owner-time RPC prototype
+
+`AuthenticationReceipts.IssueServiceObserved` and `ObserveServiceTime` are
+separate opt-in methods. Legacy methods retain strict local-time semantics.
+Observed proofs sign a canonical `clock1` epoch containing a random nonzero
+128-bit issuing-process clock identifier, native profile revision and application
+generation. The complete epoch remains bounded to 128 bytes; long authority bases
+that fit the legacy format may refuse observed issuance. At maximum revisions the
+base can occupy at most 42 bytes. A different process with the same signing key
+cannot observe the original process's proof.
+
+The issuer clock combines monotonic process age with a nondecreasing sampled
+wall offset, so wall rollback does not freeze its domain. Issuance translates the
+native credential's remaining UTC budget and subtracts captured-proof monotonic
+age; it does not refresh an old proof or compare virtual expiry directly with
+credential UTC expiry. Observation verifies the live registry key and exact
+native owners before returning digest, clock identifier, owner time, remaining
+milliseconds and revisions, with cache TTL zero. The report itself grants no
+permission and is not a revocation lease.
+
+The actual Hopae mTLS harness exercises both methods, context/signature/hash
+mutation, legacy refusal, another issuer process and key withdrawal. Seven
+additional public SDK tests pass, including 400 offset/phase/asymmetric-latency
+scenarios. Deterministic clock callbacks also reproduce profile publication during
+final validation: the old load ordering fails the regression, while sampling the
+clock before acquiring the final profile passes. Final projection tests cover
+activity and caller changes during clock sampling.
+
+This is a source RPC prototype. Hangang/Pumgye native clients, paired permit
+observations and replay consumption have not adopted this contract. In particular,
+receiver wall-forward cleanup must not discard a nonce that remains valid at its
+source; restart and issuer affinity require a defined durable retention model.
+Caller keys currently identify rotation slots, not explicit caller roles. The
+new RPC tests do not qualify that missing role model, independent-host clients,
+fleet restore or the complete Kubernetes release gate.

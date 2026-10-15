@@ -6,7 +6,7 @@ message VerifyRequest { uint64 request_id = 1; repeated Header headers = 2; }
 message VerifyReply { uint64 request_id = 1; uint32 status = 2; repeated Header headers = 3; bytes body = 4; }
 
 // Separate opt-in service; ordinary Verify never emits projection receipts.
-service AuthenticationReceipts { rpc IssueService(ServiceReceiptRequest) returns (ServiceReceiptReply); rpc ValidateService(ServiceReceiptValidationRequest) returns (ServiceReceiptValidationReply); }
+service AuthenticationReceipts { rpc IssueService(ServiceReceiptRequest) returns (ServiceReceiptReply); rpc ValidateService(ServiceReceiptValidationRequest) returns (ServiceReceiptValidationReply); rpc IssueServiceObserved(ServiceReceiptRequest) returns (ServiceReceiptObservedReply); rpc ObserveServiceTime(ServiceReceiptValidationRequest) returns (ServiceReceiptTimeReply); }
 message ServiceReceiptRequest { VerifyRequest verification = 1; string service = 2; string audience = 3; bytes request_sha256 = 4; }
 message ReceiptIdentity { string subject_ref = 1; uint32 kind = 2; uint32 aal = 3; uint64 revision = 4; uint64 credential_generation = 5; }
 message AuthenticationReceiptContext { string issuer_ref = 1; uint64 key_epoch = 2; string identity_authority_epoch = 3; ReceiptIdentity identity = 4; string service = 5; string audience = 6; bytes request_sha256 = 7; }
@@ -26,3 +26,12 @@ message ProjectionPlanReply { uint64 request_id = 1; uint64 revision = 2; string
 service CredentialProjection { rpc Project(ProjectionRequest) returns (ProjectionReply); }
 message ProjectionRequest { uint64 request_id = 1; uint32 permission_contract = 2; bytes permission_query = 3; }
 message ProjectionReply { uint64 request_id = 1; string service = 2; string audience = 3; bytes request_sha256 = 4; string header_name = 5; bytes header_value = 6; uint64 expires_ms = 7; uint64 plan_revision = 8; }
+
+// Explicit owner-relative time contract. Legacy replies cannot imply these facts.
+message ServiceReceiptObservedReply { ServiceReceiptReply receipt = 1; ServiceReceiptTimeReply observation = 2; }
+message ServiceReceiptTimeReply {
+  uint64 request_id = 1; uint64 owner_now_ms = 2; uint32 remaining_ms = 3;
+  bytes receipt_sha256 = 4; string clock_domain = 5;
+  uint64 profile_revision = 6; uint64 application_generation = 7;
+  uint64 key_registry_revision = 8; uint32 cache_ttl_ms = 9;
+}

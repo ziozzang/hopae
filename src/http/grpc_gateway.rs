@@ -195,6 +195,7 @@ impl v1::projection_plans_server::ProjectionPlans for PlanService {
 struct ReceiptService {
     pipeline: Service,
     issuer: Arc<crate::auth_gateway::receipt_issuer::Issuer>,
+    key_verifier: crate::auth_gateway::receipt_authority::Verifier,
     profiles: Arc<arc_swap::ArcSwap<crate::auth_gateway::authority::Snapshot>>,
     applications: Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
 }
@@ -271,6 +272,119 @@ impl v1::authentication_receipts_server::AuthenticationReceipts for ReceiptServi
         &self,
         request: Request<v1::ServiceReceiptRequest>,
     ) -> Result<Response<v1::ServiceReceiptReply>, Status> {
+        self.issue_inner(request, false).await
+    }
+    async fn issue_service_observed(
+        &self,
+        request: Request<v1::ServiceReceiptRequest>,
+    ) -> Result<Response<v1::ServiceReceiptObservedReply>, Status> {
+        let metadata = request.metadata().clone();
+        let receipt = self.issue_inner(request, true).await?.into_inner();
+        let context = receipt
+            .context
+            .clone()
+            .ok_or_else(|| Status::unavailable("native context unavailable"))?;
+        let mut check = Request::new(v1::ServiceReceiptValidationRequest {
+            request_id: receipt.request_id,
+            request_sha256: context.request_sha256.clone(),
+            context: Some(context),
+            receipt: receipt.receipt.clone(),
+        });
+        *check.metadata_mut() = metadata;
+        let observation = self.observe_service_time(check).await?.into_inner();
+        Ok(Response::new(v1::ServiceReceiptObservedReply {
+            receipt: Some(receipt),
+            observation: Some(observation),
+        }))
+    }
+    async fn observe_service_time(
+        &self,
+        request: Request<v1::ServiceReceiptValidationRequest>,
+    ) -> Result<Response<v1::ServiceReceiptTimeReply>, Status> {
+        self.pipeline.caller(request.metadata())?;
+        let _permit = self
+            .pipeline
+            .requests
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("time observation capacity"))?;
+        let metadata = request.metadata().clone();
+        let input = request.into_inner();
+        if !(1..=9_007_199_254_740_991).contains(&input.request_id)
+            || input.receipt.len() != hopae_grpc::receipt::LENGTH
+        {
+            return Err(Status::invalid_argument("invalid time observation"));
+        }
+        let context = input
+            .context
+            .ok_or_else(|| Status::invalid_argument("receipt context required"))?;
+        let identity = context
+            .identity
+            .ok_or_else(|| Status::invalid_argument("identity required"))?;
+        if identity.kind != 2 || identity.aal != 0 {
+            return Err(Status::permission_denied("service proof required"));
+        }
+        let context = hopae_grpc::receipt_binding::Context {
+            issuer_ref: &context.issuer_ref,
+            key_epoch: context.key_epoch,
+            identity_authority_epoch: &context.identity_authority_epoch,
+            identity: hopae_grpc::receipt_binding::Identity {
+                subject_ref: &identity.subject_ref,
+                kind: hopae_grpc::PrincipalKind::Service,
+                aal: 0,
+                revision: identity.revision,
+                credential_generation: identity.credential_generation,
+            },
+            service: &context.service,
+            audience: &context.audience,
+            request_sha256: context
+                .request_sha256
+                .as_slice()
+                .try_into()
+                .map_err(|_| Status::invalid_argument("request digest required"))?,
+        };
+        let expected = input
+            .request_sha256
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("request digest required"))?;
+        let live = self
+            .issuer
+            .verify_live_service_observed(
+                &self.profiles,
+                &self.applications,
+                &context,
+                &input.receipt,
+                &expected,
+                &self.key_verifier,
+            )
+            .map_err(|_| Status::permission_denied("native receipt clock or owner refused"))?;
+        let observed = live
+            .observe_time()
+            .map_err(|_| Status::unavailable("native time unavailable"))?;
+        let reply = v1::ServiceReceiptTimeReply {
+            request_id: input.request_id,
+            owner_now_ms: observed.report.owner_now_ms,
+            remaining_ms: observed.report.remaining_ms,
+            receipt_sha256: observed.report.receipt_sha256.to_vec(),
+            clock_domain: observed.clock_domain.into(),
+            profile_revision: observed.profile_revision,
+            application_generation: observed.application_generation,
+            key_registry_revision: observed.key_registry_revision,
+            cache_ttl_ms: 0,
+        };
+        self.pipeline.caller(&metadata)?;
+        live.current()
+            .map_err(|_| Status::unavailable("native time owner changed"))?;
+        Ok(Response::new(reply))
+    }
+}
+impl ReceiptService {
+    async fn issue_inner(
+        &self,
+        request: Request<v1::ServiceReceiptRequest>,
+        clocked: bool,
+    ) -> Result<Response<v1::ServiceReceiptReply>, Status> {
         self.pipeline.caller(request.metadata())?;
         let metadata = request.metadata().clone();
         let input = request.into_inner();
@@ -310,7 +424,7 @@ impl v1::authentication_receipts_server::AuthenticationReceipts for ReceiptServi
             .get::<Arc<crate::auth_gateway::receipt_issuer::CapturedService>>()
             .ok_or_else(|| Status::failed_precondition("service proof required"))?;
         let issued = captured
-            .issue(
+            .issue_domain(
                 &self.issuer,
                 &self.profiles,
                 &self.applications,
@@ -319,6 +433,7 @@ impl v1::authentication_receipts_server::AuthenticationReceipts for ReceiptServi
                     audience: &input.audience,
                     request_sha256: input.request_sha256.as_slice().try_into().unwrap(),
                 },
+                clocked,
                 &|| {
                     let token = metadata
                         .get("authorization")
@@ -447,6 +562,11 @@ fn receipt_resources(
             (Some(issuer), Some(owner)) => Some(ReceiptService {
                 pipeline,
                 issuer,
+                key_verifier: services
+                    .receipt_authority
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("receipt key owner unavailable"))?
+                    .verifier(),
                 profiles: owner
                     .lock()
                     .map_err(|_| anyhow::anyhow!("receipt profile owner unavailable"))?
@@ -457,6 +577,234 @@ fn receipt_resources(
         },
     )
 }
+#[cfg(test)]
+pub(crate) fn receipt_server_for_test(
+    services: crate::app::Services,
+    router: Router,
+) -> v1::authentication_receipts_server::AuthenticationReceiptsServer<
+    impl v1::authentication_receipts_server::AuthenticationReceipts,
+> {
+    let pipeline = Service {
+        router,
+        keys: services.caller_keys.clone(),
+        requests: Arc::new(Semaphore::new(4096)),
+    };
+    v1::authentication_receipts_server::AuthenticationReceiptsServer::new(
+        receipt_resources(pipeline, services).unwrap().unwrap(),
+    )
+    .max_decoding_message_size(wire::MAX_FRAME)
+    .max_encoding_message_size(2048)
+}
+
+#[cfg(test)]
+pub(crate) async fn qualify_observed_time_for_test(
+    services: &crate::app::Services,
+    message: v1::ServiceReceiptRequest,
+    key: &str,
+    channel: tonic::transport::Channel,
+) -> v1::ServiceReceiptValidationRequest {
+    use hopae_grpc::{receipt, receipt_binding, receipt_time, service_epoch};
+    let mut client = v1::authentication_receipts_client::AuthenticationReceiptsClient::new(channel);
+    let issue = |token: &str| {
+        let mut request = Request::new(message.clone());
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        request
+    };
+    assert_eq!(
+        client
+            .issue_service_observed(issue("wrong"))
+            .await
+            .err()
+            .unwrap()
+            .code(),
+        tonic::Code::Unauthenticated
+    );
+    let reply = client
+        .issue_service_observed(issue(key))
+        .await
+        .unwrap()
+        .into_inner();
+    let receipt = reply.receipt.unwrap();
+    let observed = reply.observation.unwrap();
+    assert_eq!(observed.request_id, receipt.request_id);
+    assert_eq!(observed.cache_ttl_ms, 0);
+    assert!(observed.remaining_ms > 0 && observed.remaining_ms <= 1000);
+    let context = receipt.context.as_ref().unwrap();
+    let identity = context.identity.as_ref().unwrap();
+    let epoch = service_epoch::decode_clock(&context.identity_authority_epoch).unwrap();
+    assert_eq!(epoch.clock_domain, observed.clock_domain);
+    assert_eq!(epoch.epoch.profile_revision, observed.profile_revision);
+    assert_eq!(
+        epoch.epoch.application_generation,
+        observed.application_generation
+    );
+    let context = receipt_binding::Context {
+        issuer_ref: &context.issuer_ref,
+        key_epoch: context.key_epoch,
+        identity_authority_epoch: &context.identity_authority_epoch,
+        identity: receipt_binding::Identity {
+            subject_ref: &identity.subject_ref,
+            kind: hopae_grpc::PrincipalKind::Service,
+            aal: 0,
+            revision: identity.revision,
+            credential_generation: identity.credential_generation,
+        },
+        service: &context.service,
+        audience: &context.audience,
+        request_sha256: [3; 32],
+    };
+    let checked = receipt::verify(
+        &ed25519_dalek::SigningKey::from_bytes(&[7; 32]).verifying_key(),
+        &receipt.receipt,
+        receipt::Purpose::Authentication,
+        &receipt_binding::digest(&context, None).unwrap(),
+        observed.owner_now_ms,
+    )
+    .unwrap();
+    assert_eq!(checked.sha256().as_slice(), observed.receipt_sha256);
+    // A replica with the same configured authority and signing key still has a
+    // different issuing clock domain, and cannot silently observe this proof.
+    let other = crate::auth_gateway::receipt_issuer::Issuer::new(
+        crate::auth_gateway::receipt_issuer::Configuration {
+            issuer_ref: context.issuer_ref.into(),
+            key_epoch: context.key_epoch,
+            identity_authority_epoch: epoch.epoch.authority.into(),
+            public_key: ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+                .verifying_key()
+                .to_bytes(),
+            scopes: vec![crate::auth_gateway::receipt_issuer::Scope {
+                service: context.service.into(),
+                audience: context.audience.into(),
+            }],
+        },
+        zeroize::Zeroizing::new([7; 32]),
+        services.clock.clone(),
+        services.rng.clone(),
+    )
+    .unwrap();
+    let profiles = services
+        .authentication_authority
+        .as_ref()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .reader();
+    let verifier = services.receipt_authority.lock().unwrap().verifier();
+    assert!(
+        other
+            .verify_live_service_observed(
+                &profiles,
+                &services.snapshot,
+                &context,
+                &receipt.receipt,
+                &[3; 32],
+                &verifier
+            )
+            .is_err()
+    );
+
+    let facts = receipt_time::Report {
+        owner_now_ms: observed.owner_now_ms,
+        remaining_ms: observed.remaining_ms,
+        receipt_sha256: *checked.sha256(),
+    };
+    // Arbitrary receiver offset does not reinterpret the signed source clock.
+    let local = observed.owner_now_ms + 100_000;
+    let bounds = receipt_time::Bounds::from_receipt(
+        &checked,
+        &facts,
+        &receipt_time::Exchange {
+            before_ms: local,
+            after_ms: local + 1,
+            elapsed_ms: 1,
+        },
+    )
+    .unwrap();
+    assert!(bounds.admit_until_ms() <= local + u64::from(observed.remaining_ms));
+    let original = v1::ServiceReceiptValidationRequest {
+        request_id: 9010,
+        context: receipt.context.clone(),
+        receipt: receipt.receipt.clone(),
+        request_sha256: vec![3; 32],
+    };
+    let call = |input: v1::ServiceReceiptValidationRequest, token: &str| {
+        let mut request = Request::new(input);
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        request
+    };
+    assert_eq!(
+        client
+            .observe_service_time(call(original.clone(), "wrong"))
+            .await
+            .err()
+            .unwrap()
+            .code(),
+        tonic::Code::Unauthenticated
+    );
+    let refreshed = client
+        .observe_service_time(call(original.clone(), key))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(refreshed.clock_domain, observed.clock_domain);
+    assert_eq!(refreshed.receipt_sha256, observed.receipt_sha256);
+    for attack in 0..3 {
+        let mut altered = original.clone();
+        match attack {
+            0 => altered.request_sha256[0] ^= 1,
+            1 => altered.receipt[20] ^= 1,
+            _ => {
+                let context = altered.context.as_mut().unwrap();
+                let parsed =
+                    service_epoch::decode_clock(&context.identity_authority_epoch).unwrap();
+                let other = if parsed.clock_domain.starts_with('1') {
+                    "223456789abcdef0123456789abcdef0"
+                } else {
+                    "123456789abcdef0123456789abcdef0"
+                };
+                context.identity_authority_epoch = service_epoch::encode_clock(
+                    parsed.epoch.authority,
+                    parsed.epoch.profile_revision,
+                    parsed.epoch.application_generation,
+                    other,
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(
+            client
+                .observe_service_time(call(altered, key))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+    }
+    let legacy = client.issue_service(issue(key)).await.unwrap().into_inner();
+    let old = v1::ServiceReceiptValidationRequest {
+        request_id: 9011,
+        context: legacy.context,
+        receipt: legacy.receipt,
+        request_sha256: vec![3; 32],
+    };
+    assert_eq!(
+        client
+            .observe_service_time(call(old, key))
+            .await
+            .err()
+            .unwrap()
+            .code(),
+        tonic::Code::PermissionDenied
+    );
+    assert!((services.clock.now().0 as u64) < checked.claims().expires_ms);
+    original
+}
+
 #[cfg(test)]
 pub(crate) async fn issue_service_for_test(
     services: crate::app::Services,

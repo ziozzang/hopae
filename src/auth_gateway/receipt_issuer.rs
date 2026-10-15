@@ -94,10 +94,32 @@ impl CapturedService {
         request: Request<'_>,
         guard: &dyn Fn() -> Result<(), Refused>,
     ) -> Result<Issued, Refused> {
+        self.issue_domain(issuer, reader, applications, request, false, guard)
+    }
+    pub fn issue_observed(
+        &self,
+        issuer: &Issuer,
+        reader: &Arc<arc_swap::ArcSwap<super::authority::Snapshot>>,
+        applications: &Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
+        request: Request<'_>,
+        guard: &dyn Fn() -> Result<(), Refused>,
+    ) -> Result<Issued, Refused> {
+        self.issue_domain(issuer, reader, applications, request, true, guard)
+    }
+    pub(crate) fn issue_domain(
+        &self,
+        issuer: &Issuer,
+        reader: &Arc<arc_swap::ArcSwap<super::authority::Snapshot>>,
+        applications: &Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
+        request: Request<'_>,
+        clocked: bool,
+        guard: &dyn Fn() -> Result<(), Refused>,
+    ) -> Result<Issued, Refused> {
         issuer.issue_service_owned(
             &self.authentication,
             request,
             Some(self.application.generation),
+            clocked,
             &|| {
                 let current = reader.load_full();
                 if !current.available()
@@ -129,18 +151,37 @@ pub struct LiveService<'a> {
     profile: Arc<super::authority::Snapshot>,
     application: Arc<crate::policy::types::ConfigSnapshot>,
     expires_ms: u64,
+    receipt_sha256: [u8; 32],
+    key_check: Option<super::receipt_authority::Checked>,
     verified_ms: u64,
     begun: std::time::Instant,
 }
 impl LiveService<'_> {
     pub fn current(&self) -> Result<(), Refused> {
-        let current = self.profiles.load_full();
-        let now = self.issuer.now()?.max(
+        let clocked = self.key_check.is_some();
+        let clock_now = if clocked {
+            self.issuer.clock_now()?
+        } else {
+            self.issuer.now()?
+        };
+        let now = clock_now.max(
             self.verified_ms
                 .saturating_add(self.begun.elapsed().as_millis().min(u64::MAX as u128) as u64),
         );
-        self.issuer.observed_time.fetch_max(now, Ordering::AcqRel);
-        if !current.available()
+        if clocked {
+            self.issuer.clock_floor.fetch_max(now, Ordering::AcqRel);
+        } else {
+            self.issuer.observed_time.fetch_max(now, Ordering::AcqRel);
+        }
+        // The clock is an external dependency: it may overlap publication.
+        // Acquire the profile after sampling it so a retired captured Arc cannot
+        // become apparently available again through the shared publication flag.
+        let current = self.profiles.load_full();
+        if self
+            .key_check
+            .as_ref()
+            .is_some_and(|checked| !checked.current())
+            || !current.available()
             || !Arc::ptr_eq(&current, &self.profile)
             || !Arc::ptr_eq(&self.applications.load_full(), &self.application)
             || now >= self.expires_ms
@@ -152,6 +193,38 @@ impl LiveService<'_> {
     pub fn expires_ms(&self) -> u64 {
         self.expires_ms
     }
+    pub fn observe_time(&self) -> Result<ObservedTime<'_>, Refused> {
+        self.current()?;
+        let keys = self.key_check.as_ref().ok_or(Refused)?;
+        let now = self.issuer.clock_now()?.max(
+            self.verified_ms
+                .saturating_add(self.begun.elapsed().as_millis().min(u64::MAX as u128) as u64),
+        );
+        let remaining = self
+            .expires_ms
+            .checked_sub(now)
+            .filter(|v| (1..=1000).contains(v))
+            .ok_or(Refused)?;
+        self.current()?;
+        Ok(ObservedTime {
+            report: hopae_grpc::receipt_time::Report {
+                owner_now_ms: now,
+                remaining_ms: remaining as u32,
+                receipt_sha256: self.receipt_sha256,
+            },
+            clock_domain: &self.issuer.clock_domain,
+            profile_revision: self.profile.revision,
+            application_generation: self.application.generation,
+            key_registry_revision: keys.revision(),
+        })
+    }
+}
+pub struct ObservedTime<'a> {
+    pub report: hopae_grpc::receipt_time::Report,
+    pub clock_domain: &'a str,
+    pub profile_revision: u64,
+    pub application_generation: u64,
+    pub key_registry_revision: u64,
 }
 
 pub struct ServiceRequest<'a> {
@@ -166,6 +239,10 @@ pub struct Issuer {
     clock: Arc<dyn Clock>,
     rng: Arc<dyn Rng>,
     observed_time: AtomicU64,
+    clock_domain: String,
+    clock_started: std::time::Instant,
+    clock_offset: AtomicU64,
+    clock_floor: AtomicU64,
     scopes: std::collections::HashMap<String, std::collections::HashSet<String>>,
 }
 /// No Clone/Debug/serde: adapters must expose this only through the authenticated
@@ -200,10 +277,60 @@ impl Issuer {
         bytes: &[u8],
         request_sha256: &[u8; 32],
     ) -> Result<LiveService<'a>, Refused> {
+        self.verify_live_service_domain(
+            profiles,
+            applications,
+            context,
+            bytes,
+            request_sha256,
+            None,
+        )
+    }
+    pub fn verify_live_service_observed<'a>(
+        &'a self,
+        profiles: &'a Arc<arc_swap::ArcSwap<super::authority::Snapshot>>,
+        applications: &'a Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
+        context: &Context<'_>,
+        bytes: &[u8],
+        request_sha256: &[u8; 32],
+        verifier: &super::receipt_authority::Verifier,
+    ) -> Result<LiveService<'a>, Refused> {
+        self.verify_live_service_domain(
+            profiles,
+            applications,
+            context,
+            bytes,
+            request_sha256,
+            Some(verifier),
+        )
+    }
+    fn verify_live_service_domain<'a>(
+        &'a self,
+        profiles: &'a Arc<arc_swap::ArcSwap<super::authority::Snapshot>>,
+        applications: &'a Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
+        context: &Context<'_>,
+        bytes: &[u8],
+        request_sha256: &[u8; 32],
+        key_verifier: Option<&super::receipt_authority::Verifier>,
+    ) -> Result<LiveService<'a>, Refused> {
+        let clocked = key_verifier.is_some();
         let begun = std::time::Instant::now();
-        let verified_ms = self.now()?;
-        let epoch = hopae_grpc::service_epoch::decode(context.identity_authority_epoch)
-            .map_err(|_| Refused)?;
+        let verified_ms = if clocked {
+            self.clock_now()?
+        } else {
+            self.now()?
+        };
+        let epoch = if clocked {
+            let parsed = hopae_grpc::service_epoch::decode_clock(context.identity_authority_epoch)
+                .map_err(|_| Refused)?;
+            if parsed.clock_domain != self.clock_domain {
+                return Err(Refused);
+            }
+            parsed.epoch
+        } else {
+            hopae_grpc::service_epoch::decode(context.identity_authority_epoch)
+                .map_err(|_| Refused)?
+        };
         let profile = profiles.load_full();
         let application = applications.load_full();
         if context.issuer_ref != self.config.issuer_ref
@@ -221,22 +348,35 @@ impl Issuer {
         {
             return Err(Refused);
         }
-        let binding = super::receipt_binding::digest(context, None).map_err(|_| Refused)?;
-        let checked = receipt::verify(
-            &self.signer.verifying_key(),
-            bytes,
-            Purpose::Authentication,
-            &binding,
-            verified_ms,
-        )
-        .map_err(|_| Refused)?;
+        let key_check = key_verifier
+            .map(|verifier| verifier.verify(context, None, bytes, verified_ms))
+            .transpose()?;
+        let (expires_ms, receipt_sha256) = if let Some(checked) = &key_check {
+            (
+                checked.receipt().claims().expires_ms,
+                *checked.receipt().sha256(),
+            )
+        } else {
+            let binding = super::receipt_binding::digest(context, None).map_err(|_| Refused)?;
+            let checked = receipt::verify(
+                &self.signer.verifying_key(),
+                bytes,
+                Purpose::Authentication,
+                &binding,
+                verified_ms,
+            )
+            .map_err(|_| Refused)?;
+            (checked.claims().expires_ms, *checked.sha256())
+        };
         let live = LiveService {
             issuer: self,
             profiles,
             applications,
             profile,
             application,
-            expires_ms: checked.claims().expires_ms,
+            expires_ms,
+            receipt_sha256,
+            key_check,
             verified_ms,
             begun,
         };
@@ -282,7 +422,17 @@ impl Issuer {
                 return Err(Refused);
             }
         }
+        let mut clock_bytes = [0_u8; 16];
+        rng.fill(&mut clock_bytes);
+        if clock_bytes == [0; 16] {
+            return Err(Refused);
+        }
+        let clock_domain = clock_bytes.iter().map(|b| format!("{b:02x}")).collect();
         Ok(Self {
+            clock_started: std::time::Instant::now(),
+            clock_offset: AtomicU64::new(0),
+            clock_floor: AtomicU64::new(0),
+            clock_domain,
             config: Arc::new(config),
             signer,
             clock,
@@ -290,6 +440,23 @@ impl Issuer {
             observed_time: AtomicU64::new(0),
             scopes,
         })
+    }
+    /// Clock-domain time never freezes after wall rollback: retain the largest
+    /// observed wall-minus-monotonic offset, then advance with process elapsed.
+    fn clock_now(&self) -> Result<u64, Refused> {
+        let elapsed =
+            u64::try_from(self.clock_started.elapsed().as_millis()).map_err(|_| Refused)?;
+        let wall = u64::try_from(self.clock.now().0).map_err(|_| Refused)?;
+        let offset = wall.checked_sub(elapsed).ok_or(Refused)?;
+        let offset = self
+            .clock_offset
+            .fetch_max(offset, Ordering::AcqRel)
+            .max(offset);
+        let now = offset
+            .checked_add(elapsed)
+            .filter(|v| (1..=9_007_199_254_740_991).contains(v))
+            .ok_or(Refused)?;
+        Ok(self.clock_floor.fetch_max(now, Ordering::AcqRel).max(now))
     }
     fn now(&self) -> Result<u64, Refused> {
         let now = u64::try_from(self.clock.now().0).map_err(|_| Refused)?;
@@ -345,7 +512,7 @@ impl Issuer {
         if !(1..=9_007_199_254_740_991).contains(&identity.generations.config) {
             return Err(Refused);
         }
-        self.sign_checked(issued, now, expires, begun, guard)
+        self.sign_checked(issued, now, expires, begun, false, guard)
     }
     /// Only profile-owned Service evidence is supported here. Neither network
     /// evidence nor an arbitrary caller principal can manufacture Human/MFA.
@@ -398,13 +565,14 @@ impl Issuer {
         request: Request<'_>,
         guard: &dyn Fn() -> Result<(), Refused>,
     ) -> Result<Issued, Refused> {
-        self.issue_service_owned(authentication, request, None, guard)
+        self.issue_service_owned(authentication, request, None, false, guard)
     }
     fn issue_service_owned(
         &self,
         authentication: &super::authority::ServiceAuthentication,
         request: Request<'_>,
         application_generation: Option<u64>,
+        clocked: bool,
         guard: &dyn Fn() -> Result<(), Refused>,
     ) -> Result<Issued, Refused> {
         let evidence = &authentication.evidence;
@@ -418,23 +586,63 @@ impl Issuer {
             return Err(Refused);
         }
         let begun = std::time::Instant::now();
-        let now = self.now()?;
-        let expires = evidence
-            .expires_at
-            .min(
+        let now = if clocked {
+            self.clock_now()?
+        } else {
+            self.now()?
+        };
+        let expires = if clocked {
+            // UTC credential expiry and issuer-domain time are distinct clocks.
+            // Translate a capped remaining budget; never add fresh lifetime to
+            // a captured proof or compare foreign absolute timestamps directly.
+            let wall = self.now()?.max(authentication.verified_ms);
+            let age_ms = u64::try_from(
                 authentication
-                    .verified_ms
-                    .checked_add(1000)
-                    .ok_or(Refused)?,
+                    .verified_started
+                    .elapsed()
+                    .as_nanos()
+                    .div_ceil(1_000_000),
             )
-            .min(now.saturating_add(1000));
-        if now < authentication.verified_ms || now >= expires {
-            return Err(Refused);
-        }
+            .map_err(|_| Refused)?;
+            let original = evidence
+                .expires_at
+                .checked_sub(authentication.verified_ms)
+                .ok_or(Refused)?
+                .min(1000);
+            let remaining = original
+                .checked_sub(age_ms)
+                .ok_or(Refused)?
+                .min(evidence.expires_at.checked_sub(wall).ok_or(Refused)?);
+            if remaining == 0 {
+                return Err(Refused);
+            }
+            now.checked_add(remaining).ok_or(Refused)?
+        } else {
+            let expires = evidence
+                .expires_at
+                .min(
+                    authentication
+                        .verified_ms
+                        .checked_add(1000)
+                        .ok_or(Refused)?,
+                )
+                .min(now.saturating_add(1000));
+            if now < authentication.verified_ms || now >= expires {
+                return Err(Refused);
+            }
+            expires
+        };
         guard()?;
         let issued = Issued {
             config: self.config.clone(),
             identity_epoch: match application_generation {
+                Some(generation) if clocked => hopae_grpc::service_epoch::encode_clock(
+                    &self.config.identity_authority_epoch,
+                    authentication.revision,
+                    generation,
+                    &self.clock_domain,
+                )
+                .map_err(|_| Refused)?,
                 Some(generation) => hopae_grpc::service_epoch::encode(
                     &self.config.identity_authority_epoch,
                     authentication.revision,
@@ -456,7 +664,7 @@ impl Issuer {
             request_sha256: request.request_sha256,
             bytes: [0; receipt::LENGTH],
         };
-        self.sign_checked(issued, now, expires, begun, guard)
+        self.sign_checked(issued, now, expires, begun, clocked, guard)
     }
     fn sign_checked(
         &self,
@@ -464,6 +672,7 @@ impl Issuer {
         now: u64,
         expires: u64,
         begun: std::time::Instant,
+        clocked: bool,
         guard: &dyn Fn() -> Result<(), Refused>,
     ) -> Result<Issued, Refused> {
         let binding =
@@ -482,10 +691,17 @@ impl Issuer {
         )
         .map_err(|_| Refused)?;
         guard()?;
-        let final_now = self
-            .now()?
-            .max(now.saturating_add(begun.elapsed().as_millis().min(u64::MAX as u128) as u64));
-        self.observed_time.fetch_max(final_now, Ordering::AcqRel);
+        let final_now = (if clocked {
+            self.clock_now()?
+        } else {
+            self.now()?
+        })
+        .max(now.saturating_add(begun.elapsed().as_millis().min(u64::MAX as u128) as u64));
+        if clocked {
+            self.clock_floor.fetch_max(final_now, Ordering::AcqRel);
+        } else {
+            self.observed_time.fetch_max(final_now, Ordering::AcqRel);
+        }
         if final_now >= expires {
             return Err(Refused);
         }
@@ -562,6 +778,23 @@ mod tests {
         )
         .unwrap()
     }
+    #[tokio::test]
+    async fn observed_clock_advances_through_backward_and_forward_wall_changes() {
+        let clock = Arc::new(crate::crypto::TestClock::new(Timestamp(10_000)));
+        let issuer = issuer(clock.clone());
+        let first = issuer.clock_now().unwrap();
+        clock.set(Timestamp(9_000));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let second = issuer.clock_now().unwrap();
+        assert!(second >= first + 5);
+        clock.set(Timestamp(20_000));
+        let jumped = issuer.clock_now().unwrap();
+        assert!(jumped >= 20_000);
+        clock.set(Timestamp(9_000));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(issuer.clock_now().unwrap() >= jumped + 5);
+    }
+
     fn request() -> Request<'static> {
         Request {
             service: "orders",
@@ -675,6 +908,129 @@ mod tests {
         );
         server.abort();
         let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn live_service_rechecks_profile_after_clock_sample_for_both_contracts() {
+        // Run a real native publication inside the Clock trait call. This gives
+        // the interleaving deterministically without sleeps or scheduler races.
+        #[derive(Default)]
+        struct PublishingClock {
+            on_read: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        }
+        impl Clock for PublishingClock {
+            fn now(&self) -> Timestamp {
+                let callback = self.on_read.lock().unwrap().take();
+                if let Some(callback) = callback {
+                    callback();
+                }
+                Timestamp(1000)
+            }
+        }
+
+        for clocked in [false, true] {
+            let mut db = rusqlite::Connection::open_in_memory().unwrap();
+            let mut configuration = config(None);
+            configuration.profiles[0].api_keys[0].expires_at = None;
+            let mut owner = owner(&mut db, configuration);
+            let reader = owner.reader();
+            let profile = reader.load_full();
+            let clock = Arc::new(PublishingClock::default());
+            let signer = issuer(clock.clone());
+            let authentication = profile
+                .authenticate_for_receipt(
+                    "orders.example.test",
+                    443,
+                    Some(TOKEN),
+                    "203.0.113.9".parse().unwrap(),
+                    1000,
+                )
+                .await
+                .unwrap();
+            let cfg = crate::config::parse(
+                r#"{"state_dir":"owned","portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_GATEWAY"}}"#,
+            )
+            .unwrap();
+            let application = Arc::new(cfg.snapshot(1));
+            let applications = Arc::new(arc_swap::ArcSwap::from(application.clone()));
+            let captured = CapturedService {
+                authentication,
+                profile,
+                application,
+            };
+            let issued = captured
+                .issue_domain(&signer, &reader, &applications, request(), clocked, &|| {
+                    Ok(())
+                })
+                .unwrap();
+            let mut key_owner = super::super::receipt_authority::Authority::load(&db, 0).unwrap();
+            key_owner
+                .reconcile(
+                    &mut db,
+                    &[Key {
+                        issuer_ref: "owned-hopae".into(),
+                        purpose: Purpose::Authentication,
+                        epoch: 1,
+                        public_key: ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+                            .verifying_key()
+                            .to_bytes(),
+                    }],
+                    "owned-operator",
+                    &|_| Ok(()),
+                )
+                .unwrap();
+            let verifier = key_owner.verifier();
+            let live = signer
+                .verify_live_service_domain(
+                    &reader,
+                    &applications,
+                    &issued.context(),
+                    issued.bytes(),
+                    &request().request_sha256,
+                    clocked.then_some(&verifier),
+                )
+                .unwrap();
+            assert!(live.current().is_ok());
+
+            // The old snapshot's shared publication flag becomes available
+            // again after the replacement is installed. Only a fresh pointer
+            // comparison can identify the completed withdrawal.
+            *clock.on_read.lock().unwrap() = Some(Box::new(move || {
+                owner
+                    .publish(
+                        &mut db,
+                        1,
+                        None,
+                        "owned-operator",
+                        &|_| Some(TOKEN.into()),
+                        &|_| Ok(()),
+                    )
+                    .unwrap();
+            }));
+            let result = live.current();
+            assert_eq!(reader.load_full().revision, 2);
+            assert!(captured.profile.available());
+            assert!(
+                !Arc::ptr_eq(&reader.load_full(), &captured.profile),
+                "the native owner must really have replaced the old snapshot"
+            );
+            let still_before_expiry = live
+                .verified_ms
+                .saturating_add(u64::try_from(live.begun.elapsed().as_millis()).unwrap())
+                < live.expires_ms;
+            assert!(
+                still_before_expiry,
+                "test must not pass through incidental expiry"
+            );
+            if clocked {
+                assert!(signer.clock_now().unwrap() < live.expires_ms);
+                assert!(live.key_check.as_ref().unwrap().current());
+            }
+            assert!(
+                result.is_err(),
+                "withdrawal completed during final clock sampling must refuse (clocked={clocked})"
+            );
+        }
     }
 
     #[tokio::test]

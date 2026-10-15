@@ -14,6 +14,7 @@ pub struct ServiceAuthentication {
     pub(crate) evidence: super::VerifiedEvidence,
     pub(crate) revision: u64,
     pub(crate) verified_ms: u64,
+    pub(crate) verified_started: std::time::Instant,
 }
 impl ServiceAuthentication {
     pub fn revision(&self) -> u64 {
@@ -43,6 +44,7 @@ impl Snapshot {
         let evidence = runtime
             .authenticate_async(host, port, token, ip, now)
             .await?;
+        let verified_started = std::time::Instant::now();
         let verified_ms = runtime
             .observed_time
             .load(std::sync::atomic::Ordering::Acquire)
@@ -57,6 +59,7 @@ impl Snapshot {
             evidence,
             revision: self.revision,
             verified_ms,
+            verified_started,
         })
     }
 }
