@@ -1167,7 +1167,7 @@ fn native_human_engine_overlapping_current_check_cannot_return_after_retirement(
             release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
         });
         ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let mut pending = Box::pin(checked.require_current(&input));
+        let mut pending = Box::pin(checked.require_current_retained());
         std::future::poll_fn(|cx| {
             assert!(std::future::Future::poll(pending.as_mut(), cx).is_pending());
             std::task::Poll::Ready(())
@@ -1905,4 +1905,80 @@ fn native_human_readiness_withdrawn_while_actual_engine_store_awaits() {
         assert!(!matches!(decision, Decision::Allow { .. }));
         assert!(witness.is_none());
     });
+}
+
+#[tokio::test]
+async fn native_human_retained_current_rechecks_actual_owner_without_cookie() {
+    for withdrawal in [
+        "UPDATE session_handles SET revoked_at=59",
+        "UPDATE sessions SET terminated_at=59",
+        "UPDATE users SET status='disabled'",
+        "UPDATE users SET authz_version=authz_version+1",
+        "DELETE FROM session_primary_provenance",
+    ] {
+        let f = Fx::new(None).await;
+        let (cookie, _) = f.login().await;
+        let checked = f
+            .witness(&cookie)
+            .await
+            .finish(&f.input(&cookie))
+            .await
+            .unwrap();
+        drop(cookie);
+        checked.require_current_retained().await.unwrap();
+        f.sql(withdrawal);
+        assert!(
+            checked.require_current_retained().await.is_err(),
+            "{withdrawal}"
+        );
+        assert!(
+            checked.require_current_retained().await.is_err(),
+            "retired: {withdrawal}"
+        );
+    }
+}
+#[tokio::test]
+async fn native_human_retained_current_cannot_revive_scope_retirement() {
+    let f = Fx::new(None).await;
+    let (cookie, _) = f.login().await;
+    let checked = f
+        .witness(&cookie)
+        .await
+        .finish(&f.input(&cookie))
+        .await
+        .unwrap();
+    checked.require_current_retained().await.unwrap();
+    let mut wrong = f.input(&cookie);
+    wrong.route_id = Some("wrong-route".into());
+    assert!(checked.require_current(&wrong).await.is_err());
+    assert!(checked.require_current_retained().await.is_err());
+}
+
+#[tokio::test]
+async fn native_human_retained_current_keeps_original_clock_fence() {
+    for mode in 0..3 {
+        let mut f = Fx::new(None).await;
+        let ticks = Arc::new(AtomicU64::new(100));
+        let read = ticks.clone();
+        Arc::get_mut(&mut f.owner).unwrap().ticks =
+            Some(Arc::new(move || Ok(read.load(Ordering::Acquire))));
+        let (cookie, _) = f.login().await;
+        let checked = f
+            .witness(&cookie)
+            .await
+            .finish(&f.input(&cookie))
+            .await
+            .unwrap();
+        drop(cookie);
+        checked.require_current_retained().await.unwrap();
+        match mode {
+            0 => ticks.store(1100, Ordering::Release),
+            1 => ticks.store(99, Ordering::Release),
+            _ => f.clock.set(Timestamp(58_000)),
+        }
+        assert!(checked.require_current_retained().await.is_err());
+        ticks.store(100, Ordering::Release);
+        f.clock.set(Timestamp(59_000));
+        assert!(checked.require_current_retained().await.is_err());
+    }
 }

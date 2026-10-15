@@ -7,3 +7,14 @@ The adapter samples the original native Admission **before caller authentication
 The same readiness owner remains inside Admission after consumption, through asynchronous Engine/store work, Witness finish and subsequent Checked current checks. A witnessed failure retires the original evidence. This is an observation-based local fence, not an atomic guarantee against a shutdown immediately after the final check. Original BOOTTIME, wall-floor, deadline and quantization arithmetic are retained; no budget is renewed after decoding or caller work.
 
 Tests mount the existing generated Authentication Verify service **only in an owned test harness**, authenticate an actual fixture caller, and use real owned OIDC login, production gateway and native Engine capture. They distinguish successful decode from original-age refusal, caller-callback age, invalid caller before body polling, cancellation and semaphore release, one-shot ownership, mixed markers and readiness withdrawal during store await or after Checked creation. This proves transport/owner mechanics; it does not qualify a future Human wire contract or an externally available Human endpoint. The controlled body fixture adds only a development `http-body` dependency.
+
+## Retained current checks
+
+A private Engine-produced `Checked` can repeat the same native owner checks
+without keeping or reconstructing raw cookie credentials. Its retained scope
+was established by the actual Engine; this method has no public constructor or
+caller-supplied subject. Original admission, readiness, provider/material/app,
+durable session/user/primary/factor checks and retirement apply unchanged.
+Explicit-input checks still require the exact original scope. A failed explicit
+check also retires subsequent retained checks, including overlapping awaits.
+This is a prerequisite for source records, not receipt issuance or RPC activation.

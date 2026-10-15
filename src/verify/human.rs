@@ -300,7 +300,7 @@ impl Owner {
             .await?;
         witness.expires = witness.expires.min(current.expires);
         witness.durable = Some(current);
-        witness.current(input).await?;
+        witness.current(Some(input)).await?;
         Ok(witness)
     }
 }
@@ -384,7 +384,7 @@ impl Admission {
     }
 }
 impl Witness {
-    async fn current(&self, input: &VerifyInput) -> StoreResult<()> {
+    async fn current(&self, input: Option<&VerifyInput>) -> StoreResult<()> {
         if self.retired.load(Ordering::Acquire) {
             return Err(refused());
         }
@@ -394,8 +394,10 @@ impl Witness {
         }
         result
     }
-    async fn check(&self, input: &VerifyInput) -> StoreResult<()> {
-        if Scope::from(input)? != self.scope {
+    async fn check(&self, input: Option<&VerifyInput>) -> StoreResult<()> {
+        if let Some(input) = input
+            && Scope::from(input)? != self.scope
+        {
             return Err(refused());
         }
         let sample = self.admission.sample(&self.owner)?;
@@ -428,14 +430,21 @@ impl Witness {
         Ok(())
     }
     pub(crate) async fn finish(self, input: &VerifyInput) -> StoreResult<Checked> {
-        self.current(input).await?;
+        self.current(Some(input)).await?;
         Ok(Checked { witness: self })
     }
 }
 impl Checked {
+    /// Only an actual Engine-produced Checked can retain this original scope.
+    /// Repeats every owner and original admission check without retaining or
+    /// reconstructing raw cookie credentials for later source observations.
+    #[allow(dead_code)] // Consumed by the additive native Human source records.
+    pub(crate) async fn require_current_retained(&self) -> StoreResult<()> {
+        self.witness.current(None).await
+    }
     /// Subsequent consumers must repeat owners and the original age fence.
     #[allow(dead_code)]
     pub(crate) async fn require_current(&self, input: &VerifyInput) -> StoreResult<()> {
-        self.witness.current(input).await
+        self.witness.current(Some(input)).await
     }
 }
