@@ -19,12 +19,14 @@ pub struct Registry {
     order: Vec<ProviderId>,
     owners: Option<OwnedProviders>,
     deferred_refreshers: Vec<Arc<OidcProvider>>,
+    material_fingerprints: Option<std::collections::BTreeMap<String, super::material::Fingerprint>>,
 }
 struct OwnedProviders {
     prepared: crate::store::sqlite::provider_owner::PreparedProviders,
     application: Arc<crate::policy::types::ConfigSnapshot>,
     applications: Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
     published: std::sync::atomic::AtomicBool,
+    materials: std::sync::OnceLock<crate::store::sqlite::material_owner::Published>,
 }
 /// Infrastructure only: not a Human login, factor or observed clock capability.
 #[allow(dead_code)]
@@ -64,6 +66,7 @@ impl Registry {
             order: Vec::new(),
             owners: None,
             deferred_refreshers: Vec::new(),
+            material_fingerprints: None,
         }
     }
 
@@ -77,7 +80,7 @@ impl Registry {
         clock: Arc<dyn Clock>,
         reporter: Option<Reporter>,
     ) -> Registry {
-        Self::compile(rows, env, clock, reporter, true)
+        Self::compile(rows, env, clock, reporter, true, None)
     }
 
     fn compile(
@@ -86,12 +89,14 @@ impl Registry {
         clock: Arc<dyn Clock>,
         reporter: Option<Reporter>,
         start_refreshers: bool,
+        material_key: Option<&super::material::Key>,
     ) -> Registry {
         let mut sorted: Vec<&ProviderRow> = rows.iter().collect();
         sorted.sort_by(|a, b| {
             (a.sort_order, a.provider_id.as_str()).cmp(&(b.sort_order, b.provider_id.as_str()))
         });
         let mut reg = Registry::empty();
+        reg.material_fingerprints = material_key.map(|_| std::collections::BTreeMap::new());
         for row in sorted {
             if reg.by_id.contains_key(&row.provider_id)
                 || reg.credential_by_id.contains_key(&row.provider_id)
@@ -105,14 +110,26 @@ impl Registry {
                         .cloned()
                         .and_then(|value| serde_json::from_value::<super::ldap::Config>(value).ok())
                         .and_then(|config| {
-                            super::ldap::LdapProvider::compile(row.provider_id.clone(), config, env)
-                                .ok()
+                            super::ldap::LdapProvider::compile_material(
+                                row.provider_id.clone(),
+                                config,
+                                env,
+                                material_key.map(|key| (key, row)),
+                            )
+                            .ok()
                         })
                 } else {
                     None
                 };
                 let provider: Arc<dyn super::credentials::CredentialProvider> = match provider {
-                    Some(provider) => Arc::new(provider),
+                    Some((provider, fingerprint)) => {
+                        if let (Some(map), Some(value)) =
+                            (&mut reg.material_fingerprints, fingerprint)
+                        {
+                            map.insert(row.provider_id.to_string(), value);
+                        }
+                        Arc::new(provider)
+                    }
                     None => Arc::new(DisabledCredentialProvider {
                         id: row.provider_id.clone(),
                     }),
@@ -129,7 +146,16 @@ impl Registry {
             if reg.by_id.contains_key(&row.provider_id) {
                 continue;
             }
-            let p = OidcProvider::from_row(row, env, clock.clone(), reporter.clone());
+            let (p, fingerprint) = OidcProvider::from_row_material(
+                row,
+                env,
+                clock.clone(),
+                reporter.clone(),
+                material_key,
+            );
+            if let (Some(map), Some(value)) = (&mut reg.material_fingerprints, fingerprint) {
+                map.insert(row.provider_id.to_string(), value);
+            }
             if let Some(why) = p.disabled_reason() {
                 tracing::warn!(provider = %row.provider_id, reason = why, "provider is not usable");
             } else if start_refreshers {
@@ -143,6 +169,7 @@ impl Registry {
         reg
     }
 
+    #[cfg(test)]
     pub(crate) fn from_prepared(
         prepared: crate::store::sqlite::provider_owner::PreparedProviders,
         applications: Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
@@ -150,18 +177,29 @@ impl Registry {
         clock: Arc<dyn Clock>,
         reporter: Option<Reporter>,
     ) -> crate::store::StoreResult<Self> {
+        Self::from_prepared_keyed(prepared, applications, env, clock, reporter, None)
+    }
+    pub(crate) fn from_prepared_keyed(
+        prepared: crate::store::sqlite::provider_owner::PreparedProviders,
+        applications: Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
+        env: &dyn Fn(&str) -> Option<String>,
+        clock: Arc<dyn Clock>,
+        reporter: Option<Reporter>,
+        key: Option<&super::material::Key>,
+    ) -> crate::store::StoreResult<Self> {
         let application = applications.load_full();
         if application.generation != prepared.generation() {
             return Err(crate::store::StoreError::Conflict(
                 "provider application owner changed",
             ));
         }
-        let mut registry = Self::compile(prepared.rows(), env, clock, reporter, false);
+        let mut registry = Self::compile(prepared.rows(), env, clock, reporter, false, key);
         registry.owners = Some(OwnedProviders {
             prepared,
             application,
             applications,
             published: std::sync::atomic::AtomicBool::new(false),
+            materials: std::sync::OnceLock::new(),
         });
         Ok(registry)
     }
@@ -191,6 +229,21 @@ impl Registry {
         store
             .require_prepared_providers(&owners.prepared, deadline)
             .await?;
+        if let Some(desired) = &self.material_fingerprints {
+            let materials = store
+                .publish_materials(&owners.prepared, desired, deadline)
+                .await?;
+            if let Err(materials) = owners.materials.set(materials)
+                && !owners
+                    .materials
+                    .get()
+                    .is_some_and(|current| current.same(&materials))
+            {
+                return Err(crate::store::StoreError::Conflict(
+                    "material publication raced",
+                ));
+            }
+        }
         self.owners()?;
         if !owners
             .published
@@ -254,6 +307,196 @@ impl Registry {
                 ));
             }
             Ok(())
+        }
+        .await;
+        if result.is_err() {
+            fence
+                .retired
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
+    pub(crate) async fn primary_credential(
+        self: &Arc<Self>,
+        store: &crate::store::Store,
+        provider: &Arc<dyn super::credentials::CredentialProvider>,
+        application: Arc<crate::policy::types::ConfigSnapshot>,
+    ) -> crate::store::StoreResult<crate::store::sqlite::primary_owner::Source> {
+        let id = provider.id();
+        if !self
+            .credential(id)
+            .as_ref()
+            .is_some_and(|actual| Arc::ptr_eq(actual, provider))
+        {
+            return Err(crate::store::StoreError::Conflict(
+                "primary adapter mismatch",
+            ));
+        }
+        self.primary_source(store, id, application).await
+    }
+    pub(crate) async fn primary_oidc(
+        self: &Arc<Self>,
+        store: &crate::store::Store,
+        provider: &Arc<dyn super::Provider>,
+        application: Arc<crate::policy::types::ConfigSnapshot>,
+    ) -> crate::store::StoreResult<crate::store::sqlite::primary_owner::Source> {
+        let id = provider.id();
+        if !self
+            .get(id)
+            .as_ref()
+            .is_some_and(|actual| Arc::ptr_eq(actual, provider))
+        {
+            return Err(crate::store::StoreError::Conflict(
+                "primary adapter mismatch",
+            ));
+        }
+        self.primary_source(store, id, application).await
+    }
+    async fn primary_source(
+        self: &Arc<Self>,
+        store: &crate::store::Store,
+        id: &ProviderId,
+        application: Arc<crate::policy::types::ConfigSnapshot>,
+    ) -> crate::store::StoreResult<crate::store::sqlite::primary_owner::Source> {
+        let owners = self.owners()?;
+        if !Arc::ptr_eq(&application, &owners.application) {
+            return Err(crate::store::StoreError::Conflict(
+                "primary app owner mismatch",
+            ));
+        }
+        let (generation, revision) = owners.prepared.human_expected(store, id)?;
+        let material = owners
+            .materials
+            .get()
+            .ok_or(crate::store::StoreError::Conflict(
+                "compiled material unqualified",
+            ))?
+            .expected(store, id.as_str())?;
+        let fence = self
+            .capture_provider_fence(
+                store,
+                id,
+                crate::store::Deadline::after(std::time::Duration::from_secs(5)),
+            )
+            .await?;
+        self.require_human_publication(&fence, &application)?;
+        Ok(crate::store::sqlite::primary_owner::Source::from_registry(
+            store,
+            self.clone(),
+            fence,
+            application,
+            id.clone(),
+            (revision, generation, material),
+        ))
+    }
+
+    pub(crate) fn require_human_publication(
+        self: &Arc<Self>,
+        fence: &RegistryProviderFence,
+        application: &Arc<crate::policy::types::ConfigSnapshot>,
+    ) -> crate::store::StoreResult<()> {
+        let result = (|| {
+            if fence.retired.load(std::sync::atomic::Ordering::Acquire)
+                || !std::sync::Weak::ptr_eq(&fence.registry, &Arc::downgrade(self))
+            {
+                return Err(crate::store::StoreError::Conflict(
+                    "Human provider fence retired",
+                ));
+            }
+            let owners = self.owners()?;
+            if !Arc::ptr_eq(&owners.application, application) {
+                return Err(crate::store::StoreError::Conflict(
+                    "Human app/registry mismatch",
+                ));
+            }
+            if !owners
+                .materials
+                .get()
+                .is_some_and(|m| m.contains(fence.provider.as_str()))
+                || !owners.published.load(std::sync::atomic::Ordering::Acquire)
+                || !(self
+                    .credential(&fence.provider)
+                    .is_some_and(|p| p.enabled())
+                    || self.get(&fence.provider).is_some_and(|p| p.enabled()))
+            {
+                return Err(crate::store::StoreError::Conflict(
+                    "Human provider unavailable",
+                ));
+            }
+            if fence.retired.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(crate::store::StoreError::Conflict(
+                    "Human provider fence retired",
+                ));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            fence
+                .retired
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
+    pub(crate) async fn require_human_current(
+        self: &Arc<Self>,
+        store: &crate::store::Store,
+        fence: &RegistryProviderFence,
+        witness: &crate::verify::human::Witness,
+        now: crate::crypto::Timestamp,
+        deadline: crate::store::Deadline,
+    ) -> crate::store::StoreResult<crate::store::sqlite::human_owner::Current> {
+        let result = async {
+            if fence.retired.load(std::sync::atomic::Ordering::Acquire)
+                || !std::sync::Weak::ptr_eq(&fence.registry, &Arc::downgrade(self))
+                || fence.provider != witness.view.session.provider_id
+            {
+                return Err(crate::store::StoreError::Conflict(
+                    "Human provider fence retired",
+                ));
+            }
+            let owners = self.owners()?;
+            if !Arc::ptr_eq(&owners.application, &witness.snapshot) {
+                return Err(crate::store::StoreError::Conflict(
+                    "Human app/registry mismatch",
+                ));
+            }
+            if !owners
+                .materials
+                .get()
+                .is_some_and(|m| m.contains(fence.provider.as_str()))
+                || !owners.published.load(std::sync::atomic::Ordering::Acquire)
+                || !(self
+                    .credential(&fence.provider)
+                    .is_some_and(|p| p.enabled())
+                    || self.get(&fence.provider).is_some_and(|p| p.enabled()))
+            {
+                return Err(crate::store::StoreError::Conflict(
+                    "Human provider unavailable",
+                ));
+            }
+            let checked = store
+                .require_human_snapshot(
+                    &owners.prepared,
+                    owners
+                        .materials
+                        .get()
+                        .ok_or(crate::store::StoreError::Conflict(
+                            "compiled material unqualified",
+                        ))?,
+                    witness,
+                    now,
+                    deadline,
+                )
+                .await?;
+            self.owners()?;
+            if fence.retired.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(crate::store::StoreError::Conflict(
+                    "Human provider fence retired",
+                ));
+            }
+            Ok(checked)
         }
         .await;
         if result.is_err() {

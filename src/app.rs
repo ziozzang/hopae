@@ -256,7 +256,8 @@ impl Services {
             snapshot: self.snapshot.clone(),
             providers: self.registry.clone(),
             config,
-        }))
+        })
+        .with_native_primary(self.store.clone(), self.registry.clone()))
     }
 }
 
@@ -339,6 +340,13 @@ pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
         Some(Arc::new(counters::inc)),
         Some(services.emitter.clone()),
     );
+    gateway_state = gateway_state.with_human_owner(crate::verify::human::Owner::new(
+        services.store.clone(),
+        services.registry.clone(),
+        services.snapshot.clone(),
+        services.clock.clone(),
+        services.rng.as_ref(),
+    ))?;
     if let Some(authority) = &services.authentication_authority {
         let reader = authority
             .lock()
@@ -497,7 +505,12 @@ fn provider_rows(cfg: &Config) -> Vec<ProviderRow> {
 /// Open the store, import and mirror the configuration, then bind both
 /// listeners. Failing here is a start failure.
 pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
-    let real_env = |n: &str| std::env::var(n).ok();
+    bind_environment(cfg, &|n: &str| std::env::var(n).ok()).await
+}
+async fn bind_environment(
+    cfg: &Config,
+    real_env: &(dyn Fn(&str) -> Option<String> + Sync),
+) -> anyhow::Result<Bound> {
     let receiver_keys = crate::auth_gateway::receipt_config::receiver_keys(
         cfg.receipt_issuer.as_ref(),
         &cfg.receipt_permit_keys,
@@ -709,12 +722,20 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     crate::provider::apply_stored_reauth(&mut snapshot, rows);
     let applications = Arc::new(ArcSwap::from_pointee(snapshot));
     let snapshot = applications.load_full();
-    let registry = Arc::new(Registry::from_prepared(
+    let material_key =
+        crate::provider::material::Key::resolve(cfg.human_material_key_env.as_deref(), &real_env);
+    if cfg.human_material_key_env.is_some() && material_key.is_none() {
+        tracing::warn!(
+            "native Human compiled material qualification disabled: dedicated key unavailable or invalid"
+        );
+    }
+    let registry = Arc::new(Registry::from_prepared_keyed(
         prepared_providers,
         applications.clone(),
-        &|n| std::env::var(n).ok(),
+        real_env,
         env.clock.clone(),
         Some(provider_reporter(emitter.clone())),
+        material_key.as_ref(),
     )?);
     let mut mirrored: Vec<_> = snapshot.apps.clone();
     mirrored.push(snapshot.default_app.clone());
@@ -1937,6 +1958,117 @@ pub async fn admin_check_warnings(cfg: &Config) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn actual_builder_dedicated_material_key_is_optional_stable_and_read_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let value = serde_json::json!({"state_dir":dir.path().join("state"),"listen":{"portal":"127.0.0.1:0","gateway":"127.0.0.1:0"},"portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_CALLER"},"human_material_key_env":"OWNED_MATERIAL_KEY","providers":[{"provider_id":"owned","kind":"oidc","client_id":"owned","client_secret_env":"OWNED_PROVIDER_SECRET","issuer":"https://127.0.0.1:1","allow_private_endpoints":true}],"apps":[{"app_id":"orders","hosts":["orders.example.test"]}]});
+        for key in [
+            None,
+            Some("weak".to_owned()),
+            Some(data_encoding::BASE64URL_NOPAD.encode(&[0x68; 32])),
+            Some(data_encoding::BASE64URL_NOPAD.encode(&[0x68; 32])),
+            Some(data_encoding::BASE64URL_NOPAD.encode(&[0x69; 32])),
+        ] {
+            let owned = tempfile::tempdir_in(dir.path()).unwrap();
+            let mut value = value.clone();
+            value["state_dir"] = serde_json::json!(owned.path().join("state"));
+            let cfg = crate::config::parse(&value.to_string()).unwrap();
+            let reads = std::sync::atomic::AtomicUsize::new(0);
+            let bound = bind_environment(&cfg, &|name| {
+                if name == "OWNED_MATERIAL_KEY" {
+                    reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    key.clone()
+                } else {
+                    Some("actual-builder-owned-material".into())
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(
+                bound
+                    .services
+                    .registry
+                    .get(&ProviderId::new("owned"))
+                    .unwrap()
+                    .enabled()
+            );
+            let count: i64 = bound
+                .services
+                .store
+                .conn()
+                .query_row(
+                    "SELECT count(*) FROM human_provider_material_owners",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if key.as_ref().is_none_or(|v| v.len() != 43) {
+                assert_eq!(count, 0);
+            } else {
+                let revision:i64=bound.services.store.conn().query_row("SELECT revision FROM human_provider_material_owners WHERE provider_id='owned'",[],|r|r.get(0)).unwrap();
+                assert_eq!(revision, 1);
+                // Exercise repeat/key rotation through the actual builder's
+                // owning Store without dropping/reacquiring a process lock.
+                for (material, expected) in [
+                    (
+                        [0x68u8; 32],
+                        if key.as_ref().unwrap()
+                            == &data_encoding::BASE64URL_NOPAD.encode(&[0x68; 32])
+                        {
+                            1
+                        } else {
+                            2
+                        },
+                    ),
+                    (
+                        [0x70u8; 32],
+                        if key.as_ref().unwrap()
+                            == &data_encoding::BASE64URL_NOPAD.encode(&[0x68; 32])
+                        {
+                            2
+                        } else {
+                            3
+                        },
+                    ),
+                ] {
+                    let key = crate::provider::material::Key::resolve(
+                        Some("OWNED_MATERIAL_KEY"),
+                        &|_| Some(data_encoding::BASE64URL_NOPAD.encode(&material)),
+                    )
+                    .unwrap();
+                    let registry = Registry::from_prepared_keyed(
+                        bound
+                            .services
+                            .store
+                            .prepare_registry_providers(
+                                bound.services.snapshot.load().generation,
+                                crate::store::Deadline::after(std::time::Duration::from_secs(5)),
+                            )
+                            .await
+                            .unwrap(),
+                        bound.services.snapshot.clone(),
+                        &|_| Some("actual-builder-owned-material".into()),
+                        bound.services.clock.clone(),
+                        None,
+                        Some(&key),
+                    )
+                    .unwrap();
+                    registry
+                        .publish_prepared(
+                            &bound.services.store,
+                            crate::store::Deadline::after(std::time::Duration::from_secs(5)),
+                        )
+                        .await
+                        .unwrap();
+                    let revision:i64=bound.services.store.conn().query_row("SELECT revision FROM human_provider_material_owners WHERE provider_id='owned'",[],|r|r.get(0)).unwrap();
+                    assert_eq!(revision, expected);
+                }
+            }
+            drop(bound);
+        }
+    }
 
     #[tokio::test]
     async fn actual_gateway_captures_native_service_proof_only_in_internal_extensions() {

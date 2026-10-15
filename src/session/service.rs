@@ -64,6 +64,36 @@ struct CompletedIdentity {
     row: crate::store::types::ProviderRow,
     authentication: (crate::crypto::Timestamp, AuthTimeSource),
     app_bind: Digest,
+    primary: Option<VerifiedPrimary>,
+}
+
+/// Only successful native adapter completion in this module constructs this.
+/// No Clone, Debug, serialization or public constructor.
+pub(crate) struct VerifiedPrimary {
+    source: crate::store::sqlite::primary_owner::Source,
+    subject: String,
+    authentication: (crate::crypto::Timestamp, AuthTimeSource),
+}
+impl VerifiedPrimary {
+    pub(crate) fn publication(&self) -> Result<(), StoreError> {
+        self.source.publication()
+    }
+    pub(crate) fn write(
+        &self,
+        store: &crate::store::Store,
+        tx: &rusqlite::Transaction<'_>,
+        session: &SessionRow,
+        index: usize,
+    ) -> Result<(), StoreError> {
+        self.source.write(
+            store,
+            tx,
+            session,
+            &self.subject,
+            self.authentication,
+            index,
+        )
+    }
 }
 
 /// `consumed_reason` of a transaction that completed a login (text column).
@@ -291,6 +321,7 @@ pub struct Service {
     pub(crate) providers: Arc<dyn ProviderLookup>,
     pub(crate) identity: IdentityService,
     pub(crate) cfg: ServiceConfig,
+    native_primary: Option<(crate::store::Store, Arc<crate::provider::Registry>)>,
 }
 
 pub(crate) enum HandleState {
@@ -324,7 +355,17 @@ impl Service {
             providers: deps.providers,
             identity,
             cfg: deps.config,
+            native_primary: None,
         }
+    }
+
+    pub(crate) fn with_native_primary(
+        mut self,
+        store: crate::store::Store,
+        registry: Arc<crate::provider::Registry>,
+    ) -> Self {
+        self.native_primary = Some((store, registry));
+        self
     }
 
     pub fn config(&self) -> &ServiceConfig {
@@ -1417,6 +1458,16 @@ impl Service {
                 )
                 .await);
         }
+        // Capture the exact compiled adapter BEFORE verification; later DB
+        // ownership cannot be substituted for the source that authenticated.
+        let primary_source = if let Some((store, registry)) = &self.native_primary {
+            registry
+                .primary_credential(store, &provider, self.snapshot.load_full())
+                .await
+                .ok()
+        } else {
+            None
+        };
         let verified = match crate::provider::credentials::authenticate_password(
             provider.as_ref(),
             input,
@@ -1479,6 +1530,11 @@ impl Service {
                 txn,
                 provider_id: provider_id.clone(),
                 kind,
+                primary: primary_source.map(|source| VerifiedPrimary {
+                    source,
+                    subject: ident.subject.clone(),
+                    authentication,
+                }),
                 identity: ident,
                 row,
                 authentication,
@@ -1588,6 +1644,14 @@ impl Service {
                 )
                 .await);
         }
+        let primary_source = if let Some((store, registry)) = &self.native_primary {
+            registry
+                .primary_oidc(store, &provider, self.snapshot.load_full())
+                .await
+                .ok()
+        } else {
+            None
+        };
         let redirect_uri = self.redirect_uri(provider_id)?;
         let ident = match provider.complete(&txn, &query, &redirect_uri).await {
             Ok(i) => i,
@@ -1639,6 +1703,11 @@ impl Service {
                 txn,
                 provider_id: provider_id.clone(),
                 kind: provider.kind(),
+                primary: primary_source.map(|source| VerifiedPrimary {
+                    source,
+                    subject: ident.subject.clone(),
+                    authentication: (auth_time, auth_source),
+                }),
                 identity: ident,
                 row,
                 authentication: (auth_time, auth_source),
@@ -1665,6 +1734,7 @@ impl Service {
             row,
             authentication: (auth_time, auth_source),
             app_bind,
+            primary,
         } = completed;
         let provider_id = &provider_id;
         let now = self.clock.now();
@@ -1754,7 +1824,7 @@ impl Service {
                     app_bind,
                     &view,
                     (provider_id, &row),
-                    (auth_time, auth_source),
+                    (auth_time, auth_source, primary),
                 )
                 .await?;
             return Ok(CallbackOutcome::LoggedIn {
@@ -1828,7 +1898,7 @@ impl Service {
                 (kind, &row),
                 provider_id,
                 &user,
-                (auth_time, auth_source),
+                (auth_time, auth_source, primary),
             )
             .await
         {
@@ -1874,7 +1944,11 @@ impl Service {
         app_bind: Digest,
         view: &HandleView,
         (provider_id, provider_row): (&ProviderId, &crate::store::types::ProviderRow),
-        (auth_time, source): (crate::crypto::Timestamp, AuthTimeSource),
+        (auth_time, source, primary): (
+            crate::crypto::Timestamp,
+            AuthTimeSource,
+            Option<VerifiedPrimary>,
+        ),
     ) -> Result<(Url, IssuedHandle), SessionError> {
         let now = self.clock.now();
         let snap = self.snapshot.load_full();
@@ -1920,27 +1994,47 @@ impl Service {
             provider: Some(provider_id.clone()),
             at: auth_time,
         };
-        match self
-            .sessions
-            .reauthenticate_session(
-                &session.session_id,
-                provider_id,
-                matches!(
-                    provider_row.kind,
-                    ProviderKind::Ldap | ProviderKind::Password
-                )
-                .then(|| (provider_row.kind, provider_row.config.clone())),
-                auth_time,
-                source,
-                factor,
-                portal_handle,
-                (txn.txn_sha256, reasons::REAUTH),
-                deadline,
-                events,
-                &mk_revoked,
-            )
-            .await
-        {
+        let configuration = matches!(
+            provider_row.kind,
+            ProviderKind::Ldap | ProviderKind::Password
+        )
+        .then(|| (provider_row.kind, provider_row.config.clone()));
+        let result =
+            if let (Some(primary), Some((store, _))) = (primary, self.native_primary.as_ref()) {
+                store
+                    .reauthenticate_primary(
+                        &session.session_id,
+                        provider_id,
+                        configuration,
+                        auth_time,
+                        source,
+                        factor,
+                        portal_handle,
+                        (txn.txn_sha256, reasons::REAUTH),
+                        deadline,
+                        events,
+                        &mk_revoked,
+                        primary,
+                    )
+                    .await
+            } else {
+                self.sessions
+                    .reauthenticate_session(
+                        &session.session_id,
+                        provider_id,
+                        configuration,
+                        auth_time,
+                        source,
+                        factor,
+                        portal_handle,
+                        (txn.txn_sha256, reasons::REAUTH),
+                        deadline,
+                        events,
+                        &mk_revoked,
+                    )
+                    .await
+            };
+        match result {
             Ok(()) => {}
             Err(StoreError::Conflict("provider_mismatch")) => {
                 return Err(self
@@ -2094,7 +2188,11 @@ impl Service {
         (kind, provider_row): (ProviderKind, &crate::store::types::ProviderRow),
         provider_id: &ProviderId,
         user: &User,
-        (auth_time, auth_source): (crate::crypto::Timestamp, AuthTimeSource),
+        (auth_time, auth_source, primary): (
+            crate::crypto::Timestamp,
+            AuthTimeSource,
+            Option<VerifiedPrimary>,
+        ),
     ) -> Result<(SessionRow, IssuedHandle), SessionError> {
         let now = self.clock.now();
         let snap = self.snapshot.load_full();
@@ -2161,17 +2259,21 @@ impl Service {
                 .attr("auth_time_source", auth_source.as_str())
                 .build(),
         ];
-        self.sessions
-            .create_session(CreateSession {
-                provider_configuration: matches!(kind, ProviderKind::Ldap | ProviderKind::Password)
-                    .then(|| (provider_row.kind, provider_row.config.clone())),
-                session: session.clone(),
-                portal_handle,
-                portal_handle_digest: digest,
-                consume_txn: Some((txn.txn_sha256, CONSUMED_COMPLETED)),
-                events,
-            })
-            .await?;
+        let request = CreateSession {
+            provider_configuration: matches!(kind, ProviderKind::Ldap | ProviderKind::Password)
+                .then(|| (provider_row.kind, provider_row.config.clone())),
+            session: session.clone(),
+            portal_handle,
+            portal_handle_digest: digest,
+            consume_txn: Some((txn.txn_sha256, CONSUMED_COMPLETED)),
+            events,
+        };
+        if let (Some(primary), Some((store, _))) = (primary, self.native_primary.as_ref()) {
+            store.create_session_primary(request, primary).await?;
+        } else {
+            self.sessions.create_session(request).await?;
+        }
+
         Ok((
             session,
             IssuedHandle {

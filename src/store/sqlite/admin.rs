@@ -605,8 +605,10 @@ impl Store {
         deadline: Deadline,
         events: Vec<Event>,
         ask: Ask<HandleRow, Event>,
+        primary: Option<crate::session::service::VerifiedPrimary>,
     ) -> StoreResult<()> {
         let (id, provider) = (id.clone(), provider.clone());
+        let self_store = self.clone();
         self.write_checked("reauthenticate_session", Some(deadline), move |env, check| {
             let shared = env.shared.clone();
             if new_portal_handle.session_id != id {
@@ -667,9 +669,18 @@ impl Store {
             let mut handle = new_portal_handle;
             handle.issued_aal = handle.issued_aal.min(session.aal);
             insert_handle(&tx, &handle)?;
+            if let Some(primary)=&primary {
+                let current=session_by_id(&tx,&id)?.ok_or(StoreError::Conflict("primary session missing"))?;
+                primary.write(&self_store,&tx,&current,current.factors.len().checked_sub(1).ok_or(StoreError::Conflict("primary factor missing"))?)?;
+            } else {
+                // Legacy/unqualified primary reauthentication cannot retain a
+                // previous primary proof, even when auth_time rounds equal.
+                tx.execute("DELETE FROM session_primary_provenance WHERE session_id=?1",[id.as_str()])?;
+            }
             insert_events(&tx, &shared, &events)?;
             crash(&shared, "after_reauth_write");
             before_commit(&shared, check)?;
+            if let Some(primary)=&primary {primary.publication()?;}
             commit_checked(tx, &shared, Some("admin_reauth"), check)
         })
         .await

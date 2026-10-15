@@ -168,6 +168,14 @@ impl LdapProvider {
         config: Config,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self> {
+        Self::compile_material(id, config, env, None).map(|(provider, _)| provider)
+    }
+    pub(crate) fn compile_material(
+        id: ProviderId,
+        config: Config,
+        env: &dyn Fn(&str) -> Option<String>,
+        material: Option<(&super::material::Key, &crate::store::ProviderRow)>,
+    ) -> Result<(Self, Option<super::material::Fingerprint>)> {
         config.validate()?;
         let password = env(&config.bind_password_env)
             .ok_or_else(|| anyhow::anyhow!("LDAP secret reference unavailable"))?;
@@ -199,15 +207,26 @@ impl LdapProvider {
         .with_root_certificates(roots)
         .with_no_client_auth();
         tls.enable_early_data = false;
-        Ok(Self {
-            id,
-            config,
-            bind_password: Secret::new(password),
-            tls: Arc::new(tls),
-            capacity: tokio::sync::Semaphore::new(64),
-            circuit: crate::auth_gateway::breaker::Circuit::new(3, 30_000)
-                .expect("constant circuit bounds"),
-        })
+        let fingerprint = material.and_then(|(key, row)| {
+            let mut builder = key.start(row)?;
+            builder.part(b"ldap-effective", &serde_json::to_vec(&config).ok()?);
+            builder.part(b"ldap-bind-password", password.as_bytes());
+            // These SAME validated bytes just built these TLS roots; no reopen.
+            builder.part(b"ldap-ca", &bytes);
+            Some(builder.finish())
+        });
+        Ok((
+            Self {
+                id,
+                config,
+                bind_password: Secret::new(password),
+                tls: Arc::new(tls),
+                capacity: tokio::sync::Semaphore::new(64),
+                circuit: crate::auth_gateway::breaker::Circuit::new(3, 30_000)
+                    .expect("constant circuit bounds"),
+            },
+            fingerprint,
+        ))
     }
     async fn connect(&self) -> Result<Connection, CredentialError> {
         let settings = LdapConnSettings::new()

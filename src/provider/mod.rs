@@ -4,6 +4,7 @@
 
 pub mod credentials;
 pub mod ldap;
+pub(crate) mod material;
 pub mod oidc;
 pub mod presets;
 pub mod registry;

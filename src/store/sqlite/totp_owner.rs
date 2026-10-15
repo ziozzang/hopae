@@ -7,14 +7,14 @@ use crate::{
 use rusqlite::OptionalExtension;
 use std::sync::{Arc, Weak};
 
-#[derive(PartialEq, Eq)]
-struct Facts {
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct Facts {
     user: String,
     generation: i64,
     enrollment: String,
     revision: i64,
     index: i64,
-    at_ms: i64,
+    pub(super) at_ms: i64,
     config: i64,
 }
 /// No public constructor, serialization or Debug; no raw factor material.
@@ -27,7 +27,7 @@ fn refused() -> StoreError {
     StoreError::Conflict("TOTP establishing owner unavailable")
 }
 
-fn current(c: &rusqlite::Connection, session: &str) -> StoreResult<Facts> {
+pub(super) fn current(c: &rusqlite::Connection, session: &str) -> StoreResult<Facts> {
     let found = c.query_row(
         "SELECT p.user_id,p.credential_generation,p.enrollment_id,p.enrollment_revision,p.factor_index,p.verified_at_ms,p.config_generation,CASE WHEN length(s.factors)<=65536 THEN s.factors ELSE NULL END,(SELECT value FROM meta WHERE key='config_generation') FROM session_totp_provenance p JOIN sessions s ON s.session_id=p.session_id AND s.user_id=p.user_id AND s.cred_gen=p.credential_generation JOIN users u ON u.user_id=s.user_id JOIN totp_enrollments e ON e.enrollment_id=p.enrollment_id AND e.user_id=p.user_id AND e.revision=p.enrollment_revision WHERE p.session_id=?1 AND s.terminated_at IS NULL AND s.aal=2 AND u.status='active' AND e.state='active' AND e.last_counter IS NOT NULL AND p.config_generation IS NOT NULL",
         [session], |r| Ok((Facts{user:r.get(0)?,generation:r.get(1)?,enrollment:r.get(2)?,revision:r.get(3)?,index:r.get(4)?,at_ms:r.get(5)?,config:r.get(6)?},r.get::<_,Option<String>>(7)?,r.get::<_,Option<String>>(8)?))

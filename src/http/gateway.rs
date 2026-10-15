@@ -38,6 +38,7 @@ pub struct GatewayState {
     next_id: AtomicU64,
     id_salt: RandomState,
     capture_service_receipts: bool,
+    human_owner: Option<Arc<crate::verify::human::Owner>>,
     authentication_gateway:
         Option<Arc<arc_swap::ArcSwap<crate::auth_gateway::authority::Snapshot>>>,
 }
@@ -64,8 +65,22 @@ impl GatewayState {
             next_id: AtomicU64::new(0),
             id_salt: RandomState::new(),
             capture_service_receipts: false,
+            human_owner: None,
             authentication_gateway: None,
         })
+    }
+
+    pub(crate) fn with_human_owner(
+        mut self: Arc<Self>,
+        owner: Arc<crate::verify::human::Owner>,
+    ) -> anyhow::Result<Arc<Self>> {
+        let state = Arc::get_mut(&mut self)
+            .ok_or_else(|| anyhow::anyhow!("gateway state already shared"))?;
+        if !owner.matches(&state.ctx) {
+            anyhow::bail!("native Human context mismatch");
+        }
+        state.human_owner = Some(owner);
+        Ok(self)
     }
 
     pub fn with_authentication_gateway(
@@ -156,8 +171,23 @@ pub fn router(state: Arc<GatewayState>) -> Router {
 async fn verify(
     State(st): State<Arc<GatewayState>>,
     workload: Option<axum::extract::Extension<Arc<crate::auth_gateway::workload_owner::Attempt>>>,
+    human: Option<axum::extract::Extension<crate::verify::human::Capture>>,
     headers: HeaderMap,
 ) -> Response {
+    // Private adapter extension only; no client header selects this path.
+    let human_admission = if human.is_some() {
+        match st.human_owner.as_ref().and_then(|owner| {
+            owner
+                .admit(st.ctx.limits.budget)
+                .ok()
+                .map(|admission| (owner.clone(), admission))
+        }) {
+            Some(admission) => Some(admission),
+            None => return hangang::service_identity::unavailable("native-human"),
+        }
+    } else {
+        None
+    };
     let workload = workload.map(|axum::extract::Extension(attempt)| attempt);
     let workload_application = workload.as_ref().map(|_| st.ctx.snapshot.load_full());
     let request_id = st.request_id();
@@ -206,6 +236,11 @@ async fn verify(
         }
     };
     let (input, env) = (parsed.input, parsed.env);
+    if human_admission.is_some()
+        && (workload.is_some() || headers.contains_key(axum::http::header::AUTHORIZATION))
+    {
+        return hangang::service_identity::unavailable(&request_id);
+    }
     let authority = st
         .authentication_gateway
         .as_ref()
@@ -247,6 +282,9 @@ async fn verify(
         let fallback = matches!(presented, Ok(None))
             && runtime.session_fallback(input.host.as_str(), input.port);
         if !fallback {
+            if human_admission.is_some() {
+                return hangang::service_identity::unavailable(&request_id);
+            }
             if let Some(attempt) = &workload
                 && attempt.now(st.ctx.clock.as_ref()).is_err()
             {
@@ -464,22 +502,38 @@ async fn verify(
     let client_ip = input.client_ip;
 
     let ctx = st.ctx.with_budget();
-    let (decision, cause) = match tokio::time::timeout(
-        ctx.limits.budget,
-        crate::verify::decide_with_cause(&ctx, input),
-    )
-    .await
-    {
-        Ok(d) => d,
-        Err(_) => (
-            Decision::Deny {
-                reason: reasons::BUDGET_EXCEEDED,
-                kind: DenyKind::Unavailable {
-                    retry_after: Duration::from_secs(1),
+    let (decision, cause, witness) = if let Some((owner, admission)) = human_admission {
+        crate::verify::decide_for_human(&ctx, &input, owner, admission).await
+    } else {
+        let (decision, cause) = match tokio::time::timeout(
+            ctx.limits.budget,
+            crate::verify::decide_with_cause(&ctx, input),
+        )
+        .await
+        {
+            Ok(d) => d,
+            Err(_) => (
+                Decision::Deny {
+                    reason: reasons::BUDGET_EXCEEDED,
+                    kind: DenyKind::Unavailable {
+                        retry_after: Duration::from_secs(1),
+                    },
                 },
+                None,
+            ),
+        };
+        st.count_decision(&decision);
+        st.denied(&decision, cause, Some(client_ip), None, None, &request_id);
+        return hangang::render(
+            decision,
+            if document {
+                Navigation::Document
+            } else {
+                Navigation::Other
             },
-            None,
-        ),
+            &env,
+            &st.cfg,
+        );
     };
     st.count_decision(&decision);
     st.denied(&decision, cause, Some(client_ip), None, None, &request_id);
@@ -488,5 +542,14 @@ async fn verify(
     } else {
         Navigation::Other
     };
-    hangang::render(decision, nav, &env, &st.cfg)
+    let mut response = hangang::render(decision, nav, &env, &st.cfg);
+    if let Some(witness) = witness {
+        match witness.finish(&input).await {
+            Ok(checked) => {
+                response.extensions_mut().insert(Arc::new(checked));
+            }
+            Err(_) => return hangang::service_identity::unavailable(&request_id),
+        }
+    }
+    response
 }

@@ -144,9 +144,58 @@ fn finish(tx: Transaction<'_>, shared: &Shared, gate: Option<&str>) -> StoreResu
     commit(tx, shared, gate)
 }
 
-#[async_trait]
-impl Sessions for Store {
-    async fn create_session(&self, req: CreateSession) -> StoreResult<()> {
+impl Store {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn reauthenticate_primary(
+        &self,
+        id: &crate::session::SessionId,
+        provider: &crate::provider::ProviderId,
+        configuration: Option<(crate::provider::types::ProviderKind, serde_json::Value)>,
+        auth_time: Timestamp,
+        source: crate::store::AuthTimeSource,
+        factor: crate::session::FactorEntry,
+        new_portal_handle: HandleRow,
+        consume_txn: (Digest, Reason),
+        deadline: crate::store::Deadline,
+        events: Vec<Event>,
+        mk_revoked_event: &(dyn for<'a> Fn(&'a HandleRow) -> Event + Sync),
+        primary: crate::session::service::VerifiedPrimary,
+    ) -> StoreResult<()> {
+        let (ask, responder) = super::admin::asker();
+        let job = self.reauthenticate_session_impl(
+            id,
+            provider,
+            configuration,
+            auth_time,
+            source,
+            factor,
+            new_portal_handle,
+            consume_txn,
+            deadline,
+            events,
+            ask,
+            Some(primary),
+        );
+        responder
+            .drive(job, &|row: HandleRow| mk_revoked_event(&row))
+            .await
+    }
+}
+
+impl Store {
+    pub(crate) async fn create_session_primary(
+        &self,
+        req: CreateSession,
+        primary: crate::session::service::VerifiedPrimary,
+    ) -> StoreResult<()> {
+        self.create_session_owned(req, Some(primary)).await
+    }
+    async fn create_session_owned(
+        &self,
+        req: CreateSession,
+        primary: Option<crate::session::service::VerifiedPrimary>,
+    ) -> StoreResult<()> {
+        let self_store = self.clone();
         self.write("create_session", move |env| {
             let shared = env.shared.clone();
             if req.portal_handle.handle_sha256 != req.portal_handle_digest {
@@ -183,6 +232,7 @@ impl Sessions for Store {
                 ],
             )?;
             insert_handle(&tx, &req.portal_handle)?;
+            if let Some(primary)=&primary {primary.write(&self_store,&tx,s,0)?;}
             tx.execute(
                 "UPDATE users SET last_login_at=?2 WHERE user_id=?1",
                 params![s.user_id.as_str(), s.created_at.secs()],
@@ -203,6 +253,7 @@ impl Sessions for Store {
             if let Some(h) = &shared.hooks {
                 h.crash_point("before_login_commit");
             }
+            if let Some(primary)=&primary {primary.publication()?;}
             finish(tx, &shared, Some("login_commit"))?;
             if let Some(h) = &shared.hooks {
                 h.crash_point("after_login_commit");
@@ -210,6 +261,13 @@ impl Sessions for Store {
             Ok(())
         })
         .await
+    }
+}
+
+#[async_trait]
+impl Sessions for Store {
+    async fn create_session(&self, req: CreateSession) -> StoreResult<()> {
+        self.create_session_owned(req, None).await
     }
 
     async fn session(&self, id: &SessionId) -> StoreResult<Option<SessionRow>> {
@@ -497,6 +555,7 @@ impl Sessions for Store {
             deadline,
             events,
             ask,
+            None,
         );
         responder
             .drive(job, &|row: HandleRow| mk_revoked_event(&row))

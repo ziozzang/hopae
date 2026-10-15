@@ -5,6 +5,7 @@
 
 mod engine;
 pub mod handoff;
+pub(crate) mod human;
 pub mod lifetimes;
 pub mod types;
 
@@ -41,3 +42,34 @@ pub async fn decide_with_cause(
 ) -> (Decision, Option<crate::event::types::Reason>) {
     engine::run(ctx, input).await
 }
+
+/// Owning native ingress only; no public Human constructor or wire activation.
+pub(crate) async fn decide_for_human(
+    ctx: &VerifyContext,
+    input: &VerifyInput,
+    owner: std::sync::Arc<human::Owner>,
+    admission: human::Admission,
+) -> (
+    Decision,
+    Option<crate::event::types::Reason>,
+    Option<human::Witness>,
+) {
+    let ctx = match owner.native_context(ctx) {
+        Ok(ctx) => ctx,
+        Err(_) => {
+            return (
+                Decision::Deny {
+                    reason: crate::event::types::reasons::STORE_UNAVAILABLE,
+                    kind: DenyKind::Unavailable {
+                        retry_after: std::time::Duration::from_secs(1),
+                    },
+                },
+                None,
+                None,
+            );
+        }
+    };
+    engine::run_for_human(&ctx, input, owner, admission).await
+}
+#[cfg(test)]
+mod human_tests;

@@ -137,10 +137,11 @@ mod tests;
 /// Exact actual DB rows and incarnations read under one storage snapshot.
 /// Only the Store constructs this; public Registry::from_snapshot is unqualified.
 pub(crate) struct PreparedProviders {
-    store: Weak<Inner>,
+    pub(super) store: Weak<Inner>,
     rows: Vec<crate::store::ProviderRow>,
-    owners: std::collections::BTreeMap<String, i64>,
-    generation: u64,
+    pub(super) owners: std::collections::BTreeMap<String, i64>,
+    pub(super) materials: super::material_owner::Ledger,
+    pub(super) generation: u64,
 }
 impl PreparedProviders {
     pub(crate) fn rows(&self) -> &[crate::store::ProviderRow] {
@@ -149,14 +150,31 @@ impl PreparedProviders {
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
+    pub(crate) fn human_expected(
+        &self,
+        store: &Store,
+        provider: &crate::provider::types::ProviderId,
+    ) -> StoreResult<(u64, i64)> {
+        if !Weak::ptr_eq(&self.store, &Arc::downgrade(&store.inner)) {
+            return Err(StoreError::Conflict("provider store changed"));
+        }
+        Ok((
+            self.generation,
+            *self
+                .owners
+                .get(provider.as_str())
+                .ok_or(StoreError::Conflict("provider not prepared"))?,
+        ))
+    }
 }
-fn prepared_rows(
+pub(super) fn prepared_rows(
     c: &rusqlite::Connection,
     check: &super::Check,
     expected: u64,
 ) -> StoreResult<(
     Vec<crate::store::ProviderRow>,
     std::collections::BTreeMap<String, i64>,
+    super::material_owner::Ledger,
 )> {
     use super::rows::{self, PROVIDER_COLS, cols};
     let transaction = c.unchecked_transaction()?;
@@ -194,9 +212,10 @@ fn prepared_rows(
             out.push(provider);
         }
     }
+    let materials = super::material_owner::read(&transaction, check)?;
     check.now()?;
     transaction.commit()?;
-    Ok((out, owners))
+    Ok((out, owners, materials))
 }
 impl Store {
     pub(crate) async fn prepare_registry_providers(
@@ -204,7 +223,7 @@ impl Store {
         expected_generation: u64,
         deadline: Deadline,
     ) -> StoreResult<PreparedProviders> {
-        let (rows, owners) = self
+        let (rows, owners, materials) = self
             .read_checked(
                 "prepare_registry_providers",
                 Some(deadline),
@@ -215,6 +234,7 @@ impl Store {
             store: Arc::downgrade(&self.inner),
             rows,
             owners,
+            materials,
             generation: expected_generation,
         })
     }
@@ -227,7 +247,7 @@ impl Store {
             return Err(StoreError::Conflict("provider store owner changed"));
         }
         let generation = prepared.generation;
-        let (_, owners) = self
+        let (_, owners, _) = self
             .read_checked(
                 "require_prepared_providers",
                 Some(deadline),

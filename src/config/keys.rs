@@ -139,6 +139,7 @@ pub(super) const ROOT: Node = Obj(&[
             ("eligibility_lua", Leaf),
         ])),
     ),
+    ("human_material_key_env", Leaf),
     (
         "totp_keyring",
         Obj(&[

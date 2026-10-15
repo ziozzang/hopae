@@ -28,6 +28,10 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// Dedicated canonical base64url32-byte key reference for private Human
+    /// compiled-material qualification; absent/invalid material disables only it.
+    #[serde(default)]
+    pub human_material_key_env: Option<String>,
     #[serde(default)]
     pub receipt_issuer: Option<crate::auth_gateway::receipt_config::NativeIssuer>,
     #[serde(default)]
@@ -894,6 +898,15 @@ impl Config {
         }
         if !self.external_verifiers.is_empty() && self.gateway.allow_unauthenticated_caller {
             errs.push("external_verifiers requires authenticated gateway callers".into());
+        }
+        if self
+            .human_material_key_env
+            .as_ref()
+            .is_some_and(|name| name.len() > 128 || !valid_env_name(name))
+        {
+            errs.push(
+                "human_material_key_env must be a bounded environment variable reference".into(),
+            );
         }
         if let Some(keys) = &self.totp_keyring {
             if keys.validate_references().is_err() {
@@ -1993,6 +2006,25 @@ mod tests {
             .is_err()
         );
         assert!(with(&serde_json::json!({"external_verifiers":[verifier],"gateway":{"kind":"hangang","allow_unauthenticated_caller":true}}).to_string()).is_err());
+    }
+
+    #[test]
+    fn human_material_reference_is_bounded_and_not_a_literal_key() {
+        assert!(with(r#"{"human_material_key_env":"OWNED_HUMAN_MATERIAL_KEY"}"#).is_ok());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut raw: serde_json::Value = serde_json::from_str(BASE).unwrap();
+        raw["human_material_key_env"] = serde_json::json!("OWNED_HUMAN_MATERIAL_KEY");
+        std::fs::write(&path, raw.to_string()).unwrap();
+        assert_eq!(
+            load(&path).unwrap().human_material_key_env.as_deref(),
+            Some("OWNED_HUMAN_MATERIAL_KEY")
+        );
+        for name in ["", "literal-key-with-hyphen", &"A".repeat(129)] {
+            let raw = serde_json::json!({"human_material_key_env":name}).to_string();
+            let error = with(&raw).unwrap_err().to_string();
+            assert!(!error.contains("literal-key-with-hyphen"));
+        }
     }
 
     #[test]

@@ -451,3 +451,245 @@ fn overlapping_check_observes_retirement_after_durable_read() {
         );
     });
 }
+
+fn material_key() -> super::super::material::Key {
+    super::super::material::Key::resolve(Some("OWNED_KEY"), &|_| {
+        Some(data_encoding::BASE64URL_NOPAD.encode(&[0x42; 32]))
+    })
+    .unwrap()
+}
+async fn material_registry(
+    store: &Store,
+    apps: Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
+    secret: &str,
+) -> Arc<Registry> {
+    Arc::new(
+        Registry::from_prepared_keyed(
+            store
+                .prepare_registry_providers(1, deadline())
+                .await
+                .unwrap(),
+            apps,
+            &|_| Some(secret.into()),
+            clock(),
+            None,
+            Some(&material_key()),
+        )
+        .unwrap(),
+    )
+}
+fn material_revision(store: &Store) -> i64 {
+    store
+        .conn()
+        .query_row(
+            "SELECT revision FROM human_provider_material_owners WHERE provider_id='actual-db'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+#[tokio::test]
+async fn material_preparation_cas_rejects_stale_and_preserves_identical_overlaps() {
+    let (_dir, store, apps) = fixture().await;
+    let first = material_registry(&store, apps.clone(), "owned-first").await;
+    let identical = material_registry(&store, apps.clone(), "owned-first").await;
+    let stale = material_registry(&store, apps.clone(), "owned-old-different").await;
+    first.publish_prepared(&store, deadline()).await.unwrap();
+    identical
+        .publish_prepared(&store, deadline())
+        .await
+        .unwrap();
+    assert_eq!(material_revision(&store), 1);
+    assert!(stale.publish_prepared(&store, deadline()).await.is_err());
+    let old = material_registry(&store, apps.clone(), "owned-first").await;
+    let new = material_registry(&store, apps.clone(), "owned-second").await;
+    new.publish_prepared(&store, deadline()).await.unwrap();
+    assert_eq!(material_revision(&store), 2);
+    assert!(old.publish_prepared(&store, deadline()).await.is_err());
+    let back = material_registry(&store, apps, "owned-first").await;
+    back.publish_prepared(&store, deadline()).await.unwrap();
+    assert_eq!(material_revision(&store), 3);
+    assert!(old.publish_prepared(&store, deadline()).await.is_err());
+    assert!(first.publish_prepared(&store, deadline()).await.is_err());
+}
+#[tokio::test]
+async fn material_compiler_resolves_secret_once_and_ledger_guards_survive_reopen() {
+    let (dir, store, apps) = fixture().await;
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let reg = Registry::from_prepared_keyed(
+        store
+            .prepare_registry_providers(1, deadline())
+            .await
+            .unwrap(),
+        apps,
+        &|_| {
+            assert_eq!(calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 0);
+            Some("single-immutable-read".into())
+        },
+        clock(),
+        None,
+        Some(&material_key()),
+    )
+    .unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    reg.publish_prepared(&store, deadline()).await.unwrap();
+    assert_eq!(material_revision(&store), 1);
+    for sql in [
+        "DELETE FROM human_provider_material_owners",
+        "UPDATE human_provider_material_owners SET revision=revision+1",
+        "UPDATE human_provider_material_owners SET fingerprint=zeroblob(32)",
+        "UPDATE human_provider_material_owners SET provider_id='replacement'",
+        "INSERT INTO human_provider_material_owners VALUES('forged',7,zeroblob(32))",
+    ] {
+        assert!(store.conn().execute(sql, []).is_err());
+    }
+    drop(reg);
+    drop(store);
+    let reopened = Store::open(&dir.path().join("owner.db"), clock(), vec![], None).unwrap();
+    assert_eq!(material_revision(&reopened), 1);
+}
+
+#[tokio::test]
+async fn ldap_same_ca_path_and_bind_reference_track_consumed_material_and_disable() {
+    let (dir, store, apps) = fixture().await;
+    let ca = dir.path().join("trust.pem");
+    let make_ca = |name: &str| {
+        let cert = dir.path().join(format!("{name}.pem"));
+        assert!(
+            std::process::Command::new("openssl")
+                .args([
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "ec",
+                    "-pkeyopt",
+                    "ec_paramgen_curve:P-256",
+                    "-nodes",
+                    "-days",
+                    "1",
+                    "-subj",
+                    "/CN=Owned material fixture",
+                    "-keyout"
+                ])
+                .arg(dir.path().join(format!("{name}.key")))
+                .arg("-out")
+                .arg(&cert)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::read(cert).unwrap()
+    };
+    let first = make_ca("first");
+    let second = make_ca("second");
+    std::fs::write(&ca, &first).unwrap();
+    let mut provider = row();
+    provider.kind = ProviderKind::Ldap;
+    provider.client_secret_env = None;
+    provider.config = serde_json::json!({"ldap":{"endpoint":"ldaps://directory.example.test","ca":ca,"base_dn":"dc=example,dc=test","bind_dn":"cn=service,dc=example,dc=test","bind_password_env":"SAME_BIND_REFERENCE","username_attribute":"uid","subject_attribute":"entryUUID","timeout_ms":1000}});
+    store
+        .import_providers(vec![provider], None, vec![])
+        .await
+        .unwrap();
+    let compile = |secret: &str| {
+        let secret = secret.to_owned();
+        let store = store.clone();
+        let apps = apps.clone();
+        async move { material_registry(&store, apps, &secret).await }
+    };
+    let a = compile("bind-first").await;
+    a.publish_prepared(&store, deadline()).await.unwrap();
+    let a2 = compile("bind-first").await;
+    a2.publish_prepared(&store, deadline()).await.unwrap();
+    assert_eq!(material_revision(&store), 1);
+    std::fs::write(&ca, &second).unwrap();
+    let b = compile("bind-first").await;
+    b.publish_prepared(&store, deadline()).await.unwrap();
+    assert_eq!(material_revision(&store), 2);
+    std::fs::write(&ca, &first).unwrap();
+    let a3 = compile("bind-first").await;
+    a3.publish_prepared(&store, deadline()).await.unwrap();
+    assert_eq!(material_revision(&store), 3);
+    let c = compile("bind-second").await;
+    c.publish_prepared(&store, deadline()).await.unwrap();
+    assert_eq!(material_revision(&store), 4);
+    std::fs::write(&ca, b"invalid CA").unwrap();
+    let disabled = compile("bind-second").await;
+    assert!(
+        !disabled
+            .credential(&ProviderId::new("actual-db"))
+            .unwrap()
+            .enabled()
+    );
+    disabled.publish_prepared(&store, deadline()).await.unwrap();
+    assert_eq!(material_revision(&store), 5);
+    assert!(
+        !disabled
+            .owners()
+            .unwrap()
+            .materials
+            .get()
+            .unwrap()
+            .contains("actual-db")
+    );
+}
+
+#[tokio::test]
+async fn material_publication_failure_rolls_back_and_noop_import_keeps_incarnation() {
+    let (_dir, store, apps) = fixture().await;
+    let a = material_registry(&store, apps.clone(), "original").await;
+    a.publish_prepared(&store, deadline()).await.unwrap();
+    let mut presentation = row();
+    presentation.display_name = "Renamed".into();
+    presentation.sort_order = 8;
+    store
+        .import_providers(vec![presentation], None, vec![])
+        .await
+        .unwrap();
+    let same = material_registry(&store, apps.clone(), "original").await;
+    same.publish_prepared(&store, deadline()).await.unwrap();
+    assert_eq!(material_revision(&store), 1);
+    let next = material_registry(&store, apps, "replacement").await;
+    store.conn().execute_batch("CREATE TRIGGER owned_material_abort BEFORE UPDATE ON human_provider_material_owners BEGIN SELECT RAISE(ABORT,'owned material failure'); END;").unwrap();
+    assert!(next.publish_prepared(&store, deadline()).await.is_err());
+    assert_eq!(material_revision(&store), 1);
+    assert!(
+        !next
+            .owners()
+            .unwrap()
+            .published
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    store
+        .conn()
+        .execute_batch("DROP TRIGGER owned_material_abort")
+        .unwrap();
+    next.publish_prepared(&store, deadline()).await.unwrap();
+    assert_eq!(material_revision(&store), 2);
+    assert!(a.publish_prepared(&store, deadline()).await.is_err());
+}
+
+#[tokio::test]
+async fn material_capacity_refuses_without_partial_publication() {
+    let (_dir, store, apps) = fixture().await;
+    store.conn().execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<16384) INSERT INTO human_provider_material_owners(provider_id,revision,fingerprint) SELECT 'retired-'||x,1,NULL FROM n;").unwrap();
+    let reg = material_registry(&store, apps, "owned-source").await;
+    assert!(reg.publish_prepared(&store, deadline()).await.is_err());
+    let count: i64 = store
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM human_provider_material_owners",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 16384);
+    assert!(
+        !reg.owners()
+            .unwrap()
+            .published
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+}

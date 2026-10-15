@@ -332,6 +332,13 @@ impl EndpointPolicy {
         }
     }
 
+    pub(super) fn material(&self) -> serde_json::Value {
+        let mut hosts = self.hosts.clone();
+        hosts.sort();
+        hosts.dedup();
+        serde_json::json!({"issuer_host":self.issuer_host,"hosts":hosts,"allow_private":self.allow_private})
+    }
+
     pub fn allow_private(&self) -> bool {
         self.allow_private
     }

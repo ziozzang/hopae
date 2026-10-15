@@ -168,36 +168,59 @@ impl Cx<'_> {
 }
 
 pub(super) async fn run(ctx: &VerifyContext, input: VerifyInput) -> (Decision, Option<Reason>) {
+    let (decision, cause, _) = run_inner(ctx, &input, None).await;
+    (decision, cause)
+}
+pub(super) async fn run_for_human(
+    ctx: &VerifyContext,
+    input: &VerifyInput,
+    owner: Arc<super::human::Owner>,
+    admission: super::human::Admission,
+) -> (Decision, Option<Reason>, Option<super::human::Witness>) {
+    run_inner(ctx, input, Some((owner, admission))).await
+}
+async fn run_inner(
+    ctx: &VerifyContext,
+    input: &VerifyInput,
+    human: Option<(Arc<super::human::Owner>, super::human::Admission)>,
+) -> (Decision, Option<Reason>, Option<super::human::Witness>) {
     let deadline = ctx
         .deadline
         .unwrap_or_else(|| Instant::now() + ctx.limits.budget);
     let cx = Cx {
         ctx,
-        input: &input,
+        input,
         snapshot: ctx.snapshot.load_full(),
         now: ctx.clock.now(),
         deadline,
         cause: std::sync::Mutex::new(None),
     };
     let work = with_deadline(deadline, async {
-        match flow(&cx).await {
-            Ok(d) | Err(d) => d,
+        match flow(&cx, human).await {
+            Ok(d) => d,
+            Err(d) => (d, None),
         }
     });
-    let decision = match tokio::time::timeout_at(deadline, work).await {
+    let (decision, witness) = match tokio::time::timeout_at(deadline, work).await {
         Ok(d) => d,
-        Err(_) => cx.deny(
-            reasons::BUDGET_EXCEEDED,
-            DenyKind::Unavailable {
-                retry_after: UNAVAILABLE_RETRY,
-            },
+        Err(_) => (
+            cx.deny(
+                reasons::BUDGET_EXCEEDED,
+                DenyKind::Unavailable {
+                    retry_after: UNAVAILABLE_RETRY,
+                },
+            ),
+            None,
         ),
     };
     let cause = *cx.cause.lock().unwrap_or_else(|p| p.into_inner());
-    (decision, cause)
+    (decision, cause, witness)
 }
 
-async fn flow(cx: &Cx<'_>) -> Flow {
+async fn flow(
+    cx: &Cx<'_>,
+    human: Option<(Arc<super::human::Owner>, super::human::Admission)>,
+) -> Result<(Decision, Option<super::human::Witness>), Decision> {
     let (ctx, input) = (cx.ctx, cx.input);
 
     // Contract checks the core can make on its own input.
@@ -243,13 +266,17 @@ async fn flow(cx: &Cx<'_>) -> Flow {
     match input.canonical_path.reserved() {
         Reserved::No => {}
         Reserved::Other => return Err(cx.deny(reasons::RESERVED_PATH, DenyKind::Forbidden)),
-        Reserved::Entry(entry) => return entry_point(cx, app, entry).await,
+        Reserved::Entry(entry) => return entry_point(cx, app, entry).await.map(|d| (d, None)),
     }
 
     // Reserved handoff parameter.
     match (&input.handoff, cx.document()) {
         (Handoff::None, _) => {}
-        (Handoff::Code(code), true) => return handoff::redeem(cx, app, &target, code).await,
+        (Handoff::Code(code), true) => {
+            return handoff::redeem(cx, app, &target, code)
+                .await
+                .map(|d| (d, None));
+        }
         (Handoff::Ambiguous, true) => return Err(ambiguous_handoff(cx, app).await),
         (_, false) => {
             return Err(cx.deny(reasons::HANDOFF_PARAMETER_NOT_ALLOWED, DenyKind::Forbidden));
@@ -257,7 +284,7 @@ async fn flow(cx: &Cx<'_>) -> Flow {
     }
 
     match authenticate(cx, app).await? {
-        Authn::Refused(cause) => login(cx, app, &target, cause, 0).await,
+        Authn::Refused(cause) => login(cx, app, &target, cause, 0).await.map(|d| (d, None)),
         Authn::Allowed(authed) => {
             if let step_up::StepUpVerdict::Required { aal, max_age } = step_up::evaluate(
                 &app.step_up,
@@ -283,24 +310,30 @@ async fn flow(cx: &Cx<'_>) -> Flow {
                         &authed.view,
                         max_age.unwrap_or(Duration::from_secs(300)),
                     )
-                    .await;
+                    .await
+                    .map(|d| (d, None));
                 }
                 if cx.document() && cx.ctx.limits.stepup_enabled {
-                    return start_stepup(cx, app, &target, &authed.view).await;
+                    return start_stepup(cx, app, &target, &authed.view)
+                        .await
+                        .map(|d| (d, None));
                 }
                 // Without a configured factor keyring, retain fail-closed
                 // document refusal; non-document requests never start a flow.
-                return Ok(if cx.document() {
-                    cx.deny(reasons::STEP_UP_REQUIRED, DenyKind::ForbiddenHtml)
-                } else {
-                    Decision::Login {
-                        transaction: None,
-                        bind: BindAction::Keep,
-                        kind: LoginKind::StepUp,
-                        clear_handle: false,
-                        cause: Some(reasons::STEP_UP_REQUIRED),
-                    }
-                });
+                return Ok((
+                    if cx.document() {
+                        cx.deny(reasons::STEP_UP_REQUIRED, DenyKind::ForbiddenHtml)
+                    } else {
+                        Decision::Login {
+                            transaction: None,
+                            bind: BindAction::Keep,
+                            kind: LoginKind::StepUp,
+                            clear_handle: false,
+                            cause: Some(reasons::STEP_UP_REQUIRED),
+                        }
+                    },
+                    None,
+                ));
             }
             // The console's freshness rule, after the step-up rules (ADR-0016
             // decision 15): one predicate at every verify.
@@ -308,10 +341,31 @@ async fn flow(cx: &Cx<'_>) -> Flow {
                 let session = &authed.view.session;
                 let capability = cx.snapshot.reauth_capability(&session.provider_id);
                 if !freshness::console_fresh(session, capability, cx.now, n) {
-                    return reauth(cx, app, &target, &authed.view, n).await;
+                    return reauth(cx, app, &target, &authed.view, n)
+                        .await
+                        .map(|d| (d, None));
                 }
             }
-            Ok(allow(cx, app, *authed))
+            let witness = match human {
+                Some((owner, admission)) => Some(
+                    owner
+                        .witness(
+                            admission,
+                            cx.ctx,
+                            cx.input,
+                            cx.snapshot.clone(),
+                            super::human::Allowed {
+                                app: app.clone(),
+                                view: authed.expected_view(),
+                                expires: authed.expires_at,
+                            },
+                        )
+                        .await
+                        .map_err(|e| cx.store_err(e))?,
+                ),
+                None => None,
+            };
+            Ok((allow(cx, app, *authed), witness))
         }
     }
 }
@@ -398,6 +452,15 @@ struct Authed {
     view: HandleView,
     snapshot: IdentitySnapshot,
     expires_at: Timestamp,
+    expected_authz_version: u64,
+}
+impl Authed {
+    fn expected_view(&self) -> HandleView {
+        let mut view = self.view.clone();
+        view.session.snapshot = self.snapshot.clone();
+        view.session.authz_version = self.expected_authz_version;
+        view
+    }
 }
 
 /// The handle checks of an ordinary verify: lookup, lifetimes, binding policy,
@@ -516,10 +579,15 @@ async fn authenticate(cx: &Cx<'_>, app: &AppPolicy) -> Result<Authn, Decision> {
         AuthzChange::Refresh => {}
     }
 
+    let expected_authz_version = match app.on_authz_change {
+        AuthzChange::Refresh => view.user.authz_version,
+        AuthzChange::Terminate => view.session.authz_version,
+    };
     Ok(Authn::Allowed(Box::new(Authed {
         view,
         snapshot,
         expires_at,
+        expected_authz_version,
     })))
 }
 
@@ -529,6 +597,7 @@ fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed) -> Decision {
         view,
         snapshot,
         expires_at,
+        expected_authz_version: _,
     } = authed;
     // Enabled host and step-up evidence were checked before reaching this grant.
     let path_dependent = step_up::forces_no_store(&app.step_up);

@@ -9,6 +9,9 @@ mod admin;
 mod directory;
 mod events;
 mod factors;
+pub(crate) mod human_owner;
+pub(crate) mod material_owner;
+pub(crate) mod primary_owner;
 // Internal infrastructure only; native Human candidate integration is queued.
 #[allow(dead_code)]
 pub(crate) mod provider_owner;
@@ -78,6 +81,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         8,
         "0008_session_totp_provenance",
         include_str!("../migrations/0008_session_totp_provenance.sql"),
+    ),
+    (
+        9,
+        "0009_session_primary_provenance",
+        include_str!("../migrations/0009_session_primary_provenance.sql"),
     ),
 ];
 
@@ -866,6 +874,9 @@ pub fn validate_foundation(conn: &Connection, version: u32) -> Result<(), StoreE
     }
     if version >= 8 {
         totp_owner::validate_foundation(conn)?;
+    }
+    if version >= 9 {
+        primary_owner::validate_foundation(conn)?;
     }
     Ok(())
 }

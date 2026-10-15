@@ -236,3 +236,95 @@ async fn administrator_mtls_requires_certificate_and_preserves_authentication() 
         .unwrap()
         .unwrap();
 }
+
+#[test]
+fn compiled_builder_material_owner_survives_actual_process_restart_and_retires_on_changes() {
+    struct Owned(std::process::Child);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            if self.0.try_wait().ok().flatten().is_none() {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut config: serde_json::Value = serde_json::from_str(&config_json(dir.path())).unwrap();
+    config["human_material_key_env"] = serde_json::json!("OWNED_NATIVE_MATERIAL_KEY");
+    config["providers"] = serde_json::json!([{"provider_id":"owned","kind":"oidc","client_id":"owned","client_secret_env":"OWNED_NATIVE_PROVIDER_SECRET","issuer":"https://127.0.0.1:1","allow_private_endpoints":true}]);
+    let cfg = write_config(dir.path(), &config.to_string());
+    let mut configuration = None;
+    for (key, secret, expected) in [
+        (0x31u8, "first-provider-material", 1),
+        (0x31, "first-provider-material", 1),
+        (0x31, "changed-provider-material", 2),
+        (0x31, "first-provider-material", 3),
+        (0x32, "first-provider-material", 4),
+    ] {
+        let mut child = Owned(
+            Command::new(env!("CARGO_BIN_EXE_hopae"))
+                .env(KEY_ENV, "owned-gateway-caller")
+                .env(
+                    "OWNED_NATIVE_MATERIAL_KEY",
+                    data_encoding::BASE64URL_NOPAD.encode(&[key; 32]),
+                )
+                .env("OWNED_NATIVE_PROVIDER_SECRET", secret)
+                .args(["serve", "--config"])
+                .arg(&cfg)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut lines = BufReader::new(child.0.stdout.take().unwrap()).lines();
+        let portal: std::net::SocketAddr = lines
+            .next()
+            .unwrap()
+            .unwrap()
+            .strip_prefix("portal listening on ")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let _gateway: std::net::SocketAddr = lines
+            .next()
+            .unwrap()
+            .unwrap()
+            .strip_prefix("gateway listening on ")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(get(portal, "/healthz").status, 200);
+        // Real child exit closes listeners, background tasks and the owning
+        // instance lock. No sleep/retry or test-only lock release is used.
+        assert_eq!(
+            unsafe { libc::kill(child.0.id() as libc::pid_t, libc::SIGTERM) },
+            0
+        );
+        assert!(child.0.wait().unwrap().success());
+        let db = rusqlite::Connection::open_with_flags(
+            dir.path().join("state/hopae.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let revision: i64 = db
+            .query_row(
+                "SELECT revision FROM human_provider_material_owners WHERE provider_id='owned'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let generation: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE key='config_generation'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision, expected);
+        if let Some(ref original) = configuration {
+            assert_eq!(&generation, original);
+        } else {
+            configuration = Some(generation);
+        }
+    }
+}

@@ -236,6 +236,27 @@ impl OidcProvider {
         })
     }
 
+    pub(crate) fn from_row_material(
+        row: &ProviderRow,
+        env: &dyn Fn(&str) -> Option<String>,
+        clock: Arc<dyn Clock>,
+        reporter: Option<Reporter>,
+        key: Option<&super::material::Key>,
+    ) -> (Arc<Self>, Option<super::material::Fingerprint>) {
+        let settings = OidcSettings::from_row(row, env);
+        let fingerprint=key.filter(|_|settings.disabled_reason.is_none()).and_then(|key| {
+            let mut builder=key.start(row)?;
+            let effective=serde_json::json!({"issuer":settings.issuer,"client_id":settings.client_id,"scope":settings.scope,"authoritative_domains":settings.authoritative_domains,"trust_email":settings.trust_email,"userinfo":settings.userinfo,"reauth_prompt":format!("{:?}",settings.reauth_prompt),"id_token_typ":settings.id_token_typ,"endpoints":settings.endpoints.material()});
+            builder.part(b"oidc-effective",&serde_json::to_vec(&effective).ok()?);
+            match &settings.client_secret {
+                Some(secret)=>builder.part(b"oidc-client-secret",secret.expose().as_bytes()),
+                None=>builder.part(b"oidc-public-client",b""),
+            }
+            Some(builder.finish())
+        });
+        (Self::new(settings, clock, reporter), fingerprint)
+    }
+
     pub fn from_row(
         row: &ProviderRow,
         env: &dyn Fn(&str) -> Option<String>,
