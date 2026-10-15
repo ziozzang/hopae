@@ -20,6 +20,8 @@ Independent observation also returns the cached canonical `scope_sha256` from th
 
 The final pure constraint receives the same last native SourceTime sample and may only shorten admission. It does not change the signed expiry, retained record, or retention. An independent query must intersect its original sealed Admission at this sample, without resampling a clock.
 
+The final observer repeats callback-free native publication/readiness/retirement checks after its last source/key publication loads. An overlapping observer that retires the exact retained Checked cannot be overlooked merely because this request sampled its clock earlier. This remains a local point-in-time fence, not atomic remote revocation.
+
 ## Administrator policy coordinates
 
 When native Human receipts are configured, authenticated administrator user

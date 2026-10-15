@@ -195,6 +195,8 @@ pub(crate) struct Source {
     shards: [Mutex<Shard>; SHARDS],
     cursor: AtomicUsize,
     shard_capacity: usize,
+    #[cfg(test)]
+    final_publication_gate: Option<(Arc<AtomicBool>, Arc<AtomicBool>, AtomicBool)>,
 }
 pub(crate) struct Record {
     checked: Checked,
@@ -275,6 +277,8 @@ impl Source {
             shards: std::array::from_fn(|_| Mutex::new(Shard::default())),
             cursor: AtomicUsize::new(0),
             shard_capacity: configuration.capacity.div_ceil(SHARDS) * 2,
+            #[cfg(test)]
+            final_publication_gate: None,
         })
     }
     pub(crate) fn retire(&self) {
@@ -547,7 +551,20 @@ impl Source {
         observation.owner_now_ms = now.owner_now_ms;
         observation.remaining_ms = u32::try_from(remaining).map_err(|_| Refused)?;
         self.publication.require_current().map_err(|_| Refused)?;
-        if !signature.current() || !record.keys.current() || !self.active.load(Ordering::Acquire) {
+        #[cfg(test)]
+        if let Some((entered, release, claimed)) = &self.final_publication_gate
+            && !claimed.swap(true, Ordering::AcqRel)
+        {
+            entered.store(true, Ordering::Release);
+            while !release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        }
+        if !signature.current() || !record.keys.current() {
+            return Err(Refused);
+        }
+        record.checked.require_pure_current().map_err(|_| Refused)?;
+        if !self.active.load(Ordering::Acquire) {
             return Err(Refused);
         }
         Ok(observation)
@@ -561,6 +578,13 @@ impl Record {
 
 #[cfg(test)]
 impl Source {
+    pub(crate) fn final_publication_gate_for_test(
+        &mut self,
+        entered: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+    ) {
+        self.final_publication_gate = Some((entered, release, AtomicBool::new(false)));
+    }
     pub(crate) fn usage_for_test(&self) -> (usize, usize) {
         (
             self.quota.count.load(Ordering::Acquire),

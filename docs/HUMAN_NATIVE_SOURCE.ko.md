@@ -20,6 +20,8 @@ count 기본 131,072, 최대 1,048,576입니다. 요청한 retained capacity 기
 
 최종 순수 제약 함수는 마지막 native SourceTime sample 자체를 받아 admission만 줄일 수 있습니다. 서명 expiry·보존 record·retention은 바꾸지 않습니다. 독립 query는 시계를 다시 읽지 않고 이 sample에서 원래의 sealed Admission과 교집합을 계산해야 합니다.
 
+최종 observer는 마지막 source·key publication load 뒤에 callback 없는 native publication/readiness/retirement 검사를 반복합니다. 다른 observer가 동일한 retained Checked를 철회한 경우 앞서 시계를 읽었다는 이유로 이를 놓치지 않습니다. 이는 로컬 시점 검사이며 원격 철회를 원자적으로 보장하지 않습니다.
+
 ## 관리자 정책 식별자
 
 네이티브 Human 증명을 설정하면 인증된 관리자 사용자 응답에서 지원되는 현재 계정의

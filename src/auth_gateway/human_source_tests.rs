@@ -721,3 +721,49 @@ async fn native_human_source_same_sample_constraint_only_shortens_and_keeps_reco
 
 #[path = "human_projection_current_tests.rs"]
 mod projection_current_tests;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_human_source_final_publication_then_other_observer_retirement_refuses() {
+    let f = Fx::new(None).await;
+    let (cookie, _) = f.login().await;
+    let (mut source, _, _) = source(&f, configuration());
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    source.final_publication_gate_for_test(entered.clone(), release.clone());
+    let source = Arc::new(source);
+    let record = source
+        .issue(
+            captured(&f, &cookie).await,
+            source.validate("orders", "orders-api", &request()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let (first_source, first_record) = (source.clone(), record.clone());
+    let pending = tokio::spawn(async move {
+        let context = first_record.issued().context();
+        first_source
+            .observe(
+                &context,
+                first_record.issued().bytes(),
+                &context.request_sha256,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !entered.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // Real native row withdrawal, then another actual independent observation
+    // irreversibly retires the exact retained Checked while first is post-time.
+    f.sql("UPDATE users SET status='disabled'");
+    let context = record.issued().context();
+    let retired = source
+        .observe(&context, record.issued().bytes(), &context.request_sha256)
+        .await;
+    release.store(true, Ordering::Release);
+    assert!(retired.is_err());
+    assert!(pending.await.unwrap().is_err());
+}

@@ -723,6 +723,30 @@ impl Checked {
         result
     }
 
+    /// Callback-free final publication/readiness/retirement fence. Lifetime is
+    /// independently bounded by the retained actual native observation deadline.
+    pub(crate) fn require_pure_current(&self) -> StoreResult<()> {
+        let w = &self.witness;
+        let result = (|| {
+            w.owner
+                .registry
+                .require_human_publication(&w.provider, &w.snapshot)?;
+            let application = Arc::ptr_eq(&w.snapshot, &w.owner.applications.load_full());
+            if !application
+                || w.owner.failed.load(Ordering::Acquire)
+                || w.admission.failed.load(Ordering::Acquire)
+                || !w.admission.ready()
+                || w.retired.load(Ordering::Acquire)
+            {
+                return Err(refused());
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            w.retired.store(true, Ordering::Release);
+        }
+        result
+    }
     pub(crate) fn belongs_to(&self, owner: &Arc<Owner>) -> bool {
         Arc::ptr_eq(&self.witness.owner, owner)
     }
