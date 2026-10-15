@@ -281,8 +281,13 @@ application/caller guards, bounded blocking-store execution, receiver gRPC and
 Hangang final credential delivery remain required before activation or release.
 The library API is not an ordinary gateway authentication endpoint.
 
-Library 528 tests (one existing ignore), all workspace tests and strict Clippy
+Library 529 tests (one existing ignore), all workspace tests and strict Clippy
 pass. Rebuilt Hopae also passes the existing actual four-server permit/route/
 plan regression with durable withdrawal and authority outages. That regression
 keeps the new receiver library inactive and therefore proves compatibility,
 not runtime projection or replay consumption across the four servers.
+
+Projected output also retains its own entry timestamp and monotonic elapsed-time
+anchor through final header conversion. Post-commit storage cannot extend its
+shortened expiry by supplying a reversed or stalled wall clock. A focused output
+test covers reversal and elapsed expiry after successful construction.

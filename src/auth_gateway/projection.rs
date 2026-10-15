@@ -56,6 +56,8 @@ pub struct Projector {
 /// No Clone, Debug or serde implementation: credential bytes must not enter
 /// ordinary auth responses, telemetry or serialized management state.
 pub struct Output {
+    checked_ms: u64,
+    begun: std::time::Instant,
     scope: Scope,
     name: HeaderName,
     value: Zeroizing<String>,
@@ -158,7 +160,13 @@ impl Projector {
         guard: &dyn Fn(&Connection) -> Result<(), Refused>,
         resolve: &dyn Fn(&str) -> Result<Zeroizing<String>, Refused>,
     ) -> Result<Output, Refused> {
+        let begun = std::time::Instant::now();
+        let checked_ms = clock();
         let scope = &admission.scope;
+        if checked_ms < scope.issued_ms || checked_ms >= scope.expires_ms {
+            return Err(Refused);
+        }
+
         let plan = self
             .plans
             .get(scope.service.as_str())
@@ -210,7 +218,13 @@ impl Projector {
                     )
                 }
             };
-            Ok(Output { scope, name, value })
+            Ok(Output {
+                scope,
+                name,
+                value,
+                checked_ms,
+                begun,
+            })
         })
     }
 }
@@ -228,8 +242,11 @@ impl Output {
         if service != self.scope.service
             || audience != self.scope.audience
             || *request_sha256 != self.scope.request_sha256
-            || now < self.scope.issued_ms
-            || now >= self.scope.expires_ms
+            || now < self.checked_ms
+            || now.max(
+                self.checked_ms
+                    .saturating_add(self.begun.elapsed().as_millis().min(u64::MAX as u128) as u64),
+            ) >= self.scope.expires_ms
         {
             return Err(Refused);
         }
@@ -242,6 +259,51 @@ impl Output {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn output() -> Output {
+        Output {
+            checked_ms: 105,
+            begun: std::time::Instant::now(),
+            scope: Scope {
+                service: "orders".into(),
+                audience: "orders-api".into(),
+                subject: "s_owned".into(),
+                resource: "db:orders".into(),
+                action: "select".into(),
+                aal: 0,
+                request_sha256: [3; 32],
+                plan_revision: 1,
+                issued_ms: 100,
+                expires_ms: 900,
+            },
+            name: HeaderName::from_static("authorization"),
+            value: Zeroizing::new("Bearer owned-upstream-token".into()),
+        }
+    }
+    #[test]
+    fn final_header_rejects_post_commit_clock_reversal_and_elapsed_expiry() {
+        assert!(
+            output()
+                .into_header("orders", "orders-api", &[3; 32], 106)
+                .is_ok()
+        );
+        assert!(
+            output()
+                .into_header("orders", "orders-api", &[3; 32], 104)
+                .is_err()
+        );
+        assert!(
+            output()
+                .into_header("orders", "orders-api", &[3; 32], 900)
+                .is_err()
+        );
+        let mut delayed = output();
+        delayed.begun = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        assert!(
+            delayed
+                .into_header("orders", "orders-api", &[3; 32], 106)
+                .is_err()
+        );
+    }
     #[test]
     fn plans_are_bounded_reference_only_and_reject_duplicate_scopes() {
         let plan = Plan {
