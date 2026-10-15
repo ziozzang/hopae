@@ -1,6 +1,8 @@
 //! Actual authenticated TLS TokenReview -> gateway -> native Workload RPC.
 //! Owned mock API; no claim to validate real Kubernetes JWT signatures here.
 use super::*;
+#[path = "../../tests/support/owned_port.rs"]
+mod owned_ready_port;
 use crate::{
     auth_gateway::{authority, receipt_config, receipt_keys, runtime},
     crypto::Rng,
@@ -132,7 +134,11 @@ impl Fixture {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let port = std::fs::read_to_string(root.path().join("ready")).unwrap();
+        let port =
+            owned_ready_port::parse(&std::fs::read_to_string(root.path().join("ready")).unwrap())
+                .expect(
+                    "owned Kubernetes verifier must atomically publish a complete canonical port",
+                );
         let ca = std::fs::read_to_string(root.path().join("ca.pem")).unwrap();
         let mut value = serde_json::json!({"state_dir":root.path().join("state"),"listen":{"portal":"127.0.0.1:0","gateway":"127.0.0.1:0"},"portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_CALLER","verify_budget_ms":2000},"apps":[{"app_id":"orders","hosts":["orders.example.test"]}]});
         if human_only {

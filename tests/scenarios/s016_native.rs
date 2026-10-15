@@ -1,4 +1,6 @@
 //! The native socket re-enters the same real caller/parse/session engine.
+#[path = "../support/owned_port.rs"]
+mod owned_ready_port;
 use super::s004_verify::fx::Fx;
 use axum::{
     body::{Body, to_bytes},
@@ -2389,7 +2391,10 @@ async fn kubernetes_workload_http_native_parity_and_profile_revocation() {
             assert!(std::time::Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let port = std::fs::read_to_string(verifier.dir.path().join("ready")).unwrap();
+        let port = owned_ready_port::parse(
+            &std::fs::read_to_string(verifier.dir.path().join("ready")).unwrap(),
+        )
+        .expect("owned Kubernetes verifier must atomically publish a complete canonical port");
         let ca = std::fs::read_to_string(verifier.dir.path().join("ca.pem")).unwrap();
         let env = |name: &str| match name {
             "OWNED_KUBE_CA" => Some(ca.clone()),

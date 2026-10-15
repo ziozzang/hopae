@@ -3,12 +3,28 @@
 import base64
 import http.server
 import json
+import os
+import tempfile
 import pathlib
 import socketserver
 import ssl
 import sys
 import time
-root=pathlib.Path(sys.argv[1])
+def publish_ready(path, port):
+    """Publish complete canonical port bytes; existence is the readiness signal."""
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError("invalid owned verifier port")
+    path = pathlib.Path(path)
+    descriptor, temporary = tempfile.mkstemp(prefix="." + path.name + "-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "w") as output:
+            output.write(str(port))
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        pathlib.Path(temporary).unlink(missing_ok=True)
+
 class Handler(http.server.BaseHTTPRequestHandler):
     calls=0
     def log_message(self,*_):pass
@@ -40,4 +56,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
 class Server(http.server.ThreadingHTTPServer):
     def server_bind(self):
         socketserver.TCPServer.server_bind(self);self.server_name='localhost';self.server_port=self.server_address[1]
-server=Server(('127.0.0.1',0),Handler);context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(root/'server.pem',root/'server.key');server.socket=context.wrap_socket(server.socket,server_side=True);(root/'ready').write_text(str(server.server_port));server.serve_forever()
+def main():
+    global root
+    root = pathlib.Path(sys.argv[1])
+    server = Server(('127.0.0.1', 0), Handler)
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(root / 'server.pem', root / 'server.key')
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        publish_ready(root / 'ready', server.server_port)
+        server.serve_forever()
+    finally:
+        server.server_close()
+
+if __name__ == '__main__':
+    main()

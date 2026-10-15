@@ -154,3 +154,23 @@ auth.renew_native_evidence로 선택형 네이티브 재인증을 제공합니�
 같은 신원/종류/AAL/service가 필요하며 실패·늦은 갱신은 거절합니다. 개별 자격 회수
 구독과 실제 클러스터 원천의 지속 가용성은 미구현입니다. 이번 수명 검증은
 기존 운영 이미지를 전환하지 않으며 장기 워크로드 인증 완료를 의미하지 않습니다.
+
+## 소유한 verifier 준비 파일
+
+로컬 mock API의 임시 port는 같은 디렉터리의0600 임시 파일에 완전히 기록하고
+flush/fsync 후 원자적으로 `ready`로 교체합니다. 최종 파일 이름을 빈/부분 내용으로
+관측할 수 없습니다. 네이티브 RPC와 HTTP/HOP1 fixture는 URL 구성 전에 ASCII
+정규 십진수1..65535만 허용하여 빈 port가 HTTPS 기본443으로 해석되지 않게 합니다.
+운영 API origin 의미, 자격 검증, 인증 재시도나 원래1초 원천 예산을 변경하지 않는
+fixture IPC 보완입니다.
+
+결정적 스케줄링 제어로 기존 create-before-write 경합과 실제 production 설정 검사기의
+빈 port origin 수락을 재현했습니다. 구체적 경합 메커니즘의 증명이지 과거 Workload
+첫 Issue 거부의 원인 확정은 아닙니다. 당시 ready 내용이 보존되지 않아 원인은
+미확정이며 단독 시험 성공으로 인과관계를 주장하지 않습니다.
+
+`python3 -m unittest discover -s tools -p test_owned_kubernetes_verifier.py -v`로
+게시·교체·실패 정리·잘못된 port를 검사합니다. 공통 Rust fixture parser도 빈 값,
+0, 선행0, 범위 초과, 공백, 부호, 비ASCII 및 경로 형태를 URL 전에 거부합니다.
+소유 TokenReview API는 프로토콜 fixture이며 실제 Kubernetes JWT 서명을 검증하지
+않습니다.

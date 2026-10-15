@@ -190,3 +190,26 @@ credential-revocation subscriptions and sustained real-cluster source
 availability are not implemented. Existing
 production images have not been switched by the lifetime qualification; do not
 claim this completes long-lived workload authentication.
+
+## Owned verifier readiness files
+
+The local mock API publishes its ephemeral port through an exclusive0600
+same-directory temporary file, flush/fsync and atomic replacement. Readers cannot
+observe the final `ready` name while its contents are empty/partial. Both native
+RPC and HTTP/HOP1 fixtures additionally require canonical ASCII decimal1..65535
+before constructing an endpoint; empty content cannot silently become the default
+HTTPS port443. This is fixture IPC hardening, not a change to production API
+origin semantics, credential validation, authentication retries or original1s
+source budgets.
+
+A deterministic scheduling gate reproduced the old create-before-write window,
+and the actual production config checker accepted the resulting empty-port origin.
+This establishes a concrete fixture race mechanism. Historical Workload first-Issue
+refusals did not capture their ready-file contents, so their cause remains
+unproven; an isolated passing test is not a causal diagnosis.
+
+Run `python3 -m unittest discover -s tools -p test_owned_kubernetes_verifier.py -v`
+for publication, replacement, failure cleanup and invalid-port regressions. Shared
+Rust fixture parsing also rejects empty, zero, leading-zero, overflow, whitespace,
+signs, non-ASCII and path-like input before URL construction. The owned TokenReview
+API remains a protocol fixture and does not validate real Kubernetes JWT signatures.
