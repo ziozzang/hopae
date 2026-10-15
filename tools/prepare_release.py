@@ -4,6 +4,8 @@ import argparse,base64,gzip,hashlib,json,subprocess,tarfile,tempfile,tomllib
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 TARGETS={'x86_64-unknown-linux-musl':('linux','amd64'),'aarch64-unknown-linux-musl':('linux','arm64'),'x86_64-apple-darwin':('darwin','amd64'),'aarch64-apple-darwin':('darwin','arm64')}
+# Explicit public contracts only; never recursively package local evidence or keys.
+HUMAN_DOCS=('docs/HUMAN_NATIVE_CAPTURE.md', 'docs/ko/HUMAN_NATIVE_CAPTURE.md', 'docs/HUMAN_PROVIDER_OWNER.md', 'docs/ko/HUMAN_PROVIDER_OWNER.md', 'docs/HUMAN_IDENTITY_OWNER.md', 'docs/HUMAN_IDENTITY_OWNER.ko.md', 'docs/HUMAN_TOTP_PROVENANCE.md', 'docs/ko/HUMAN_TOTP_PROVENANCE.md', 'docs/HUMAN_NATIVE_INGRESS.md', 'docs/HUMAN_NATIVE_INGRESS.ko.md', 'docs/HUMAN_NATIVE_SOURCE.md', 'docs/HUMAN_NATIVE_SOURCE.ko.md', 'docs/HUMAN_PAIRED_PROJECTION.md', 'docs/HUMAN_PAIRED_PROJECTION.ko.md', 'crates/hopae-grpc/docs/HUMAN_OBSERVED_PROTOCOL.md', 'crates/hopae-grpc/docs/HUMAN_OBSERVED_PROTOCOL.ko.md')
 def prepare(target,output,signer=None,seed=None):
  platform,arch=TARGETS[target];version=tomllib.loads((ROOT/'Cargo.toml').read_text())['package']['version']
  binary=ROOT/'target'/target/'release/hopae'
@@ -16,10 +18,12 @@ def prepare(target,output,signer=None,seed=None):
   reported=subprocess.check_output([str(signer.resolve()),'--public-key',str(seed.resolve())],text=True).strip()
   if reported!=pin:raise ValueError('signing identity does not match repository pin')
  if output.exists() and any(output.iterdir()):raise ValueError('output must be empty')
+ for name in HUMAN_DOCS:
+  if not (ROOT/name).is_file():raise ValueError('required Human release documentation missing: '+name)
  output.mkdir(parents=True,exist_ok=True);raw=output/('hopae-'+target);raw.write_bytes(binary.read_bytes());raw.chmod(0o755)
  folder=f'hopae-v{version}-{platform}-{arch}'
  sources={'hopae':binary,'LICENSE':ROOT/'LICENSE','README.md':ROOT/'README.md','README.ko.md':ROOT/'README.ko.md','docs/HANGANG_NATIVE.md':ROOT/'docs/HANGANG_NATIVE.md','docs/ko/HANGANG_NATIVE.md':ROOT/'docs/ko/HANGANG_NATIVE.md'}
- for name in ('docs/AUTH_GATEWAY.md','docs/ko/AUTH_GATEWAY.md'):sources[name]=ROOT/name
+ for name in ('docs/AUTH_GATEWAY.md','docs/ko/AUTH_GATEWAY.md')+HUMAN_DOCS:sources[name]=ROOT/name
  for name in ('manifest.json','index.js','style.css'):sources['plugins/hopae/'+name]=ROOT/'plugins/hopae'/name
  with (output/(folder+'.tar.gz')).open('wb') as f,gzip.GzipFile(fileobj=f,mode='wb',filename='',mtime=0) as gz,tarfile.open(fileobj=gz,mode='w') as tar:
   for name,path in sources.items():
