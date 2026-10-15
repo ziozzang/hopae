@@ -190,6 +190,7 @@ impl Readiness {
 /// Everything the routers and services are built from.
 #[derive(Clone)]
 pub struct Services {
+    pub projection_resources: Option<Arc<crate::auth_gateway::projection_resources::Prepared>>,
     pub receipt_authority: Arc<std::sync::Mutex<crate::auth_gateway::receipt_authority::Authority>>,
     pub receipt_issuer: Option<Arc<crate::auth_gateway::receipt_issuer::Issuer>>,
     pub projection_authority:
@@ -503,6 +504,16 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     )
     .map_err(|_| anyhow::anyhow!("native receiver key configuration refused"))?;
 
+    let projection_resources = cfg
+        .projection_receiver
+        .as_ref()
+        .map(|resources| {
+            resources
+                .prepare(&real_env)
+                .map(Arc::new)
+                .map_err(|_| anyhow::anyhow!("native projection resources unavailable"))
+        })
+        .transpose()?;
     let external_verifiers = Arc::new(
         crate::factor::external_registry::Registry::compile(
             &cfg.external_verifiers,
@@ -772,6 +783,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         Arc::new(std::sync::Mutex::new(owner))
     };
     let services = Services {
+        projection_resources,
         receipt_authority,
         receipt_issuer,
         projection_authority,

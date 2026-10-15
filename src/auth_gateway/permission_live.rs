@@ -493,6 +493,53 @@ mod tests {
                 .unwrap()
                 .as_millis() as u64
         };
+        let resources = super::super::projection_resources::Configuration {
+            authority: super::super::projection_resources::Authority {
+                address: address.clone(),
+                server_name: "pumgye.example.test".into(),
+                ca: root.path().join("ca.pem"),
+                certificate: root.path().join("client.pem"),
+                key: root.path().join("client.key"),
+                token_env: "OWNED_AUTHORITY".into(),
+            },
+            secrets: vec![super::super::projection_resources::SecretReference {
+                reference: "vault:owned".into(),
+                token_env: "OWNED_ORIGIN".into(),
+            }],
+        };
+        let prepared = resources
+            .prepare(&|name| match name {
+                "OWNED_AUTHORITY" => Some(TOKEN.into()),
+                "OWNED_ORIGIN" => Some("owned-upstream-token".into()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            prepared
+                .client
+                .validate(request(now() + 900), &now)
+                .await
+                .is_ok()
+        );
+        assert!(prepared.resolve("vault:owned").is_ok());
+        assert!(prepared.resolve("vault:other").is_err());
+        assert!(
+            resources
+                .prepare(&|name| if name == "OWNED_AUTHORITY" {
+                    Some(TOKEN.into())
+                } else {
+                    Some("bad\r\ncredential".into())
+                })
+                .is_err()
+        );
+        let mut malformed = resources.clone();
+        malformed.authority.key = root.path().join("malformed-client.key");
+        std::fs::write(&malformed.authority.key, b"not a private key").unwrap();
+        assert!(malformed.prepare(&|_| Some(TOKEN.into())).is_err());
+        let mut invalid = resources.clone();
+        invalid.authority.ca = root.path().join("oversized.pem");
+        std::fs::write(&invalid.authority.ca, vec![b'x'; 128 * 1024 + 1]).unwrap();
+        assert!(invalid.prepare(&|_| Some(TOKEN.into())).is_err());
         let input = request(now() + 900);
         let observed = client.validate(input.clone(), &now).await.unwrap();
         assert!(observed.valid_for(&input, &client, now()));

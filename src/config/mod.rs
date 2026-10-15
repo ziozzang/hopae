@@ -33,6 +33,8 @@ pub struct Config {
     #[serde(default)]
     pub receipt_permit_keys: Vec<crate::auth_gateway::receipt_config::PermitKey>,
     #[serde(default)]
+    pub projection_receiver: Option<crate::auth_gateway::projection_resources::Configuration>,
+    #[serde(default)]
     pub external_verifiers: Vec<crate::factor::external_transport::Config>,
     #[serde(default)]
     pub totp_keyring: Option<crate::factor::keyring::Configuration>,
@@ -909,6 +911,20 @@ impl Config {
         .is_err()
         {
             errs.push("receipt_permit_keys: invalid native receiver keys".into());
+        }
+        if let Some(receiver) = &self.projection_receiver
+            && (self.receipt_issuer.is_none()
+                || self.receipt_permit_keys.is_empty()
+                || self.authentication_gateway.is_none()
+                || self.listen.grpc_gateway.is_none()
+                || self.listen.native_gateway_tls.is_none()
+                || self.gateway.allow_unauthenticated_caller
+                || self
+                    .credential_projection
+                    .as_ref()
+                    .is_none_or(|plans| receiver.validate_plans(plans).is_err()))
+        {
+            errs.push("projection_receiver requires valid native issuer, permit keys, profiles, declared plans and mTLS gRPC".into());
         }
         if let Some(config) = &self.receipt_issuer {
             if config.validate().is_err() {

@@ -319,3 +319,39 @@ registration. Existing no-permit mode also passes. The key-rotation check runs
 after the owned identity/permission tombstones and qualifies receiver trust
 startup, not coordinated signer rotation or runtime projection. Receiver RPC,
 local guard wiring and final credential dispatch remain required.
+
+## Native receiver transport and credential references (unreleased)
+
+`projection_receiver` declares `authority` with fixed HTTPS root `address`,
+`server_name`, absolute `ca`/`certificate`/`key` paths and `token_env`, plus an
+optional `secrets` array of `reference`/`token_env` pairs. It requires native
+issuer, permit keys, authentication profiles, declared projection plans and
+mandatory-mTLS gRPC with authenticated callers. Every declared bearer plan must
+have its secret reference; duplicate references and inline values refuse.
+
+Startup prepares the persistent Pumgye client and zeroizing secret capabilities
+before instance lock/store/listener creation. PEM inputs are bounded at 128 KiB
+each; the peer credential is 32–256 graphic ASCII bytes. Declared projected
+bearer values are bounded RFC 6750 tokens at 1–4096 bytes. Preparation and final
+projection share the same token validator. Native resolution accepts declared
+references only; request messages do not choose an environment variable. The
+owning transaction must still complete signature/live-owner/paired admission
+before resolving an origin credential.
+
+The channel is lazy, so startup does not require the Pumgye server to be online.
+Peer identity/caller acceptance is established by actual mTLS RPC, not resource
+preparation. Resources are retained in `Services.projection_resources`. This
+increment prepares native capabilities; it does not register the receiver RPC
+or forward credentials in ordinary authentication responses. Runtime local
+issuer/profile/application/caller guards, bounded blocking execution, receiver
+RPC and Hangang final credential delivery remain required.
+
+Library 535 tests (one existing ignore), full workspace and strict Clippy pass;
+a mechanical conditional-style cleanup preserves validation behavior. The mTLS
+protocol fixture also prepares real referenced PEM resources and checks missing
+references, invalid bearer material, malformed private keys and oversized CA
+files. A bind test refuses missing resources before creating state. The actual
+four-server permit fixture prepares resources before Pumgye starts, rejects a
+missing CA with the owned database unchanged, restores without advancing key
+history and retains the existing durable withdrawal/outage checks. Receiver RPC
+and actual credential projection remain inactive in this qualification.

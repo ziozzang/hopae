@@ -203,6 +203,26 @@ pub(super) const ROOT: Node = Obj(&[
         ]),
     ),
     (
+        "projection_receiver",
+        Obj(&[
+            (
+                "authority",
+                Obj(&[
+                    ("address", Leaf),
+                    ("server_name", Leaf),
+                    ("ca", Leaf),
+                    ("certificate", Leaf),
+                    ("key", Leaf),
+                    ("token_env", Leaf),
+                ]),
+            ),
+            (
+                "secrets",
+                Arr(&Obj(&[("reference", Leaf), ("token_env", Leaf)])),
+            ),
+        ]),
+    ),
+    (
         "receipt_permit_keys",
         Arr(&Obj(&[
             ("issuer_ref", Leaf),

@@ -68,6 +68,16 @@ fn identifier(s: &str) -> bool {
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
 }
+pub(crate) fn valid_bearer(secret: &str) -> bool {
+    if secret.len() > 4096 {
+        return false;
+    }
+    let token = secret.trim_end_matches('=');
+    !token.is_empty()
+        && token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~+/".contains(&b))
+}
 /// Administrator publication may select declared capabilities, not introduce a
 /// secret reference, audience/resource/action or lower assurance requirement.
 pub fn validate_capabilities(
@@ -201,15 +211,7 @@ impl Projector {
                     let secret = resolve(secret_ref)?;
                     // RFC 6750 b64token with trailing padding only. No whitespace,
                     // control characters, arbitrary header names or concatenation.
-                    if secret.len() > 4096 {
-                        return Err(Refused);
-                    }
-                    let token = secret.trim_end_matches('=');
-                    if token.is_empty()
-                        || !token
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"-._~+/".contains(&b))
-                    {
+                    if !valid_bearer(&secret) {
                         return Err(Refused);
                     }
                     (

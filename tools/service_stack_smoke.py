@@ -106,6 +106,7 @@ def main():
                 env['OWNED_PERMIT_SEED']=base64.b64encode(permit_seed[-32:]).decode()
                 permit_pin={'issuer_ref':'owned-pumgye','key_epoch':1,'public_key':base64.b64encode(permit_public[-32:]).decode()}
                 hop['receipt_permit_keys']=[permit_pin]
+                hop['projection_receiver']={'authority':dict(tls('pumgye.example.test'),address=f'https://127.0.0.1:{pum_grpc}',token_env='PUMGYE_DECISION_TOKEN'),'secrets':[]}
                 (root/'hopae.json').write_text(json.dumps(hop))
                 config['http'][0]['auth']['native_resource']['permission_permit']=permit_pin
                 (root/'permit-key.json').write_text(json.dumps(dict(permit_pin,seed_env='OWNED_PERMIT_SEED')))
@@ -328,11 +329,13 @@ def main():
                             return json.loads(value[0]),audits
                     state,audits=receiver_keys();assert state['revision']==1 and audits==1,'unchanged restart advanced receiver trust'
                     hopae.terminate();hopae.wait(timeout=5)
+                    receiver_resources=hop.pop('projection_receiver')
                     hop['receipt_permit_keys']=[];(root/'hopae.json').write_text(json.dumps(hop))
                     hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-key-retired');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae-key-retired')
                     state,audits=receiver_keys();assert state['revision']==2 and audits==2
                     assert any(f['issuer']=='owned-pumgye' and not f['active'] for f in state['floors'])
                     hopae.terminate();hopae.wait(timeout=5)
+                    hop['projection_receiver']=receiver_resources
                     hop['receipt_permit_keys']=[permit_pin];(root/'hopae.json').write_text(json.dumps(hop))
                     stale=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-stale-key')
                     stale.wait(timeout=8);assert stale.returncode!=0,'retired receiver key resurrected at restart'
@@ -345,6 +348,19 @@ def main():
                     state,audits=receiver_keys();assert state['revision']==3 and audits==3
                     assert any(f['issuer']=='owned-pumgye' and f['epoch']==2 and f['active'] for f in state['floors'])
                     print('PASS: actual Hopae receiver-key bootstrap is idempotent; removal retires, stale restart refuses and fresh material/epoch activates. Receiver RPC/projection remains inactive.')
+                    hopae.terminate();hopae.wait(timeout=5)
+                    before=hashlib.sha256((root/'hopae-state'/'hopae.db').read_bytes()).digest()
+                    hop['projection_receiver']['authority']['ca']=str(root/'missing-authority-ca.pem')
+                    (root/'hopae.json').write_text(json.dumps(hop))
+                    refused=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-invalid-resources')
+                    refused.wait(timeout=8);assert refused.returncode!=0,'invalid native resources did not refuse startup'
+                    assert hashlib.sha256((root/'hopae-state'/'hopae.db').read_bytes()).digest()==before,'invalid resources changed state'
+                    hop['projection_receiver']['authority']['ca']=str(root/'ca.pem')
+                    (root/'hopae.json').write_text(json.dumps(hop))
+                    hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-resources-restored');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae-resources-restored')
+                    state,audits=receiver_keys();assert state['revision']==3 and audits==3
+                    print('PASS: native receiver resources prepare without an online Pumgye startup dependency; missing CA refuses before state changes, restoration preserves key history. Receiver RPC remains inactive.')
+
 
             label='four' if args.sumunjang_binary else 'three'
             transport='gRPC' if args.grpc else ('HOP1/PPG1/HGD1' if args.sumunjang_binary else 'HOP1/PPG1')

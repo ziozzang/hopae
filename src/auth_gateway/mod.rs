@@ -9,6 +9,7 @@ pub mod projection;
 pub mod projection_admission;
 pub mod projection_authority;
 pub mod projection_receiver;
+pub mod projection_resources;
 pub mod publication;
 pub mod receipt;
 pub mod receipt_authority;
