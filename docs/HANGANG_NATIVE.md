@@ -382,3 +382,24 @@ prove final Hangang-to-origin delivery: the four-server fixture still does not
 invoke this RPC. Hangang client integration and real four-server credential
 projection remain required before release. The earlier resource-preparation
 qualification above describes its historical scope.
+
+
+### Actual four-server credential delivery fixture
+
+`tools/service_stack_smoke.py --credential-projection` requires permit issuance,
+route ownership and projection ownership. It configures a declared bearer
+reference and a separate ephemeral origin credential, enables Hangang's native
+projection phase, and asserts on every successful request that only that origin
+bearer reaches the application. Incoming service credentials must be absent.
+The real Hopae receiver calls the real Pumgye validator, which checks the actual
+Hangang route and Hopae plan owners plus Sumunjang network evidence.
+
+A Hangang response-deadline bug initially caused restoration refusals: independent
+conservative live observations differed by one millisecond. The corrected client
+checks the original signed upper bound and intersects the new response deadline
+with its already accepted deadline, so previous authority is never extended.
+The corrected fixture passes twice, including scope/key/peer/caller refusal,
+configuration and information-class restoration, durable permission withdrawal
+and issuer tombstones after restart. This supersedes the earlier statement that
+the four-server fixture did not invoke projection. It does not qualify coordinated
+signer rotation, fleet restore, Kubernetes/operating deployment or throughput.

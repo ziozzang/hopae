@@ -14,10 +14,12 @@ def main():
     p.add_argument('--route-owner',action='store_true')
     p.add_argument('--projection-owner',action='store_true')
     p.add_argument('--permit-issuance',action='store_true')
+    p.add_argument('--credential-projection',action='store_true')
     p.add_argument('--legacy-pumgye-binary',type=Path)
     p.add_argument('--external-verifier',action='store_true')
     p.add_argument('--durable-restart',action='store_true')
     args=p.parse_args()
+    if args.credential_projection and not args.permit_issuance:p.error('--credential-projection requires --permit-issuance')
     if args.resource_catalog and not args.grpc:p.error('--resource-catalog requires --grpc')
     if args.native_resource and not (args.grpc and args.resource_catalog and args.sumunjang_binary):p.error('--native-resource requires --grpc --resource-catalog and --sumunjang-binary')
     if args.permit_issuance and not (args.projection_owner and args.route_owner):p.error('--permit-issuance requires --projection-owner --route-owner')
@@ -107,6 +109,11 @@ def main():
                 permit_pin={'issuer_ref':'owned-pumgye','key_epoch':1,'public_key':base64.b64encode(permit_public[-32:]).decode()}
                 hop['receipt_permit_keys']=[permit_pin]
                 hop['projection_receiver']={'authority':dict(tls('pumgye.example.test'),address=f'https://127.0.0.1:{pum_grpc}',token_env='PUMGYE_DECISION_TOKEN'),'secrets':[]}
+                if args.credential_projection:
+                    env['OWNED_ORIGIN_BEARER']=secrets.token_urlsafe(32)
+                    hop['credential_projection']['plans'][0]['credential']={'type':'bearer_reference','secret_ref':'fixture:origin'}
+                    hop['projection_receiver']['secrets']=[{'reference':'fixture:origin','token_env':'OWNED_ORIGIN_BEARER'}]
+                    config['http'][0]['auth']['native_resource']['project_credentials']=True
                 (root/'hopae.json').write_text(json.dumps(hop))
                 config['http'][0]['auth']['native_resource']['permission_permit']=permit_pin
                 (root/'permit-key.json').write_text(json.dumps(dict(permit_pin,seed_env='OWNED_PERMIT_SEED')))
@@ -153,16 +160,22 @@ def main():
                 c=http.client.HTTPSConnection('127.0.0.1',public,context=ssl.create_default_context(cafile=str(root/'ca.pem')),timeout=3)
                 headers={'Host':'app.example.test','x-forwarded-user':'u_forged','x-hopae-aal':'3'}
                 if key is not None:headers['Authorization']='Bearer '+key
-                before=len(seen)
-                c.request(method,'/secure',body=b'owned final entity' if args.native_resource else None,headers=headers);r=c.getresponse();status=r.status;r.read();c.close()
+                before=len(seen);begun=time.monotonic()
+                c.request(method,'/secure',body=b'owned final entity' if args.native_resource else None,headers=headers);r=c.getresponse();status=r.status;r.read();c.close();request.last_status=status;request.last_elapsed_ms=round((time.monotonic()-begun)*1000)
                 assert len(seen)==before+(1 if status==200 else 0),'refused request reached application upstream'
+                if args.credential_projection and status==200:
+                    assert seen[-1].get('authorization')=='Bearer '+env['OWNED_ORIGIN_BEARER'],'projected credential mismatch'
+                    assert seen[-1].get('authorization')!='Bearer '+api_key,'incoming credential leaked'
                 return status
             def api(path='/v1/config',method='GET',document=None,extra=None):
                 headers={'Authorization':'Bearer '+system,'Content-Type':'application/json'}
                 if extra:headers.update(extra)
                 with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{admin}'+path,data=None if document is None else json.dumps(document).encode(),headers=headers,method=method),timeout=3) as r:return json.loads(r.read()),dict(r.headers)
-            assert request()==200 and request()==200
-            assert len(seen)==2 and all(not any(k.lower()=='authorization' for k in h) for h in seen)
+            assert request()==200,f'initial projection status={request.last_status}, elapsed_ms={request.last_elapsed_ms}'
+            assert request()==200,f'repeated projection status={request.last_status}, elapsed_ms={request.last_elapsed_ms}'
+            assert len(seen)==2
+            if args.credential_projection:print('PASS: actual four-server final credential projection delivers only the separate referenced origin bearer; incoming API credential is absent.')
+            if not args.credential_projection:assert all(not any(k.lower()=='authorization' for k in h) for h in seen)
             if args.native_resource:assert seen_paths==['/api/secure','/api/secure'] and seen_bodies==[b'owned final entity']*2, 'final target/entity mismatch'
             assert all(h.get('x-forwarded-user')==subject and h.get('x-hopae-aal')=='0' for h in seen)
             if args.native_resource:
@@ -187,7 +200,7 @@ def main():
                     changed['http'][0]['auth']['native_resource']['permission_permit']=baseline
                     api('/v1/config','PUT',changed,{'If-Match':f'"{changed["revision"]}"'})
                     assert request()==200,'permit pin restoration failed'
-                print('PASS: actual native permit issuance and Hangang signature/binding checks; wrong purpose key/issuer/epoch refuse without origin effects; no paired replay or credential projection claim.')
+                print('PASS: actual native permit issuance and Hangang signature/binding checks; wrong purpose key/issuer/epoch refuse without origin effects; origin credential assertions apply when --credential-projection is enabled.')
             if args.route_owner:
                 def restart_route_authority(binary,argv):
                     nonlocal owner
@@ -237,7 +250,7 @@ def main():
                         if status==200:break
                         time.sleep(.1)
                     else:raise AssertionError('plan owner recovery deadline')
-                print('PASS: native plan owner required, wrong TLS identity/caller refused without origin effects, restoration passed; no projection credential issued.')
+                print('PASS: native plan owner required, wrong TLS identity/caller refused without origin effects, restoration passed; final credential forwarding is checked in credential-projection mode.')
             assert request('POST')==403 and request(key=None)==401 and request(key='invalid-service-key-at-least-thirty-two-bytes')==401
             root_config,_=api();current,headers=api('/v1/pumgye/policy');original=copy.deepcopy(current);current['policy']['services']['orders']['users']={}
             updated,_=api('/v1/pumgye/policy','PUT',current,{'If-Match':f'"{current["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==403
@@ -256,12 +269,12 @@ def main():
                 classified['policy']['resources']['db:orders']['information_class']='restricted'
                 classified,_=api('/v1/pumgye/policy','PUT',classified,{'If-Match':f'"{classified["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==403,'owner class clearance was ignored'
                 classified['policy']['resources']['db:orders']['information_class']='internal'
-                classified,_=api('/v1/pumgye/policy','PUT',classified,{'If-Match':f'"{classified["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==200
+                classified,_=api('/v1/pumgye/policy','PUT',classified,{'If-Match':f'"{classified["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==200,f'catalog restoration returned {request.last_status}, elapsed_ms={request.last_elapsed_ms}'
                 catalog=copy.deepcopy(classified['policy']['resources'])
                 classified['policy']['resources']={}
                 classified,_=api('/v1/pumgye/policy','PUT',classified,{'If-Match':f'"{classified["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==403,'catalog deletion did not refuse'
                 classified['policy']['resources']=catalog
-                classified,_=api('/v1/pumgye/policy','PUT',classified,{'If-Match':f'"{classified["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==200
+                classified,_=api('/v1/pumgye/policy','PUT',classified,{'If-Match':f'"{classified["revision"]}"','x-hangang-config-revision':headers['x-hangang-config-revision']});assert request()==200,f'catalog restoration returned {request.last_status}, elapsed_ms={request.last_elapsed_ms}'
             else:
                 classified=copy.deepcopy(now);classified['http'][0]['resource_policy']['pumgye']['information_class']='restricted'
                 classified,_=api('/v1/config','PUT',classified,{'If-Match':f'"{classified["revision"]}"'});assert request()==403,'class clearance was ignored'
@@ -347,7 +360,7 @@ def main():
                     hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-key-rotated');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae-key-rotated')
                     state,audits=receiver_keys();assert state['revision']==3 and audits==3
                     assert any(f['issuer']=='owned-pumgye' and f['epoch']==2 and f['active'] for f in state['floors'])
-                    print('PASS: actual Hopae receiver-key bootstrap is idempotent; removal retires, stale restart refuses and fresh material/epoch activates. Configured receiver RPC is registered; this fixture does not invoke final credential projection.')
+                    print('PASS: actual Hopae receiver-key bootstrap is idempotent; removal retires, stale restart refuses and fresh material/epoch activates. Configured receiver RPC is registered; final projection is invoked only in credential-projection mode.')
                     hopae.terminate();hopae.wait(timeout=5)
                     before=hashlib.sha256((root/'hopae-state'/'hopae.db').read_bytes()).digest()
                     hop['projection_receiver']['authority']['ca']=str(root/'missing-authority-ca.pem')
@@ -359,7 +372,7 @@ def main():
                     (root/'hopae.json').write_text(json.dumps(hop))
                     hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-resources-restored');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae-resources-restored')
                     state,audits=receiver_keys();assert state['revision']==3 and audits==3
-                    print('PASS: native receiver resources prepare without an online Pumgye startup dependency; missing CA refuses before state changes, restoration preserves key history. Configured receiver RPC is registered; final credential projection is not exercised.')
+                    print('PASS: native receiver resources prepare without an online Pumgye startup dependency; missing CA refuses before state changes, restoration preserves key history. Configured receiver RPC is registered; final projection is exercised only in credential-projection mode.')
 
 
             label='four' if args.sumunjang_binary else 'three'
