@@ -105,7 +105,9 @@ Both observed Service and Workload now use one PRIVATE reply finalizer: allocate
 reply strings/hash/domain and pending secret bytes first, run final caller/source
 guard, sample remaining local proof budgets, perform pure owner/activity checks,
 then assign numeric report fields and move pending bytes without further
-allocation/callbacks. Failed pending buffers are zeroizing. Opaque outputs are
+allocation/callbacks. The pending `Zeroizing<Vec<u8>>` buffer is zeroizing on failure; the temporary
+`HeaderValue` copy is ordinary memory, so this does not promise erasure of all
+transient copies. Opaque outputs are
 non-Clone/non-Debug/non-serde; protobuf secret Debug remains redacted. This does
 not turn the report into a remote revocation lease or guarantee remote byte
 recall. The Root consumer must preserve its independent auth/permit/output bounds

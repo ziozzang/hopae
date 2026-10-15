@@ -65,8 +65,8 @@ nonce ID에 kind·RPC·contract 번호·원천 cache를 넣어 재사용 공간�
 
 Service와 Workload observed 출력은 공통 private finalizer를 사용합니다. 응답 문자열·
 hash·domain·보류 비밀 바이트를 먼저 할당하고, 마지막 caller/원천 guard·시간·순수 owner
-검사를 끝낸 뒤 숫자 report와 바이트 이동만 수행합니다. 실패한 보류 비밀 버퍼는
-zeroizing이며 불투명 출력에는 Clone/Debug/serde가 없습니다. RPC 비밀 Debug도 가립니다.
+검사를 끝낸 뒤 숫자 report와 바이트 이동만 수행합니다. 보류 `Zeroizing<Vec<u8>>` 버퍼는 실패 시 지워지지만 임시 `HeaderValue` 사본은
+일반 메모리이므로 모든 일시 사본의 삭제를 보장하지 않습니다. 불투명 출력에는 Clone/Debug/serde가 없습니다. RPC 비밀 Debug도 가립니다.
 worker 취소·콜백 중 profile/app/plan/key 철회·만료는 출력으로 이어지지 않습니다.
 
 이 결과는 원격 철회 lease나 원격 바이트 회수를 보장하지 않습니다. Root는 독립된
