@@ -64,6 +64,25 @@ impl Snapshot {
         ip: std::net::IpAddr,
         now: u64,
     ) -> Result<ServiceAuthentication, runtime::Error> {
+        self.authenticate_credential_for_receipt(
+            host,
+            port,
+            token.map(super::composition::Credential::Bearer),
+            ip,
+            now,
+            None,
+        )
+        .await
+    }
+    pub(crate) async fn authenticate_credential_for_receipt(
+        &self,
+        host: &str,
+        port: u16,
+        token: Option<super::composition::Credential<'_>>,
+        ip: std::net::IpAddr,
+        now: u64,
+        entry_stamp: Option<&super::composition::EntryTime<'_>>,
+    ) -> Result<ServiceAuthentication, runtime::Error> {
         if !(1..=9_007_199_254_740_991).contains(&self.revision) {
             return Err(runtime::Error::Unavailable);
         }
@@ -76,7 +95,7 @@ impl Snapshot {
         let observed_start = hangang_runtime::time::ElapsedStamp::now().ok();
         let begun = std::time::Instant::now();
         let evidence = runtime
-            .authenticate_async(host, port, token, ip, now)
+            .authenticate_credential_async(host, port, token, ip, now, entry_stamp)
             .await?;
         // Capture completion age before sampling pre-await elapsed: a pause
         // between them is charged conservatively rather than lost on reset.

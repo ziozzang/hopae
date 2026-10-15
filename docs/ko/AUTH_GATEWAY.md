@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=32 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=33 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -173,8 +173,91 @@ upstream credential 교환·영속 quarantine·관리 게시·RFC 7662 필드 ad
 커넥터·만료 근거·충돌하는 namespace subject·불일치 audience를 거부합니다. 읽기
 전용 결과에는 assurance 수준 주장이 없으며 서비스/network 근거가 여러 개라도 사람
 MFA가 되지 않습니다. audience 유지·최초 만료·1초 상한·만료 거부를 검증했습니다.
-조합 기초 계층이며 런타임 connector 실행 조합과 명시적으로 검증된 provider 간
-subject 관계는 남아 있습니다. 기존 요청 프로필은 설정된 커넥터를 사용합니다.
+아래 opt-in 서비스 실행 조합은 실제 검증된 요인의 명시적인 관계를 적용하여 이
+helper를 호출합니다. 다른 프로필의 커넥터 선택은 그대로 유지합니다. 사람·워크로드
+조합과 종류 간 위임은 별도로 남은 경계입니다.
+
+## 명시적 서비스 전용 provider 조합 (소스 구현)
+
+이 opt-in 경계는 기존 자체 API key와 실제 고정 HTTPS API 검증기를 조합합니다.
+사람 MFA·사람 계정 연결·워크로드 조합·신규 provider·종류 간 위임을 구현하지
+않으며 출력은 Service/AAL0입니다. 미설정 프로필과 공개 단일 Bearer API의 기존
+동작은 유지하지만, 그 API로 조합 프로필의 필수 분기를 우회할 수는 없습니다.
+
+`api_keys`와 `api_relay`가 설정된 유효한 프로필에 다음 필드를 추가합니다.
+
+```json
+{
+  "composition": {
+    "mode": "all", "timeout_ms": 200,
+    "slots": [{"id":"local","provider":"api_key"},{"id":"partner","provider":"api_relay"}],
+    "identities": [{"subject":"worker","bindings":[
+      {"slot":"local","issuer":"hopae:owned","realm":"services","subject":"worker","kind":"service"},
+      {"slot":"partner","issuer":"partner-directory","realm":"services","subject":"external-worker","kind":"service"}
+    ]}]
+  }
+}
+```
+
+예제의 프로필 authority는 `owned`, realm은 `services`, 등록된 로컬 key subject는
+`worker`, relay issuer는 `partner-directory`입니다. 네이티브 정규 주체는
+`(hopae:owned, services, worker, Service)`입니다. 각 관계는 실제 검증된
+slot·issuer·realm·subject·kind와 정확히 일치해야 하며 이름 일치만으로는 부족합니다.
+미지 필드·중복 slot/provider·모호한 소스 매핑·없는 provider·미지원 kind·불일치
+issuer/realm/로컬 subject는 거부합니다. 서로 다른 provider slot 두 개와 정규 신원
+1..128개를 지원하며 전체 제한 시간은 명시적 1..1000ms입니다. 첫 조합 모드에
+session fallback·접두사 라우팅·TokenReview를 혼용할 수 없습니다. 기존 비밀값
+참조·private endpoint 게시 제한은 유지하며 관계 설정으로 검증기를 추가하지 못합니다.
+
+자격증명 필드는 다음 하나뿐입니다.
+
+```text
+Authorization: Hopae-Compose <unpadded-base64url-UTF8-JSON>
+```
+
+디코딩한 객체는 `{"version":1,"credentials":[{"slot":"local","credential":"<local credential>"},{"slot":"partner","credential":"<remote credential>"}]}`입니다.
+추가 자격증명 헤더는 없습니다. 인코딩한 envelope는 4096바이트, 항목은 두 개,
+각 자격증명은 ASCII graphic 1024바이트로 제한합니다. 중복 Authorization·미지
+scheme/slot/version/필드·잘못된 인코딩/JSON·중복 항목은 provider I/O 전에 거부합니다.
+기존 프로필의 조합 envelope와 조합 프로필의 단일 Bearer도 모두 거부합니다.
+자격증명과 envelope는 로그·오류 응답·Lua에 전달하지 않습니다. 각 provider는 선언된
+자기 slot의 자격증명만 받으며 클라이언트 identity/AAL 헤더는 검증 근거가 아닙니다.
+크기가 제한된 컴파일 digest 집합은 현재 런타임 전체 프로필에 선언된 자체 API key를
+원격 slot에서 거부하며, 만료되었어도 선언이 남은 key를 포함합니다. 삭제된 과거 비밀값,
+다른 서버의 자격증명, 임의의 타사 key까지 식별한다는 주장은 아니며 기존 접두사
+라우팅의 별도 계약은 유지합니다.
+
+`All`은 두 분기를 모두 요구합니다. `Any`는 **제시하지 않은 분기만 선택 사항이며,
+제시한 모든 분기는 검증해야 합니다**. 제시된 분기의 잘못된 자격·만료·장애를 다른
+분기의 성공으로 조용히 대체하지 않습니다. 여러 분기가 성공하면 같은 정규 주체에
+매핑되어야 하며 성공한 신원끼리 충돌하면 거부합니다. 요인 수를 합하거나 최댓값으로
+assurance를 올리지 않습니다. 최종 connector 식별자는 `composition:local+partner`처럼
+실제 검증된 slot의 기여만 기록합니다.
+
+네이티브 HTTP ingress는 신뢰하는 UTC 표본 전에 BOOTTIME을 잡고 그 비공개 시계
+문맥을 파싱·각 분기·Lua·최종 응답까지 유지합니다. 현재 네이티브 wall 표본과 원래
+suspend-inclusive 경과 시간으로 이전 근거의 수명을 갱신할 수 없습니다. 모든 분기는
+원래 전체 기한과 가장 짧은 근거 만료를 공유합니다. 최종 TTL의 밀리초 위상은
+보수적으로 반올림하고 이 상향 허용 경계를 가짜 네이티브 UTC 표본으로 저장하지
+않습니다. 영수증을 캡처하지 않는 HTTP도 마지막 시계 콜백 뒤에 프로필·애플리케이션
+fence를 확인합니다. 프로필별 admission은 32이며 원격 admission·서킷 제한을 유지하고
+재시도하지 않습니다. 취소된 probe도 서킷 실패 의미를 유지합니다. relay binding이
+같으면 프로필 게시 후에도 서킷을 재사용하고, 프로필 snapshot이 바뀌면 진행 중인
+반환을 거부합니다.
+
+기존 네이티브 영수증 서명은 조합 Service/AAL0 근거를 요청 소유자가 method·target·
+body 변환 뒤 계산한 최종 digest에 묶습니다. Hopae가 보지 못한 upstream 바이트를
+검사했다는 주장은 아닙니다. 운영 downstream 검증은 네이티브 projection이 원래
+Authorization을 origin 자격증명으로만 교체하고 어느 소스 자격증명이나 envelope도
+backend에 전달되지 않는지 별도로 입증해야 합니다. 원래 Authorization을 upstream에
+전달하는 설정은 인증 성공만으로 안전한 조합 전달로 검증된 것이 아닙니다.
+
+소스 테스트는 실제 소유 HTTPS 교환, HTTP·생성된 mTLS 네이티브 ingress,
+검증기 호출 전 중복 거부, 신원 모호성, 로컬 만료, 시작 지연, 네이티브 시계 실패,
+취소, 서킷 유지, 철회, provider 후 정지와 UTC 역행을 캡처/일반 응답에서 검증합니다.
+실제 설정 파일 로딩과 서명된 최종 digest 대체 거부도 검증합니다. 이는 소스 fixture이며
+릴리스 artifact·브라우저/provider·운영 경로의 완료가 아닙니다. 사람 세션/provider 연결,
+네이티브 워크로드 조합, 종류 간 위임은 명시적으로 남은 후속 작업입니다.
 
 ## 사용자 2차 인증과 확장 계약 — 구현 백로그
 

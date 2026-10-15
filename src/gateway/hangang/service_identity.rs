@@ -25,6 +25,34 @@ pub fn bearer(headers: &HeaderMap) -> Result<Option<&str>, InvalidBearer> {
     }
     Ok(Some(token))
 }
+/// Explicit typed service ingress; legacy bearer() still accepts Bearer only.
+pub(crate) fn credential(
+    headers: &HeaderMap,
+) -> Result<Option<crate::auth_gateway::composition::Credential<'_>>, InvalidBearer> {
+    let mut values = headers.get_all(http::header::AUTHORIZATION).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(InvalidBearer);
+    }
+    let value = value.to_str().map_err(|_| InvalidBearer)?;
+    let (scheme, token) = value.split_once(' ').ok_or(InvalidBearer)?;
+    if token.is_empty() || !token.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(InvalidBearer);
+    }
+    if scheme.eq_ignore_ascii_case("bearer") {
+        Ok(Some(crate::auth_gateway::composition::Credential::Bearer(
+            token,
+        )))
+    } else if scheme.eq_ignore_ascii_case("hopae-compose") && token.len() <= 4096 {
+        Ok(Some(
+            crate::auth_gateway::composition::Credential::Composite(token),
+        ))
+    } else {
+        Err(InvalidBearer)
+    }
+}
 pub fn stable_subject(subject: &Subject) -> String {
     crate::auth_gateway::stable_subject(subject)
 }

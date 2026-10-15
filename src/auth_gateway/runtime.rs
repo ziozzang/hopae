@@ -14,6 +14,8 @@ pub struct Config {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition: Option<super::composition::Config>,
     pub service_id: String,
     pub host: String,
     pub ports: Vec<u16>,
@@ -80,7 +82,7 @@ impl Config {
             let mixed = p.api_relay.is_some()
                 && (!p.api_keys.is_empty() || p.kubernetes_tokenreview.is_some());
             ensure!(
-                !mixed || p.relay_token_prefix.is_some(),
+                !mixed || p.composition.is_some() || p.relay_token_prefix.is_some(),
                 "mixed authentication requires an explicit relay token prefix"
             );
             ensure!(
@@ -116,6 +118,9 @@ impl Config {
                         .is_none_or(|prefix| prefix != &kubernetes.token_prefix),
                     "credential routing prefixes must be distinct"
                 );
+            }
+            if let Some(composition) = &p.composition {
+                composition.validate(&self.authority_id, p)?;
             }
             total += p.api_keys.len();
             ensure!(total <= 4096, "authentication credential capacity exceeded");
@@ -222,6 +227,7 @@ struct Credential {
     expires_at: Option<u64>,
 }
 struct Prepared {
+    composition: Option<super::composition::Compiled>,
     service_id: String,
     realm: String,
     keys: HashMap<[u8; 32], Credential>,
@@ -234,6 +240,7 @@ struct Prepared {
     relay_token_prefix: Option<String>,
 }
 pub struct Runtime {
+    native_key_digests: std::collections::HashSet<[u8; 32]>,
     profiles: HashMap<String, HashMap<u16, std::sync::Arc<Prepared>>>,
     pub(crate) observed_time: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
@@ -294,6 +301,7 @@ impl Runtime {
         config.validate()?;
         let mut profiles: HashMap<String, HashMap<u16, std::sync::Arc<Prepared>>> = HashMap::new();
         let mut budget = 0;
+        let mut native_key_digests = std::collections::HashSet::new();
         for p in &config.profiles {
             let mut keys = HashMap::new();
             for key in &p.api_keys {
@@ -317,6 +325,7 @@ impl Runtime {
                     "local credential collides with Kubernetes routing namespace"
                 );
                 let digest: [u8; 32] = Sha256::digest(value.as_bytes()).into();
+                native_key_digests.insert(digest);
                 let subject = Subject {
                     issuer: format!("hopae:{}", config.authority_id),
                     realm: p.realm.clone(),
@@ -370,6 +379,10 @@ impl Runtime {
                 })
                 .transpose()?;
             let prepared = std::sync::Arc::new(Prepared {
+                composition: p
+                    .composition
+                    .as_ref()
+                    .map(|c| super::composition::Compiled::new(c, &config.authority_id, p)),
                 service_id: p.service_id.clone(),
                 realm: p.realm.clone(),
                 keys,
@@ -397,6 +410,7 @@ impl Runtime {
         }
         Ok(Self {
             profiles,
+            native_key_digests,
             observed_time: previous
                 .map(|runtime| runtime.observed_time.clone())
                 .unwrap_or_default(),
@@ -413,6 +427,108 @@ impl Runtime {
             .and_then(|ports| ports.get(&port))
             .is_some_and(|p| p.session_fallback)
     }
+    pub(crate) async fn authenticate_credential_async(
+        &self,
+        host: &str,
+        port: u16,
+        credential: Option<super::composition::Credential<'_>>,
+        ip: IpAddr,
+        now: u64,
+        entry_stamp: Option<&super::composition::EntryTime<'_>>,
+    ) -> Result<VerifiedEvidence, Error> {
+        match credential {
+            Some(super::composition::Credential::Composite(encoded)) => {
+                self.authenticate_composed(
+                    host,
+                    port,
+                    encoded,
+                    ip,
+                    entry_stamp.ok_or(Error::Unavailable)?,
+                )
+                .await
+            }
+            Some(super::composition::Credential::Bearer(token)) => {
+                self.authenticate_async(host, port, Some(token), ip, now)
+                    .await
+            }
+            None => self.authenticate_async(host, port, None, ip, now).await,
+        }
+    }
+    async fn authenticate_composed(
+        &self,
+        host: &str,
+        port: u16,
+        encoded: &str,
+        ip: IpAddr,
+        clock: &super::composition::EntryTime<'_>,
+    ) -> Result<VerifiedEvidence, Error> {
+        let p = self
+            .profiles
+            .get(host)
+            .and_then(|ports| ports.get(&port))
+            .ok_or(Error::Invalid)?;
+        let composition = p.composition.as_ref().ok_or(Error::Invalid)?;
+        let presented = composition.parse(encoded)?;
+        // Declaring a remote slot is not permission to disclose one of this
+        // runtime's declared native secrets to that verifier, or count one secret twice.
+        let mut fingerprints = std::collections::BTreeSet::new();
+        for entry in &presented {
+            let digest: [u8; 32] = Sha256::digest(entry.credential.as_bytes()).into();
+            if !fingerprints.insert(digest)
+                || (entry.provider == super::composition::Provider::ApiRelay
+                    && self.native_key_digests.contains(&digest))
+            {
+                return Err(Error::Invalid);
+            }
+        }
+
+        if !p.networks.permits(ip) {
+            return Err(Error::NetworkDenied);
+        }
+        let _capacity = composition
+            .capacity
+            .try_acquire()
+            .map_err(|_| Error::Unavailable)?;
+        let deadline = clock
+            .entry_ms()
+            .checked_add(composition.timeout_ms())
+            .ok_or(Error::Unavailable)?;
+        let current = || clock.current(&self.observed_time, deadline);
+        tokio::time::timeout(
+            std::time::Duration::from_millis(composition.timeout_ms()),
+            async {
+                let mut evidence = Vec::with_capacity(presented.len());
+                for entry in presented {
+                    let now = current()?;
+                    let checked = match entry.provider {
+                        super::composition::Provider::ApiKey => {
+                            p.verify_local(&entry.credential, now)?
+                        }
+                        super::composition::Provider::ApiRelay => {
+                            p.relay
+                                .as_ref()
+                                .ok_or(Error::Unavailable)?
+                                .authenticate(&p.service_id, &p.realm, &entry.credential, ip, now)
+                                .await?
+                        }
+                    };
+                    let now = current()?;
+                    if checked.expires_at <= now {
+                        return Err(Error::Expired);
+                    }
+                    evidence.push(composition.map(&entry.slot, checked)?);
+                }
+                let composed = composition.compose(&evidence, current()?, deadline)?;
+                let composed = p.restrict(composed, current()?)?;
+                if composed.expires_at <= current()? {
+                    return Err(Error::Expired);
+                }
+                Ok(composed)
+            },
+        )
+        .await
+        .map_err(|_| Error::Unavailable)?
+    }
     pub async fn authenticate_async(
         &self,
         host: &str,
@@ -426,6 +542,9 @@ impl Runtime {
             .get(host)
             .and_then(|ports| ports.get(&port))
             .ok_or(Error::Invalid)?;
+        if profile.composition.is_some() {
+            return Err(Error::Invalid);
+        }
         if let Some((kubernetes, prefix)) = &profile.kubernetes {
             if !profile.networks.permits(ip) {
                 return Err(Error::NetworkDenied);
@@ -501,33 +620,40 @@ impl Runtime {
             .get(host)
             .and_then(|ports| ports.get(&port))
             .ok_or(Error::Invalid)?;
+        if p.composition.is_some() {
+            return Err(Error::Invalid);
+        }
         let token = token.ok_or(Error::Missing)?;
         if !(32..=1024).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_graphic()) {
             return Err(Error::Invalid);
         }
-        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        let key = p.keys.get(&digest).ok_or(Error::Invalid)?;
-        if key.expires_at.is_some_and(|t| t <= now) {
-            return Err(Error::Expired);
-        }
+        let evidence = p.verify_local(token, now)?;
         if !p.networks.permits(ip) {
             return Err(Error::NetworkDenied);
         }
-        p.restrict(
-            VerifiedEvidence {
-                subject: key.subject.clone(),
-                service: Some(p.service_id.clone()),
-                connector: format!("api-key:{}", p.service_id),
-                expires_at: now
-                    .saturating_add(1000)
-                    .min(key.expires_at.unwrap_or(u64::MAX)),
-            },
-            now,
-        )
+        p.restrict(evidence, now)
     }
 }
 
 impl Prepared {
+    fn verify_local(&self, token: &str, now: u64) -> Result<VerifiedEvidence, Error> {
+        if !(32..=1024).contains(&token.len()) || !token.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(Error::Invalid);
+        }
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        let key = self.keys.get(&digest).ok_or(Error::Invalid)?;
+        if key.expires_at.is_some_and(|expiry| expiry <= now) {
+            return Err(Error::Expired);
+        }
+        Ok(VerifiedEvidence {
+            subject: key.subject.clone(),
+            service: Some(self.service_id.clone()),
+            connector: format!("api-key:{}", self.service_id),
+            expires_at: now
+                .saturating_add(1000)
+                .min(key.expires_at.unwrap_or(u64::MAX)),
+        })
+    }
     fn restrict(&self, evidence: VerifiedEvidence, now: u64) -> Result<VerifiedEvidence, Error> {
         let Some(policy) = &self.eligibility else {
             return Ok(evidence);
@@ -964,3 +1090,7 @@ mod tests {
         assert!(Runtime::compile(&cfg, &|_| Some(KEY.into())).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "composition_tests.rs"]
+mod composition_tests;

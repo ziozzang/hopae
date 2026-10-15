@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 32 -->
+<!-- doc-rev: 33 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -216,9 +216,100 @@ whichever comes first. Any/All still reject unknown or duplicate connectors, exp
 evidence, conflicting namespaced subjects and mismatched audiences. The resulting
 read-only evidence contains no assurance-level claim; multiple service/network
 factors do not imply human MFA. Tests verify audience retention, earliest expiry,
-the one-second cap and expiry rejection. This is a composition primitive; runtime
-connector orchestration and explicitly verified cross-provider subject relationships
-remain pending. Existing request profiles still select their configured connector.
+the one-second cap and expiry rejection. The opt-in service orchestration below
+now calls this helper with explicitly related, actually verified factors. Other
+profiles retain their existing connector selection. Human/workload composition
+and cross-kind delegation remain separate pending boundaries.
+
+## Explicit service-only provider composition (source implementation)
+
+This opt-in boundary combines an existing native API key and actual fixed HTTPS
+API verifier. It does not implement human MFA, human account linking, workload
+composition, new providers, or cross-kind delegation. Output remains Service/AAL0.
+Unconfigured profiles and public single-Bearer APIs retain their existing behavior;
+those APIs cannot bypass a composed profile's required branches.
+
+Add this field to an otherwise valid profile with `api_keys` and `api_relay`:
+
+```json
+{
+  "composition": {
+    "mode": "all", "timeout_ms": 200,
+    "slots": [{"id":"local","provider":"api_key"},{"id":"partner","provider":"api_relay"}],
+    "identities": [{"subject":"worker","bindings":[
+      {"slot":"local","issuer":"hopae:owned","realm":"services","subject":"worker","kind":"service"},
+      {"slot":"partner","issuer":"partner-directory","realm":"services","subject":"external-worker","kind":"service"}
+    ]}]
+  }
+}
+```
+
+The profile authority is `owned`, realm is `services`, configured local key subject
+is `worker`, and configured relay issuer is `partner-directory` in this example.
+The native canonical principal is `(hopae:owned, services, worker, Service)`.
+Every relationship matches exact verified slot/issuer/realm/subject/kind. Source
+name equality alone is insufficient. Unknown fields, duplicate slots/providers,
+ambiguous source mappings, absent providers, unsupported kinds, and nonmatching
+issuer/realm/local subjects are invalid. Exactly two distinct provider slots and
+1..128 canonical identities are supported. Whole-operation timeout is explicit
+1..1000 ms. Session fallback, prefix routing and TokenReview cannot be combined
+with this first composition mode. Existing secret-reference/private-endpoint
+publication restrictions still apply; relationships cannot introduce a verifier.
+
+The only credential field is:
+
+```text
+Authorization: Hopae-Compose <unpadded-base64url-UTF8-JSON>
+```
+
+The decoded object is `{"version":1,"credentials":[{"slot":"local","credential":"<local credential>"},{"slot":"partner","credential":"<remote credential>"}]}`.
+There are no additional credential headers. The envelope is capped at 4096 encoded
+bytes, two entries, and 1024 ASCII graphic bytes per credential. Duplicate
+Authorization, unknown schemes/slots/version/fields, malformed encoding/JSON and
+duplicate entries refuse before provider I/O. A composed envelope on a legacy
+profile and a single Bearer on a composed profile both refuse. Neither credentials
+nor the envelope are logged, echoed or exposed to Lua. Each provider receives only
+its declared slot's credential; client identity/AAL headers never become evidence.
+A bounded compiled digest set also refuses any currently declared native API key
+in a remote slot across all runtime profiles, including expired declared keys.
+This does not identify removed historical secrets, credentials in other servers,
+or arbitrary third-party keys; legacy prefix routing keeps its separate contract.
+
+`All` requires both branches. `Any` makes **absent branches optional; every
+presented branch must verify**. A presented invalid/expired/unavailable branch
+never silently falls back to a sibling. Multiple verified branches must map to
+the same canonical identity; conflicting successful identities refuse. There is
+no factor-count sum/max assurance upgrade. The final connector identifier records
+only verified slot contributions, such as `composition:local+partner`.
+
+Native HTTP ingress captures BOOTTIME before its trusted UTC sample and carries
+that private clock context through parsing, every branch, Lua, and final response.
+Fresh native wall samples and the original suspend-inclusive elapsed age cannot
+renew earlier evidence. All branches share the original overall deadline and
+shortest evidence expiry. Millisecond phase is rounded conservatively for final
+TTL; that upper admission bound is never stored as a fabricated native UTC sample.
+Final profile/application fences follow the last clock callback, including plain
+HTTP without receipt capture. Per-profile admission is 32, remote admission/circuit
+limits remain native, there are no retries, and canceled probes preserve circuit
+failure semantics. Unchanged relay bindings retain their circuit across profile
+publication. A changed profile snapshot refuses in-flight return.
+
+Existing native receipt signing binds the composed Service/AAL0 proof to the
+trusted request owner's final digest after method/target/body transformation.
+This does not claim Hopae inspected unseen upstream bytes. Production downstream
+qualification must separately prove that native projection replaces the original
+Authorization with only the origin credential and that neither source credential
+nor envelope reaches the backend. Configurations forwarding original Authorization
+to an upstream are not qualified as safe composite delivery by authentication alone.
+
+Source tests cover actual owned HTTPS exchanges, HTTP and generated mTLS native
+ingress, duplicate refusal before verifier calls, identity ambiguity, local expiry,
+entry scheduling gaps, native clock failure, cancellation, circuit retention,
+withdrawal, and post-provider pause plus UTC rollback in capture/noncapture output.
+They also exercise actual config-file loading and signed final-digest substitution
+refusal. These are source fixtures, not released artifact, browser/provider or
+operating-route completion. Human sessions/provider linking, native workload
+composition and cross-kind delegation remain explicitly queued follow-up work.
 
 ## Human second factors and extension contract — implementation backlog
 

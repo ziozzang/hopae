@@ -2,6 +2,7 @@
 //! Evidence construction stays crate-private: request claims cannot authenticate themselves.
 pub mod authority;
 pub mod breaker;
+pub mod composition;
 pub mod kubernetes;
 pub mod lua;
 pub mod permission_live;

@@ -106,6 +106,15 @@ impl Connector {
             circuit: Circuit::new(3, 30_000).expect("constant circuit bounds"),
         })
     }
+    #[cfg(test)]
+    pub(crate) fn trust_fixture_ca(&mut self, ca: &[u8]) {
+        self.fetcher = Fetcher::for_verifier(
+            true,
+            self.timeout,
+            vec![reqwest::Certificate::from_pem(ca).unwrap()],
+        )
+        .unwrap();
+    }
     pub(crate) fn same_binding(&self, other: &Self) -> bool {
         self.binding == other.binding
     }

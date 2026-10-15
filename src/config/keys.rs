@@ -194,6 +194,30 @@ pub(super) const ROOT: Node = Obj(&[
                             ("token_prefix", Leaf),
                         ]),
                     ),
+                    (
+                        "composition",
+                        Obj(&[
+                            ("mode", Leaf),
+                            ("timeout_ms", Leaf),
+                            ("slots", Arr(&Obj(&[("id", Leaf), ("provider", Leaf)]))),
+                            (
+                                "identities",
+                                Arr(&Obj(&[
+                                    ("subject", Leaf),
+                                    (
+                                        "bindings",
+                                        Arr(&Obj(&[
+                                            ("slot", Leaf),
+                                            ("issuer", Leaf),
+                                            ("realm", Leaf),
+                                            ("subject", Leaf),
+                                            ("kind", Leaf),
+                                        ])),
+                                    ),
+                                ])),
+                            ),
+                        ]),
+                    ),
                     ("networks", Arr(&Leaf)),
                     ("session_fallback", Leaf),
                     ("relay_token_prefix", Leaf),

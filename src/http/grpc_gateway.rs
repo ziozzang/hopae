@@ -630,6 +630,19 @@ fn receipt_resources(
     )
 }
 #[cfg(test)]
+pub(crate) fn authentication_server_for_test(
+    router: Router,
+    keys: Arc<CallerKeys>,
+) -> v1::authentication_server::AuthenticationServer<impl Authentication> {
+    v1::authentication_server::AuthenticationServer::new(Service {
+        router,
+        keys,
+        requests: Arc::new(Semaphore::new(16)),
+    })
+    .max_decoding_message_size(wire::MAX_FRAME)
+    .max_encoding_message_size(wire::MAX_FRAME)
+}
+#[cfg(test)]
 pub(crate) fn receipt_server_for_test(
     services: crate::app::Services,
     router: Router,

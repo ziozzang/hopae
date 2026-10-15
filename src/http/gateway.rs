@@ -237,35 +237,55 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
             crate::verify::types::Reserved::No
         )
     {
-        let presented = hangang::service_identity::bearer(&headers);
+        let presented = hangang::service_identity::credential(&headers);
         let fallback = matches!(presented, Ok(None))
             && runtime.session_fallback(input.host.as_str(), input.port);
         if !fallback {
+            // Keep the paired native clock capability through final HTTP output,
+            // including non-receipt callers and callbacks after provider return.
+            let entry_stamp = if matches!(
+                presented,
+                Ok(Some(
+                    crate::auth_gateway::composition::Credential::Composite(_)
+                ))
+            ) {
+                match crate::auth_gateway::composition::EntryTime::capture(st.ctx.clock.as_ref()) {
+                    Ok(time) => Some(time),
+                    Err(_) => return hangang::service_identity::unavailable(&request_id),
+                }
+            } else {
+                None
+            };
             let result = match presented {
                 Ok(token) => tokio::time::timeout(st.ctx.limits.budget, async {
-                    let now = st.ctx.clock.now().0.max(0) as u64;
+                    let now = entry_stamp.as_ref().map_or_else(
+                        || st.ctx.clock.now().0.max(0) as u64,
+                        |time| time.entry_ms(),
+                    );
                     if st.capture_service_receipts {
                         let captured = authority
                             .as_ref()
                             .ok_or(crate::auth_gateway::runtime::Error::Unavailable)?;
                         let proof = captured
-                            .authenticate_for_receipt(
+                            .authenticate_credential_for_receipt(
                                 input.host.as_str(),
                                 input.port,
                                 token,
                                 input.client_ip,
                                 now,
+                                entry_stamp.as_ref(),
                             )
                             .await?;
                         Ok((proof.evidence.clone(), Some(proof)))
                     } else {
                         runtime
-                            .authenticate_async(
+                            .authenticate_credential_async(
                                 input.host.as_str(),
                                 input.port,
                                 token,
                                 input.client_ip,
                                 now,
+                                entry_stamp.as_ref(),
                             )
                             .await
                             .map(|evidence| (evidence, None))
@@ -315,7 +335,7 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
             let mut validated_application = None;
             if evidence.is_some() {
                 let policy = st.ctx.snapshot.load_full();
-                if st.capture_service_receipts {
+                if st.capture_service_receipts || entry_stamp.is_some() {
                     validated_application = Some(policy.clone());
                 }
                 let refused = match crate::policy::apps::resolve(&policy, &input.host) {
@@ -358,8 +378,11 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
                 st.ctx.clock.now().0.max(0) as u64,
             );
             if response.status().is_success()
-                && let (Some(proof), Some(profile), Some(application)) =
-                    (receipt_proof, authority.as_ref(), validated_application)
+                && let (Some(proof), Some(profile), Some(application)) = (
+                    receipt_proof,
+                    authority.as_ref(),
+                    validated_application.clone(),
+                )
             {
                 response.extensions_mut().insert(Arc::new(
                     crate::auth_gateway::receipt_issuer::CapturedService {
@@ -368,6 +391,38 @@ async fn verify(State(st): State<Arc<GatewayState>>, headers: HeaderMap) -> Resp
                         application,
                     },
                 ));
+            }
+            if response.status().is_success()
+                && let (Some(time), Some(evidence)) = (entry_stamp.as_ref(), evidence.as_ref())
+            {
+                let now = match time.current(&runtime.observed_time, evidence.expires_at_ms()) {
+                    Ok(now) => now,
+                    Err(_) => return hangang::service_identity::unavailable(&request_id),
+                };
+                // Time dependencies may overlap publication; owner fences follow
+                // the final native clock callback, not merely provider completion.
+                let current = st
+                    .authentication_gateway
+                    .as_ref()
+                    .map(|reader| reader.load_full());
+                if !current
+                    .as_ref()
+                    .zip(authority.as_ref())
+                    .is_some_and(|(current, captured)| {
+                        current.available() && Arc::ptr_eq(current, captured)
+                    })
+                    || !validated_application
+                        .as_ref()
+                        .is_some_and(|captured| Arc::ptr_eq(captured, &st.ctx.snapshot.load_full()))
+                {
+                    return hangang::service_identity::unavailable(&request_id);
+                }
+                let remaining = evidence.expires_at_ms() - now;
+                response.headers_mut().insert(
+                    "x-hopae-evidence-ttl-ms",
+                    axum::http::HeaderValue::from_str(&remaining.min(1000).to_string())
+                        .expect("bounded remaining duration"),
+                );
             }
             return response;
         }
