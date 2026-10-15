@@ -35,3 +35,39 @@ original BOOTTIME admission and final emission fences. This reference alone gran
 no Human or MFA authority. It does not poll remote LDAP/OIDC account state, detect
 arbitrary database backup rollback, or fence independently cloned live processes.
 Migration/backup and source-process retirement remain separate requirements.
+
+## Actual compiled Registry preparation
+
+The production startup now prepares the actual durable provider rows and their
+incarnations in one bounded SQLite read transaction, after the existing config
+generation/import writes. The generation must already exist and match; no default
+is invented. At most4096 rows are prepared. The same rows configure native OIDC
+and LDAP adapters and their private owner map retained inside the Registry.
+File-only settings do not replace retained/API-managed DB authority.
+
+The exact application snapshot is frozen once and its same ArcSwap is reused by
+Services. Registry retains that original Arc and its owning publisher. An owner
+requires the actual compiled adapter to be enabled/usable: missing credentials,
+invalid LDAP trust/config, unsupported kinds or absent adapters never qualify
+merely because the DB row enabled bit is set. Ordinary public from_snapshot
+registries remain usable for their existing role but have no additive owner map.
+
+Publication rechecks the durable owner set/generation and application identity
+before returning Bound, after fallible bind/listener preparation. OIDC refreshers
+are deferred until this check succeeds. A later fallible run/router build can
+still fail; existing Weak refreshers may finish a bounded in-flight fetch before
+stopping. No universal “failed startup made no external request” claim is made.
+
+A private provider fence belongs to that Registry and Store. Current checks use
+the original prepared incarnation/config generation, not a late binding to new
+DB rows. Disable/re-enable, material ABA, deletion/recreation or application Arc
+replacement refuse; an observed failed check retires that fence. A newer prepared
+Registry is required to use a changed provider. Runtime Registry is currently
+fixed at startup and configuration reload requires restart. Unobserved privileged
+ArcSwap rollback, arbitrary DB restore and live clones are not solved here.
+
+These are fresh durable-read correctness checks, not a completed authentication
+hot path or Human grant. Later source-backed immutable memory snapshots and
+membership/publication gates must preserve owner retirement without exporting
+numeric capabilities; their cache/follower/performance qualification remains
+open. Actual Engine session/factor/app binding and Human protocol are still queued.

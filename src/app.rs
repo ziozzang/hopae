@@ -697,15 +697,25 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
     import_admin_grants_at_start(cfg, &*directory, &env).await?;
     // The provider registry, from the rows the import just settled (the
     // database is authoritative). Its reporter writes `provider.error`.
-    let rows = directory.providers().await.context("reading providers")?;
+    let prepared_providers = store
+        .prepare_registry_providers(
+            generation,
+            crate::store::Deadline(std::time::Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .context("preparing native provider owners")?;
+    let rows = prepared_providers.rows();
     // A stored `reauth` setting (an api-managed row) overrides the file's default.
-    crate::provider::apply_stored_reauth(&mut snapshot, &rows);
-    let registry = Arc::new(Registry::from_snapshot(
-        &rows,
+    crate::provider::apply_stored_reauth(&mut snapshot, rows);
+    let applications = Arc::new(ArcSwap::from_pointee(snapshot));
+    let snapshot = applications.load_full();
+    let registry = Arc::new(Registry::from_prepared(
+        prepared_providers,
+        applications.clone(),
         &|n| std::env::var(n).ok(),
         env.clock.clone(),
         Some(provider_reporter(emitter.clone())),
-    ));
+    )?);
     let mut mirrored: Vec<_> = snapshot.apps.clone();
     mirrored.push(snapshot.default_app.clone());
     store
@@ -796,7 +806,7 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         clock: env.clock.clone(),
         rng: env.rng.clone(),
         emitter,
-        snapshot: Arc::new(ArcSwap::from_pointee(snapshot)),
+        snapshot: applications,
         caller_keys: Arc::new(CallerKeys::from_env(cfg, |n| std::env::var(n).ok())),
         readiness: Readiness::default(),
         store_hooks: env.store_hooks.clone(),
@@ -900,6 +910,14 @@ pub async fn bind(cfg: &Config) -> anyhow::Result<Bound> {
         ),
         None => tracing::info!("listeners bound: portal {portal_addr}, gateway {gateway_addr}"),
     }
+    services
+        .registry
+        .publish_prepared(
+            &store,
+            crate::store::Deadline(std::time::Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .context("publishing native provider owners")?;
     Ok(Bound {
         admin_tls,
         grpc_gateway,

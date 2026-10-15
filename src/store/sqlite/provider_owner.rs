@@ -133,3 +133,151 @@ impl Store {
 #[cfg(test)]
 #[path = "provider_owner_tests.rs"]
 mod tests;
+
+/// Exact actual DB rows and incarnations read under one storage snapshot.
+/// Only the Store constructs this; public Registry::from_snapshot is unqualified.
+pub(crate) struct PreparedProviders {
+    store: Weak<Inner>,
+    rows: Vec<crate::store::ProviderRow>,
+    owners: std::collections::BTreeMap<String, i64>,
+    generation: u64,
+}
+impl PreparedProviders {
+    pub(crate) fn rows(&self) -> &[crate::store::ProviderRow] {
+        &self.rows
+    }
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+fn prepared_rows(
+    c: &rusqlite::Connection,
+    check: &super::Check,
+    expected: u64,
+) -> StoreResult<(
+    Vec<crate::store::ProviderRow>,
+    std::collections::BTreeMap<String, i64>,
+)> {
+    use super::rows::{self, PROVIDER_COLS, cols};
+    let transaction = c.unchecked_transaction()?;
+    check.now()?;
+    let generation: Option<String> = transaction
+        .query_row(
+            "SELECT value FROM meta WHERE key='config_generation'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if expected == 0 || generation.and_then(|v| v.parse::<u64>().ok()) != Some(expected) {
+        return Err(StoreError::Conflict("provider configuration owner changed"));
+    }
+    let mut out = Vec::new();
+    let mut owners = std::collections::BTreeMap::new();
+    {
+        let sql = format!(
+            "SELECT {},o.revision FROM providers p LEFT JOIN human_provider_owners o ON o.provider_id=p.provider_id ORDER BY p.sort_order,p.provider_id",
+            cols("p", PROVIDER_COLS)
+        );
+        let mut statement = transaction.prepare(&sql)?;
+        let mut query = statement.query([])?;
+        while let Some(row) = query.next()? {
+            check.step()?;
+            if out.len() >= 4096 {
+                return Err(StoreError::Conflict("provider preparation capacity"));
+            }
+            let provider = rows::provider(row, 0)?;
+            let revision: Option<i64> = row.get(PROVIDER_COLS.len())?;
+            let revision = revision
+                .filter(|v| *v > 0)
+                .ok_or_else(|| StoreError::Corrupt("missing provider incarnation".into()))?;
+            owners.insert(provider.provider_id.to_string(), revision);
+            out.push(provider);
+        }
+    }
+    check.now()?;
+    transaction.commit()?;
+    Ok((out, owners))
+}
+impl Store {
+    pub(crate) async fn prepare_registry_providers(
+        &self,
+        expected_generation: u64,
+        deadline: Deadline,
+    ) -> StoreResult<PreparedProviders> {
+        let (rows, owners) = self
+            .read_checked(
+                "prepare_registry_providers",
+                Some(deadline),
+                move |c, check| prepared_rows(c, check, expected_generation),
+            )
+            .await?;
+        Ok(PreparedProviders {
+            store: Arc::downgrade(&self.inner),
+            rows,
+            owners,
+            generation: expected_generation,
+        })
+    }
+    pub(crate) async fn require_prepared_providers(
+        &self,
+        prepared: &PreparedProviders,
+        deadline: Deadline,
+    ) -> StoreResult<()> {
+        if !Weak::ptr_eq(&prepared.store, &Arc::downgrade(&self.inner)) {
+            return Err(StoreError::Conflict("provider store owner changed"));
+        }
+        let generation = prepared.generation;
+        let (_, owners) = self
+            .read_checked(
+                "require_prepared_providers",
+                Some(deadline),
+                move |c, check| prepared_rows(c, check, generation),
+            )
+            .await?;
+        if owners != prepared.owners {
+            return Err(StoreError::Conflict("provider registry owner changed"));
+        }
+        Ok(())
+    }
+    pub(crate) async fn require_prepared_provider(
+        &self,
+        prepared: &PreparedProviders,
+        id: &crate::provider::types::ProviderId,
+        deadline: Deadline,
+    ) -> StoreResult<()> {
+        if !Weak::ptr_eq(&prepared.store, &Arc::downgrade(&self.inner)) {
+            return Err(StoreError::Conflict("provider store owner changed"));
+        }
+        let expected = prepared
+            .owners
+            .get(id.as_str())
+            .copied()
+            .ok_or(StoreError::Conflict("provider not prepared"))?;
+        let id = id.to_string();
+        let generation = prepared.generation;
+        self.read_checked(
+            "require_prepared_provider",
+            Some(deadline),
+            move |c, check| {
+                check.now()?;
+                let tx = c.unchecked_transaction()?;
+                let config: Option<String> = tx
+                    .query_row(
+                        "SELECT value FROM meta WHERE key='config_generation'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if config.and_then(|v| v.parse::<u64>().ok()) != Some(generation)
+                    || current(&tx, &id)? != expected
+                {
+                    return Err(StoreError::Conflict("provider registry owner changed"));
+                }
+                check.now()?;
+                tx.commit()?;
+                Ok(())
+            },
+        )
+        .await
+    }
+}

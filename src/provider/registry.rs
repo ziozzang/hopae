@@ -17,6 +17,21 @@ pub struct Registry {
     credential_order: Vec<ProviderId>,
     /// All ids, in `(sort_order, id)` order.
     order: Vec<ProviderId>,
+    owners: Option<OwnedProviders>,
+    deferred_refreshers: Vec<Arc<OidcProvider>>,
+}
+struct OwnedProviders {
+    prepared: crate::store::sqlite::provider_owner::PreparedProviders,
+    application: Arc<crate::policy::types::ConfigSnapshot>,
+    applications: Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
+    published: std::sync::atomic::AtomicBool,
+}
+/// Infrastructure only: not a Human login, factor or observed clock capability.
+#[allow(dead_code)]
+pub(crate) struct RegistryProviderFence {
+    registry: std::sync::Weak<Registry>,
+    provider: ProviderId,
+    retired: std::sync::atomic::AtomicBool,
 }
 
 struct DisabledCredentialProvider {
@@ -47,6 +62,8 @@ impl Registry {
             credential_by_id: HashMap::new(),
             credential_order: Vec::new(),
             order: Vec::new(),
+            owners: None,
+            deferred_refreshers: Vec::new(),
         }
     }
 
@@ -59,6 +76,16 @@ impl Registry {
         env: &dyn Fn(&str) -> Option<String>,
         clock: Arc<dyn Clock>,
         reporter: Option<Reporter>,
+    ) -> Registry {
+        Self::compile(rows, env, clock, reporter, true)
+    }
+
+    fn compile(
+        rows: &[ProviderRow],
+        env: &dyn Fn(&str) -> Option<String>,
+        clock: Arc<dyn Clock>,
+        reporter: Option<Reporter>,
+        start_refreshers: bool,
     ) -> Registry {
         let mut sorted: Vec<&ProviderRow> = rows.iter().collect();
         sorted.sort_by(|a, b| {
@@ -105,13 +132,136 @@ impl Registry {
             let p = OidcProvider::from_row(row, env, clock.clone(), reporter.clone());
             if let Some(why) = p.disabled_reason() {
                 tracing::warn!(provider = %row.provider_id, reason = why, "provider is not usable");
-            } else {
+            } else if start_refreshers {
                 p.spawn_refresher();
+            } else {
+                reg.deferred_refreshers.push(p.clone());
             }
             reg.order.push(row.provider_id.clone());
             reg.by_id.insert(row.provider_id.clone(), p);
         }
         reg
+    }
+
+    pub(crate) fn from_prepared(
+        prepared: crate::store::sqlite::provider_owner::PreparedProviders,
+        applications: Arc<arc_swap::ArcSwap<crate::policy::types::ConfigSnapshot>>,
+        env: &dyn Fn(&str) -> Option<String>,
+        clock: Arc<dyn Clock>,
+        reporter: Option<Reporter>,
+    ) -> crate::store::StoreResult<Self> {
+        let application = applications.load_full();
+        if application.generation != prepared.generation() {
+            return Err(crate::store::StoreError::Conflict(
+                "provider application owner changed",
+            ));
+        }
+        let mut registry = Self::compile(prepared.rows(), env, clock, reporter, false);
+        registry.owners = Some(OwnedProviders {
+            prepared,
+            application,
+            applications,
+            published: std::sync::atomic::AtomicBool::new(false),
+        });
+        Ok(registry)
+    }
+    fn owners(&self) -> crate::store::StoreResult<&OwnedProviders> {
+        let owners = self
+            .owners
+            .as_ref()
+            .ok_or(crate::store::StoreError::Conflict(
+                "provider registry unqualified",
+            ))?;
+        if !Arc::ptr_eq(&owners.application, &owners.applications.load_full()) {
+            return Err(crate::store::StoreError::Conflict(
+                "provider application owner changed",
+            ));
+        }
+        Ok(owners)
+    }
+    /// Called after fallible bind/listener preparation. A failed publication
+    /// starts no refresher tasks; later run/router failures retain the existing
+    /// Weak refresher lifecycle, including a bounded in-flight request.
+    pub(crate) async fn publish_prepared(
+        &self,
+        store: &crate::store::Store,
+        deadline: crate::store::Deadline,
+    ) -> crate::store::StoreResult<()> {
+        let owners = self.owners()?;
+        store
+            .require_prepared_providers(&owners.prepared, deadline)
+            .await?;
+        self.owners()?;
+        if !owners
+            .published
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            for provider in &self.deferred_refreshers {
+                provider.spawn_refresher();
+            }
+        }
+        Ok(())
+    }
+    #[allow(dead_code)]
+    pub(crate) async fn capture_provider_fence(
+        self: &Arc<Self>,
+        store: &crate::store::Store,
+        id: &ProviderId,
+        deadline: crate::store::Deadline,
+    ) -> crate::store::StoreResult<RegistryProviderFence> {
+        let fence = RegistryProviderFence {
+            registry: Arc::downgrade(self),
+            provider: id.clone(),
+            retired: std::sync::atomic::AtomicBool::new(false),
+        };
+        self.require_provider_fence(store, &fence, deadline).await?;
+        Ok(fence)
+    }
+    #[allow(dead_code)]
+    pub(crate) async fn require_provider_fence(
+        self: &Arc<Self>,
+        store: &crate::store::Store,
+        fence: &RegistryProviderFence,
+        deadline: crate::store::Deadline,
+    ) -> crate::store::StoreResult<()> {
+        let result = async {
+            if fence.retired.load(std::sync::atomic::Ordering::Acquire)
+                || !std::sync::Weak::ptr_eq(&fence.registry, &Arc::downgrade(self))
+            {
+                return Err(crate::store::StoreError::Conflict(
+                    "provider registry fence retired",
+                ));
+            }
+            let owners = self.owners()?;
+            let usable = self
+                .credential(&fence.provider)
+                .is_some_and(|p| p.enabled())
+                || self.get(&fence.provider).is_some_and(|p| p.enabled());
+            if !owners.published.load(std::sync::atomic::Ordering::Acquire) || !usable {
+                return Err(crate::store::StoreError::Conflict(
+                    "compiled provider unavailable",
+                ));
+            }
+            store
+                .require_prepared_provider(&owners.prepared, &fence.provider, deadline)
+                .await?;
+            self.owners()?;
+            // Observe concurrent retirement after the durable read. This is a
+            // point-in-time fence check, not an atomic remote authorization.
+            if fence.retired.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(crate::store::StoreError::Conflict(
+                    "provider registry fence retired",
+                ));
+            }
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            fence
+                .retired
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
     }
 
     pub fn credential(
@@ -375,3 +525,7 @@ mod tests {
         assert!(reg.get(&ProviderId::new("pw")).is_none());
     }
 }
+
+#[cfg(test)]
+#[path = "registry_owner_tests.rs"]
+mod owner_tests;

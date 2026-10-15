@@ -26,3 +26,33 @@ crate 내부 참조는 숫자 생성자·직렬화·Debug를 제공하지 않고
 예산·최종 공개 fence 연결이 필요합니다. 이 참조 자체는 Human/MFA 권위가 아닙니다.
 원격 LDAP/OIDC 계정 상태 polling, 임의 DB 복구 rollback 및 live process clone 방어를
 제공하지 않습니다. migration backup과 원천 process retirement는 별도입니다.
+
+## 실제 컴파일된 Registry 준비
+
+production startup은 기존 설정 세대/import 쓰기가 끝난 뒤 실제 DB provider 행과
+incarnation을 하나의 제한된 SQLite 읽기 트랜잭션에서 준비합니다. 기존 양수 설정
+세대가 일치해야 하며 기본값을 만들지 않고 최대4096행을 허용합니다. 같은 행으로
+OIDC·LDAP adapter와 Registry 내부 비공개 owner map을 구성합니다. 파일 설정이
+retained/API-managed DB 권위를 대체하지 않습니다.
+
+정확한 application snapshot을 한 번 동결하고 같은 ArcSwap을 Services에서도
+사용합니다. Registry는 원래 Arc와 publisher를 보존합니다. 실제 컴파일된 adapter가
+사용 가능해야 하며 자격 누락·LDAP trust/config 오류·미지원 kind·adapter 부재는
+DB enabled 값만으로 추가 owner를 얻지 못합니다. 기존 공개 from_snapshot은 일반
+용도를 유지하지만 추가 owner map을 제공하지 않습니다.
+
+fallible bind/listener 준비 후 Bound 반환 전에 DB owner set/설정 세대와 application
+동일성을 재확인하고 그 뒤 OIDC refresher를 시작합니다. 이후 run/router 생성은
+여전히 실패할 수 있습니다. 기존 Weak refresher가 제한된 진행 중 요청을 끝낸 뒤
+종료할 수 있으므로 모든 startup 실패에 외부 요청이 전혀 없었다는 주장은 하지 않습니다.
+
+비공개 fence는 해당 Registry·Store에 속하고 새 DB 행으로 뒤늦게 갈아타지 않습니다.
+비활성/재활성·material ABA·삭제/재생성·application Arc 교체를 거부하고 관측한 실패는
+그 fence를 은퇴시킵니다. 변경 provider는 새로 준비한 Registry가 필요합니다. 현재
+Registry는 startup 고정이며 reload는 재시작이 필요합니다. 관측하지 못한 특권
+ArcSwap rollback·임의 DB 복구·live clone 방어를 제공하지 않습니다.
+
+현재의 fresh durable 조회는 정확성 기반이며 인증 hot path나 Human 권한 완성이
+아닙니다. 후속 원천 소유 불변 memory snapshot·membership/publication gate가 숫자
+capability 공개 없이 은퇴 경계를 유지해야 합니다. cache/follower/성능 검증과 실제
+Engine 세션/factor/app 결합·Human protocol은 남아 있습니다.
