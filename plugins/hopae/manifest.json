@@ -5,7 +5,7 @@
   "api_version": 1,
   "entry": "index.js",
   "assets": {
-    "index.js": "d8f38f479d20f55b789f69e1a7817a13166415048607daa76ffc03b0582ddcf9",
+    "index.js": "ff8ff72b8f2c367990354a8aa749162d45dec0211ddc571772e445ba14b0eaa8",
     "style.css": "5a557146b34acf8c7a9f8b33f47dea8cab6f8005eaebade246df1d7047f044ef"
   },
   "routes": [
