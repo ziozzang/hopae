@@ -408,6 +408,9 @@ impl ReceiptService {
         let verification = input
             .verification
             .ok_or_else(|| Status::invalid_argument("verification required"))?;
+        if clocked && !(1..=9_007_199_254_740_991).contains(&verification.request_id) {
+            return Err(Status::invalid_argument("invalid observed receipt request"));
+        }
         let mut request = Request::new(verification);
         *request.metadata_mut() = metadata.clone();
         let (request_id, response, _permit) = self.pipeline.exchange(request).await?;
@@ -929,5 +932,373 @@ mod plan_tests {
             service.observe(request()).await.unwrap_err().code(),
             tonic::Code::Unavailable
         );
+    }
+}
+
+#[cfg(test)]
+mod observed_boundary_tests {
+    use super::*;
+    use crate::{
+        auth_gateway::{authority, receipt_authority, receipt_issuer, receipt_keys, runtime},
+        crypto::{Clock, Secret, Timestamp},
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use v1::authentication_receipts_server::AuthenticationReceipts;
+
+    const TOKEN: &str = "owned-boundary-native-key-at-least-thirty-two-bytes";
+    const CALLER: &str = "owned-boundary-gateway-key";
+
+    #[derive(Default)]
+    struct CountedClock(AtomicUsize);
+    impl Clock for CountedClock {
+        fn now(&self) -> Timestamp {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            crate::crypto::SystemClock.now()
+        }
+    }
+
+    #[derive(Default)]
+    struct RouterGate {
+        block_next: AtomicBool,
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    struct Fixture {
+        service: ReceiptService,
+        clock: Arc<CountedClock>,
+        router_calls: Arc<AtomicUsize>,
+        gate: Arc<RouterGate>,
+    }
+
+    fn fixture() -> Fixture {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .unwrap();
+        let configuration: runtime::Config = serde_json::from_value(serde_json::json!({
+            "authority_id": "owned-boundary",
+            "profiles": [{
+                "service_id": "orders", "host": "orders.example.test", "ports": [443],
+                "realm": "partner", "api_keys": [{"token_env": "OWNED_BOUNDARY_KEY", "subject": "worker"}],
+                "networks": ["203.0.113.0/24"]
+            }]
+        })).unwrap();
+        let owner = authority::Authority::load(
+            &mut db,
+            Some(configuration),
+            &|_| Some(TOKEN.into()),
+            &|_| Ok(()),
+        )
+        .unwrap();
+        let profiles = owner.reader();
+        let cfg = crate::config::parse(
+            r#"{"state_dir":"owned","portal":{"public_url":"https://auth.example.test"},"gateway":{"kind":"hangang","caller_key_env":"OWNED_GATEWAY"}}"#,
+        ).unwrap();
+        let application = Arc::new(cfg.snapshot(1));
+        let applications = Arc::new(arc_swap::ArcSwap::from(application.clone()));
+        let clock = Arc::new(CountedClock::default());
+        let public_key = ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+            .verifying_key()
+            .to_bytes();
+        let issuer = Arc::new(
+            receipt_issuer::Issuer::new(
+                receipt_issuer::Configuration {
+                    issuer_ref: "owned-boundary-hopae".into(),
+                    key_epoch: 1,
+                    identity_authority_epoch: "owned-boundary-identity".into(),
+                    public_key,
+                    scopes: vec![receipt_issuer::Scope {
+                        service: "orders".into(),
+                        audience: "orders-api".into(),
+                    }],
+                },
+                zeroize::Zeroizing::new([7; 32]),
+                clock.clone(),
+                Arc::new(crate::crypto::OsRng),
+            )
+            .unwrap(),
+        );
+        let mut key_owner = receipt_authority::Authority::load(&db, 0).unwrap();
+        key_owner
+            .reconcile(
+                &mut db,
+                &[receipt_keys::Key {
+                    issuer_ref: "owned-boundary-hopae".into(),
+                    purpose: hopae_grpc::receipt::Purpose::Authentication,
+                    epoch: 1,
+                    public_key,
+                }],
+                "owned-test",
+                &|_| Ok(()),
+            )
+            .unwrap();
+        let router_calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(RouterGate::default());
+        let calls = router_calls.clone();
+        let router_gate = gate.clone();
+        let reader = profiles.clone();
+        let router = Router::new().route(
+            hangang::VERIFY_PATH,
+            axum::routing::get(move || {
+                let calls = calls.clone();
+                let gate = router_gate.clone();
+                let reader = reader.clone();
+                let application = application.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if gate.block_next.swap(false, Ordering::SeqCst) {
+                        gate.entered.notify_one();
+                        gate.release.notified().await;
+                    }
+                    let profile = reader.load_full();
+                    let authentication = profile
+                        .authenticate_for_receipt(
+                            "orders.example.test",
+                            443,
+                            Some(TOKEN),
+                            "203.0.113.9".parse().unwrap(),
+                            crate::crypto::SystemClock.now().0 as u64,
+                        )
+                        .await
+                        .unwrap();
+                    let mut response = axum::response::Response::new(Body::empty());
+                    response
+                        .extensions_mut()
+                        .insert(Arc::new(receipt_issuer::CapturedService {
+                            authentication,
+                            profile,
+                            application,
+                        }));
+                    response
+                }
+            }),
+        );
+        Fixture {
+            service: ReceiptService {
+                pipeline: Service {
+                    router,
+                    keys: Arc::new(CallerKeys::new(
+                        Some(Secret::new(CALLER.into())),
+                        None,
+                        false,
+                    )),
+                    requests: Arc::new(Semaphore::new(1)),
+                },
+                issuer,
+                key_verifier: key_owner.verifier(),
+                profiles,
+                applications,
+            },
+            clock,
+            router_calls,
+            gate,
+        }
+    }
+
+    fn authorize<T>(message: T) -> Request<T> {
+        let mut request = Request::new(message);
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {CALLER}").parse().unwrap());
+        request
+    }
+
+    fn issue(id: u64) -> Request<v1::ServiceReceiptRequest> {
+        authorize(v1::ServiceReceiptRequest {
+            verification: Some(v1::VerifyRequest {
+                request_id: id,
+                headers: vec![],
+            }),
+            service: "orders".into(),
+            audience: "orders-api".into(),
+            request_sha256: vec![3; 32],
+        })
+    }
+
+    fn observation(reply: v1::ServiceReceiptReply) -> Request<v1::ServiceReceiptValidationRequest> {
+        authorize(v1::ServiceReceiptValidationRequest {
+            request_id: reply.request_id + 1,
+            context: reply.context,
+            receipt: reply.receipt,
+            request_sha256: vec![3; 32],
+        })
+    }
+
+    #[tokio::test]
+    async fn observed_issue_rejects_noncanonical_ids_before_authentication_work() {
+        let fixture = fixture();
+        for id in [0, 9_007_199_254_740_992, u64::MAX] {
+            let result = fixture.service.issue_service_observed(issue(id)).await;
+            assert_eq!(result.unwrap_err().code(), tonic::Code::InvalidArgument);
+            assert_eq!(
+                fixture.router_calls.load(Ordering::SeqCst),
+                0,
+                "malformed observed ID must be rejected before calling native authentication"
+            );
+            assert_eq!(
+                fixture.clock.0.load(Ordering::SeqCst),
+                0,
+                "malformed observed ID must not reach the issuer clock"
+            );
+            assert_eq!(fixture.service.pipeline.requests.available_permits(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_methods_reject_ambiguous_or_absent_credentials_before_work() {
+        let fixture = fixture();
+        for credentials in [
+            vec![],
+            vec![""],
+            vec!["Bearer "],
+            vec!["Basic owned-boundary-gateway-key"],
+            vec!["Bearer owned-boundary-gateway-key", "Bearer incorrect"],
+            vec!["Bearer incorrect", "Bearer owned-boundary-gateway-key"],
+            vec![
+                "Bearer owned-boundary-gateway-key",
+                "Bearer owned-boundary-gateway-key",
+            ],
+        ] {
+            let mut issue = issue(20);
+            issue.metadata_mut().remove("authorization");
+            for value in &credentials {
+                issue
+                    .metadata_mut()
+                    .append("authorization", value.parse().unwrap());
+            }
+            let mut observe = Request::new(v1::ServiceReceiptValidationRequest::default());
+            *observe.metadata_mut() = issue.metadata().clone();
+            assert_eq!(
+                fixture
+                    .service
+                    .issue_service_observed(issue)
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::Unauthenticated
+            );
+            assert_eq!(
+                fixture
+                    .service
+                    .observe_service_time(observe)
+                    .await
+                    .unwrap_err()
+                    .code(),
+                tonic::Code::Unauthenticated
+            );
+        }
+        assert_eq!(fixture.router_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.clock.0.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.service.pipeline.requests.available_permits(), 1);
+
+        let mut development = fixture;
+        development.service.pipeline.keys = Arc::new(CallerKeys::new(None, None, true));
+        assert_eq!(
+            development
+                .service
+                .issue_service_observed(issue(20))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            development
+                .service
+                .observe_service_time(authorize(v1::ServiceReceiptValidationRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(development.router_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(development.clock.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn observed_issue_and_refresh_share_one_permit_without_self_exhaustion() {
+        let fixture = fixture();
+        let held = fixture
+            .service
+            .pipeline
+            .requests
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture
+                .service
+                .issue_service_observed(issue(30))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::ResourceExhausted
+        );
+        assert_eq!(
+            fixture
+                .service
+                .observe_service_time(authorize(v1::ServiceReceiptValidationRequest::default()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::ResourceExhausted
+        );
+        assert_eq!(fixture.router_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fixture.clock.0.load(Ordering::SeqCst), 0);
+        drop(held);
+
+        let issued = fixture
+            .service
+            .issue_service_observed(issue(30))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(fixture.service.pipeline.requests.available_permits(), 1);
+        let initial = issued.observation.unwrap();
+        let refreshed = fixture
+            .service
+            .observe_service_time(observation(issued.receipt.unwrap()))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(refreshed.request_id, 31);
+        assert_eq!(refreshed.receipt_sha256, initial.receipt_sha256);
+        assert_eq!(refreshed.clock_domain, initial.clock_domain);
+        assert_eq!(refreshed.cache_ttl_ms, 0);
+        assert_eq!(fixture.router_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fixture.service.pipeline.requests.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_observed_issue_releases_capacity_for_the_next_call() {
+        let fixture = fixture();
+        fixture.gate.block_next.store(true, Ordering::SeqCst);
+        let mut pending = Box::pin(fixture.service.issue_service_observed(issue(40)));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                _ = fixture.gate.entered.notified() => {},
+                result = &mut pending => panic!("router must suspend issuance, got {result:?}"),
+            }
+        })
+        .await
+        .expect("native authentication entry");
+        assert_eq!(fixture.service.pipeline.requests.available_permits(), 0);
+        assert_eq!(fixture.clock.0.load(Ordering::SeqCst), 0);
+        drop(pending);
+        assert_eq!(fixture.service.pipeline.requests.available_permits(), 1);
+
+        // The gate blocks only the cancelled call. No timer or release is needed
+        // for the next authentication, so a leaked permit fails immediately.
+        let next = fixture
+            .service
+            .issue_service_observed(issue(41))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(next.receipt.unwrap().request_id, 41);
+        assert_eq!(next.observation.unwrap().request_id, 41);
+        assert_eq!(fixture.router_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fixture.service.pipeline.requests.available_permits(), 1);
     }
 }

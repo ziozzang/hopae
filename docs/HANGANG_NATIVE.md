@@ -469,3 +469,9 @@ source; restart and issuer affinity require a defined durable retention model.
 Caller keys currently identify rotation slots, not explicit caller roles. The
 new RPC tests do not qualify that missing role model, independent-host clients,
 fleet restore or the complete Kubernetes release gate.
+
+Four native boundary regressions also pass: observed request-ID validation before
+authentication work, ambiguous/missing caller metadata refusal, capacity-one
+issuance followed by nested observation, and cancellation releasing the admission
+permit. The early-ID test reproduced unnecessary authentication before the guard
+was added; only the observed contract gains this stricter early check.
