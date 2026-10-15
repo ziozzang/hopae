@@ -14,8 +14,11 @@ mod factors;
 pub(crate) mod provider_owner;
 mod rows;
 mod sessions;
+// Provenance infrastructure; actual native Human candidate integration is queued.
 #[cfg(test)]
 mod tests;
+#[allow(dead_code)]
+pub(crate) mod totp_owner;
 mod window;
 
 use std::collections::VecDeque;
@@ -70,6 +73,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         7,
         "0007_human_provider_owners",
         include_str!("../migrations/0007_human_provider_owners.sql"),
+    ),
+    (
+        8,
+        "0008_session_totp_provenance",
+        include_str!("../migrations/0008_session_totp_provenance.sql"),
     ),
 ];
 
@@ -855,6 +863,9 @@ pub fn validate_foundation(conn: &Connection, version: u32) -> Result<(), StoreE
     }
     if version >= 7 {
         provider_owner::validate_foundation(conn)?;
+    }
+    if version >= 8 {
+        totp_owner::validate_foundation(conn)?;
     }
     Ok(())
 }

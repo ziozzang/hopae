@@ -3113,8 +3113,31 @@ async fn totp_stepup_fixture(
     HandleRow,
     HandoffCodeRow,
 ) {
+    totp_stepup_fixture_at_generation(f, None).await
+}
+
+async fn totp_stepup_fixture_at_generation(
+    f: &Fx,
+    config_generation: Option<u64>,
+) -> (
+    crate::factor::keyring::Keyring,
+    Sess,
+    TransactionRow,
+    HandleView,
+    HandleRow,
+    HandoffCodeRow,
+) {
     use crate::store::Factors;
     let user = f.user(91).await;
+    if let Some(generation) = config_generation {
+        f.store
+            .conn()
+            .execute(
+                "INSERT INTO meta(key,value) VALUES('config_generation',?1)",
+                [generation.to_string()],
+            )
+            .unwrap();
+    }
     f.clock.set(Timestamp(59_000));
     f.store.conn().execute("INSERT INTO providers(provider_id,kind,display_name,enabled,managed_by,created_at,updated_at)VALUES('mock','oidc','Owned',1,'api',0,0)",[]).unwrap();
     let keys = test_totp_keyring();
@@ -3153,7 +3176,7 @@ async fn totp_stepup_fixture(
             actor: stepup_actor(f, view.clone()),
             transaction: digest,
             portal_binding: sha256(b"owned-portal-cookie"),
-            config_generation: None,
+            config_generation,
         })
         .await
         .unwrap();
@@ -3211,6 +3234,17 @@ async fn native_totp_stepup_atomically_consumes_proof_and_challenge_rotates_and_
     assert_eq!(elevated.session.aal, Aal::Two);
     assert_eq!(elevated.handle.issued_aal, Aal::Two);
     assert_eq!(elevated.session.cred_gen, 2);
+    assert_eq!(f.count("SELECT count(*) FROM session_totp_provenance WHERE credential_generation=2 AND enrollment_id='elevate' AND enrollment_revision=2 AND factor_index=1 AND verified_at_ms=59000 AND config_generation IS NULL"),1);
+    // Legacy native flows remain valid but cannot manufacture additive ownership.
+    assert!(
+        f.store
+            .capture_totp_owner(
+                &session.row.session_id,
+                Deadline(std::time::Instant::now() + Duration::from_secs(5))
+            )
+            .await
+            .is_err()
+    );
     assert_eq!(elevated.session.auth_time, session.row.auth_time);
     assert_eq!(
         elevated.session.factors.last().unwrap().kind,
@@ -3357,6 +3391,11 @@ async fn native_totp_stepup_refusal_rolls_back_challenge_counter_and_credentials
         );
         assert_eq!(
             f.count("SELECT COUNT(*) FROM sessions WHERE aal=2"),
+            0,
+            "{case}"
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM session_totp_provenance"),
             0,
             "{case}"
         );
@@ -4622,3 +4661,6 @@ async fn external_completion_tolerates_second_boundary_but_refuses_stale_or_futu
         );
     }
 }
+
+#[path = "totp_owner_tests.rs"]
+mod totp_owner_tests;

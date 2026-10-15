@@ -65,6 +65,7 @@ fn open_applies_migration_and_sets_pragmas() {
             "providers",
             "schema_migrations",
             "session_handles",
+            "session_totp_provenance",
             "sessions",
             "totp_enrollments",
             "txn_admissions",

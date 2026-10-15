@@ -246,6 +246,12 @@ impl Factors for Store {
             factors.push(FactorEntry { kind: FactorKind::Totp, provider: None, at: now });
             // Preserve the primary authentication time: OTP is not provider reauthentication.
             tx.execute("UPDATE sessions SET aal=2,factors=?2,cred_gen=?3 WHERE session_id=?1",params![sid.as_str(),super::rows::json_str(&factors)?,generation])?;
+            // The exact establishing factor belongs to this successful native
+            // elevation, not to whichever enrollment happens to be active later.
+            let factor_index = i64::try_from(factors.len()-1).map_err(|_|StoreError::Conflict("factor provenance exhausted"))?;
+            let config_generation = request.config_generation.map(i64::try_from).transpose().map_err(|_|StoreError::Conflict("invalid configuration generation"))?;
+            let linked = tx.execute("INSERT INTO session_totp_provenance(session_id,user_id,credential_generation,enrollment_id,enrollment_revision,factor_index,verified_at_ms,config_generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(session_id) DO UPDATE SET user_id=excluded.user_id,credential_generation=excluded.credential_generation,enrollment_id=excluded.enrollment_id,enrollment_revision=excluded.enrollment_revision,factor_index=excluded.factor_index,verified_at_ms=excluded.verified_at_ms,config_generation=excluded.config_generation WHERE excluded.user_id=session_totp_provenance.user_id AND excluded.credential_generation>session_totp_provenance.credential_generation",params![sid.as_str(),user.as_str(),generation,request.enrollment,revision,factor_index,now.0,config_generation])?;
+            if linked != 1 { return Err(StoreError::Conflict("TOTP provenance generation unavailable")); }
             let mut events = request.events;
             let live:Vec<String> = tx.prepare("SELECT host FROM session_handles WHERE session_id=?1 AND revoked_at IS NULL ORDER BY host,handle_sha256")?.query_map([sid.as_str()],|r|r.get(0))?.collect::<Result<_,_>>()?;
             for host in live {
