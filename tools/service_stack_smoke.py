@@ -8,6 +8,7 @@ def main():
     p=argparse.ArgumentParser()
     for name in ['gateway','hopae','pumgye']:p.add_argument('--'+name+'-binary',required=True,type=Path)
     p.add_argument('--sumunjang-binary',type=Path)
+    p.add_argument('--receipt-probe-binary',type=Path,help='Private observed SDK probe for composition issue/observe/refresh')
     p.add_argument('--grpc',action='store_true')
     p.add_argument('--resource-catalog',action='store_true')
     p.add_argument('--native-resource',action='store_true')
@@ -19,8 +20,11 @@ def main():
     p.add_argument('--keep-workdir',action='store_true',help='Retain private synthetic fixture state and logs for diagnosis')
     p.add_argument('--legacy-pumgye-binary',type=Path)
     p.add_argument('--external-verifier',action='store_true')
+    p.add_argument('--composition',action='store_true',help='Actual service API key + HTTPS relay composition; requires final credential projection')
     p.add_argument('--durable-restart',action='store_true')
     args=p.parse_args()
+    if args.receipt_probe_binary and not (args.composition and args.observed):p.error('--receipt-probe-binary requires --composition --observed')
+    if args.composition and (not args.credential_projection or args.external_verifier):p.error('--composition requires --credential-projection and cannot combine --external-verifier')
     if args.observed and not args.credential_projection:p.error('--observed requires --credential-projection')
     if args.credential_projection and not args.permit_issuance:p.error('--credential-projection requires --permit-issuance')
     if args.resource_catalog and not args.grpc:p.error('--resource-catalog requires --grpc')
@@ -30,7 +34,7 @@ def main():
     if args.projection_owner and args.legacy_pumgye_binary:p.error('--projection-owner cannot use a legacy permission server')
     if args.route_owner and not args.native_resource:p.error('--route-owner requires --native-resource')
     if args.legacy_pumgye_binary and not args.route_owner:p.error('--legacy-pumgye-binary requires --route-owner')
-    processes=[];seen=[];seen_bodies=[];seen_paths=[];verifier_state={'unavailable':False,'calls':0}
+    processes=[];seen=[];seen_bodies=[];seen_paths=[];verifier_state={'unavailable':False,'calls':0,'ambiguous':False,'headers':[]}
     class Origin(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
             seen.append(dict(self.headers));seen_bodies.append(self.rfile.read(int(self.headers.get('Content-Length','0'))));seen_paths.append(self.path);self.send_response(200);self.end_headers();self.wfile.write(b'owned')
@@ -39,11 +43,12 @@ def main():
     class Verifier(http.server.BaseHTTPRequestHandler):
         def do_POST(self):
             verifier_state['calls']+=1
+            verifier_state['headers'].append(dict(self.headers))
             body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
             if verifier_state['unavailable']:status,reply=503,{}
-            elif self.headers.get('Authorization')!='Bearer '+api_key:status,reply=401,{}
+            elif self.headers.get('Authorization')!='Bearer '+(remote_key if args.composition else api_key):status,reply=401,{}
             elif body.get('service_id')!='orders':status,reply=200,{'active':False}
-            else:status,reply=200,{'active':True,'subject':'worker','service_id':'orders','expires_at':int(time.time()*1000)+1000}
+            else:status,reply=200,{'active':True,'subject':('partner-other' if verifier_state['ambiguous'] else 'partner-worker') if args.composition else 'worker','service_id':'orders','expires_at':int(time.time()*1000)+1000}
             self.send_response(status);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(json.dumps(reply).encode())
         def log_message(self,*args):pass
     verifier=http.server.ThreadingHTTPServer(('127.0.0.1',0),Verifier);threading.Thread(target=verifier.serve_forever,daemon=True).start()
@@ -58,6 +63,8 @@ def main():
             route_port=port()
             api_key,caller,system,pum_decision,pum_admin,guard_collector,guard_admin=[secrets.token_hex(32) for _ in range(7)]
             env=dict(os.environ,OWNED_API_KEY=api_key,HOPAE_TEST_GATEWAY_KEY=caller,FIXTURE_KEY=caller,HANGANG_ADMIN_TOKEN=system,PUMGYE_DECISION_TOKEN=pum_decision,PUMGYE_ADMIN_TOKEN=pum_admin,HANGANG_GUARD_COLLECTOR_TOKEN=guard_collector,HANGANG_GUARD_ADMIN_TOKEN=guard_admin)
+            remote_key=secrets.token_hex(32)
+            env['OWNED_OTHER_KEY']=secrets.token_hex(32)
             env['OWNED_ROUTE_CALLER']=secrets.token_hex(32)
             def openssl(*a):subprocess.run(['openssl',*a],cwd=root,check=True,capture_output=True)
             openssl('req','-x509','-newkey','rsa:2048','-nodes','-keyout','ca.key','-out','ca.pem','-days','1','-subj','/CN=Owned CA','-addext','basicConstraints=critical,CA:TRUE')
@@ -65,6 +72,13 @@ def main():
                 openssl('req','-new','-newkey','rsa:2048','-nodes','-keyout',name+'.key','-out',name+'.csr','-subj','/CN='+name)
                 (root/(name+'.ext')).write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage='+usage+'\nsubjectAltName=DNS:hopae.example.test,DNS:pumgye.example.test,DNS:sumunjang.example.test,DNS:hangang.example.test,IP:127.0.0.1\n')
                 openssl('x509','-req','-in',name+'.csr','-CA','ca.pem','-CAkey','ca.key','-CAcreateserial','-days','1','-extfile',name+'.ext','-out',name+'.pem')
+            if args.composition:
+                verifier_tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                verifier_tls.load_cert_chain(str(root/'server.pem'),str(root/'server.key'))
+                verifier.socket=verifier_tls.wrap_socket(verifier.socket,server_side=True)
+            def composition_wire(entries):
+                return base64.urlsafe_b64encode(json.dumps({'version':1,'credentials':[{'slot':slot,'credential':value} for slot,value in entries]},separators=(',',':')).encode()).decode().rstrip('=')
+            composition_key=composition_wire([('local',api_key),('partner',remote_key)])
             digest=hashlib.sha256(bytes([1]))
             for value in ['owned-external' if args.external_verifier else 'hopae:owned','services','worker']:
                 value=value.encode();digest.update(struct.pack('!Q',len(value)));digest.update(value)
@@ -80,6 +94,11 @@ def main():
             hop['authentication_gateway']={'authority_id':'owned','profiles':[{'service_id':'orders','host':'app.example.test','ports':[public],'realm':'services','api_keys':[{'token_env':'OWNED_API_KEY','subject':'worker'}],'networks':['127.0.0.1/32']}]}
             if args.external_verifier:
                 profile=hop['authentication_gateway']['profiles'][0];profile.pop('api_keys');profile['api_relay']={'url':f'http://127.0.0.1:{verifier.server_port}/verify','issuer':'owned-external','allow_private_endpoints':True,'timeout_ms':500}
+            if args.composition:
+                profile=hop['authentication_gateway']['profiles'][0]
+                profile['api_keys'].append({'token_env':'OWNED_OTHER_KEY','subject':'other'})
+                profile['api_relay']={'url':f'https://127.0.0.1:{verifier.server_port}/verify','issuer':'owned-partner','allow_private_endpoints':True,'timeout_ms':500,'ca_file':str(root/'ca.pem')}
+                profile['composition']={'mode':'all','timeout_ms':800,'slots':[{'id':'local','provider':'api_key'},{'id':'partner','provider':'api_relay'}],'identities':[{'subject':canonical,'bindings':[{'slot':'local','issuer':'hopae:owned','realm':'services','subject':canonical,'kind':'service'},{'slot':'partner','issuer':'owned-partner','realm':'services','subject':partner,'kind':'service'}]} for canonical,partner in [('worker','partner-worker'),('other','partner-other')]]}
             if args.native_resource:
                 openssl('genpkey','-algorithm','ED25519','-out','issuer.key')
                 openssl('pkey','-in','issuer.key','-outform','DER','-out','issuer.der')
@@ -88,7 +107,7 @@ def main():
                 assert len(seed)==48 and len(public_key)==44
                 env['OWNED_RECEIPT_SEED']=base64.b64encode(seed[-32:]).decode()
                 issuer_pin=base64.b64encode(public_key[-32:]).decode()
-                hop['receipt_issuer']={'issuer_ref':'owned','key_epoch':1,'identity_authority_epoch':'epoch1','public_key':issuer_pin,'seed_env':'OWNED_RECEIPT_SEED','scopes':[{'service':'orders','audience':'orders-api'}]}
+                hop['receipt_issuer']={'issuer_ref':'owned','key_epoch':1,'identity_authority_epoch':('world1' if args.composition else 'epoch1'),'public_key':issuer_pin,'seed_env':'OWNED_RECEIPT_SEED','scopes':[{'service':'orders','audience':'orders-api'}]}
             if args.projection_owner:hop['credential_projection']={'revision':1,'plans':[{'service':'orders','audience':'orders-api','resource':'db:orders','action':'select','minimum_aal':0,'credential':{'type':'identity_header'}}]}
             (root/'hopae.json').write_text(json.dumps(hop))
             def tls(name):return {'server_name':name,'ca':str(root/'ca.pem'),'certificate':str(root/'client.pem'),'key':str(root/'client.key')}
@@ -101,7 +120,7 @@ def main():
             if args.native_resource:
                 config['http'][0]['auth']['native_resource']={'issuer_ref':'owned','key_epoch':1,'public_key':issuer_pin,'audience':'orders-api'}
                 config['http'][0]['backends'][0]+='/api'
-                (root/'authentication-trust.json').write_text(json.dumps({'entries':[{'issuer_ref':'owned','key_epoch':1,'identity_epoch':'epoch1','service':'orders','audience':'orders-api','minimum_revision':1,'public_key':issuer_pin}]}))
+                (root/'authentication-trust.json').write_text(json.dumps({'entries':[{'issuer_ref':'owned','key_epoch':1,'identity_epoch':('world1' if args.composition else 'epoch1'),'service':'orders','audience':'orders-api','minimum_revision':1,'public_key':issuer_pin}]}))
                 (root/'authentication-live.json').write_text(json.dumps(dict(tls('hopae.example.test'),issuer_ref='owned',address=f'https://localhost:{hop_grpc}',token_env='FIXTURE_KEY')))
                 (root/'network-live.json').write_text(json.dumps(dict(tls('sumunjang.example.test'),address=f'https://localhost:{guard_grpc}',token_env='HANGANG_GUARD_COLLECTOR_TOKEN')))
             if args.permit_issuance:
@@ -125,7 +144,7 @@ def main():
                 (root/'permit-key.json').write_text(json.dumps(dict(permit_pin,seed_env='OWNED_PERMIT_SEED')))
             if args.observed:
                 config['http'][0]['auth']['native_resource']['observed']={
-                    'identity_authority':'epoch1',
+                    'identity_authority':('world1' if args.composition else 'epoch1'),
                     'minimum_profile_revision':1,
                     'minimum_application_generation':1,
                     'minimum_key_registry_revision':1,
@@ -178,16 +197,22 @@ def main():
                 pum_args+=['--projection-live',str(root/'projection-live.json')]
             owner=start(args.pumgye_binary,pum_args,'pumgye');wait(f'https://127.0.0.1:{pum_http}/healthz',owner,'pumgye',context)
             gateway=start(args.gateway_binary,['--config',str(root/'hangang.json'),'--listen',f'127.0.0.1:{public}','--admin',f'127.0.0.1:{admin}','--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--threads','2','--lua-workers','1','--drain-seconds','1',*guard_args,*(['--route-owner-config',str(root/'route-owner.json')] if args.route_owner else [])],'hangang');wait(f'http://127.0.0.1:{admin}/v1/config',gateway,'hangang',token=system)
-            def request(method='GET',key=api_key):
+            default_key=composition_key if args.composition else api_key
+            def request(method='GET',key=default_key):
                 c=http.client.HTTPSConnection('127.0.0.1',public,context=ssl.create_default_context(cafile=str(root/'ca.pem')),timeout=3)
                 headers={'Host':'app.example.test','x-forwarded-user':'u_forged','x-hopae-aal':'3'}
-                if key is not None:headers['Authorization']='Bearer '+key
+                if key is not None:headers['Authorization']=('Hopae-Compose ' if args.composition else 'Bearer ')+key
                 before=len(seen);begun=time.monotonic()
                 c.request(method,'/secure',body=b'owned final entity' if args.native_resource else None,headers=headers);r=c.getresponse();status=r.status;r.read();c.close();request.last_status=status;request.last_elapsed_ms=round((time.monotonic()-begun)*1000)
                 assert len(seen)==before+(1 if status==200 else 0),'refused request reached application upstream'
                 if args.credential_projection and status==200:
                     assert seen[-1].get('authorization')=='Bearer '+env['OWNED_ORIGIN_BEARER'],'projected credential mismatch'
                     assert seen[-1].get('authorization')!='Bearer '+api_key,'incoming credential leaked'
+                    if args.composition:
+                        serialized=json.dumps(seen[-1]).encode()+seen_bodies[-1]
+                        assert all(secret.encode() not in serialized for secret in [api_key,remote_key,composition_key,caller]),'composition/caller credential reached origin'
+                        for sent in verifier_state['headers']:
+                            assert all(secret not in json.dumps(sent) for secret in [api_key,composition_key,caller]),'unrelated credential reached relay'
                 return status
             def api(path='/v1/config',method='GET',document=None,extra=None):
                 headers={'Authorization':'Bearer '+system,'Content-Type':'application/json'}
@@ -201,6 +226,54 @@ def main():
             if not args.credential_projection:assert all(not any(k.lower()=='authorization' for k in h) for h in seen)
             if args.native_resource:assert seen_paths==['/api/secure','/api/secure'] and seen_bodies==[b'owned final entity']*2, 'final target/entity mismatch'
             assert all(h.get('x-forwarded-user')==subject and h.get('x-hopae-aal')=='0' for h in seen)
+            if args.receipt_probe_binary:
+                receipt_config={'settings':{'transport':'grpc','address':f'localhost:{hop_grpc}','tls':tls('hopae.example.test')},'issuer_ref':'owned','key_epoch':1,'public_key':issuer_pin,'service':'orders','audience':'orders-api','identity_authority':'world1','source_ppm':500,'receiver_ppm':500,'credential_scheme':'hopae_compose','method':'GET','target':'/api/secure','body':'owned final entity','headers':[['x-hopae-contract','1'],['x-forwarded-host','app.example.test'],['x-forwarded-proto','https'],['x-forwarded-port',str(public)],['x-forwarded-for','127.0.0.1'],['x-original-method','GET'],['x-original-url',f'https://app.example.test:{public}/secure']]}
+                (root/'receipt-probe.json').write_text(json.dumps(receipt_config))
+                probe_env=dict(env,OWNED_RECEIPT_CALLER=caller,OWNED_RECEIPT_CREDENTIAL=composition_key)
+                probe=subprocess.run([str(args.receipt_probe_binary.resolve()),str(root/'receipt-probe.json')],env=probe_env,input='allow\n',text=True,capture_output=True,timeout=10)
+                assert probe.returncode==0,'composition SDK probe refused'
+                report=json.loads(probe.stdout)
+                assert report['contract']=='hopae-observed-sdk-v1' and all(report.get(field) is True for field in ['allowed','issued','independently_observed','refreshed'])
+                assert all(secret not in probe.stdout+probe.stderr for secret in [api_key,remote_key,composition_key,caller]),'probe disclosed credentials'
+                print('PASS: actual native SDK composition issue, independent observe, consuming refresh and final checks; safe output only.')
+            if args.composition:
+                for entries in [[('local',api_key)],[('partner',remote_key)],[('local','invalid-local-key-at-least-thirty-two'),('partner',remote_key)],[('local',api_key),('partner','invalid-partner-key-at-least-thirty-two')]]:
+                    assert request(key=composition_wire(entries))==401,'All missing/invalid factor accepted'
+                verifier_state['ambiguous']=True
+                assert request()==401,'different verified canonical identities silently selected'
+                verifier_state['ambiguous']=False
+                assert request()==200
+                def restart_composition(mode):
+                    nonlocal hopae
+                    hopae.terminate();hopae.wait(timeout=8)
+                    # Distinct owned fixture stores prevent rewriting production authority history.
+                    hop['state_dir']=str(root/('hopae-'+mode+'-state'))
+                    hop['authentication_gateway']['profiles'][0]['composition']['mode']=mode
+                    (root/'hopae.json').write_text(json.dumps(hop))
+                    hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-composition-'+mode)
+                    wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae-composition-'+mode)
+                    for _ in range(30):
+                        status=request()
+                        if status==200:return
+                        assert status==503,'composition reconnect changed authorization'
+                        time.sleep(.1)
+                    raise AssertionError('composition reconnect deadline')
+                restart_composition('any')
+                assert request(key=composition_wire([('local',api_key)]))==200
+                assert request(key=composition_wire([('partner',remote_key)]))==200
+                assert request(key=composition_wire([('local','invalid-local-key-at-least-thirty-two'),('partner',remote_key)]))==401
+                verifier_state['ambiguous']=True
+                assert request()==401,'Any ambiguous success selected a sibling'
+                verifier_state['ambiguous']=False
+                verifier_state['unavailable']=True
+                for _ in range(3):assert request()==503
+                calls=verifier_state['calls']
+                assert request()==503 and verifier_state['calls']==calls,'composition circuit emitted extra provider call'
+                verifier_state['unavailable']=False
+                restart_composition('all')
+                # Existing durable-restart checks below expect this conventional path.
+                hop['state_dir']=str(root/'hopae-all-state')
+                print('PASS: real composition All/Any, missing/invalid/ambiguous refusal, relay circuit and separate final origin credential; strict signed or observed wrapper follows selected mode.')
             if args.native_resource:
                 openssl('genpkey','-algorithm','ED25519','-out','wrong-issuer.key')
                 openssl('pkey','-in','wrong-issuer.key','-pubout','-outform','DER','-out','wrong-issuer.pub')
@@ -345,7 +418,7 @@ def main():
             if args.durable_restart:
                 hopae.terminate();hopae.wait(timeout=5)
                 # Owned offline operator fixture: install a tombstone while keeping bootstrap unchanged.
-                with sqlite3.connect(root/'hopae-state'/'hopae.db') as db:
+                with sqlite3.connect(Path(hop['state_dir'])/'hopae.db') as db:
                     key='authentication_profile_authority_v1'
                     raw=db.execute('SELECT value FROM meta WHERE key=?',(key,)).fetchone();assert raw,'startup did not import the authority'
                     document=json.loads(raw[0]);document['revision']+=1;document['configuration']=None;document['digest']=hashlib.sha256(b'null').hexdigest()
@@ -357,7 +430,7 @@ def main():
                 print('PASS: owned offline tombstone survives actual Hopae restart despite unchanged bootstrap file.')
                 if args.permit_issuance:
                     def receiver_keys():
-                        path=root/'hopae-state'/'hopae.db'
+                        path=Path(hop['state_dir'])/'hopae.db'
                         with sqlite3.connect(f'file:{path}?mode=ro',uri=True) as db:
                             value=db.execute("SELECT value FROM meta WHERE key='projection_receipt_registry_v1'").fetchone()
                             assert value,'receiver keys were not imported'
@@ -385,12 +458,12 @@ def main():
                     assert any(f['issuer']=='owned-pumgye' and f['epoch']==2 and f['active'] for f in state['floors'])
                     print('PASS: actual Hopae receiver-key bootstrap is idempotent; removal retires, stale restart refuses and fresh material/epoch activates. Configured receiver RPC is registered; final projection is invoked only in credential-projection mode.')
                     hopae.terminate();hopae.wait(timeout=5)
-                    before=hashlib.sha256((root/'hopae-state'/'hopae.db').read_bytes()).digest()
+                    before=hashlib.sha256((Path(hop['state_dir'])/'hopae.db').read_bytes()).digest()
                     hop['projection_receiver']['authority']['ca']=str(root/'missing-authority-ca.pem')
                     (root/'hopae.json').write_text(json.dumps(hop))
                     refused=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-invalid-resources')
                     refused.wait(timeout=8);assert refused.returncode!=0,'invalid native resources did not refuse startup'
-                    assert hashlib.sha256((root/'hopae-state'/'hopae.db').read_bytes()).digest()==before,'invalid resources changed state'
+                    assert hashlib.sha256((Path(hop['state_dir'])/'hopae.db').read_bytes()).digest()==before,'invalid resources changed state'
                     hop['projection_receiver']['authority']['ca']=str(root/'ca.pem')
                     (root/'hopae.json').write_text(json.dumps(hop))
                     hopae=start(args.hopae_binary,['run','--config',str(root/'hopae.json')],'hopae-resources-restored');wait(f'http://127.0.0.1:{portal}/healthz',hopae,'hopae-resources-restored')

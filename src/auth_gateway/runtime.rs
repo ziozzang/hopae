@@ -709,6 +709,7 @@ mod tests {
             timeout_ms: 100,
             allow_private_endpoints: false,
             verifier_key_env: None,
+            ca_file: None,
         });
         assert!(config.validate().is_err());
         config.profiles[0].relay_token_prefix = Some("k8s:".into());
@@ -731,6 +732,7 @@ mod tests {
             timeout_ms: 100,
             allow_private_endpoints: false,
             verifier_key_env: Some("OWNED_VERIFIER_KEY".into()),
+            ca_file: None,
         });
         let runtime = Runtime::compile(&cfg, &|_| Some(KEY.into())).unwrap();
         let rows = runtime.connector_status();
@@ -777,6 +779,7 @@ mod tests {
             timeout_ms: 500,
             allow_private_endpoints: true,
             verifier_key_env: None,
+            ca_file: None,
         });
         assert!(cfg.validate().is_err());
         cfg.profiles[0].relay_token_prefix = Some("partner:".into());

@@ -115,6 +115,7 @@ pub async fn put(
                         config.profiles.iter().any(|old| {
                             old.api_relay.as_ref().is_some_and(|reference| {
                                 reference.url == relay.url
+                                    && reference.ca_file == relay.ca_file
                                     && reference.issuer == relay.issuer
                                     && reference.verifier_key_env == relay.verifier_key_env
                                     && reference.allow_private_endpoints
@@ -122,7 +123,9 @@ pub async fn put(
                             })
                         })
                     });
-                    if (relay.verifier_key_env.is_some() || relay.allow_private_endpoints)
+                    if (relay.verifier_key_env.is_some()
+                        || relay.allow_private_endpoints
+                        || relay.ca_file.is_some())
                         && !matching
                     {
                         return Err(crate::auth_gateway::publication::Error::Invalid);

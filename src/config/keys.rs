@@ -173,6 +173,7 @@ pub(super) const ROOT: Node = Obj(&[
                             ("timeout_ms", Leaf),
                             ("allow_private_endpoints", Leaf),
                             ("verifier_key_env", Leaf),
+                            ("ca_file", Leaf),
                         ]),
                     ),
                     (

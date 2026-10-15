@@ -17,6 +17,8 @@ pub struct Config {
     pub allow_private_endpoints: bool,
     #[serde(default)]
     pub verifier_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_file: Option<String>,
 }
 fn deadline() -> u64 {
     100
@@ -44,6 +46,16 @@ impl Config {
                 && v.len() <= 128
                 && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')),
             "invalid verifier credential reference"
+        );
+        ensure!(
+            self.ca_file.as_ref().is_none_or(|path| !path.is_empty()
+                && path.len() <= 4096
+                && !path.chars().any(char::is_control)),
+            "invalid verifier trust reference"
+        );
+        ensure!(
+            self.ca_file.is_none() || url.scheme() == "https",
+            "verifier trust requires HTTPS"
         );
         Ok(())
     }
@@ -92,6 +104,48 @@ impl Connector {
         use sha2::{Digest, Sha256};
         let mut fingerprint = Sha256::new();
         fingerprint.update(serde_json::to_vec(config)?);
+        // One bounded immutable snapshot feeds both trust and connector ownership.
+        let fetcher = if let Some(path) = &config.ca_file {
+            use std::io::Read;
+            let mut file = std::fs::File::open(path)
+                .map_err(|_| anyhow::anyhow!("verifier trust unavailable"))?;
+            ensure!(
+                file.metadata()
+                    .map_err(|_| anyhow::anyhow!("verifier trust unavailable"))?
+                    .is_file(),
+                "invalid verifier trust"
+            );
+            let mut bytes = Vec::new();
+            file.by_ref()
+                .take(128 * 1024 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| anyhow::anyhow!("verifier trust unavailable"))?;
+            ensure!(
+                !bytes.is_empty() && bytes.len() <= 128 * 1024,
+                "invalid verifier trust bounds"
+            );
+            let mut roots = Vec::new();
+            for item in rustls_pemfile::read_all(&mut bytes.as_slice()) {
+                let item = item.map_err(|_| anyhow::anyhow!("invalid verifier trust"))?;
+                let rustls_pemfile::Item::X509Certificate(cert) = item else {
+                    anyhow::bail!("invalid verifier trust");
+                };
+                roots.push(
+                    reqwest::Certificate::from_der(cert.as_ref())
+                        .map_err(|_| anyhow::anyhow!("invalid verifier trust"))?,
+                );
+            }
+            ensure!(!roots.is_empty(), "invalid verifier trust");
+            fingerprint.update(Sha256::digest(&bytes));
+            Fetcher::for_verifier(
+                config.allow_private_endpoints,
+                Duration::from_millis(config.timeout_ms),
+                roots,
+            )
+            .map_err(|_| anyhow::anyhow!("invalid verifier trust"))?
+        } else {
+            Fetcher::new(config.allow_private_endpoints)
+        };
         if let Some(key) = &key {
             fingerprint.update(Sha256::digest(key.as_bytes()));
         }
@@ -100,20 +154,11 @@ impl Connector {
             url: url::Url::parse(&config.url)?,
             issuer: config.issuer.clone(),
             timeout: Duration::from_millis(config.timeout_ms),
-            fetcher: Fetcher::new(config.allow_private_endpoints),
+            fetcher,
             key,
             capacity: Arc::new(tokio::sync::Semaphore::new(64)),
             circuit: Circuit::new(3, 30_000).expect("constant circuit bounds"),
         })
-    }
-    #[cfg(test)]
-    pub(crate) fn trust_fixture_ca(&mut self, ca: &[u8]) {
-        self.fetcher = Fetcher::for_verifier(
-            true,
-            self.timeout,
-            vec![reqwest::Certificate::from_pem(ca).unwrap()],
-        )
-        .unwrap();
     }
     pub(crate) fn same_binding(&self, other: &Self) -> bool {
         self.binding == other.binding
@@ -224,6 +269,7 @@ mod tests {
             timeout_ms: 100,
             allow_private_endpoints: false,
             verifier_key_env: Some("OWNED_VERIFIER_KEY".into()),
+            ca_file: None,
         };
         let first = Connector::compile(&config, &|_| Some("a".repeat(32))).unwrap();
         let same = Connector::compile(&config, &|_| Some("a".repeat(32))).unwrap();
@@ -258,6 +304,7 @@ mod tests {
             timeout_ms: 500,
             allow_private_endpoints: true,
             verifier_key_env: Some("OWNED_VERIFIER".into()),
+            ca_file: None,
         };
         let connector = Connector::compile(&config, &|_| {
             Some("owned-verifier-key-at-least-thirty-two-bytes".into())
@@ -358,6 +405,7 @@ mod tests {
                 timeout_ms: 100,
                 allow_private_endpoints: true,
                 verifier_key_env: None,
+                ca_file: None,
             },
             &|_| None,
         )
@@ -441,7 +489,8 @@ mod tests {
                     issuer: "partner".into(),
                     timeout_ms: 100,
                     allow_private_endpoints: false,
-                    verifier_key_env: None
+                    verifier_key_env: None,
+                    ca_file: None
                 }
                 .validate()
                 .is_err()

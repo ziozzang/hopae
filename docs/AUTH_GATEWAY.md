@@ -1,6 +1,6 @@
 # Service authentication gateway
 
-<!-- doc-rev: 33 -->
+<!-- doc-rev: 34 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_GATEWAY.md) · [Native integration](HANGANG_NATIVE.md)
 
@@ -1111,3 +1111,17 @@ The pure contract crate exports `GATEWAY_PROTO` for build-time consumers using
 its exact generated receipt-context type through protobuf extern-path mapping.
 This avoids copied wire schemas and request-time JSON reinterpretation in native
 gRPC adapters; it does not grant access or change existing operating endpoints.
+
+### Private HTTPS verifier trust
+
+An API relay may declare optional `ca_file`, an operator-owned PEM certificate bundle
+(maximum 128 KiB). With this field, HTTPS is mandatory and preparation reads one
+immutable bounded snapshot for both verified TLS roots and connector identity.
+Missing, invalid or oversized bundles refuse startup/publication; certificate and
+hostname verification remain mandatory. No environment proxy or system trust is
+changed. Default `None` preserves legacy serialization and trust behavior.
+Changing bundle bytes creates a separate connector/circuit owner; unchanged bytes
+reuse the original circuit. Replacing the file does not mutate an already prepared
+connector. Admin publication accepts this reference only when declared by server
+configuration. Reference-only privileged configuration includes the declared path;
+status/error/authentication responses never include its path or PEM contents.

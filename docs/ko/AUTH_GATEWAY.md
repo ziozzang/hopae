@@ -1,6 +1,6 @@
 # 서비스 인증 게이트웨이
 
-<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=33 status=current -->
+<!-- translation-status: source=../AUTH_GATEWAY.md source-rev=34 status=current -->
 
 [문서](README.md) · [English](../AUTH_GATEWAY.md) · [네이티브 통합](HANGANG_NATIVE.md)
 
@@ -974,3 +974,15 @@ portable tools/service_receipt_smoke.py의 --live-validation 모드는 실제 �
 순수 계약 crate는 GATEWAY_PROTO를 내보내며 빌드 소비자가 protobuf extern-path로
 정확한 공용 receipt 문맥 타입을 사용할 수 있습니다. wire 스키마 복사와 네이티브
 gRPC 요청 중 JSON 재해석을 피하며 권한이나 운영 endpoint를 변경하지 않습니다.
+
+### 사설 HTTPS 검증기 신뢰
+
+API relay는 운영자가 관리하는 PEM 인증서 묶음 `ca_file`을 선택적으로 선언할
+수 있습니다(최대 128 KiB). 이 경우 HTTPS가 필수이며 준비 단계의 단일 불변
+스냅샷을 TLS 루트 검증과 connector 식별에 함께 사용합니다. 없거나 잘못되거나
+너무 큰 파일은 시작/게시를 거부합니다. 인증서/서버이름 검증을 유지하며 환경
+proxy나 시스템 신뢰를 변경하지 않습니다. 기본 None은 기존 직렬화와 신뢰를
+유지합니다. 내용 변경은 별도 connector/circuit owner를 만들고 같은 내용은
+기존 circuit을 재사용합니다. 파일 교체가 준비된 connector를 변경하지 않습니다.
+관리자 게시는 서버 설정이 선언한 참조만 허용합니다. 권한 있는 참조 설정에는
+경로가 포함되지만 상태/오류/인증 응답에는 경로나 PEM 내용을 내보내지 않습니다.

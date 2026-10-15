@@ -33,6 +33,9 @@ impl Drop for Peer {
 }
 impl Peer {
     async fn start() -> Self {
+        Self::start_certificate(false).await
+    }
+    async fn start_certificate(wrong_name: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let openssl = |args: &[&str]| {
             assert!(
@@ -75,7 +78,7 @@ impl Peer {
             "-subj",
             "/CN=localhost",
         ]);
-        std::fs::write(root.path().join("extensions"),"subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth,clientAuth\n").unwrap();
+        std::fs::write(root.path().join("extensions"),(if wrong_name { "subjectAltName=DNS:wrong.example.test\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth,clientAuth\n" } else { "subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nextendedKeyUsage=serverAuth,clientAuth\n" }).as_bytes()).unwrap();
         openssl(&[
             "x509",
             "-req",
@@ -188,10 +191,10 @@ impl Peer {
         }
     }
     fn config(&self, mode: &str) -> Config {
-        serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"api.example.test","ports":[443],"realm":"services","api_keys":[{"token_env":"OWNED_LOCAL","subject":"worker"},{"token_env":"OWNED_OTHER","subject":"other"}],"api_relay":{"url":self.address,"issuer":"partner-directory","timeout_ms":500,"allow_private_endpoints":true,"verifier_key_env":"OWNED_VERIFIER"},"networks":["192.0.2.0/24"],"composition":{"mode":mode,"timeout_ms":500,"slots":[{"id":"local","provider":"api_key"},{"id":"partner","provider":"api_relay"}],"identities":[{"subject":"worker","bindings":[{"slot":"local","issuer":"hopae:owned","realm":"services","subject":"worker","kind":"service"},{"slot":"partner","issuer":"partner-directory","realm":"services","subject":"partner-worker","kind":"service"}]},{"subject":"other","bindings":[{"slot":"local","issuer":"hopae:owned","realm":"services","subject":"other","kind":"service"},{"slot":"partner","issuer":"partner-directory","realm":"services","subject":"partner-other","kind":"service"}]}]}}]})).unwrap()
+        serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"api.example.test","ports":[443],"realm":"services","api_keys":[{"token_env":"OWNED_LOCAL","subject":"worker"},{"token_env":"OWNED_OTHER","subject":"other"}],"api_relay":{"url":self.address,"ca_file":self.root.path().join("ca.pem"),"issuer":"partner-directory","timeout_ms":500,"allow_private_endpoints":true,"verifier_key_env":"OWNED_VERIFIER"},"networks":["192.0.2.0/24"],"composition":{"mode":mode,"timeout_ms":500,"slots":[{"id":"local","provider":"api_key"},{"id":"partner","provider":"api_relay"}],"identities":[{"subject":"worker","bindings":[{"slot":"local","issuer":"hopae:owned","realm":"services","subject":"worker","kind":"service"},{"slot":"partner","issuer":"partner-directory","realm":"services","subject":"partner-worker","kind":"service"}]},{"subject":"other","bindings":[{"slot":"local","issuer":"hopae:owned","realm":"services","subject":"other","kind":"service"},{"slot":"partner","issuer":"partner-directory","realm":"services","subject":"partner-other","kind":"service"}]}]}}]})).unwrap()
     }
     fn runtime(&self, config: &Config) -> Runtime {
-        let mut runtime = Runtime::compile(config, &|name| {
+        Runtime::compile(config, &|name| {
             Some(
                 match name {
                     "OWNED_LOCAL" => LOCAL,
@@ -201,21 +204,9 @@ impl Peer {
                 .into(),
             )
         })
-        .unwrap();
-        let p = Arc::get_mut(
-            runtime
-                .profiles
-                .get_mut("api.example.test")
-                .unwrap()
-                .get_mut(&443)
-                .unwrap(),
-        )
-        .unwrap();
-        Arc::get_mut(p.relay.as_mut().unwrap())
-            .unwrap()
-            .trust_fixture_ca(&self.ca);
-        runtime
+        .unwrap()
     }
+
     fn count(&self) -> usize {
         self.requests.lock().unwrap().len()
     }
@@ -942,6 +933,26 @@ async fn composition_durable_publication_reload_and_invalid_update_preserve_auth
             )
             .is_err()
     );
+    let mut invalid_ca = config.clone();
+    invalid_ca.profiles[0].api_relay.as_mut().unwrap().ca_file = Some(
+        peer.root
+            .path()
+            .join("missing.pem")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    assert!(
+        owner
+            .publish(
+                &mut db,
+                1,
+                Some(invalid_ca),
+                "owned-test-operator",
+                &environment,
+                &|_| Ok(())
+            )
+            .is_err()
+    );
     assert!(before.available());
     assert!(Arc::ptr_eq(&before, &owner.reader().load_full()));
     assert_eq!(publication::read(&db).unwrap().unwrap().revision, 1);
@@ -970,5 +981,87 @@ async fn composition_durable_publication_reload_and_invalid_update_preserve_auth
         restored.runtime.as_ref().unwrap().profiles["api.example.test"][&443]
             .composition
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn composition_production_ca_snapshot_refuses_wrong_trust_and_rebinds_owner() {
+    let peer = Peer::start().await;
+    let config = peer.config("all");
+    let runtime = peer.runtime(&config);
+    assert!(
+        authenticate(
+            &runtime,
+            &envelope(&[("local", LOCAL), ("partner", REMOTE)])
+        )
+        .await
+        .is_ok()
+    );
+    let env = |name: &str| {
+        Some(
+            match name {
+                "OWNED_LOCAL" => LOCAL,
+                "OWNED_OTHER" => "synthetic-other-local-key-at-least-thirty-two",
+                _ => "synthetic-verifier-caller-at-least-thirty-two",
+            }
+            .to_string(),
+        )
+    };
+    let resumed = Runtime::compile_resuming(&config, &env, Some(&runtime)).unwrap();
+    let relay = |r: &Runtime| r.profiles["api.example.test"][&443].relay.clone().unwrap();
+    assert!(
+        Arc::ptr_eq(&relay(&runtime), &relay(&resumed)),
+        "unchanged trust preserves circuit owner"
+    );
+    let ca_path = peer.root.path().join("ca.pem");
+    let original = std::fs::read(&ca_path).unwrap();
+    for invalid in [
+        Vec::new(),
+        b"invalid PEM".to_vec(),
+        vec![b'x'; 128 * 1024 + 1],
+    ] {
+        std::fs::write(&ca_path, invalid).unwrap();
+        assert!(Runtime::compile_resuming(&config, &env, Some(&runtime)).is_err());
+    }
+    std::fs::remove_file(&ca_path).unwrap();
+    assert!(Runtime::compile_resuming(&config, &env, Some(&runtime)).is_err());
+    let foreign = Peer::start().await;
+    std::fs::write(&ca_path, &foreign.ca).unwrap();
+    let changed = Runtime::compile_resuming(&config, &env, Some(&runtime)).unwrap();
+    assert!(
+        !Arc::ptr_eq(&relay(&runtime), &relay(&changed)),
+        "changed bytes create separate circuit/trust owner"
+    );
+    assert!(
+        authenticate(
+            &changed,
+            &envelope(&[("local", LOCAL), ("partner", REMOTE)])
+        )
+        .await
+        .is_err()
+    );
+    // Existing connector owns its original immutable trust despite path replacement.
+    assert!(
+        authenticate(
+            &runtime,
+            &envelope(&[("local", LOCAL), ("partner", REMOTE)])
+        )
+        .await
+        .is_ok()
+    );
+    std::fs::write(&ca_path, original).unwrap();
+    let wrong_name = Peer::start_certificate(true).await;
+    assert!(
+        authenticate(
+            &wrong_name.runtime(&wrong_name.config("all")),
+            &envelope(&[("local", LOCAL), ("partner", REMOTE)])
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        wrong_name.count(),
+        0,
+        "hostname refusal precedes HTTP credential delivery"
     );
 }
