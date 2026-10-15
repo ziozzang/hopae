@@ -448,3 +448,142 @@ impl Checked {
         self.witness.current(Some(input)).await
     }
 }
+
+/// Private data read only from an actual Engine-sealed witness.
+#[allow(dead_code)] // Pending native source integration.
+pub(crate) struct SourceFacts {
+    pub subject: String,
+    pub aal: u8,
+    pub user_revision: u64,
+    pub credential_generation: u64,
+    pub application_generation: u64,
+}
+#[allow(dead_code)] // Pending native source integration.
+pub(crate) struct SourceTime {
+    pub owner_now_ms: u64,
+    pub expires_ms: u64,
+    pub clock_domain: [u8; 16],
+}
+#[allow(dead_code)] // Native source integration consumes these private interfaces.
+impl Checked {
+    pub(crate) fn belongs_to(&self, owner: &Arc<Owner>) -> bool {
+        Arc::ptr_eq(&self.witness.owner, owner)
+    }
+    pub(crate) async fn source_facts(
+        &self,
+        issuer: &str,
+        binding: &crate::auth_gateway::human_request::Binding,
+    ) -> StoreResult<SourceFacts> {
+        let result = async {
+            self.require_current_retained().await?;
+            let w = &self.witness;
+            if w.app.app_id.as_str() != binding.application()
+                || w.scope.route.as_deref() != Some(binding.route())
+                || w.scope.method != binding.method()
+            {
+                return Err(refused());
+            }
+            let subject = w
+                .durable
+                .as_ref()
+                .ok_or_else(refused)?
+                .subject_for_witness(issuer, w)?;
+            let facts = SourceFacts {
+                subject,
+                aal: w.view.session.aal as u8,
+                user_revision: w.view.user.authz_version,
+                credential_generation: w.view.session.cred_gen,
+                application_generation: w.snapshot.generation,
+            };
+            if [
+                facts.user_revision,
+                facts.credential_generation,
+                facts.application_generation,
+            ]
+            .iter()
+            .any(|n| !(1..=9_007_199_254_740_991).contains(n))
+            {
+                return Err(refused());
+            }
+            self.require_publication_current()?;
+            Ok(facts)
+        }
+        .await;
+        if result.is_err() {
+            self.witness.retired.store(true, Ordering::Release);
+        }
+        result
+    }
+    pub(crate) fn require_publication_current(&self) -> StoreResult<()> {
+        let result = (|| {
+            let w = &self.witness;
+            if w.retired.load(Ordering::Acquire) {
+                return Err(refused());
+            }
+            let sample = w.admission.sample(&w.owner)?;
+            let now = w.admission.after(&w.owner, &sample)?;
+            w.owner
+                .registry
+                .require_human_publication(&w.provider, &w.snapshot)?;
+            if now >= w.expires
+                || !Arc::ptr_eq(&w.snapshot, &w.owner.applications.load_full())
+                || w.retired.load(Ordering::Acquire)
+                || !w.admission.ready()
+            {
+                return Err(refused());
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.witness.retired.store(true, Ordering::Release);
+        }
+        result
+    }
+    pub(crate) fn source_time(&self) -> StoreResult<SourceTime> {
+        let result = (|| {
+            self.require_publication_current()?;
+            let w = &self.witness;
+            let sample = w.admission.sample(&w.owner)?;
+            let elapsed = sample
+                .ticks
+                .checked_sub(w.admission.started)
+                .ok_or_else(refused)?;
+            let admission_left = w
+                .admission
+                .limit_ms
+                .checked_sub(elapsed)
+                .and_then(|n| n.checked_sub(1))
+                .ok_or_else(refused)?;
+            let utc_left =
+                u64::try_from(w.expires.0.checked_sub(sample.now.0).ok_or_else(refused)?)
+                    .map_err(|_| refused())?
+                    .checked_sub(1)
+                    .ok_or_else(refused)?;
+            let remaining = admission_left.min(utc_left);
+            let expires_ms = sample.ticks.checked_add(remaining).ok_or_else(refused)?;
+            if remaining == 0 || expires_ms > 9_007_199_254_740_991 {
+                return Err(refused());
+            }
+            let clock_domain = *w.owner.clock.as_ref().ok_or_else(refused)?.generation();
+            // The last clock callback may itself withdraw a publication.
+            w.owner
+                .registry
+                .require_human_publication(&w.provider, &w.snapshot)?;
+            if !Arc::ptr_eq(&w.snapshot, &w.owner.applications.load_full())
+                || w.retired.load(Ordering::Acquire)
+                || !w.admission.ready()
+            {
+                return Err(refused());
+            }
+            Ok(SourceTime {
+                owner_now_ms: sample.ticks,
+                expires_ms,
+                clock_domain,
+            })
+        })();
+        if result.is_err() {
+            self.witness.retired.store(true, Ordering::Release);
+        }
+        result
+    }
+}

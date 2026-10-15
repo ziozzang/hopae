@@ -1982,3 +1982,162 @@ async fn native_human_retained_current_keeps_original_clock_fence() {
         assert!(checked.require_current_retained().await.is_err());
     }
 }
+
+fn source_binding(
+    application: &str,
+    route: &str,
+    method: &str,
+) -> crate::auth_gateway::human_request::Binding {
+    use crate::auth_gateway::human_request::{Configuration, Scope};
+    use sha2::{Digest as _, Sha256};
+    let scope = Scope::compile(Configuration {
+        service: "orders",
+        audience: "orders-api",
+        application,
+        route,
+        route_revision: 1,
+        destination: [3; 32],
+        header_revision: 1,
+        headers: &[],
+        reserved_headers: &[],
+        maximum_entity_bytes: 16 * 1024 * 1024,
+    })
+    .unwrap();
+    scope
+        .validate(
+            "orders",
+            "orders-api",
+            &hopae_grpc::v1::HumanFinalRequest {
+                binding_contract: 2,
+                method: method.into(),
+                target: "/transformed".into(),
+                entity_sha256: Sha256::digest([]).to_vec(),
+                entity_length: 0,
+                route_id: route.into(),
+                route_revision: 1,
+                destination_sha256: vec![3; 32],
+                header_policy_revision: 1,
+                headers: vec![],
+            },
+        )
+        .unwrap()
+}
+#[tokio::test]
+async fn native_human_source_facts_use_actual_native_user_and_same_owner_clock() {
+    let f = Fx::new(None).await;
+    let (cookie, _) = f.login().await;
+    let checked = f
+        .witness(&cookie)
+        .await
+        .finish(&f.input(&cookie))
+        .await
+        .unwrap();
+    drop(cookie);
+    let binding = source_binding("app", "owned-route", "GET");
+    let facts = checked
+        .source_facts("native-issuer", &binding)
+        .await
+        .unwrap();
+    assert_eq!(facts.subject.len(), 71);
+    assert!(facts.subject.starts_with("human1:"));
+    assert_eq!(facts.aal, 1);
+    assert!(facts.user_revision > 0 && facts.credential_generation > 0);
+    assert_eq!(facts.application_generation, 1);
+    assert!(checked.belongs_to(&f.owner));
+    let other = Fx::new(None).await;
+    assert!(!checked.belongs_to(&other.owner));
+    let first = checked.source_time().unwrap();
+    let next = checked.source_time().unwrap();
+    assert_ne!(first.clock_domain, [0; 16]);
+    assert_eq!(next.clock_domain, first.clock_domain);
+    assert!(next.owner_now_ms >= first.owner_now_ms);
+    assert!(next.expires_ms <= first.expires_ms);
+    assert!(next.expires_ms > next.owner_now_ms);
+    assert!(next.expires_ms - next.owner_now_ms < 1000);
+    let second = checked
+        .source_facts("native-issuer", &binding)
+        .await
+        .unwrap();
+    assert_eq!(second.subject, facts.subject);
+    let different = checked
+        .source_facts("other-issuer", &binding)
+        .await
+        .unwrap();
+    assert_ne!(different.subject, facts.subject);
+    f.sql("UPDATE users SET status='disabled'");
+    assert!(
+        checked
+            .source_facts("native-issuer", &binding)
+            .await
+            .is_err()
+    );
+    assert!(checked.source_time().is_err());
+}
+#[tokio::test]
+async fn native_human_source_facts_refuse_scope_substitution_and_latch() {
+    for (app, route, method) in [
+        ("other", "owned-route", "GET"),
+        ("app", "other", "GET"),
+        ("app", "owned-route", "POST"),
+    ] {
+        let f = Fx::new(None).await;
+        let (cookie, _) = f.login().await;
+        let checked = f
+            .witness(&cookie)
+            .await
+            .finish(&f.input(&cookie))
+            .await
+            .unwrap();
+        assert!(
+            checked
+                .source_facts("native-issuer", &source_binding(app, route, method))
+                .await
+                .is_err()
+        );
+        assert!(
+            checked
+                .source_facts(
+                    "native-issuer",
+                    &source_binding("app", "owned-route", "GET")
+                )
+                .await
+                .is_err()
+        );
+        assert!(checked.source_time().is_err());
+    }
+}
+
+#[tokio::test]
+async fn native_human_source_final_clock_callback_cannot_hide_publication_withdrawal() {
+    for final_read in [3, 5] {
+        let mut f = Fx::new(None).await;
+        let reads = Arc::new(AtomicU64::new(0));
+        let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let snapshot = f.ctx.snapshot.clone();
+        let replacement = Arc::new(f.config.snapshot(1));
+        let count = reads.clone();
+        let trigger = armed.clone();
+        Arc::get_mut(&mut f.owner).unwrap().ticks = Some(Arc::new(move || {
+            if trigger.load(Ordering::Acquire)
+                && count.fetch_add(1, Ordering::AcqRel) + 1 == final_read
+            {
+                snapshot.store(replacement.clone());
+            }
+            Ok(100)
+        }));
+        let (cookie, _) = f.login().await;
+        let checked = f
+            .witness(&cookie)
+            .await
+            .finish(&f.input(&cookie))
+            .await
+            .unwrap();
+        armed.store(true, Ordering::Release);
+        if final_read == 3 {
+            assert!(checked.require_publication_current().is_err());
+        } else {
+            assert!(checked.source_time().is_err());
+        }
+        assert!(checked.require_current_retained().await.is_err());
+    }
+}
