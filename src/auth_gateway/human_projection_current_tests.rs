@@ -191,3 +191,47 @@ async fn native_human_projection_actual_ldap_primary_totp_same_writer() {
             .unwrap();
     }
 }
+
+#[tokio::test]
+async fn native_human_projection_retirement_is_observed_after_last_publication_load() {
+    let f = Fx::new(None).await;
+    let (cookie, _) = f.login().await;
+    let checked = Arc::new(captured(&f, &cookie).await);
+    let other = Fx::new(None).await;
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut prepared = checked.prepare_projection_current().unwrap();
+    prepared.final_latch_gate_for_test(entered.clone(), release.clone());
+    let prepared = Arc::new(prepared);
+    let (original, native, store) = (prepared.clone(), checked.clone(), f.store.clone());
+    let pending = tokio::spawn(async move {
+        store
+            .human_ledger(
+                crate::store::Deadline(std::time::Instant::now() + Duration::from_secs(1)),
+                move |ledger| {
+                    ledger.test_transaction(|snapshot| original.current_on(&native, snapshot))
+                },
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !entered.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // Another writer's wrong-owner rejection irreversibly retires this same check.
+    let retired = other
+        .store
+        .human_ledger(
+            crate::store::Deadline(std::time::Instant::now() + Duration::from_secs(1)),
+            move |ledger| {
+                ledger.test_transaction(|snapshot| prepared.current_on(&checked, snapshot))
+            },
+        )
+        .await;
+    release.store(true, Ordering::Release);
+    assert!(retired.is_err());
+    assert!(pending.await.unwrap().is_err());
+}

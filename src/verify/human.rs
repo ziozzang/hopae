@@ -563,6 +563,12 @@ pub(crate) struct ProjectionCurrent {
     failed: AtomicBool,
     #[cfg(test)]
     elapsed_for_test: Option<Arc<AtomicU64>>,
+    #[cfg(test)]
+    final_latch_gate: Option<(
+        Arc<AtomicBool>,
+        Arc<AtomicBool>,
+        std::sync::atomic::AtomicUsize,
+    )>,
 }
 #[allow(dead_code)] // H4 orchestration follows the native checker qualification.
 impl ProjectionCurrent {
@@ -622,11 +628,27 @@ impl ProjectionCurrent {
         w.owner
             .registry
             .require_human_publication(&w.provider, &w.snapshot)?;
+        // The publication load may overlap another current check retiring us.
+        // Observe all retirement latches AFTER the final publication load.
+        let application_current = Arc::ptr_eq(&w.snapshot, &w.owner.applications.load_full());
+        #[cfg(test)]
+        if let Some((entered, release, calls)) = &self.final_latch_gate
+            && calls.fetch_add(1, Ordering::AcqRel) == 1
+        {
+            // Pause only the SECOND (post-SQL, final) sample; the first sample's
+            // retirement is checked again by the ordinary second sample.
+            entered.store(true, Ordering::Release);
+            while !release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        }
         if now >= w.expires
-            || w.retired.load(Ordering::Acquire)
+            || !application_current
             || !w.admission.ready()
             || w.owner.failed.load(Ordering::Acquire)
-            || !Arc::ptr_eq(&w.snapshot, &w.owner.applications.load_full())
+            || w.admission.failed.load(Ordering::Acquire)
+            || self.failed.load(Ordering::Acquire)
+            || w.retired.load(Ordering::Acquire)
         {
             return Err(refused());
         }
@@ -635,6 +657,14 @@ impl ProjectionCurrent {
     #[cfg(test)]
     pub(crate) fn elapsed_for_test(&mut self, value: Arc<AtomicU64>) {
         self.elapsed_for_test = Some(value);
+    }
+    #[cfg(test)]
+    pub(crate) fn final_latch_gate_for_test(
+        &mut self,
+        entered: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+    ) {
+        self.final_latch_gate = Some((entered, release, std::sync::atomic::AtomicUsize::new(0)));
     }
     pub(crate) fn current_on(
         &self,
@@ -683,6 +713,8 @@ impl Checked {
                 failed: AtomicBool::new(false),
                 #[cfg(test)]
                 elapsed_for_test: None,
+                #[cfg(test)]
+                final_latch_gate: None,
             })
         })();
         if result.is_err() {
