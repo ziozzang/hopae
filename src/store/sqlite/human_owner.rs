@@ -17,6 +17,7 @@ use crate::{
 use rusqlite::{OptionalExtension, params};
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Current {
+    realm: String,
     factor: Option<super::totp_owner::Facts>,
     primary: super::primary_owner::Facts,
     pub(crate) expires: Timestamp,
@@ -87,10 +88,11 @@ impl Store {
             check.now()?;
             let config:Option<String>=tx.query_row("SELECT value FROM meta WHERE key='config_generation'",[],|r|r.get(0)).optional()?;
             if config.and_then(|s|s.parse::<u64>().ok())!=Some(generation) {return Err(refused());}
-            let sql=format!("SELECT {}, {}, u.status,u.authz_version,u.groups,o.revision FROM session_handles h JOIN sessions s ON s.session_id=h.session_id JOIN users u ON u.user_id=s.user_id JOIN providers p ON p.provider_id=s.provider_id AND p.enabled=1 AND p.deleted_at IS NULL JOIN human_provider_owners o ON o.provider_id=p.provider_id WHERE h.handle_sha256=?1 AND h.host=?2 AND length(s.factors)<=65536 AND length(s.snapshot)<=65536 AND length(u.groups)<=65536",cols("h",HANDLE_COLS),cols("s",SESSION_COLS));
+            let sql=format!("SELECT {}, {}, u.status,u.authz_version,u.groups,o.revision,a.realm FROM session_handles h JOIN sessions s ON s.session_id=h.session_id JOIN users u ON u.user_id=s.user_id JOIN providers p ON p.provider_id=s.provider_id AND p.enabled=1 AND p.deleted_at IS NULL JOIN human_provider_owners o ON o.provider_id=p.provider_id JOIN human_user_ids i ON i.user_id=u.user_id JOIN human_authority_realm a ON a.singleton=1 WHERE h.handle_sha256=?1 AND h.host=?2 AND length(s.factors)<=65536 AND length(s.snapshot)<=65536 AND length(u.groups)<=65536",cols("h",HANDLE_COLS),cols("s",SESSION_COLS));
             let hn=HANDLE_COLS.len();let sn=SESSION_COLS.len();
-            let found=tx.query_row(&sql,params![blob(&expected.handle.handle_sha256),expected.handle.host.as_str()],|r|Ok((||->StoreResult<_>{Ok((HandleView{handle:rows::handle(r,0)?,session:rows::session(r,hn)?,user:rows::user_authz(r,hn+sn)?},r.get::<_,i64>(hn+sn+3)?))})())).optional()?.transpose()?.ok_or_else(refused)?;
-            let (current,provider_revision)=found;
+            let found=tx.query_row(&sql,params![blob(&expected.handle.handle_sha256),expected.handle.host.as_str()],|r|Ok((||->StoreResult<_>{Ok((HandleView{handle:rows::handle(r,0)?,session:rows::session(r,hn)?,user:rows::user_authz(r,hn+sn)?},r.get::<_,i64>(hn+sn+3)?,r.get::<_,String>(hn+sn+4)?))})())).optional()?.transpose()?.ok_or_else(refused)?;
+            let (current,provider_revision,realm)=found;
+            if !super::identity_owner::valid_realm(&realm) {return Err(refused());}
             if provider_revision!=revision || !same(&current,&expected) || current.handle.issued_aal>current.session.aal || current.handle.created_at>now || current.session.created_at>now || current.session.auth_time>now || now>=original_expiry {return Err(refused());}
             if !matches!(lifetimes::evaluate(&current.handle,&current.session,&app.session,&policy,now),LifetimeVerdict::Live{..}) {return Err(refused());}
             // Native TOTP provenance is mandatory for handle AAL2. Only this
@@ -115,7 +117,7 @@ impl Store {
                 }
             }
             if let Some(age)=app.max_auth_age {expires=expires.min(current.session.auth_time.add(age));}
-            let result=Current{factor:establishing,primary,expires};
+            let result=Current{realm,factor:establishing,primary,expires};
             if now>=expires || original.as_ref().is_some_and(|expected|expected!=&result) {return Err(refused());}
             check.now()?;tx.commit()?;Ok(result)
         }).await

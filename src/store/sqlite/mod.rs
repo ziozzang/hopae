@@ -10,6 +10,7 @@ mod directory;
 mod events;
 mod factors;
 pub(crate) mod human_owner;
+mod identity_owner;
 pub(crate) mod material_owner;
 pub(crate) mod primary_owner;
 // Internal infrastructure only; native Human candidate integration is queued.
@@ -86,6 +87,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         9,
         "0009_session_primary_provenance",
         include_str!("../migrations/0009_session_primary_provenance.sql"),
+    ),
+    (
+        10,
+        "0010_human_identity_owners",
+        include_str!("../migrations/0010_human_identity_owners.sql"),
     ),
 ];
 
@@ -877,6 +883,9 @@ pub fn validate_foundation(conn: &Connection, version: u32) -> Result<(), StoreE
     }
     if version >= 9 {
         primary_owner::validate_foundation(conn)?;
+    }
+    if version >= 10 {
+        identity_owner::validate_foundation(conn)?;
     }
     Ok(())
 }

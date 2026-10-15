@@ -1549,3 +1549,40 @@ async fn native_human_engine_cold_store_unchanged_material_restores_original_nat
     );
     drop(_oidc);
 }
+
+#[tokio::test]
+async fn native_human_current_includes_same_transaction_realm_and_latches_retirement() {
+    let f = Fx::new(None).await;
+    let (cookie, _) = f.login().await;
+    let checked = f
+        .witness(&cookie)
+        .await
+        .finish(&f.input(&cookie))
+        .await
+        .unwrap();
+    checked.require_current(&f.input(&cookie)).await.unwrap();
+    let original: String = f
+        .store
+        .conn()
+        .query_row("SELECT realm FROM human_authority_realm", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        f.store
+            .conn()
+            .execute(
+                "UPDATE human_authority_realm SET realm=lower(hex(randomblob(32)))",
+                []
+            )
+            .is_err()
+    );
+    // Deliberate privileged fault injection only: runtime users cannot change
+    // the realm. This proves the joined Current compares it, not live DB-clone
+    // or arbitrary SQL-tampering support.
+    f.sql("DROP TRIGGER human_realm_update;UPDATE human_authority_realm SET realm=lower(hex(randomblob(32)))");
+    assert!(checked.require_current(&f.input(&cookie)).await.is_err());
+    f.store
+        .conn()
+        .execute("UPDATE human_authority_realm SET realm=?1", [original])
+        .unwrap();
+    assert!(checked.require_current(&f.input(&cookie)).await.is_err());
+}
