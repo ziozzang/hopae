@@ -236,6 +236,15 @@ pub(super) const ROOT: Node = Obj(&[
                 Arr(&Obj(&[("service", Leaf), ("audience", Leaf)])),
             ),
             (
+                "human_observed_scopes",
+                Arr(&Obj(&[
+                    ("service", Leaf),
+                    ("audience", Leaf),
+                    ("application", Leaf),
+                    ("route", Leaf),
+                ])),
+            ),
+            (
                 "authority",
                 Obj(&[
                     ("address", Leaf),

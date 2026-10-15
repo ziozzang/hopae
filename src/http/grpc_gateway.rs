@@ -638,6 +638,41 @@ impl ReceiptService {
         }))
     }
 }
+#[cfg(test)]
+pub(crate) fn human_projection_transport_for_test(
+    services: &crate::app::Services,
+) -> anyhow::Result<tonic::service::interceptor::InterceptedService<
+    hangang_runtime::unary_ingress::UnaryIngress<
+        v1::human_observed_credential_projection_server::HumanObservedCredentialProjectionServer<
+            impl v1::human_observed_credential_projection_server::HumanObservedCredentialProjection,
+        >,
+    >,
+    impl tonic::service::Interceptor + Clone,
+>>{
+    let pipeline = Service {
+        router: Router::new(),
+        keys: services.caller_keys.clone(),
+        requests: Arc::new(Semaphore::new(16)),
+    };
+    let projection =
+        super::grpc_human_projection::HumanProjection::from_services(pipeline.clone(), services)?
+            .ok_or_else(|| anyhow::anyhow!("Human projection required"))?;
+    let generated = v1::human_observed_credential_projection_server::HumanObservedCredentialProjectionServer::new(projection)
+        .max_decoding_message_size(8448).max_encoding_message_size(8192);
+    Ok(bounded_human_transport(
+        generated,
+        pipeline,
+        Arc::new(Semaphore::new(16)),
+        8448,
+        services.human_owner.clone(),
+        services.readiness.clone(),
+        services
+            .config
+            .verify_limits()
+            .budget
+            .min(std::time::Duration::from_secs(1)),
+    ))
+}
 pub async fn serve_with_receipts(
     listener: TcpListener,
     tls: ServerTlsConfig,
@@ -700,6 +735,16 @@ pub async fn serve_with_receipts(
                 services.config.verify_limits().budget.min(std::time::Duration::from_secs(1)))
         }))
     }).transpose()?.flatten();
+    let human_projection_service = services.as_ref().map(|services| {
+        super::grpc_human_projection::HumanProjection::from_services(pipeline.clone(), services)
+            .map(|projection| projection.map(|projection| {
+                let service = v1::human_observed_credential_projection_server::HumanObservedCredentialProjectionServer::new(projection)
+                    .max_decoding_message_size(8448).max_encoding_message_size(8192);
+                bounded_human_transport(service, pipeline.clone(), ingress.clone(), 8448,
+                    services.human_owner.clone(), services.readiness.clone(),
+                    services.config.verify_limits().budget.min(std::time::Duration::from_secs(1)))
+            }))
+    }).transpose()?.flatten();
     let receipt_resources = services
         .map(|services| receipt_resources(pipeline.clone(), services))
         .transpose()?
@@ -721,6 +766,7 @@ pub async fn serve_with_receipts(
     });
     hangang_runtime::server(tls)?
         .add_optional_service(human_service)
+        .add_optional_service(human_projection_service)
         .add_service(bounded_transport(
             AuthenticationServer::new(pipeline.clone())
                 .max_decoding_message_size(wire::MAX_FRAME)

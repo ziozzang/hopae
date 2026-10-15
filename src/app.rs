@@ -194,7 +194,17 @@ impl Readiness {
 #[derive(Clone)]
 pub struct Services {
     pub(crate) human_owner: Arc<crate::verify::human::Owner>,
+    pub(crate) human_receipt_source: Option<Arc<crate::auth_gateway::human_source::Source>>,
     pub projection_resources: Option<Arc<crate::auth_gateway::projection_resources::Prepared>>,
+    // One latched receiver generation for every projection class and endpoint.
+    projection_clock: Arc<
+        std::sync::OnceLock<
+            Result<
+                Arc<hangang_runtime::time::ReceiverClock>,
+                crate::auth_gateway::receipt_keys::Refused,
+            >,
+        >,
+    >,
     pub receipt_authority: Arc<std::sync::Mutex<crate::auth_gateway::receipt_authority::Authority>>,
     pub receipt_issuer: Option<Arc<crate::auth_gateway::receipt_issuer::Issuer>>,
     pub projection_authority:
@@ -221,6 +231,23 @@ pub struct Services {
 }
 
 impl Services {
+    pub(crate) fn projection_receiver_clock(
+        &self,
+    ) -> Result<Arc<hangang_runtime::time::ReceiverClock>, crate::auth_gateway::receipt_keys::Refused>
+    {
+        self.projection_clock
+            .get_or_init(|| {
+                let mut generation = [0; 16];
+                self.rng.fill(&mut generation);
+                hangang_runtime::time::ReceiverClock::new(generation)
+                    .map(Arc::new)
+                    .map_err(|_| crate::auth_gateway::receipt_keys::Refused)
+            })
+            .as_ref()
+            .map(Arc::clone)
+            .map_err(|_| crate::auth_gateway::receipt_keys::Refused)
+    }
+
     pub fn directory(&self) -> Arc<dyn Directory> {
         self.store.directory()
     }
@@ -345,6 +372,12 @@ pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
         Some(services.emitter.clone()),
     );
     gateway_state = gateway_state.with_human_owner(services.human_owner.clone())?;
+    if let Some(issuer) = &services.config.receipt_issuer
+        && issuer.human_receipts.is_some()
+    {
+        gateway_state = gateway_state
+            .with_human_policy_metadata(services.store.clone(), issuer.issuer_ref.clone())?;
+    }
     if let Some(authority) = &services.authentication_authority {
         let reader = authority
             .lock()
@@ -818,8 +851,33 @@ async fn bind_environment(
         env.clock.clone(),
         env.rng.as_ref(),
     );
+    // One process-affine record owner is shared by Human receipt and projection RPCs.
+    let human_receipt_source = cfg
+        .receipt_issuer
+        .as_ref()
+        .filter(|native| native.human_receipts.is_some())
+        .map(|native| {
+            let issuer = receipt_issuer
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Human issuer unavailable"))?;
+            let verifier = receipt_authority
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Human receipt keys unavailable"))?
+                .verifier();
+            crate::auth_gateway::human_source::Source::new(
+                human_owner.clone(),
+                issuer,
+                verifier,
+                native,
+            )
+            .map(Arc::new)
+            .map_err(|_| anyhow::anyhow!("Human source unavailable"))
+        })
+        .transpose()?;
     let services = Services {
         human_owner,
+        human_receipt_source,
+        projection_clock: Arc::default(),
         projection_resources,
         receipt_authority,
         receipt_issuer,

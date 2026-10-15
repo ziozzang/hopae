@@ -928,7 +928,8 @@ impl Config {
         if let Some(receiver) = &self.projection_receiver
             && (self.receipt_issuer.is_none()
                 || self.receipt_permit_keys.is_empty()
-                || self.authentication_gateway.is_none()
+                || (self.authentication_gateway.is_none()
+                    && receiver.human_observed_scopes.is_empty())
                 || self.listen.grpc_gateway.is_none()
                 || self.listen.native_gateway_tls.is_none()
                 || self.gateway.allow_unauthenticated_caller
@@ -940,6 +941,28 @@ impl Config {
             errs.push("projection_receiver requires valid native issuer, permit keys, profiles, declared plans and mTLS gRPC".into());
         }
         if let Some(receiver) = &self.projection_receiver {
+            for scope in &receiver.human_observed_scopes {
+                if !self
+                    .receipt_issuer
+                    .as_ref()
+                    .and_then(|i| i.human_receipts.as_ref())
+                    .is_some_and(|human| {
+                        human
+                            .scopes
+                            .iter()
+                            .filter(|native| {
+                                native.service == scope.service
+                                    && native.audience == scope.audience
+                                    && native.application == scope.application
+                                    && native.route == scope.route
+                            })
+                            .count()
+                            > 0
+                    })
+                {
+                    errs.push("projection_receiver human_observed_scopes requires exact declared native Human scope".into());
+                }
+            }
             for scope in &receiver.workload_observed_scopes {
                 if !self
                     .receipt_issuer
@@ -1020,10 +1043,34 @@ impl Config {
                 errs.push("credential_projection requires authenticated gateway callers".into());
             }
             if config.plans.iter().any(|plan| {
-                !self
+                let legacy = self
                     .apps
                     .iter()
-                    .any(|app| app.app_id.as_str() == plan.service)
+                    .any(|app| app.app_id.as_str() == plan.service);
+                let human = matches!(plan.minimum_aal, 1 | 2)
+                    && self.projection_receiver.as_ref().is_some_and(|receiver| {
+                        receiver.human_observed_scopes.iter().any(|scope| {
+                            scope.service == plan.service
+                                && scope.audience == plan.audience
+                                && self
+                                    .apps
+                                    .iter()
+                                    .any(|app| app.app_id.as_str() == scope.application)
+                                && self
+                                    .receipt_issuer
+                                    .as_ref()
+                                    .and_then(|issuer| issuer.human_receipts.as_ref())
+                                    .is_some_and(|human| {
+                                        human.scopes.iter().any(|native| {
+                                            native.service == scope.service
+                                                && native.audience == scope.audience
+                                                && native.application == scope.application
+                                                && native.route == scope.route
+                                        })
+                                    })
+                        })
+                    });
+                !(legacy || human)
             }) {
                 errs.push(
                     "credential_projection service must match a configured application".into(),

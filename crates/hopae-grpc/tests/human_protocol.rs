@@ -37,7 +37,16 @@ fn additive_fields_and_redaction_are_fixed() {
     };
     assert!(!format!("{q:?}").contains("secret-handle"));
     assert!(GATEWAY_PROTO.contains("uint64 source_revision = 6;"));
-    assert!(!GATEWAY_PROTO.contains("service HumanObservedCredentialProjection"));
+    let normalized = GATEWAY_PROTO
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(normalized.contains("service HumanObservedCredentialProjection { rpc Project(ProjectionRequest) returns (ObservedProjectionReply); }"));
+    let output = v1::ObservedProjectionReply {
+        header_value: b"secret-projected-credential".to_vec(),
+        ..Default::default()
+    };
+    assert!(!format!("{output:?}").contains("secret-projected-credential"));
 }
 #[test]
 fn source_epoch_is_not_a_user_revision_or_credential_generation() {

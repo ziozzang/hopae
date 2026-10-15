@@ -2257,3 +2257,6 @@ mod native_source_tests;
 
 #[path = "../http/grpc_human_tests.rs"]
 mod native_rpc_tests;
+
+#[path = "../auth_gateway/human_projection_tests.rs"]
+mod native_projection_tests;

@@ -74,6 +74,20 @@ fn framed(hash: &mut Sha256, value: &[u8]) {
 }
 #[allow(dead_code)] // Wired to the additive Human issuer in the next integration.
 impl Scope {
+    pub(crate) fn projection_fingerprint(
+        &self,
+        service: &str,
+        audience: &str,
+        application: &str,
+        route: &str,
+    ) -> Option<[u8; 32]> {
+        (self.service == service
+            && self.audience == audience
+            && self.application == application
+            && self.route == route)
+            .then_some(self.fingerprint)
+    }
+
     pub(crate) fn compile(c: Configuration<'_>) -> Result<Arc<Self>, Refused> {
         if ![c.service, c.audience, c.application, c.route]
             .into_iter()

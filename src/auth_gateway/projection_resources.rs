@@ -26,10 +26,20 @@ pub struct SecretReference {
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct HumanScope {
+    pub service: String,
+    pub audience: String,
+    pub application: String,
+    pub route: String,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Configuration {
     pub authority: Authority,
     #[serde(default)]
     pub workload_observed_scopes: Vec<super::receipt_issuer::Scope>,
+    #[serde(default)]
+    pub human_observed_scopes: Vec<HumanScope>,
     #[serde(default)]
     pub observed_clock_rates: Option<ObservedClockRates>,
     #[serde(default)]
@@ -53,6 +63,8 @@ pub struct Prepared {
     pub(crate) workload_client: Option<Arc<super::workload_permission_live::Client>>,
     pub(crate) observed_rates: Option<hopae_grpc::receipt_time::ClockRates>,
     pub(crate) workload_scopes: HashSet<(String, String)>,
+    pub(crate) human_scopes: Vec<HumanScope>,
+    pub(crate) human_client: Option<Arc<super::human_permission_live::Client>>,
     secrets: HashMap<String, Zeroizing<String>>,
 }
 fn id(value: &str) -> bool {
@@ -103,6 +115,31 @@ impl Configuration {
                 return Err(Refused);
             }
         }
+        if self.human_observed_scopes.len() > 128
+            || (!self.human_observed_scopes.is_empty() && self.observed_clock_rates.is_none())
+        {
+            return Err(Refused);
+        }
+        let mut human_seen = HashSet::new();
+        for scope in &self.human_observed_scopes {
+            if ![
+                &scope.service,
+                &scope.audience,
+                &scope.application,
+                &scope.route,
+            ]
+            .into_iter()
+            .all(|s| id(s))
+                || !human_seen.insert((
+                    &scope.service,
+                    &scope.audience,
+                    &scope.application,
+                    &scope.route,
+                ))
+            {
+                return Err(Refused);
+            }
+        }
         let a = &self.authority;
         let uri: tonic::codegen::http::Uri = a.address.parse().map_err(|_| Refused)?;
         if a.address.len() > 256
@@ -139,6 +176,15 @@ impl Configuration {
         for scope in &self.workload_observed_scopes {
             if !plans.plans.iter().any(|p| {
                 p.service == scope.service && p.audience == scope.audience && p.minimum_aal == 0
+            }) {
+                return Err(Refused);
+            }
+        }
+        for scope in &self.human_observed_scopes {
+            if !plans.plans.iter().any(|p| {
+                p.service == scope.service
+                    && p.audience == scope.audience
+                    && matches!(p.minimum_aal, 1 | 2)
             }) {
                 return Err(Refused);
             }
@@ -185,6 +231,18 @@ impl Configuration {
                 &token,
             )?))
         };
+        let human_client = if self.human_observed_scopes.is_empty() {
+            None
+        } else {
+            Some(Arc::new(super::human_permission_live::Client::prepare(
+                &self.authority.address,
+                &self.authority.server_name,
+                &ca,
+                &certificate,
+                &key,
+                &token,
+            )?))
+        };
         let mut secrets = HashMap::with_capacity(self.secrets.len());
         for reference in &self.secrets {
             let value = Zeroizing::new(resolve(&reference.token_env).ok_or(Refused)?);
@@ -196,6 +254,8 @@ impl Configuration {
         Ok(Prepared {
             client: Arc::new(client),
             workload_client,
+            human_client,
+            human_scopes: self.human_observed_scopes.clone(),
             observed_rates: self
                 .observed_clock_rates
                 .as_ref()
@@ -406,5 +466,86 @@ mod tests {
         assert!(super::super::projection::valid_bearer(
             "native-._~+/token=="
         ));
+    }
+    #[test]
+    fn human_output_activation_is_default_off_exact_native_and_independent_of_service_profiles() {
+        let baseline = config();
+        let parsed = crate::config::parse(&baseline.to_string()).unwrap();
+        assert!(
+            parsed
+                .projection_receiver
+                .unwrap()
+                .human_observed_scopes
+                .is_empty()
+        );
+        let mut missing = baseline.clone();
+        missing
+            .as_object_mut()
+            .unwrap()
+            .remove("authentication_gateway");
+        assert!(crate::config::parse(&missing.to_string()).is_err());
+        let mut value = missing;
+        value["apps"][0]["app_id"] = serde_json::json!("app");
+        value["receipt_issuer"]["human_receipts"] = serde_json::json!({"source_revision":7,"scopes":[{
+            "service":"orders","audience":"orders-api","application":"app","route":"owned-route",
+            "route_revision":11,"destination_sha256":"12".repeat(32),"header_revision":13,
+            "headers":[],"reserved_headers":["x-owned-secret"],"maximum_entity_bytes":16777216
+        }]});
+        let scope = serde_json::json!({"service":"orders","audience":"orders-api","application":"app","route":"owned-route"});
+        value["projection_receiver"]["human_observed_scopes"] = serde_json::json!([scope.clone()]);
+        value["projection_receiver"]["observed_clock_rates"] =
+            serde_json::json!({"source_ppm":500,"receiver_ppm":500});
+        value["credential_projection"]["plans"][0]["minimum_aal"] = serde_json::json!(1);
+        crate::config::parse(&value.to_string())
+            .expect("explicit native Human mapped plan should activate");
+        let mut absent_activation = value.clone();
+        absent_activation["projection_receiver"]
+            .as_object_mut()
+            .unwrap()
+            .remove("human_observed_scopes");
+        assert!(crate::config::parse(&absent_activation.to_string()).is_err());
+        let mut unknown_application = value.clone();
+        unknown_application["receipt_issuer"]["human_receipts"]["scopes"][0]["application"] =
+            serde_json::json!("missing");
+        assert!(crate::config::parse(&unknown_application.to_string()).is_err());
+        let mut alternative = value["receipt_issuer"]["human_receipts"]["scopes"][0].clone();
+        alternative["destination_sha256"] = serde_json::json!("34".repeat(32));
+        value["receipt_issuer"]["human_receipts"]["scopes"]
+            .as_array_mut()
+            .unwrap()
+            .push(alternative);
+        assert!(
+            crate::config::parse(&value.to_string()).is_ok(),
+            "explicit destination alternatives retain one activation tuple"
+        );
+        for aal in [0, 3] {
+            let mut bad = value.clone();
+            bad["credential_projection"]["plans"][0]["minimum_aal"] = serde_json::json!(aal);
+            assert!(crate::config::parse(&bad.to_string()).is_err());
+        }
+        for field in ["service", "audience", "application", "route"] {
+            let mut bad = value.clone();
+            bad["projection_receiver"]["human_observed_scopes"][0][field] =
+                serde_json::json!("unconfigured");
+            assert!(crate::config::parse(&bad.to_string()).is_err());
+        }
+        let mut bad = value.clone();
+        bad["receipt_issuer"]
+            .as_object_mut()
+            .unwrap()
+            .remove("human_receipts");
+        assert!(crate::config::parse(&bad.to_string()).is_err());
+        let mut bad = value.clone();
+        bad["projection_receiver"]["human_observed_scopes"]
+            .as_array_mut()
+            .unwrap()
+            .push(scope);
+        assert!(crate::config::parse(&bad.to_string()).is_err());
+        let mut bad = value.clone();
+        bad["projection_receiver"]
+            .as_object_mut()
+            .unwrap()
+            .remove("observed_clock_rates");
+        assert!(crate::config::parse(&bad.to_string()).is_err());
     }
 }

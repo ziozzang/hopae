@@ -883,6 +883,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "guard-grpc"
+version = "0.3.4"
+source = "git+https://github.com/ziozzang/sumunjang?rev=1f70428e9481654845a696cf30cdb917a6aef009#1f70428e9481654845a696cf30cdb917a6aef009"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -899,6 +910,17 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "hangang-route-grpc"
+version = "0.1.0"
+source = "git+https://github.com/ziozzang/hangang?rev=dfc099ea763650f98b31110f0720cf3d9042f3ec#dfc099ea763650f98b31110f0720cf3d9042f3ec"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
 ]
 
 [[package]]
@@ -984,6 +1006,8 @@ dependencies = [
  "data-encoding",
  "ed25519-dalek",
  "form_urlencoded",
+ "guard-grpc",
+ "hangang-route-grpc",
  "hangang-runtime",
  "hmac",
  "hopae-grpc 0.0.3",
@@ -1044,7 +1068,7 @@ dependencies = [
 [[package]]
 name = "hopae-grpc"
 version = "0.0.3"
-source = "git+https://github.com/ziozzang/hopae?rev=4ea3e1473de61d6b46f5420efe481c126790d800#4ea3e1473de61d6b46f5420efe481c126790d800"
+source = "git+https://github.com/ziozzang/hopae?rev=b08e105666de99f2ae957cff16ca9f3c75d3f7c5#b08e105666de99f2ae957cff16ca9f3c75d3f7c5"
 dependencies = [
  "ed25519-dalek",
  "prost",
@@ -1933,10 +1957,10 @@ dependencies = [
 
 [[package]]
 name = "pumgye-grpc"
-version = "0.1.7"
-source = "git+https://github.com/ziozzang/pumgye?rev=dd62d6559613923f421cb76f0e65aea48224ea76#dd62d6559613923f421cb76f0e65aea48224ea76"
+version = "0.1.9"
+source = "git+https://github.com/ziozzang/pumgye?rev=f6fb7d9a7e92b615d3c2525999b55a66e7a491ac#f6fb7d9a7e92b615d3c2525999b55a66e7a491ac"
 dependencies = [
- "hopae-grpc 0.0.3 (git+https://github.com/ziozzang/hopae?rev=4ea3e1473de61d6b46f5420efe481c126790d800)",
+ "hopae-grpc 0.0.3 (git+https://github.com/ziozzang/hopae?rev=b08e105666de99f2ae957cff16ca9f3c75d3f7c5)",
  "prost",
  "tonic",
  "tonic-prost",

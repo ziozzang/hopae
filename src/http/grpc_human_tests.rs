@@ -7,11 +7,11 @@ use tonic::{
     Request,
     transport::{Certificate, Identity, ServerTlsConfig},
 };
-const CALLER: &str = "native-human-rpc-owned-caller-thirty-two-bytes";
-fn native() -> NativeIssuer {
+pub(super) const CALLER: &str = "native-human-rpc-owned-caller-thirty-two-bytes";
+pub(super) fn native() -> NativeIssuer {
     serde_json::from_value(serde_json::json!({"issuer_ref":"native-human","key_epoch":1,"identity_authority_epoch":"owned-human","public_key":STANDARD.encode(ed25519_dalek::SigningKey::from_bytes(&[0x45;32]).verifying_key().to_bytes()),"seed_env":"OWNED_HUMAN_SIGNING","scopes":[{"service":"orders","audience":"orders-api"}],"human_receipts":{"source_revision":7,"scopes":[{"service":"orders","audience":"orders-api","application":"app","route":"owned-route","route_revision":11,"destination_sha256":"12".repeat(32),"header_revision":13,"headers":[],"reserved_headers":["x-owned-secret"],"maximum_entity_bytes":16777216}],"capacity":1024,"retained_bytes":33554432}})).unwrap()
 }
-async fn services(f: &Fx) -> (crate::app::Bound, crate::app::Services) {
+pub(super) async fn services(f: &Fx) -> (crate::app::Bound, crate::app::Services) {
     let mut config = f.config.clone();
     config.listen.portal = "127.0.0.1:0".into();
     config.listen.gateway = "127.0.0.1:0".into();
@@ -53,6 +53,15 @@ async fn services(f: &Fx) -> (crate::app::Bound, crate::app::Services) {
         )
         .unwrap();
     services.receipt_authority = Arc::new(std::sync::Mutex::new(authority));
+    services.human_receipt_source = Some(Arc::new(
+        crate::auth_gateway::human_source::Source::new(
+            services.human_owner.clone(),
+            services.receipt_issuer.clone().unwrap(),
+            services.receipt_authority.lock().unwrap().verifier(),
+            &native,
+        )
+        .unwrap(),
+    ));
     services.authentication_authority = None;
     services.caller_keys = Arc::new(crate::app::CallerKeys::new(
         Some(Secret::new(CALLER.into())),
@@ -61,7 +70,7 @@ async fn services(f: &Fx) -> (crate::app::Bound, crate::app::Services) {
     ));
     (bound, services)
 }
-fn headers(cookie: &Secret) -> Vec<v1::Header> {
+pub(super) fn headers(cookie: &Secret) -> Vec<v1::Header> {
     [
         ("x-hopae-contract", "1".into()),
         ("x-original-url", "https://app.example.test/data".into()),
@@ -80,7 +89,7 @@ fn headers(cookie: &Secret) -> Vec<v1::Header> {
     })
     .collect()
 }
-fn scope() -> sdk::HumanScope {
+pub(super) fn scope() -> sdk::HumanScope {
     sdk::HumanScope {
         service: "orders".into(),
         audience: "orders-api".into(),
@@ -130,7 +139,7 @@ fn capture(f: &Fx, s: &crate::app::Services) -> human::Capture {
         )
         .unwrap()
 }
-fn tls(root: &std::path::Path) {
+pub(super) fn tls(root: &std::path::Path) {
     let openssl = |args: &[&str]| {
         assert!(
             std::process::Command::new("openssl")
@@ -566,6 +575,69 @@ async fn native_human_rpc_query_remaining_same_sample_rejects_wrong_owner_domain
         assert!(
             query.remaining_at(&f.owner, &sample).is_err(),
             "failed query cannot recover after attack {attack}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_human_rpc_verify_metadata_is_canonical_for_ordinary_and_private_capture() {
+    use tower::ServiceExt;
+    let f = Fx::new(None).await;
+    let (cookie, view) = f.login().await;
+    let (_bound, services) = services(&f).await;
+    let router = crate::app::build_routers(&services).unwrap().gateway;
+    let expected = services
+        .store
+        .admin_human_subject(
+            "native-human".into(),
+            view.session.user_id.as_str().into(),
+            crate::store::Deadline(std::time::Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    for private_capture in [false, true] {
+        let mut request = axum::http::Request::builder()
+            .uri("/_hopae/verify")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        for header in headers(&cookie) {
+            request.headers_mut().append(
+                axum::http::HeaderName::from_bytes(header.name.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_bytes(&header.value).unwrap(),
+            );
+        }
+        request
+            .headers_mut()
+            .insert("x-hopae-gateway-key", CALLER.parse().unwrap());
+        request.headers_mut().insert(
+            "x-hopae-human-policy-subject",
+            "human1:forged".parse().unwrap(),
+        );
+        request
+            .headers_mut()
+            .insert("x-hopae-human-policy-issuer", "forged".parse().unwrap());
+        if private_capture {
+            request.extensions_mut().insert(capture(&f, &services));
+        }
+        let response = router.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.headers()["x-hopae-human-policy-subject"], expected);
+        assert_eq!(
+            response.headers()["x-hopae-human-policy-issuer"],
+            "native-human"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get_all("x-hopae-human-policy-subject")
+                .iter()
+                .count(),
+            1
+        );
+        assert_eq!(
+            response.headers()["x-forwarded-user"],
+            view.session.user_id.as_str()
         );
     }
 }

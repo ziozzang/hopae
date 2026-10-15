@@ -3,6 +3,7 @@
 pub mod authority;
 pub mod breaker;
 pub mod composition;
+pub(crate) mod human_permission_live;
 pub(crate) mod human_request;
 pub(crate) mod human_source;
 pub mod kubernetes;
@@ -11,6 +12,7 @@ pub mod permission_live;
 pub mod projection;
 pub mod projection_admission;
 pub mod projection_authority;
+pub(crate) mod projection_human;
 pub(crate) mod projection_observed;
 pub mod projection_receiver;
 pub mod projection_resources;

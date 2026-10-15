@@ -234,6 +234,18 @@ pub(crate) fn consume_observed_pair<T>(
     guard: &dyn Fn(&Connection) -> Result<(), Refused>,
     operation: impl FnOnce(&Transaction<'_>) -> Result<T, Refused>,
 ) -> Result<T, Refused> {
+    consume_observed_pair_with_final(db, proofs, clock, guard, &|| Ok(()), operation)
+}
+/// Same paired algorithm with a known callback-free final native latch fence.
+/// It cannot perform SQL, time reads, allocation or external callbacks.
+pub(crate) fn consume_observed_pair_with_final<T>(
+    db: &mut Connection,
+    proofs: [&ObservedProof; 2],
+    clock: &hangang_runtime::time::ReceiverClock,
+    guard: &dyn Fn(&Connection) -> Result<(), Refused>,
+    final_guard: &dyn Fn() -> Result<(), Refused>,
+    operation: impl FnOnce(&Transaction<'_>) -> Result<T, Refused>,
+) -> Result<T, Refused> {
     let revision = proofs[0].checked.revision();
     if proofs.iter().any(|p| p.checked.revision() != revision)
         || proofs[0].checked.replay_key() == proofs[1].checked.replay_key()
@@ -353,6 +365,7 @@ pub(crate) fn consume_observed_pair<T>(
     {
         return Err(Refused);
     }
+    final_guard()?;
     tx.commit().map_err(|_| Refused)?;
     Ok(result)
 }

@@ -16,7 +16,7 @@ name = "hopae"
 path = "src/main.rs"
 
 [dependencies]
-pumgye-grpc = { git = "https://github.com/ziozzang/pumgye", rev = "dd62d6559613923f421cb76f0e65aea48224ea76" }
+pumgye-grpc = { git = "https://github.com/ziozzang/pumgye", rev = "f6fb7d9a7e92b615d3c2525999b55a66e7a491ac" }
 prost = "0.14"
 hopae-grpc = { path = "crates/hopae-grpc" }
 hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "bf3ba2c0ccfb8603a34b14a30bc52d5112f0677a" }
@@ -69,6 +69,10 @@ ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std"
 test-hooks = []
 
 [dev-dependencies]
+# Actual Human paired-runtime qualification uses fixed owning protocol fixtures;
+# authentication and permits still come from native Hop/Pum implementations.
+guard-grpc = { git = "https://github.com/ziozzang/sumunjang", rev = "1f70428e9481654845a696cf30cdb917a6aef009" }
+hangang-route-grpc = { git = "https://github.com/ziozzang/hangang", rev = "dfc099ea763650f98b31110f0720cf3d9042f3ec" }
 http-body = "1"
 # Exercise the production observed client against native Hopae owners.
 hopae-grpc = { path = "crates/hopae-grpc", features = ["native-client"] }

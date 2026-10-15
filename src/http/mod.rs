@@ -34,5 +34,6 @@ pub mod native_gateway;
 
 pub mod grpc_gateway;
 pub(crate) mod grpc_human;
+pub(crate) mod grpc_human_projection;
 
 pub(crate) mod grpc_projection;

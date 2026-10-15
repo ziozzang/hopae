@@ -1,6 +1,6 @@
 //! Actual native Human records. Affine process ownership, not a replay ledger.
 //! No signature-only reconstruction and no public numeric capability constructor.
-#![allow(dead_code)] // Native source candidate; owning RPC remains unmounted.
+#![allow(dead_code)] // Native Human owners are explicit and default-off.
 use crate::{
     auth_gateway::{
         human_request, receipt_authority,
@@ -121,7 +121,12 @@ impl Configuration {
                 .scopes
                 .iter()
                 .any(|s| s.service == scope.service && s.audience == scope.audience)
-                || !seen.insert((&scope.service, &scope.audience, &scope.route))
+                || !seen.insert((
+                    &scope.service,
+                    &scope.audience,
+                    &scope.route,
+                    &scope.destination_sha256,
+                ))
             {
                 return Err(Refused);
             }
@@ -207,6 +212,95 @@ pub(crate) struct Record {
     domain: String,
     _reservation: Reservation,
 }
+/// Issuer-affine actual local record handle, not yet paired projection admission.
+/// Only Source lookup can create it; signature/numeric input alone is insufficient.
+pub(crate) struct RetainedRecord {
+    source: Arc<Source>,
+    record: Arc<Record>,
+}
+impl RetainedRecord {
+    pub(crate) fn scope_sha256(&self) -> [u8; 32] {
+        self.record.binding.scope_sha256()
+    }
+    pub(crate) fn application(&self) -> &str {
+        self.record.binding.application()
+    }
+    pub(crate) fn route(&self) -> &str {
+        self.record.binding.route()
+    }
+    pub(crate) fn context(&self) -> super::receipt_binding::Context<'_> {
+        self.record.issued.context()
+    }
+    pub(crate) fn receipt(&self) -> &[u8] {
+        self.record.issued.bytes()
+    }
+    pub(crate) fn require_publication(&self) -> Result<(), Refused> {
+        self.source
+            .publication
+            .require_current()
+            .map_err(|_| Refused)?;
+        if !self.source.publication.accepts(&self.record.checked)
+            || !Arc::ptr_eq(&self.source.keys, &self.record.keys)
+            || !self.record.keys.current()
+        {
+            return Err(Refused);
+        }
+        self.record
+            .checked
+            .require_pure_current()
+            .map_err(|_| Refused)?;
+        if !self.source.active.load(Ordering::Acquire) {
+            return Err(Refused);
+        }
+        Ok(())
+    }
+    pub(crate) async fn require_current(&self) -> Result<(), Refused> {
+        self.require_publication()?;
+        self.record
+            .checked
+            .require_current_retained()
+            .await
+            .map_err(|_| Refused)?;
+        self.require_publication()
+    }
+    pub(crate) fn prepare_current(
+        &self,
+    ) -> Result<crate::verify::human::ProjectionCurrent, Refused> {
+        self.require_publication()?;
+        let prepared = self
+            .record
+            .checked
+            .prepare_projection_current()
+            .map_err(|_| Refused)?;
+        self.require_publication()?;
+        Ok(prepared)
+    }
+    pub(crate) fn current_on(
+        &self,
+        prepared: &crate::verify::human::ProjectionCurrent,
+        ledger: &crate::store::sqlite::human_owner::LedgerSnapshot<'_>,
+    ) -> Result<(), Refused> {
+        self.require_publication()?;
+        prepared
+            .current_on(&self.record.checked, ledger)
+            .map_err(|_| Refused)?;
+        self.require_publication()
+    }
+    pub(crate) async fn observe(
+        &self,
+        constraint: &(dyn Fn(&SourceTime) -> Result<u64, Refused> + Send + Sync),
+    ) -> Result<Observation, Refused> {
+        let context = self.record.issued.context();
+        self.source
+            .observe_with_final(
+                &context,
+                self.record.issued.bytes(),
+                &self.record.binding.sha256(),
+                constraint,
+            )
+            .await
+    }
+}
 pub(crate) struct Observation {
     pub owner_now_ms: u64,
     pub remaining_ms: u32,
@@ -218,6 +312,32 @@ pub(crate) struct Observation {
     pub key_registry_revision: u64,
 }
 impl Source {
+    /// Resolve explicit startup metadata only; this does not create a proof.
+    pub(crate) fn projection_fingerprints(
+        &self,
+        service: &str,
+        audience: &str,
+        application: &str,
+        route: &str,
+    ) -> Result<Vec<[u8; 32]>, Refused> {
+        self.publication.require_current().map_err(|_| Refused)?;
+        if !self.active.load(Ordering::Acquire) || !self.keys.current() {
+            return Err(Refused);
+        }
+        let fingerprints = self
+            .scopes
+            .iter()
+            .filter_map(|scope| scope.projection_fingerprint(service, audience, application, route))
+            .collect::<Vec<_>>();
+        if fingerprints.is_empty() {
+            return Err(Refused);
+        }
+        Ok(fingerprints)
+    }
+    pub(crate) fn belongs_to(&self, owner: &Arc<Owner>) -> bool {
+        Arc::ptr_eq(&self.owner, owner)
+    }
+
     pub(crate) fn new(
         owner: Arc<Owner>,
         issuer: Arc<Issuer>,
@@ -463,26 +583,12 @@ impl Source {
         drop(removed);
         Ok(())
     }
-    pub(crate) async fn observe(
+    fn lookup_record(
         &self,
         context: &super::receipt_binding::Context<'_>,
         receipt: &[u8],
         request_sha256: &[u8; 32],
-    ) -> Result<Observation, Refused> {
-        self.observe_with_final(context, receipt, request_sha256, &|_| Ok(u64::MAX))
-            .await
-    }
-    pub(crate) async fn observe_with_final(
-        &self,
-        context: &super::receipt_binding::Context<'_>,
-        receipt: &[u8],
-        request_sha256: &[u8; 32],
-        // Must be a known callback-free owner/caller fence. Counted or external
-        // callbacks run before this method's durable current read, never here.
-        // The borrowed native sample is the final sample. A numeric return can
-        // only shorten admission; it cannot extend the retained proof/record.
-        final_check: &(dyn Fn(&SourceTime) -> Result<u64, Refused> + Send + Sync),
-    ) -> Result<Observation, Refused> {
+    ) -> Result<([u8; 32], Arc<Record>, receipt_authority::ObservedChecked), Refused> {
         if !self.active.load(Ordering::Acquire)
             || receipt.len() != super::receipt::LENGTH
             || context.request_sha256 != *request_sha256
@@ -515,6 +621,41 @@ impl Source {
             return Err(Refused);
         }
         self.publication.require_current().map_err(|_| Refused)?;
+        Ok((hash, record, signature))
+    }
+    pub(crate) fn retain(
+        self: &Arc<Self>,
+        context: &super::receipt_binding::Context<'_>,
+        receipt: &[u8],
+        request_sha256: &[u8; 32],
+    ) -> Result<RetainedRecord, Refused> {
+        let (_, record, _) = self.lookup_record(context, receipt, request_sha256)?;
+        Ok(RetainedRecord {
+            source: self.clone(),
+            record,
+        })
+    }
+    pub(crate) async fn observe(
+        &self,
+        context: &super::receipt_binding::Context<'_>,
+        receipt: &[u8],
+        request_sha256: &[u8; 32],
+    ) -> Result<Observation, Refused> {
+        self.observe_with_final(context, receipt, request_sha256, &|_| Ok(u64::MAX))
+            .await
+    }
+    pub(crate) async fn observe_with_final(
+        &self,
+        context: &super::receipt_binding::Context<'_>,
+        receipt: &[u8],
+        request_sha256: &[u8; 32],
+        // Must be a known callback-free owner/caller fence. Counted or external
+        // callbacks run before this method's durable current read, never here.
+        // The borrowed native sample is the final sample. A numeric return can
+        // only shorten admission; it cannot extend the retained proof/record.
+        final_check: &(dyn Fn(&SourceTime) -> Result<u64, Refused> + Send + Sync),
+    ) -> Result<Observation, Refused> {
+        let (hash, record, signature) = self.lookup_record(context, receipt, request_sha256)?;
         record
             .checked
             .require_current_retained()

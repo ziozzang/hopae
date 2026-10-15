@@ -767,3 +767,49 @@ async fn native_human_source_final_publication_then_other_observer_retirement_re
     assert!(retired.is_err());
     assert!(pending.await.unwrap().is_err());
 }
+
+#[tokio::test]
+async fn native_human_source_explicit_multiple_origins_share_route_without_scope_fallback() {
+    let f = Fx::new(None).await;
+    let (cookie, _) = f.login().await;
+    let mut config = configuration();
+    let mut alternative = config["scopes"][0].clone();
+    alternative["destination_sha256"] = serde_json::json!("34".repeat(32));
+    config["scopes"].as_array_mut().unwrap().push(alternative);
+    let (source, _, _) = source(&f, config.clone());
+    let fingerprints = source
+        .projection_fingerprints("orders", "orders-api", "app", "owned-route")
+        .unwrap();
+    assert_eq!(fingerprints.len(), 2);
+    assert_ne!(fingerprints[0], fingerprints[1]);
+    for destination in [0x12, 0x34] {
+        let mut request = request();
+        request.destination_sha256 = vec![destination; 32];
+        let binding = source.validate("orders", "orders-api", &request).unwrap();
+        let expected_scope = binding.scope_sha256();
+        let record = source
+            .issue(captured(&f, &cookie).await, binding)
+            .await
+            .unwrap();
+        let context = record.issued().context();
+        let observation = source
+            .observe(&context, record.issued().bytes(), &context.request_sha256)
+            .await
+            .unwrap();
+        assert_eq!(observation.scope_sha256, expected_scope);
+        assert!(fingerprints.contains(&observation.scope_sha256));
+    }
+    let mut request = request();
+    request.destination_sha256 = vec![0x56; 32];
+    assert!(source.validate("orders", "orders-api", &request).is_err());
+    request.destination_sha256 = vec![0x34; 32];
+    request.header_policy_revision += 1;
+    assert!(source.validate("orders", "orders-api", &request).is_err());
+    // A repeated destination must not provide an alternative application or
+    // header-policy interpretation for the same route.
+    config["scopes"][1]["destination_sha256"] = config["scopes"][0]["destination_sha256"].clone();
+    config["scopes"][1]["header_revision"] = serde_json::json!(99);
+    let native = native(config.clone());
+    let duplicate: Configuration = serde_json::from_value(config).unwrap();
+    assert!(duplicate.validate(&native).is_err());
+}

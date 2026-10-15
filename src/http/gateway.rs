@@ -39,6 +39,7 @@ pub struct GatewayState {
     id_salt: RandomState,
     capture_service_receipts: bool,
     human_owner: Option<Arc<crate::verify::human::Owner>>,
+    human_policy_metadata: Option<(crate::store::Store, String)>,
     authentication_gateway:
         Option<Arc<arc_swap::ArcSwap<crate::auth_gateway::authority::Snapshot>>>,
 }
@@ -66,6 +67,7 @@ impl GatewayState {
             id_salt: RandomState::new(),
             capture_service_receipts: false,
             human_owner: None,
+            human_policy_metadata: None,
             authentication_gateway: None,
         })
     }
@@ -81,6 +83,48 @@ impl GatewayState {
         }
         state.human_owner = Some(owner);
         Ok(self)
+    }
+
+    pub(crate) fn with_human_policy_metadata(
+        mut self: Arc<Self>,
+        store: crate::store::Store,
+        issuer: String,
+    ) -> anyhow::Result<Arc<Self>> {
+        Arc::get_mut(&mut self)
+            .ok_or_else(|| anyhow::anyhow!("gateway state already shared"))?
+            .human_policy_metadata = Some((store, issuer));
+        Ok(self)
+    }
+
+    // Native policy coordinates only: these never substitute for a source
+    // receipt, an independent observation or the final paired projection.
+    async fn human_policy_headers(
+        &self,
+        decision: &Decision,
+        ctx: &VerifyContext,
+    ) -> Result<Option<(axum::http::HeaderValue, axum::http::HeaderValue)>, ()> {
+        let Some((store, issuer)) = &self.human_policy_metadata else {
+            return Ok(None);
+        };
+        let Decision::Allow { identity, .. } = decision else {
+            return Ok(None);
+        };
+        let deadline = ctx.deadline.ok_or(())?;
+        let subject = store
+            .admin_human_subject(
+                issuer.clone(),
+                identity.user_id.as_str().to_owned(),
+                crate::store::Deadline(deadline.into_std()),
+            )
+            .await
+            .map_err(|_| ())?
+            .ok_or(())?;
+        let subject = axum::http::HeaderValue::from_str(&subject).map_err(|_| ())?;
+        let issuer = axum::http::HeaderValue::from_str(issuer).map_err(|_| ())?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(());
+        }
+        Ok(Some((subject, issuer)))
     }
 
     pub fn with_authentication_gateway(
@@ -525,9 +569,13 @@ async fn verify(
                 None,
             ),
         };
+        let policy_headers = match st.human_policy_headers(&decision, &ctx).await {
+            Ok(headers) => headers,
+            Err(()) => return hangang::service_identity::unavailable(&request_id),
+        };
         st.count_decision(&decision);
         st.denied(&decision, cause, Some(client_ip), None, None, &request_id);
-        return hangang::render(
+        let mut response = hangang::render(
             decision,
             if document {
                 Navigation::Document
@@ -537,6 +585,14 @@ async fn verify(
             &env,
             &st.cfg,
         );
+        if append_human_policy_headers(&mut response, policy_headers, ctx.deadline).is_err() {
+            return hangang::service_identity::unavailable(&request_id);
+        }
+        return response;
+    };
+    let policy_headers = match st.human_policy_headers(&decision, &ctx).await {
+        Ok(headers) => headers,
+        Err(()) => return hangang::service_identity::unavailable(&request_id),
     };
     st.count_decision(&decision);
     st.denied(&decision, cause, Some(client_ip), None, None, &request_id);
@@ -554,5 +610,29 @@ async fn verify(
             Err(_) => return hangang::service_identity::unavailable(&request_id),
         }
     }
+    if append_human_policy_headers(&mut response, policy_headers, ctx.deadline).is_err() {
+        return hangang::service_identity::unavailable(&request_id);
+    }
     response
+}
+
+fn append_human_policy_headers(
+    response: &mut Response,
+    headers: Option<(axum::http::HeaderValue, axum::http::HeaderValue)>,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<(), ()> {
+    if headers.is_some() && deadline.is_none_or(|limit| tokio::time::Instant::now() >= limit) {
+        return Err(());
+    }
+    if response.status().is_success()
+        && let Some((subject, issuer)) = headers
+    {
+        response
+            .headers_mut()
+            .insert("x-hopae-human-policy-subject", subject);
+        response
+            .headers_mut()
+            .insert("x-hopae-human-policy-issuer", issuer);
+    }
+    Ok(())
 }

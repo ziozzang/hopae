@@ -167,13 +167,15 @@ impl Runtime {
             return Ok(None);
         };
         let issuer = services.receipt_issuer.clone().ok_or(Refused)?;
-        let profiles = services
-            .authentication_authority
-            .as_ref()
-            .ok_or(Refused)?
-            .lock()
-            .map_err(|_| Refused)?
-            .reader();
+        // Human-only projection has its own native runtime and must not mint a
+        // synthetic Service profile. Legacy receivers still require this owner.
+        let Some(profile_owner) = services.authentication_authority.as_ref() else {
+            if !resources.human_scopes.is_empty() && resources.workload_scopes.is_empty() {
+                return Ok(None);
+            }
+            return Err(Refused);
+        };
+        let profiles = profile_owner.lock().map_err(|_| Refused)?.reader();
         let verifier = services
             .receipt_authority
             .lock()
@@ -184,10 +186,7 @@ impl Runtime {
             .lock()
             .map_err(|_| Refused)?
             .reader();
-        let mut generation = [0; 16];
-        services.rng.fill(&mut generation);
-        let receiver =
-            Arc::new(hangang_runtime::time::ReceiverClock::new(generation).map_err(|_| Refused)?);
+        let receiver = services.projection_receiver_clock()?;
         Ok(Some(Arc::new(Self {
             resources,
             receiver,
@@ -812,6 +811,7 @@ pub(crate) mod tests {
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let resources = projection_resources::Configuration {
             workload_observed_scopes: vec![],
+            human_observed_scopes: vec![],
             observed_clock_rates: Some(projection_resources::ObservedClockRates {
                 source_ppm: 0,
                 receiver_ppm: 0,
@@ -901,6 +901,12 @@ pub(crate) mod tests {
             )
             .unwrap();
         let runtime = Runtime::from_services(&services).unwrap().unwrap();
+        let sibling = Runtime::from_services(&services.clone()).unwrap().unwrap();
+        assert!(Arc::ptr_eq(&runtime.receiver, &sibling.receiver));
+        assert!(Arc::ptr_eq(
+            &runtime.receiver,
+            &services.projection_receiver_clock().unwrap()
+        ));
         let projection =
             crate::http::grpc_projection::server(runtime.clone(), services.caller_keys.clone());
         let observed_projection = crate::http::grpc_projection::observed_server(

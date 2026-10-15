@@ -19,29 +19,24 @@ impl Human {
         pipeline: Pipeline,
         services: &crate::app::Services,
     ) -> anyhow::Result<Option<Self>> {
-        let Some(native) = services
+        if services
             .config
             .receipt_issuer
             .as_ref()
-            .filter(|n| n.human_receipts.is_some())
-        else {
+            .is_none_or(|native| native.human_receipts.is_none())
+        {
             return Ok(None);
-        };
-        let issuer = services
-            .receipt_issuer
+        }
+        let source = services
+            .human_receipt_source
             .clone()
-            .ok_or_else(|| anyhow::anyhow!("Human issuer unavailable"))?;
-        let verifier = services
-            .receipt_authority
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Human receipt keys unavailable"))?
-            .verifier();
-        let source =
-            human_source::Source::new(services.human_owner.clone(), issuer, verifier, native)
-                .map_err(|_| anyhow::anyhow!("Human source unavailable"))?;
+            .ok_or_else(|| anyhow::anyhow!("Human source unavailable"))?;
+        if !source.belongs_to(&services.human_owner) {
+            anyhow::bail!("Human source owner mismatch");
+        }
         Ok(Some(Self {
             pipeline,
-            source: Arc::new(source),
+            source,
             owner: services.human_owner.clone(),
         }))
     }

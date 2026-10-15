@@ -77,6 +77,44 @@ impl Snapshot {
     pub fn enabled(&self) -> bool {
         self.projector.is_some()
     }
+    pub(crate) fn project_human(
+        &self,
+        admission: super::projection_observed::Admission,
+        ledger: &mut crate::store::sqlite::human_owner::Ledger<'_>,
+        clock: Arc<hangang_runtime::time::ReceiverClock>,
+        guard: &dyn Fn(
+            &crate::store::sqlite::human_owner::LedgerSnapshot<'_>,
+        ) -> Result<(), Refused>,
+        final_guard: &dyn Fn() -> Result<(), Refused>,
+        resolve: &dyn Fn(&str) -> Result<Zeroizing<String>, Refused>,
+    ) -> Result<super::projection_observed::Output, Refused> {
+        if !self.available() {
+            return Err(Refused);
+        }
+        admission.project_human(
+            self.projector.as_ref().ok_or(Refused)?,
+            ledger,
+            clock,
+            &|snapshot| {
+                guard(snapshot)?;
+                let expected = self.document.as_deref().ok_or(Refused)?;
+                let unchanged = snapshot
+                    .connection()
+                    .prepare_cached("SELECT value FROM meta WHERE key=?1")
+                    .map_err(|_| Refused)?
+                    .query_row([KEY], |r| Ok(r.get_ref(0)?.as_str()? == expected))
+                    .optional()
+                    .map_err(|_| Refused)?
+                    .unwrap_or(false);
+                if !self.available() || !unchanged {
+                    return Err(Refused);
+                }
+                Ok(())
+            },
+            final_guard,
+            resolve,
+        )
+    }
     pub(crate) fn project_observed(
         &self,
         admission: super::projection_observed::Admission,

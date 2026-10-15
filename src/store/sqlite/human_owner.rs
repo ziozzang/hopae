@@ -92,16 +92,18 @@ impl Ledger<'_> {
         guard: &dyn Fn(
             &LedgerSnapshot<'_>,
         ) -> Result<(), crate::auth_gateway::receipt_keys::Refused>,
+        final_guard: &dyn Fn() -> Result<(), crate::auth_gateway::receipt_keys::Refused>,
         operation: impl FnOnce(
             &rusqlite::Transaction<'_>,
         ) -> Result<T, crate::auth_gateway::receipt_keys::Refused>,
     ) -> Result<T, crate::auth_gateway::receipt_keys::Refused> {
         let owner = &self.owner;
-        crate::auth_gateway::receipt_replay::consume_observed_pair(
+        crate::auth_gateway::receipt_replay::consume_observed_pair_with_final(
             self.connection,
             proofs,
             clock,
             &|connection| guard(&LedgerSnapshot { connection, owner }),
+            final_guard,
             operation,
         )
     }

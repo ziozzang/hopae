@@ -138,6 +138,7 @@ impl World {
             )
             .unwrap();
         let resources = projection_resources::Configuration {
+            human_observed_scopes: vec![],
             authority: projection_resources::Authority {
                 address,
                 server_name: "localhost".into(),

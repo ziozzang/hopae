@@ -36,3 +36,51 @@ count 기본 131,072, 최대 1,048,576입니다. 요청한 retained capacity 기
 사용자 관리에 표시하되 Human 식별자만 생략한다. 정규화·절단·대체 신원을 만들지 않고
 네이티브 증명 발급의 엄격한 조건은 유지한다. 관리자 API 질의로 issuer나 realm을
 지정할 수 없다.
+
+
+## Human 쌍 증명 기반 credential projection
+
+`projection_receiver.human_observed_scopes`는 기본값이 빈 목록인 별도 allowlist다.
+정확한 `{service,audience,application,route}`가 실제 네이티브 Human Source와
+최소 AAL 1 또는 2인 plan에 일치해야 한다. 명시한 Human 매핑에서만 service와
+application을 다르게 둘 수 있으며 기존 Service/Workload 조건은 유지한다.
+같은 tuple의 명시적 목적지 대안은 시작 시 고정 fingerprint 집합으로 묶는다.
+동일 service/audience/route의 중복 목적지는 header policy가 달라도 거부한다.
+요청 descriptor로 목적지·애플리케이션·정책을 추가할 수 없다.
+
+선택적으로 여는 `HumanObservedCredentialProjection.Project`는 contract4와
+정확한 Pum PermitValidationRequest 원본 bytes를 요구한다. 인증·permit·출력은
+하나의 최종 H1v2 digest에 묶이며 보존한 실제 Checked가 원래 frontend 범위도
+검사한다. 이후에는 제외된 고정 credential 헤더만 추가한다. chain digest는
+재인코딩하지 않은 permission query 원본 bytes의 해시다.
+
+인증 RPC와 projection은 정확히 같은 실제 Source Arc를 공유한다. 로컬 record가
+없으면 서명만으로 복구하지 않는다. Pum은 공개 SDK로 실제 Source를 독립 관측한다.
+Projection의 원래 Admission은 caller/decode 전에 시작하고 Source의 같은 마지막
+sample에서 인증 허용 예산과 교집합을 만든다. Pum 지연·writer 대기·secret 작업·
+응답 할당·최종 네이티브 Store 검사까지 이 원래 예산을 소비한다. refresh는 원래
+증명의 수명을 갱신하지 못한다.
+
+모든 클래스/endpoint는 초기화 실패도 고정하는 Services 소유 receiver clock Arc를
+공유한다. Human도 기존 Service/Workload와 동일한 Store 소유 paired ledger 및
+nonce namespace를 사용한다. 실제 writer transaction에서 material/current SQL을
+검사한 뒤 마지막 receiver/registry 검사 직후 commit 전에 순수 publication/key/
+readiness/cancellation fence를 검사한다. 이 마지막 fence에는 SQL·시계·할당·계수
+callback이 없다. 로컬 최종 관측이며 원격 철회의 원자적 보장은 아니다. commit 전
+취소는 두 nonce를 rollback하고 commit 후 만료/취소는 출력을 버리되 소비 기록은
+유지한다. 응답 할당은 마지막 async 네이티브 current 검사보다 먼저 끝낸다.
+보존 secret buffer만 zeroizing이며 임시 HeaderValue 복사 전체의 메모리 삭제는
+주장하지 않는다.
+
+실제 Source/공개 SDK/실제 Pum/secret·replay 검사, 공통 ledger 서명 벡터,
+고정 network/route owner fixture를 구분한다. 실제 네 컴포넌트 Human HTTP 흐름,
+운영 활성화, Human 관리 완성 또는 처리량 검증으로 확대하지 않는다. 별도 RED는
+postreceiver event/counter를 유지하고 마지막 pure 검사만 제거한다. 같은 취소
+검사가 소비된 두 nonce를 발견하며 실패한다. 이전 setup/oracle 실패 기록도 보존한다.
+
+Human receipts 설정 시 일반 네이티브 Human Verify는 실제 인증 UID·설정 issuer·
+Store realm/사용자 예약으로 정책 식별자와 issuer 헤더도 계산한다. 기존 deadline을
+재사용하고 forwarded UID는 바꾸지 않는다. 이는 source proof/독립 관측/permit이
+아니다. 해당 인증 경로의 지원하지 않는 좌표는 거부하지만 관리자 메타데이터의 기존
+ID 생략 규칙은 유지한다. PEP는 issuer/class/AAL을 고정하고 클라이언트 유사 헤더를
+제거하며 최종 opaque Source 관측의 동일성도 검증해야 한다.

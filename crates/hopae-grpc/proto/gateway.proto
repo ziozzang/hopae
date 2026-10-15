@@ -142,3 +142,9 @@ message HumanReceiptTimeReply {
   uint32 cache_ttl_ms = 9;
   bytes scope_sha256 = 10;
 }
+
+// Fixed Human class only. Contract4 retains the exact original H1v2 request
+// digest and uses the same canonical paired nonce ledger as other classes.
+service HumanObservedCredentialProjection {
+  rpc Project(ProjectionRequest) returns (ObservedProjectionReply);
+}
