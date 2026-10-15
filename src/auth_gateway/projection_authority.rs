@@ -77,6 +77,39 @@ impl Snapshot {
     pub fn enabled(&self) -> bool {
         self.projector.is_some()
     }
+    pub(crate) fn project_observed(
+        &self,
+        admission: super::projection_observed::Admission,
+        db: &mut Connection,
+        clock: Arc<hangang_runtime::time::ReceiverClock>,
+        guard: &dyn Fn(&Connection) -> Result<(), Refused>,
+        resolve: &dyn Fn(&str) -> Result<Zeroizing<String>, Refused>,
+    ) -> Result<super::projection_observed::Output, Refused> {
+        if !self.available() {
+            return Err(Refused);
+        }
+        admission.project(
+            self.projector.as_ref().ok_or(Refused)?,
+            db,
+            clock,
+            &|db| {
+                guard(db)?;
+                let expected = self.document.as_deref().ok_or(Refused)?;
+                let unchanged = db
+                    .prepare_cached("SELECT value FROM meta WHERE key=?1")
+                    .map_err(|_| Refused)?
+                    .query_row([KEY], |r| Ok(r.get_ref(0)?.as_str()? == expected))
+                    .optional()
+                    .map_err(|_| Refused)?
+                    .unwrap_or(false);
+                if !self.available() || !unchanged {
+                    return Err(Refused);
+                }
+                Ok(())
+            },
+            resolve,
+        )
+    }
     /// The captured reader cannot issue after a durable update/tombstone, even in
     /// the DB-commit/snapshot-install interval. External guard rechecks live owners.
     pub fn project(

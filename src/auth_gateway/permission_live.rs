@@ -24,6 +24,7 @@ pub struct Refused;
 pub struct Request {
     native: AuthenticatedResourceRequest,
     permit: ProjectionPermitReply,
+    observed_chain_sha256: Option<[u8; 32]>,
 }
 impl Request {
     pub fn new(
@@ -49,7 +50,33 @@ impl Request {
         {
             return Err(Refused);
         }
-        Ok(Arc::new(Self { native, permit }))
+        Ok(Arc::new(Self {
+            native,
+            permit,
+            observed_chain_sha256: None,
+        }))
+    }
+    pub(crate) fn decode_observed_query(
+        bytes: &[u8],
+        request_id: u64,
+    ) -> Result<Arc<Self>, Refused> {
+        use sha2::{Digest as _, Sha256};
+        if bytes.len() > 8192 {
+            return Err(Refused);
+        }
+        let query = PermitValidationRequest::decode(bytes).map_err(|_| Refused)?;
+        if query.request_id != request_id {
+            return Err(Refused);
+        }
+        let mut request = Self::new(query.request.ok_or(Refused)?, query.permit.ok_or(Refused)?)?;
+        Arc::get_mut(&mut request)
+            .ok_or(Refused)?
+            .observed_chain_sha256 = Some(Sha256::digest(bytes).into());
+        Ok(request)
+    }
+    pub(crate) fn observed_chain_sha256(&self) -> Result<[u8; 32], super::receipt_keys::Refused> {
+        self.observed_chain_sha256
+            .ok_or(super::receipt_keys::Refused)
     }
     pub(crate) fn authentication_context(
         &self,
@@ -84,6 +111,61 @@ impl Request {
                 .map_err(|_| Refused)?,
         })
     }
+    pub(crate) fn permission_context(
+        &self,
+    ) -> Result<super::receipt_binding::Context<'_>, super::receipt_keys::Refused> {
+        use super::{
+            PrincipalKind,
+            receipt_binding::{Context, Identity},
+            receipt_keys::Refused,
+        };
+        let p = self.permit.context.as_ref().ok_or(Refused)?;
+        let i = p.identity.as_ref().ok_or(Refused)?;
+        if i.kind != 2 || i.aal != 0 {
+            return Err(Refused);
+        }
+        Ok(Context {
+            issuer_ref: &p.issuer_ref,
+            key_epoch: p.key_epoch,
+            identity_authority_epoch: &p.identity_authority_epoch,
+            identity: Identity {
+                subject_ref: &i.subject_ref,
+                kind: PrincipalKind::Service,
+                aal: 0,
+                revision: i.revision,
+                credential_generation: i.credential_generation,
+            },
+            service: &p.service,
+            audience: &p.audience,
+            request_sha256: p
+                .request_sha256
+                .as_slice()
+                .try_into()
+                .map_err(|_| Refused)?,
+        })
+    }
+    pub(crate) fn binding(
+        &self,
+    ) -> Result<super::receipt_binding::Permit<'_>, super::receipt_keys::Refused> {
+        use super::{receipt_binding::Permit, receipt_keys::Refused};
+        let b = self.permit.binding.as_ref().ok_or(Refused)?;
+        Ok(Permit {
+            authentication_receipt_sha256: b
+                .authentication_receipt_sha256
+                .as_slice()
+                .try_into()
+                .map_err(|_| Refused)?,
+            decision_ref: &b.decision_ref,
+            resource: &b.resource,
+            action: &b.action,
+            authority_epoch: &b.authority_epoch,
+            catalog_revision: b.catalog_revision,
+            policy_revision: b.policy_revision,
+            network_revision: b.network_revision,
+            route_revision: b.route_revision,
+            plan_revision: b.plan_revision,
+        })
+    }
     pub fn native(&self) -> &AuthenticatedResourceRequest {
         &self.native
     }
@@ -93,6 +175,10 @@ impl Request {
 }
 pub struct Client {
     rpc: ProjectionPermitsClient<Channel>,
+    observed_rpc:
+        pumgye_grpc::v1::observed_projection_permits_client::ObservedProjectionPermitsClient<
+            Channel,
+        >,
     credential: MetadataValue<tonic::metadata::Ascii>,
     admission: Semaphore,
     sequence: AtomicU64,
@@ -122,6 +208,26 @@ impl Observation {
                 self.before_ms
                     .saturating_add(self.begun.elapsed().as_millis().min(u64::MAX as u128) as u64),
             ) < self.expires_ms
+    }
+}
+/// Private fixed-owner authenticated completion, not caller numeric evidence.
+pub(crate) struct ObservedObservation {
+    request: Arc<Request>,
+    owner: Arc<()>,
+    proof: super::receipt_replay::ObservedProof,
+}
+impl ObservedObservation {
+    pub(crate) fn into_proof(
+        self,
+        request: &Arc<Request>,
+        client: &Client,
+        clock: &hangang_runtime::time::ReceiverClock,
+    ) -> Result<super::receipt_replay::ObservedProof, super::receipt_keys::Refused> {
+        if !Arc::ptr_eq(&self.request, request) || !Arc::ptr_eq(&self.owner, &client.owner) {
+            return Err(super::receipt_keys::Refused);
+        }
+        self.proof.remaining(clock)?;
+        Ok(self.proof)
     }
 }
 impl Client {
@@ -174,6 +280,7 @@ impl Client {
             .map_err(|_| Refused)?
             .connect_lazy();
         Ok(Self {
+            observed_rpc: pumgye_grpc::v1::observed_projection_permits_client::ObservedProjectionPermitsClient::new(channel.clone()).max_encoding_message_size(8192).max_decoding_message_size(1024),
             rpc: ProjectionPermitsClient::new(channel)
                 .max_encoding_message_size(8192)
                 .max_decoding_message_size(128),
@@ -181,6 +288,102 @@ impl Client {
             admission: Semaphore::new(128),
             sequence: AtomicU64::new(1),
             owner: Arc::new(()),
+        })
+    }
+    pub(crate) async fn observe(
+        &self,
+        request: Arc<Request>,
+        verifier: &super::receipt_authority::Verifier,
+        clock: &hangang_runtime::time::ReceiverClock,
+        rates: &hopae_grpc::receipt_time::ClockRates,
+    ) -> Result<ObservedObservation, super::receipt_keys::Refused> {
+        use super::receipt_keys::Refused;
+        let _admission = self.admission.try_acquire().map_err(|_| Refused)?;
+        let context = request.permission_context()?;
+        let binding = request.binding()?;
+        let checked = verifier.verify_observed_signature(
+            &context,
+            Some(&binding),
+            &request.permit.receipt,
+        )?;
+        let request_id = self
+            .sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                (v < MAXIMUM).then(|| v + 1)
+            })
+            .map_err(|_| Refused)?;
+        let start = clock.begin_exchange().map_err(|_| Refused)?;
+        let mut rpc = tonic::Request::new(PermitValidationRequest {
+            request_id,
+            request: Some(request.native.clone()),
+            permit: Some(request.permit.clone()),
+        });
+        rpc.metadata_mut()
+            .insert("authorization", self.credential.clone());
+        rpc.set_timeout(Duration::from_secs(1));
+        let reply = tokio::time::timeout(
+            Duration::from_secs(1),
+            self.observed_rpc.clone().observe(rpc),
+        )
+        .await
+        .map_err(|_| Refused)?
+        .map_err(|_| Refused)?
+        .into_inner();
+        let exchange = clock.finish_exchange(start).map_err(|_| Refused)?;
+        let signed_remaining = checked
+            .evidence()
+            .claims()
+            .expires_ms
+            .checked_sub(reply.owner_now_ms)
+            .ok_or(Refused)?;
+        let domain = reply
+            .clock_domain
+            .strip_prefix("pobs1:")
+            .and_then(|v| v.split_once(':'))
+            .ok_or(Refused)?;
+        if domain.0.len() != 32
+            || !domain
+                .0
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || domain.0.bytes().all(|b| b == b'0')
+            || domain.1.is_empty()
+            || domain.1.len() > 64
+            || !domain
+                .1
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+            || reply.request_id != request_id
+            || reply.cache_ttl_ms != 0
+            || reply.clock_domain != binding.authority_epoch
+            || reply.receipt_sha256.as_slice() != checked.evidence().sha256()
+            || u64::from(reply.proof_remaining_ms) != signed_remaining
+            || reply.policy_revision != binding.policy_revision
+            || reply.network_revision != binding.network_revision
+            || reply.route_revision != binding.route_revision
+            || reply.plan_revision != binding.plan_revision
+        {
+            return Err(Refused);
+        }
+        let proof = super::receipt_replay::ObservedProof::from_owner_report(
+            checked,
+            reply.clock_domain,
+            &hopae_grpc::receipt_time::Report {
+                owner_now_ms: reply.owner_now_ms,
+                remaining_ms: reply.remaining_ms,
+                receipt_sha256: reply
+                    .receipt_sha256
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Refused)?,
+            },
+            exchange,
+            rates,
+        )?;
+        Ok(ObservedObservation {
+            request,
+            owner: self.owner.clone(),
+            proof,
         })
     }
     pub async fn validate(
@@ -287,6 +490,7 @@ mod tests {
     }
     fn client() -> Client {
         Client {
+            observed_rpc:pumgye_grpc::v1::observed_projection_permits_client::ObservedProjectionPermitsClient::new(Channel::from_static("https://owned.example.test").connect_lazy()),
             rpc: ProjectionPermitsClient::new(
                 Channel::from_static("https://owned.example.test").connect_lazy(),
             ),
@@ -527,6 +731,7 @@ mod tests {
                 .as_millis() as u64
         };
         let resources = super::super::projection_resources::Configuration {
+            observed_clock_rates: None,
             authority: super::super::projection_resources::Authority {
                 address: address.clone(),
                 server_name: "pumgye.example.test".into(),

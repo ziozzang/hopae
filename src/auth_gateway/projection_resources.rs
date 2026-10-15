@@ -29,11 +29,26 @@ pub struct SecretReference {
 pub struct Configuration {
     pub authority: Authority,
     #[serde(default)]
+    pub observed_clock_rates: Option<ObservedClockRates>,
+    #[serde(default)]
     pub secrets: Vec<SecretReference>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedClockRates {
+    pub source_ppm: u32,
+    pub receiver_ppm: u32,
+}
+impl ObservedClockRates {
+    fn compile(&self) -> Result<hopae_grpc::receipt_time::ClockRates, Refused> {
+        hopae_grpc::receipt_time::ClockRates::new(self.source_ppm, self.receiver_ppm)
+            .map_err(|_| Refused)
+    }
 }
 /// No Clone/Debug/serde. Only native plan-owned references may resolve values.
 pub struct Prepared {
     pub client: Arc<Client>,
+    pub(crate) observed_rates: Option<hopae_grpc::receipt_time::ClockRates>,
     secrets: HashMap<String, Zeroizing<String>>,
 }
 fn id(value: &str) -> bool {
@@ -66,6 +81,10 @@ fn read(path: &Path) -> Result<Zeroizing<Vec<u8>>, Refused> {
 }
 impl Configuration {
     pub fn validate(&self) -> Result<(), Refused> {
+        self.observed_clock_rates
+            .as_ref()
+            .map(ObservedClockRates::compile)
+            .transpose()?;
         let a = &self.authority;
         let uri: tonic::codegen::http::Uri = a.address.parse().map_err(|_| Refused)?;
         if a.address.len() > 256
@@ -139,6 +158,11 @@ impl Configuration {
         }
         Ok(Prepared {
             client: Arc::new(client),
+            observed_rates: self
+                .observed_clock_rates
+                .as_ref()
+                .map(ObservedClockRates::compile)
+                .transpose()?,
             secrets,
         })
     }
@@ -176,6 +200,53 @@ mod tests {
             "credential_projection":{"revision":1,"plans":[{"service":"orders","audience":"orders-api","resource":"db:orders","action":"select","minimum_aal":0,"credential":{"type":"bearer_reference","secret_ref":"vault:orders"}}]},
             "projection_receiver":{"authority":{"address":"https://pumgye.example.test:443","server_name":"pumgye.example.test","ca":"/owned/ca.pem","certificate":"/owned/client.pem","key":"/owned/client.key","token_env":"OWNED_PROJECTION_BOOTSTRAP_MISSING_7AF"},"secrets":[{"reference":"vault:orders","token_env":"OWNED_ORIGIN"}]}
         })
+    }
+    #[test]
+    fn observed_remote_rates_are_explicit_bounded_and_strict_optional() {
+        let mut value = config()["projection_receiver"].clone();
+        let strict: super::Configuration = serde_json::from_value(value.clone()).unwrap();
+        assert!(strict.observed_clock_rates.is_none());
+        assert!(strict.validate().is_ok());
+        value["observed_clock_rates"] = serde_json::json!({"source_ppm":500,"receiver_ppm":500});
+        let observed: super::Configuration = serde_json::from_value(value.clone()).unwrap();
+        assert!(observed.validate().is_ok());
+        value["observed_clock_rates"]["source_ppm"] = serde_json::json!(1_000_000);
+        let invalid: super::Configuration = serde_json::from_value(value).unwrap();
+        assert!(invalid.validate().is_err());
+    }
+    #[test]
+    fn actual_config_file_loader_accepts_only_explicit_valid_observed_rates() {
+        let mut value = config();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let load = |value: &serde_json::Value| {
+            std::fs::write(file.path(), value.to_string()).unwrap();
+            crate::config::load(file.path())
+        };
+        assert!(
+            load(&value)
+                .unwrap()
+                .projection_receiver
+                .unwrap()
+                .observed_clock_rates
+                .is_none()
+        );
+        value["projection_receiver"]["observed_clock_rates"] =
+            serde_json::json!({"source_ppm":500,"receiver_ppm":500});
+        assert!(
+            load(&value)
+                .unwrap()
+                .projection_receiver
+                .unwrap()
+                .observed_clock_rates
+                .is_some()
+        );
+        value["projection_receiver"]["observed_clock_rates"]["source_ppm"] =
+            serde_json::json!(1_000_000);
+        assert!(load(&value).is_err());
+        value["projection_receiver"]["observed_clock_rates"] =
+            serde_json::json!({"source_ppm":500,"receiver_ppm":500,"fabricated":1});
+        let error = load(&value).err().unwrap().to_string();
+        assert!(error.contains("projection_receiver.observed_clock_rates.fabricated"));
     }
     #[test]
     fn receiver_configuration_requires_trusted_native_dependencies_and_reference_only_secrets() {

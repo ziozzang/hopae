@@ -162,6 +162,40 @@ impl Projector {
     /// `resolve` is a native vault capability, never a script callback. Guard must
     /// recheck current plan revision and all live owner state before and after work.
     /// Output is returned only after both nonces and owner work successfully commit.
+    pub(crate) fn resolve_observed(
+        &self,
+        scope: &super::projection_observed::Scope,
+        resolve: &dyn Fn(&str) -> Result<Zeroizing<String>, Refused>,
+    ) -> Result<(HeaderName, Zeroizing<String>), Refused> {
+        let plan = self
+            .plans
+            .get(&scope.service)
+            .and_then(|p| p.get(&scope.audience))
+            .ok_or(Refused)?;
+        if self.revision != scope.plan_revision
+            || scope.aal < plan.minimum_aal
+            || scope.resource != plan.resource
+            || scope.action != plan.action
+        {
+            return Err(Refused);
+        }
+        match &plan.credential {
+            Credential::IdentityHeader => Ok((
+                HeaderName::from_static("x-hopae-subject"),
+                Zeroizing::new(scope.subject.clone()),
+            )),
+            Credential::BearerReference { secret_ref } => {
+                let secret = resolve(secret_ref)?;
+                if !valid_bearer(&secret) {
+                    return Err(Refused);
+                }
+                Ok((
+                    HeaderName::from_static("authorization"),
+                    Zeroizing::new(format!("Bearer {}", secret.as_str())),
+                ))
+            }
+        }
+    }
     pub fn project(
         &self,
         admission: Admission,

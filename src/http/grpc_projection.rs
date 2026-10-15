@@ -4,6 +4,7 @@ use crate::auth_gateway::{permission_live, projection_runtime};
 use prost::Message;
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
+#[derive(Clone)]
 pub(super) struct Projection {
     pipeline: Service,
     runtime: Arc<projection_runtime::Runtime>,
@@ -89,6 +90,67 @@ impl v1::credential_projection_server::CredentialProjection for Projection {
             plan_revision,
         }))
     }
+}
+#[tonic::async_trait]
+impl v1::observed_credential_projection_server::ObservedCredentialProjection for Projection {
+    async fn project(
+        &self,
+        request: Request<v1::ProjectionRequest>,
+    ) -> Result<Response<v1::ObservedProjectionReply>, Status> {
+        self.pipeline.caller(request.metadata())?;
+        let _permit = self
+            .pipeline
+            .requests
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("projection capacity"))?;
+        let metadata = request.metadata().clone();
+        let input = request.into_inner();
+        if !(1..=9_007_199_254_740_991).contains(&input.request_id)
+            || input.permission_contract != 2
+            || input.permission_query.len() > 8192
+        {
+            return Err(Status::invalid_argument(
+                "invalid observed projection contract",
+            ));
+        }
+        let request = permission_live::Request::decode_observed_query(
+            &input.permission_query,
+            input.request_id,
+        )
+        .map_err(|_| Status::invalid_argument("invalid observed permission query"))?;
+        let pipeline = self.pipeline.clone();
+        let output = self
+            .runtime
+            .project_observed(
+                request,
+                Arc::new(move || pipeline.caller(&metadata).is_ok()),
+            )
+            .await
+            .map_err(|_| Status::unavailable("native observed projection refused"))?;
+        let reply = output
+            .into_reply(input.request_id)
+            .map_err(|_| Status::unavailable("native observed projection retired"))?;
+        Ok(Response::new(reply))
+    }
+}
+#[cfg(test)]
+pub(crate) fn observed_server(
+    runtime: Arc<projection_runtime::Runtime>,
+    keys: Arc<crate::app::CallerKeys>,
+) -> v1::observed_credential_projection_server::ObservedCredentialProjectionServer<
+    impl v1::observed_credential_projection_server::ObservedCredentialProjection,
+> {
+    v1::observed_credential_projection_server::ObservedCredentialProjectionServer::new(Projection {
+        runtime,
+        pipeline: Service {
+            router: axum::Router::new(),
+            keys,
+            requests: Arc::new(tokio::sync::Semaphore::new(4096)),
+        },
+    })
+    .max_decoding_message_size(8448)
+    .max_encoding_message_size(8192)
 }
 #[cfg(test)]
 pub(crate) fn server(

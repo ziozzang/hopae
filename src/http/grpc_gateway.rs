@@ -543,12 +543,17 @@ pub async fn serve_with_receipts(
                 .map_err(|_| anyhow::anyhow!("native projection owners unavailable"))
         })
         .transpose()?
-        .flatten()
-        .map(|service| {
-            v1::credential_projection_server::CredentialProjectionServer::new(service)
-                .max_decoding_message_size(8448)
-                .max_encoding_message_size(8192)
-        });
+        .flatten();
+    let observed_projection_service = projection_service.clone().map(|service| {
+        v1::observed_credential_projection_server::ObservedCredentialProjectionServer::new(service)
+            .max_decoding_message_size(8448)
+            .max_encoding_message_size(8192)
+    });
+    let projection_service = projection_service.map(|service| {
+        v1::credential_projection_server::CredentialProjectionServer::new(service)
+            .max_decoding_message_size(8448)
+            .max_encoding_message_size(8192)
+    });
     let receipt_service = services
         .map(|services| receipt_resources(pipeline.clone(), services))
         .transpose()?
@@ -576,6 +581,10 @@ pub async fn serve_with_receipts(
         )
         .add_optional_service(
             projection_service
+                .map(|service| bounded_transport(service, pipeline.clone(), ingress.clone(), 8448)),
+        )
+        .add_optional_service(
+            observed_projection_service
                 .map(|service| bounded_transport(service, pipeline.clone(), ingress.clone(), 8448)),
         )
         .serve_with_incoming_shutdown(hangang_runtime::incoming(listener), async move {

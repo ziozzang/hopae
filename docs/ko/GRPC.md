@@ -1,6 +1,6 @@
 # gRPC 게이트웨이 인증 확인
 
-<!-- translation-status: source=../GRPC.md source-rev=1 status=current -->
+<!-- translation-status: source=../GRPC.md source-rev=2 status=current -->
 
 [문서 목차](README.md) · [English](../GRPC.md)
 
@@ -26,3 +26,22 @@ TLS 파일 크기와 요청 시간 1초를 제한한다. gRPC 전체 처리량�
 종료는 기존 애플리케이션 드레인을 따른다. 빌드에는 protoc가 필요하다.
 
 실제 K8s gRPC 배포·한강 gRPC 클라이언트·릴리즈와 운영 반영은 후속 검증 대상이다.
+
+## 관측형 projection 출력 스키마
+
+`ObservedCredentialProjection.Project`는 추가된 생성 계약이며, SDK에 있다는
+사실만으로 실제 리스너가 제공한다고 볼 수 없습니다. 계약 2는 Pumgye 관측형
+permit 질의를 사용하며 기존 엄격 시간 계약 1과 분리됩니다. `chain_sha256`은
+디코딩·재인코딩 전의 정확한 `permission_query` 바이트에 대한 SHA-256입니다.
+매 시도마다 새 `request_id`를 쓰고 내부 질의 및 응답의 상관값과 일치시킵니다.
+
+고정된 인증 projection 소유자는 독립된 `hproj1:<32자리 소문자 hex 시작 세대>`
+시계와 소유자 세대, 현재 시각, 남은 기간을 보고합니다. 남은 기간은 비밀값 처리와
+최종 콜백 이후의 실제 BOOTTIME 잔여 기간을 내림한 값이어야 합니다. 인증·permit·
+출력의 절대 만료값을 비교하면 안 됩니다. 수신자는 RPC 전후 BOOTTIME 표본으로
+전송 지연·반올림·명시적 시계 오차를 보수적으로 차감하고, 원래 전제조건의 기한과
+교차한 뒤 최종 요청·설정·소유자 검사를 거쳐야 합니다. 미지원 시 기존 경로로
+전환하지 않고 거부합니다. 두 projection 응답의 기본 Debug는 비밀값을 숨깁니다.
+
+네이티브 관측형 구현과 명시적 시계 오차 설정은
+[네이티브 관측형 paired projection](OBSERVED_PROJECTION.md)을 참고한다.

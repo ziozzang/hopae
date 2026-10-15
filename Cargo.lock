@@ -1043,7 +1043,7 @@ dependencies = [
 [[package]]
 name = "hopae-grpc"
 version = "0.0.3"
-source = "git+https://github.com/ziozzang/hopae?rev=fd0605361165235086df70e9105ca276327ccb27#fd0605361165235086df70e9105ca276327ccb27"
+source = "git+https://github.com/ziozzang/hopae?rev=e01c67ed63203931aba0f45fbc8c10e42ed4a66f#e01c67ed63203931aba0f45fbc8c10e42ed4a66f"
 dependencies = [
  "ed25519-dalek",
  "prost",
@@ -1932,10 +1932,10 @@ dependencies = [
 
 [[package]]
 name = "pumgye-grpc"
-version = "0.1.6"
-source = "git+https://github.com/ziozzang/pumgye?rev=b4b7f18210f61c9e2f3bfce804cb87591746389b#b4b7f18210f61c9e2f3bfce804cb87591746389b"
+version = "0.1.7"
+source = "git+https://github.com/ziozzang/pumgye?rev=401d72f8aef4b3167a7055f2c2b3e368a2379d04#401d72f8aef4b3167a7055f2c2b3e368a2379d04"
 dependencies = [
- "hopae-grpc 0.0.3 (git+https://github.com/ziozzang/hopae?rev=fd0605361165235086df70e9105ca276327ccb27)",
+ "hopae-grpc 0.0.3 (git+https://github.com/ziozzang/hopae?rev=e01c67ed63203931aba0f45fbc8c10e42ed4a66f)",
  "prost",
  "tonic",
  "tonic-prost",

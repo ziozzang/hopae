@@ -28,6 +28,9 @@ pub struct Current {
     registry: Arc<Registry>,
 }
 impl Current {
+    pub(crate) fn revision(&self) -> u64 {
+        self.registry.revision()
+    }
     pub fn current(&self) -> bool {
         self.available.load(Ordering::Acquire)
             && self
@@ -60,6 +63,40 @@ impl Checked {
     pub fn receipt(&self) -> &VerifiedReceipt {
         &self.receipt
     }
+}
+/// Signature/registry evidence only. Source observations and local deadlines are
+/// deliberately separate; this type can never enter strict UTC consumption.
+pub(crate) struct ObservedChecked {
+    current: Current,
+    evidence: super::receipt::SignatureEvidence,
+    replay_key: [u8; 32],
+}
+impl ObservedChecked {
+    pub(crate) fn current(&self) -> bool {
+        self.current.current()
+    }
+    pub(crate) fn revision(&self) -> u64 {
+        self.current.registry.revision()
+    }
+    pub(crate) fn matches_registry(&self, registry: &Registry) -> Result<bool, Refused> {
+        Ok(self.current.registry.encode()? == registry.encode()?)
+    }
+    pub(crate) fn evidence(&self) -> &super::receipt::SignatureEvidence {
+        &self.evidence
+    }
+    pub(crate) fn replay_key(&self) -> &[u8; 32] {
+        &self.replay_key
+    }
+}
+fn replay_key(issuer: &str, claims: &super::receipt::Claims) -> [u8; 32] {
+    use sha2::{Digest as _, Sha256};
+    let mut hash = Sha256::new();
+    hash.update(b"hangang-zerotrust:receipt-consumption:v1\0");
+    hash.update((issuer.len() as u32).to_be_bytes());
+    hash.update(issuer.as_bytes());
+    hash.update([claims.purpose as u8]);
+    hash.update(claims.nonce);
+    hash.finalize().into()
 }
 impl Authority {
     pub fn load(connection: &Connection, minimum_revision: u64) -> Result<Self, Refused> {
@@ -194,26 +231,53 @@ impl Verifier {
         bytes: &[u8],
         now: u64,
     ) -> Result<Checked, Refused> {
+        if context.identity_authority_epoch.starts_with("clock1:")
+            || permit.is_some_and(|p| p.authority_epoch.starts_with("pobs1:"))
+        {
+            return Err(Refused);
+        }
+        self.verify_source_time(context, permit, bytes, now)
+    }
+    /// Exact local source validation only. Observed evidence never reaches the
+    /// public UTC verifier or generic replay entry through this method.
+    pub(crate) fn verify_source_time(
+        &self,
+        context: &Context<'_>,
+        permit: Option<&Permit<'_>>,
+        bytes: &[u8],
+        now: u64,
+    ) -> Result<Checked, Refused> {
         if !self.available.load(Ordering::Acquire) {
             return Err(Refused);
         }
         let registry = self.snapshot.load_full().ok_or(Refused)?;
         let receipt = registry.verify(context, permit, bytes, now)?;
-        use sha2::{Digest as _, Sha256};
-        let mut hash = Sha256::new();
-        hash.update(b"hangang-zerotrust:receipt-consumption:v1\0");
-        hash.update((context.issuer_ref.len() as u32).to_be_bytes());
-        hash.update(context.issuer_ref.as_bytes());
-        hash.update([receipt.claims().purpose as u8]);
-        hash.update(receipt.claims().nonce);
         let checked = Checked {
             available: self.available.clone(),
             snapshot: self.snapshot.clone(),
             registry,
+            replay_key: replay_key(context.issuer_ref, receipt.claims()),
             receipt,
-            replay_key: hash.finalize().into(),
         };
         if !self.is_current(&checked) {
+            return Err(Refused);
+        }
+        Ok(checked)
+    }
+    pub(crate) fn verify_observed_signature(
+        &self,
+        context: &Context<'_>,
+        permit: Option<&Permit<'_>>,
+        bytes: &[u8],
+    ) -> Result<ObservedChecked, Refused> {
+        let current = self.capture()?;
+        let evidence = current.registry.verify_signature(context, permit, bytes)?;
+        let checked = ObservedChecked {
+            replay_key: replay_key(context.issuer_ref, evidence.claims()),
+            current,
+            evidence,
+        };
+        if !checked.current() {
             return Err(Refused);
         }
         Ok(checked)

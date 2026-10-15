@@ -349,7 +349,7 @@ impl Issuer {
             return Err(Refused);
         }
         let key_check = key_verifier
-            .map(|verifier| verifier.verify(context, None, bytes, verified_ms))
+            .map(|verifier| verifier.verify_source_time(context, None, bytes, verified_ms))
             .transpose()?;
         let (expires_ms, receipt_sha256) = if let Some(checked) = &key_check {
             (

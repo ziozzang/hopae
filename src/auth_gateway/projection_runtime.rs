@@ -24,6 +24,7 @@ pub struct Runtime {
     store: crate::store::Store,
     clock: Arc<dyn crate::crypto::Clock>,
     workers: Arc<Semaphore>,
+    receiver: Arc<hangang_runtime::time::ReceiverClock>,
 }
 struct Active(Arc<AtomicBool>);
 impl Drop for Active {
@@ -89,6 +90,85 @@ impl Output {
         Ok(result)
     }
 }
+struct ObservedFence {
+    runtime: Arc<Runtime>,
+    request: Arc<Request>,
+    profile: Arc<super::authority::Snapshot>,
+    application: Arc<crate::policy::types::ConfigSnapshot>,
+    plan: Arc<projection_authority::Snapshot>,
+    keys: Current,
+    caller: Caller,
+    active: Active,
+}
+impl ObservedFence {
+    fn check(&self) -> Result<(), Refused> {
+        let caller_current = (self.caller)();
+        let context = self.request.authentication_context()?;
+        let live = self.runtime.issuer.verify_live_service_observed(
+            &self.runtime.profiles,
+            &self.runtime.applications,
+            &context,
+            &self.request.native().receipt,
+            &context.request_sha256,
+            &self.runtime.verifier,
+        )?;
+        live.current()?;
+        self.runtime.receiver.sample_ticks().map_err(|_| Refused)?;
+        if !caller_current
+            || !self.active.0.load(Ordering::Acquire)
+            || !self.profile.available()
+            || !self.plan.available()
+            || !self.keys.current()
+            || !Arc::ptr_eq(&self.profile, &self.runtime.profiles.load_full())
+            || !Arc::ptr_eq(&self.application, &self.runtime.applications.load_full())
+            || !Arc::ptr_eq(&self.plan, &self.runtime.plans.load_full())
+        {
+            return Err(Refused);
+        }
+        Ok(())
+    }
+}
+pub(crate) struct ObservedOutput {
+    fence: ObservedFence,
+    value: super::projection_observed::Output,
+}
+impl ObservedOutput {
+    pub(crate) fn into_reply(
+        self,
+        request_id: u64,
+    ) -> Result<hopae_grpc::v1::ObservedProjectionReply, Refused> {
+        let context = self.fence.request.authentication_context()?;
+        let service = context.service.to_owned();
+        let audience = context.audience.to_owned();
+        let parsed = hopae_grpc::service_epoch::decode_clock(context.identity_authority_epoch)
+            .map_err(|_| Refused)?;
+        let profile_revision = parsed.epoch.profile_revision;
+        let application_generation = parsed.epoch.application_generation;
+        let key_registry_revision = self.fence.keys.revision();
+        let (name, value, envelope) =
+            self.value
+                .into_header(&service, &audience, &context.request_sha256, &|| {
+                    self.fence.check()
+                })?;
+        Ok(hopae_grpc::v1::ObservedProjectionReply {
+            request_id,
+            service,
+            audience,
+            request_sha256: envelope.request_sha256.to_vec(),
+            header_name: name.to_string(),
+            header_value: value.as_bytes().to_vec(),
+            chain_sha256: envelope.chain_sha256.to_vec(),
+            output_clock_domain: envelope.output_clock_domain,
+            owner_now_ms: envelope.owner_now_ms,
+            remaining_ms: envelope.remaining_ms,
+            profile_revision,
+            application_generation,
+            key_registry_revision,
+            plan_revision: envelope.plan_revision,
+            cache_ttl_ms: 0,
+        })
+    }
+}
 impl Runtime {
     /// Capture actual owners once at listener setup, never a request-defined owner.
     pub fn from_services(services: &crate::app::Services) -> Result<Option<Arc<Self>>, Refused> {
@@ -113,8 +193,13 @@ impl Runtime {
             .lock()
             .map_err(|_| Refused)?
             .reader();
+        let mut generation = [0; 16];
+        services.rng.fill(&mut generation);
+        let receiver =
+            Arc::new(hangang_runtime::time::ReceiverClock::new(generation).map_err(|_| Refused)?);
         Ok(Some(Arc::new(Self {
             resources,
+            receiver,
             issuer,
             verifier,
             profiles,
@@ -127,6 +212,123 @@ impl Runtime {
     }
     fn now(&self) -> Result<u64, Refused> {
         self.clock.now().0.try_into().map_err(|_| Refused)
+    }
+    pub(crate) async fn project_observed(
+        self: &Arc<Self>,
+        request: Arc<Request>,
+        caller: Caller,
+    ) -> Result<ObservedOutput, Refused> {
+        if !caller() {
+            return Err(Refused);
+        }
+        let remote_rates = self.resources.observed_rates.as_ref().ok_or(Refused)?;
+        let profile = self.profiles.load_full();
+        let application = self.applications.load_full();
+        let plan = self.plans.load_full();
+        if !plan.available() || !plan.enabled() {
+            return Err(Refused);
+        }
+        let context = request.authentication_context()?;
+        let live = self.issuer.verify_live_service_observed(
+            &self.profiles,
+            &self.applications,
+            &context,
+            &request.native().receipt,
+            &context.request_sha256,
+            &self.verifier,
+        )?;
+        let authentication = super::projection_observed::observe_local(
+            &self.verifier,
+            &request,
+            &live,
+            &self.receiver,
+            &hopae_grpc::receipt_time::ClockRates::EQUAL,
+        )?;
+        let permission = self
+            .resources
+            .client
+            .observe(
+                request.clone(),
+                &self.verifier,
+                &self.receiver,
+                remote_rates,
+            )
+            .await?;
+        live.current()?;
+        let chain = super::projection_observed::from_native(
+            &request,
+            authentication,
+            permission,
+            &self.resources.client,
+            &self.receiver,
+        )?;
+        let remaining = chain.remaining(&self.receiver)?;
+        let worker = self
+            .workers
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Refused)?;
+        let active = Active(Arc::new(AtomicBool::new(true)));
+        let cancelled = active.0.clone();
+        let runtime = self.clone();
+        let output_runtime = self.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            let _worker = worker;
+            let keys = runtime.verifier.capture()?;
+            let current = || -> Result<(), Refused> {
+                let caller_current = caller();
+                let context = request.authentication_context()?;
+                let live = runtime.issuer.verify_live_service_observed(
+                    &runtime.profiles,
+                    &runtime.applications,
+                    &context,
+                    &request.native().receipt,
+                    &context.request_sha256,
+                    &runtime.verifier,
+                )?;
+                live.current()?;
+                runtime.receiver.sample_ticks().map_err(|_| Refused)?;
+                if !caller_current
+                    || !cancelled.load(Ordering::Acquire)
+                    || !profile.available()
+                    || !keys.current()
+                    || !plan.available()
+                    || !Arc::ptr_eq(&profile, &runtime.profiles.load_full())
+                    || !Arc::ptr_eq(&application, &runtime.applications.load_full())
+                    || !Arc::ptr_eq(&plan, &runtime.plans.load_full())
+                {
+                    return Err(Refused);
+                }
+                Ok(())
+            };
+            current()?;
+            let value = plan.project_observed(
+                chain,
+                &mut runtime.store.conn(),
+                runtime.receiver.clone(),
+                &|_| current(),
+                &|reference| runtime.resources.resolve(reference),
+            )?;
+            current()?;
+            Ok::<_, Refused>((value, request, profile, application, plan, keys, caller))
+        });
+        let (value, request, profile, application, plan, keys, caller) =
+            tokio::time::timeout(remaining, task)
+                .await
+                .map_err(|_| Refused)?
+                .map_err(|_| Refused)??;
+        let fence = ObservedFence {
+            runtime: output_runtime,
+            request,
+            profile,
+            application,
+            plan,
+            keys,
+            caller,
+            active,
+        };
+        fence.check()?;
+        Ok(ObservedOutput { fence, value })
     }
     /// Caller is a native transport-role recheck. It must never originate in
     /// request claims, scripts or a caller-provided allow flag.
@@ -304,6 +506,64 @@ pub(crate) mod tests {
             }))
         }
     }
+    #[tonic::async_trait]
+    impl pumgye_grpc::v1::observed_projection_permits_server::ObservedProjectionPermits for Peer {
+        async fn issue(
+            &self,
+            _: tonic::Request<AuthenticatedResourceRequest>,
+        ) -> Result<tonic::Response<pumgye_grpc::v1::ObservedProjectionPermitReply>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("fixture only"))
+        }
+        async fn observe(
+            &self,
+            request: tonic::Request<PermitValidationRequest>,
+        ) -> Result<tonic::Response<pumgye_grpc::v1::ObservedPermitTimeReply>, tonic::Status>
+        {
+            use sha2::{Digest as _, Sha256};
+            if request
+                .metadata()
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                != Some(concat!(
+                    "Bearer ",
+                    "owned-runtime-peer-credential-at-least-32-bytes"
+                ))
+            {
+                return Err(tonic::Status::unauthenticated("fixture caller"));
+            }
+            self.0.fetch_add(1, Ordering::Relaxed);
+            let input = request.into_inner();
+            let wrong_report_domain = input.request.as_ref().is_some_and(|r| r.request_id == 9006);
+            let proof = input
+                .permit
+                .ok_or_else(|| tonic::Status::invalid_argument("proof"))?;
+            let binding = proof
+                .binding
+                .ok_or_else(|| tonic::Status::invalid_argument("binding"))?;
+            let issued = u64::from_be_bytes(proof.receipt[2..10].try_into().unwrap());
+            let expires = u64::from_be_bytes(proof.receipt[10..18].try_into().unwrap());
+            Ok(tonic::Response::new(
+                pumgye_grpc::v1::ObservedPermitTimeReply {
+                    request_id: input.request_id,
+                    receipt_sha256: Sha256::digest(proof.receipt).to_vec(),
+                    clock_domain: if wrong_report_domain {
+                        "pobs1:323456789abcdef0123456789abcdef0:owned-policy".into()
+                    } else {
+                        binding.authority_epoch
+                    },
+                    owner_now_ms: issued + 1,
+                    proof_remaining_ms: (expires - issued - 1) as u32,
+                    remaining_ms: (expires - issued - 1) as u32,
+                    policy_revision: binding.policy_revision,
+                    network_revision: binding.network_revision,
+                    route_revision: binding.route_revision,
+                    plan_revision: binding.plan_revision,
+                    cache_ttl_ms: 0,
+                },
+            ))
+        }
+    }
     async fn fresh(
         services: &crate::app::Services,
         router: &axum::Router,
@@ -311,7 +571,6 @@ pub(crate) mod tests {
         key: &str,
         plan_revision: u64,
     ) -> Arc<Request> {
-        use sha2::{Digest, Sha256};
         let mut call = tonic::Request::new(message.clone());
         call.metadata_mut()
             .insert("authorization", format!("Bearer {key}").parse().unwrap());
@@ -323,6 +582,15 @@ pub(crate) mod tests {
         .await
         .unwrap()
         .into_inner();
+        fresh_from_auth(services, auth, plan_revision, false)
+    }
+    fn fresh_from_auth(
+        services: &crate::app::Services,
+        auth: hopae_grpc::v1::ServiceReceiptReply,
+        plan_revision: u64,
+        observed: bool,
+    ) -> Arc<Request> {
+        use sha2::{Digest as _, Sha256};
         let context = auth.context.as_ref().unwrap();
         let identity = context.identity.as_ref().unwrap();
         let signer = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
@@ -346,14 +614,22 @@ pub(crate) mod tests {
             decision_ref: "owned-runtime-decision",
             resource: "db:orders",
             action: "select",
-            authority_epoch: "owned-policy",
+            authority_epoch: if observed {
+                "pobs1:223456789abcdef0123456789abcdef0:owned-policy"
+            } else {
+                "owned-policy"
+            },
             catalog_revision: 1,
             policy_revision: 1,
             network_revision: 1,
             route_revision: 1,
             plan_revision,
         };
-        let now = services.clock.now().0 as u64;
+        let now = if observed {
+            9_000_000
+        } else {
+            services.clock.now().0 as u64
+        };
         let permission = receipt::sign(
             &signer,
             &receipt::Claims {
@@ -402,6 +678,45 @@ pub(crate) mod tests {
         native.context.as_mut().unwrap().key_epoch = 1;
         Request::new(native, wire).unwrap()
     }
+    async fn fresh_observed_pair(
+        services: &crate::app::Services,
+        client: &hopae_grpc::observed_client::Client,
+        message: &hopae_grpc::v1::ServiceReceiptRequest,
+        plan_revision: u64,
+        request_id: u64,
+    ) -> (Arc<Request>, Vec<u8>) {
+        let intent = client
+            .prepare_issue_digest(
+                hopae_grpc::observed_client::ServiceScope {
+                    service: message.service.clone(),
+                    audience: message.audience.clone(),
+                },
+                [3; 32],
+                message.verification.as_ref().unwrap().headers.clone(),
+            )
+            .unwrap();
+        let auth = client.issue(intent).await.unwrap();
+        let pair = fresh_from_auth(
+            services,
+            hopae_grpc::v1::ServiceReceiptReply {
+                request_id,
+                context: Some(auth.context().clone()),
+                receipt: auth.receipt().to_vec(),
+            },
+            plan_revision,
+            true,
+        );
+        let query = PermitValidationRequest {
+            request_id,
+            request: Some(pair.native().clone()),
+            permit: Some(pair.permit().clone()),
+        }
+        .encode_to_vec();
+        (
+            Request::decode_observed_query(&query, request_id).unwrap(),
+            query,
+        )
+    }
     fn services_nonce(services: &crate::app::Services) -> [u8; 32] {
         let mut nonce = [0; 32];
         services.rng.fill(&mut nonce);
@@ -442,6 +757,7 @@ pub(crate) mod tests {
                 store: runtime.store.clone(),
                 clock: clock.clone(),
                 workers: runtime.workers.clone(),
+                receiver: runtime.receiver.clone(),
             });
             let active = Arc::new(AtomicBool::new(true));
             let caller_current = Arc::new(AtomicBool::new(true));
@@ -501,8 +817,13 @@ pub(crate) mod tests {
         .unwrap();
         let calls = Arc::new(AtomicU64::new(0));
         let peer = Peer(calls.clone());
+        let observed_peer = Peer(calls.clone());
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let resources = projection_resources::Configuration {
+            observed_clock_rates: Some(projection_resources::ObservedClockRates {
+                source_ppm: 0,
+                receiver_ppm: 0,
+            }),
             authority: projection_resources::Authority {
                 address: address.clone(),
                 server_name: "hopae.example.test".into(),
@@ -590,6 +911,10 @@ pub(crate) mod tests {
         let runtime = Runtime::from_services(&services).unwrap().unwrap();
         let projection =
             crate::http::grpc_projection::server(runtime.clone(), services.caller_keys.clone());
+        let observed_projection = crate::http::grpc_projection::observed_server(
+            runtime.clone(),
+            services.caller_keys.clone(),
+        );
         let receipts =
             crate::http::grpc_gateway::receipt_server_for_test(services.clone(), router.clone());
         let running = tokio::spawn(async move {
@@ -600,6 +925,8 @@ pub(crate) mod tests {
                         .max_decoding_message_size(8192)
                         .max_encoding_message_size(128),
                 )
+                .add_service(pumgye_grpc::v1::observed_projection_permits_server::ObservedProjectionPermitsServer::new(observed_peer).max_decoding_message_size(8192).max_encoding_message_size(1024))
+                .add_service(observed_projection)
                 .add_service(projection)
                 .add_service(receipts)
                 .serve_with_incoming_shutdown(hangang_runtime::incoming(listener), async {
@@ -822,6 +1149,179 @@ pub(crate) mod tests {
             native_client
                 .check(&native_auth, native_auth.request())
                 .is_ok()
+        );
+        let observed_pair = fresh_from_auth(
+            &services,
+            hopae_grpc::v1::ServiceReceiptReply {
+                request_id: 9002,
+                context: Some(native_auth.context().clone()),
+                receipt: native_auth.receipt().to_vec(),
+            },
+            plan_revision,
+            true,
+        );
+        let permission_query = PermitValidationRequest {
+            request_id: 9002,
+            request: Some(observed_pair.native().clone()),
+            permit: Some(observed_pair.permit().clone()),
+        }
+        .encode_to_vec();
+        let mut observed_client=hopae_grpc::v1::observed_credential_projection_client::ObservedCredentialProjectionClient::new(channel.clone());
+        let observed_rpc = || {
+            let mut request = tonic::Request::new(hopae_grpc::v1::ProjectionRequest {
+                request_id: 9002,
+                permission_contract: 2,
+                permission_query: permission_query.clone(),
+            });
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {key}").parse().unwrap());
+            request
+        };
+        let output = observed_client
+            .project(observed_rpc())
+            .await
+            .unwrap()
+            .into_inner();
+        use sha2::{Digest as _, Sha256};
+        assert_eq!(
+            output.chain_sha256,
+            Sha256::digest(&permission_query).to_vec()
+        );
+        assert_eq!(output.request_id, 9002);
+        assert_eq!(output.request_sha256, vec![3; 32]);
+        assert_eq!(output.header_value, b"Bearer owned-runtime-origin-token");
+        assert!(output.output_clock_domain.starts_with("hproj1:"));
+        assert!(output.remaining_ms > 0 && output.remaining_ms < 800);
+        assert!(output.owner_now_ms < 9_000_000);
+        assert_eq!(
+            output.profile_revision,
+            native_auth.context().identity.as_ref().unwrap().revision
+        );
+        assert_eq!(output.plan_revision, plan_revision);
+        assert_eq!(output.cache_ttl_ms, 0);
+        assert!(!format!("{output:?}").contains("owned-runtime-origin-token"));
+        assert_eq!(
+            observed_client
+                .project(observed_rpc())
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::Unavailable
+        );
+        assert_eq!(count(), 8);
+        let (unconsumed, _) =
+            fresh_observed_pair(&services, &native_client, &message, plan_revision, 9005).await;
+        let configured = services.projection_resources.clone();
+        let mut strict_only = resources.clone();
+        strict_only.observed_clock_rates = None;
+        services.projection_resources = Some(Arc::new(
+            strict_only
+                .prepare(&|name| {
+                    Some(if name == "OWNED_PEER" {
+                        TOKEN.into()
+                    } else {
+                        "owned-runtime-origin-token".into()
+                    })
+                })
+                .unwrap(),
+        ));
+        let strict_only_runtime = Runtime::from_services(&services).unwrap().unwrap();
+        services.projection_resources = configured;
+        let prior_calls = calls.load(Ordering::Relaxed);
+        let prior_count = count();
+        assert!(
+            strict_only_runtime
+                .project_observed(unconsumed, caller.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            prior_calls,
+            "missing explicit rates must refuse before owner RPC"
+        );
+        assert_eq!(count(), prior_count);
+        let (bad_domain, _) =
+            fresh_observed_pair(&services, &native_client, &message, plan_revision, 9006).await;
+        let prior_count = count();
+        assert!(
+            runtime
+                .project_observed(bad_domain, caller.clone())
+                .await
+                .is_err(),
+            "authenticated report must match exact signed source domain"
+        );
+        assert_eq!(count(), prior_count);
+        let (bad_signature, _) =
+            fresh_observed_pair(&services, &native_client, &message, plan_revision, 9007).await;
+        let mut permit = bad_signature.permit().clone();
+        let last = permit.receipt.len() - 1;
+        permit.receipt[last] ^= 1;
+        let query = PermitValidationRequest {
+            request_id: 9007,
+            request: Some(bad_signature.native().clone()),
+            permit: Some(permit),
+        }
+        .encode_to_vec();
+        let bad_signature = Request::decode_observed_query(&query, 9007).unwrap();
+        let prior_calls = calls.load(Ordering::Relaxed);
+        assert!(
+            runtime
+                .project_observed(bad_signature, caller.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            prior_calls,
+            "invalid signature must refuse before source RPC"
+        );
+        assert_eq!(count(), prior_count);
+        // Real native cancellation while queued behind the authoritative SQL owner
+        // rolls back both observed nonces and never resolves a secret.
+        let (queued, _) =
+            fresh_observed_pair(&services, &native_client, &message, plan_revision, 9003).await;
+        let before_count = count();
+        let held = services.store.conn();
+        let r = runtime.clone();
+        let c = caller.clone();
+        let pending = tokio::spawn(async move { r.project_observed(queued, c).await });
+        tokio::time::timeout(std::time::Duration::from_millis(700), async {
+            while runtime.workers.available_permits() == 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        pending.abort();
+        assert!(pending.await.err().unwrap().is_cancelled());
+        drop(held);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while runtime.workers.available_permits() != 4 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(count(), before_count);
+        let (pair, _) =
+            fresh_observed_pair(&services, &native_client, &message, plan_revision, 9004).await;
+        let output = runtime
+            .project_observed(pair, caller.clone())
+            .await
+            .unwrap();
+        let old_application = services.snapshot.load_full();
+        services
+            .snapshot
+            .store(Arc::new((*old_application).clone()));
+        assert!(output.into_reply(9004).is_err());
+        services.snapshot.store(old_application);
+        assert_eq!(
+            count(),
+            before_count + 2,
+            "postcommit refusal must retain the pair"
         );
         let independent_query = independent_client
             .prepare_observation(native_auth.context().clone(), [3; 32])

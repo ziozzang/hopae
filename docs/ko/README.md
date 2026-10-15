@@ -1,6 +1,6 @@
 # 문서
 
-<!-- translation-status: source=../README.md source-rev=10 status=current -->
+<!-- translation-status: source=../README.md source-rev=11 status=current -->
 
 [English](../README.md)
 
@@ -39,3 +39,5 @@
 - [2차 인증 확장](SECOND_FACTOR_EXTENSIONS.md) — 네이티브 OTP와 외부 API·Lua 경계.
 
 - [Kubernetes 워크로드 인증](KUBERNETES_WORKLOAD.md) — 네이티브 Pod-bound TokenReview 연결기; 프로필·전송 연계 예정.
+
+- [네이티브 관측형 paired projection](OBSERVED_PROJECTION.md) — 명시적 소스 시계 예산, 원자적 재생 방지와 재시작 보존.

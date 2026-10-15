@@ -24,22 +24,9 @@ pub struct Admission {
     pub(crate) scope: super::projection::Scope,
 }
 pub fn verify(verifier: &Verifier, input: Input<'_>, now: u64) -> Result<Admission, Refused> {
+    validate_chain(&input)?;
     let a = input.authentication_context;
     let p = input.permission_context;
-    if a.identity_authority_epoch != p.identity_authority_epoch
-        || a.identity.subject_ref != p.identity.subject_ref
-        || a.identity.kind != p.identity.kind
-        || a.identity.aal != p.identity.aal
-        || a.identity.revision != p.identity.revision
-        || a.identity.credential_generation != p.identity.credential_generation
-        || a.service != p.service
-        || a.audience != p.audience
-        || a.request_sha256 != p.request_sha256
-        || <[u8; 32]>::from(Sha256::digest(input.authentication_receipt))
-            != input.permit.authentication_receipt_sha256
-    {
-        return Err(Refused);
-    }
     let authentication = verifier.verify(a, None, input.authentication_receipt, now)?;
     let permission = verifier.verify(p, Some(input.permit), input.permission_receipt, now)?;
     if authentication.revision() != permission.revision() {
@@ -69,6 +56,25 @@ pub fn verify(verifier: &Verifier, input: Input<'_>, now: u64) -> Result<Admissi
         authentication,
         permission,
     })
+}
+pub(crate) fn validate_chain(input: &Input<'_>) -> Result<(), Refused> {
+    let a = input.authentication_context;
+    let p = input.permission_context;
+    if a.identity_authority_epoch != p.identity_authority_epoch
+        || a.identity.subject_ref != p.identity.subject_ref
+        || a.identity.kind != p.identity.kind
+        || a.identity.aal != p.identity.aal
+        || a.identity.revision != p.identity.revision
+        || a.identity.credential_generation != p.identity.credential_generation
+        || a.service != p.service
+        || a.audience != p.audience
+        || a.request_sha256 != p.request_sha256
+        || <[u8; 32]>::from(Sha256::digest(input.authentication_receipt))
+            != input.permit.authentication_receipt_sha256
+    {
+        return Err(Refused);
+    }
+    Ok(())
 }
 impl Admission {
     pub(crate) fn restrict_expiry(&mut self, expiry: u64) -> Result<(), Refused> {

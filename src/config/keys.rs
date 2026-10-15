@@ -217,6 +217,10 @@ pub(super) const ROOT: Node = Obj(&[
                 ]),
             ),
             (
+                "observed_clock_rates",
+                Obj(&[("source_ppm", Leaf), ("receiver_ppm", Leaf)]),
+            ),
+            (
                 "secrets",
                 Arr(&Obj(&[("reference", Leaf), ("token_env", Leaf)])),
             ),

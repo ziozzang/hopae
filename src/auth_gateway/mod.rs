@@ -8,6 +8,7 @@ pub mod permission_live;
 pub mod projection;
 pub mod projection_admission;
 pub mod projection_authority;
+pub(crate) mod projection_observed;
 pub mod projection_receiver;
 pub mod projection_resources;
 pub mod projection_runtime;

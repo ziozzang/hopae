@@ -153,6 +153,209 @@ pub(crate) fn consume_group<T>(
     tx.commit().map_err(|_| Refused)?;
     Ok(result)
 }
+// Observed v2 rows share IDS/COUNT with v1: mode never changes nonce identity.
+// Only this generation's BOOTTIME index can collect them. Unknown generations
+// remain tombstones indefinitely, including after restart; capacity fails closed.
+const OBSERVED_EXPIRY: &str = "projection_nonce_observed_expiry_v2:";
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObservedRow {
+    version: u8,
+    receiver_generation: [u8; 16],
+    retain_until_ms: u64,
+    source_domain: String,
+}
+pub(crate) struct ObservedProof {
+    checked: super::receipt_authority::ObservedChecked,
+    deadline: hangang_runtime::time::LocalDeadline,
+    retention: hangang_runtime::time::ReplayRetention,
+    source_domain: String,
+}
+impl ObservedProof {
+    /// Only native fixed-owner adapters may call this after authenticating the
+    /// report's exact source domain, proof digest and live owner generations.
+    pub(crate) fn from_owner_report(
+        checked: super::receipt_authority::ObservedChecked,
+        source_domain: String,
+        report: &hopae_grpc::receipt_time::Report,
+        exchange: hangang_runtime::time::ExchangeSample,
+        rates: &hopae_grpc::receipt_time::ClockRates,
+    ) -> Result<Self, Refused> {
+        if source_domain.is_empty()
+            || source_domain.len() > 256
+            || source_domain.chars().any(char::is_control)
+            || !checked.current()
+        {
+            return Err(Refused);
+        }
+        let bounds = hopae_grpc::receipt_time::Bounds::from_signature_with_rates(
+            checked.evidence(),
+            report,
+            &hopae_grpc::receipt_time::Exchange {
+                before_ms: exchange.before_ticks(),
+                after_ms: exchange.after_ticks(),
+                elapsed_ms: exchange.elapsed_ms(),
+            },
+            rates,
+        )
+        .map_err(|_| Refused)?;
+        let (deadline, retention) = exchange
+            .bind_bounds(bounds.admit_until_ms(), bounds.retain_until_ms())
+            .map_err(|_| Refused)?;
+        Ok(Self {
+            checked,
+            deadline,
+            retention,
+            source_domain,
+        })
+    }
+    pub(crate) fn matches_bytes(&self, bytes: &[u8]) -> bool {
+        use sha2::{Digest as _, Sha256};
+        <[u8; 32]>::from(Sha256::digest(bytes)) == *self.checked.evidence().sha256()
+    }
+    pub(crate) fn remaining(
+        &self,
+        clock: &hangang_runtime::time::ReceiverClock,
+    ) -> Result<std::time::Duration, Refused> {
+        let remaining = self.deadline.remaining(clock).map_err(|_| Refused)?;
+        if !self.checked.current() {
+            return Err(Refused);
+        }
+        Ok(remaining)
+    }
+}
+/// Exactly two independently retained nonces. No UTC/source-time read or cleanup
+/// occurs here. Native guard is called before and after secret resolution, then
+/// local time/registry fences run after the final external callback.
+pub(crate) fn consume_observed_pair<T>(
+    db: &mut Connection,
+    proofs: [&ObservedProof; 2],
+    clock: &hangang_runtime::time::ReceiverClock,
+    guard: &dyn Fn(&Connection) -> Result<(), Refused>,
+    operation: impl FnOnce(&Transaction<'_>) -> Result<T, Refused>,
+) -> Result<T, Refused> {
+    let revision = proofs[0].checked.revision();
+    if proofs.iter().any(|p| p.checked.revision() != revision)
+        || proofs[0].checked.replay_key() == proofs[1].checked.replay_key()
+    {
+        return Err(Refused);
+    }
+    let check = |db: &Connection| -> Result<(), Refused> {
+        for p in &proofs {
+            p.deadline.check(clock).map_err(|_| Refused)?;
+            // Checks the private clock instance, not merely generation bytes.
+            p.retention.elapsed(clock).map_err(|_| Refused)?;
+            if !p.checked.current() {
+                return Err(Refused);
+            }
+        }
+        let current = receipt_key_store::load(db, revision)?.ok_or(Refused)?;
+        if current.revision() != revision
+            || proofs
+                .iter()
+                .any(|p| !p.checked.matches_registry(&current).unwrap_or(false))
+        {
+            return Err(Refused);
+        }
+        Ok(())
+    };
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| Refused)?;
+    guard(&tx)?;
+    check(&tx)?;
+    let registry = receipt_key_store::load(&tx, revision)?
+        .ok_or(Refused)?
+        .encode()?;
+    let now = clock.sample_ticks().map_err(|_| Refused)?;
+    let generation = data_encoding::HEXLOWER.encode(clock.generation());
+    let prefix = format!("{OBSERVED_EXPIRY}{generation}:");
+    let mut count = match value(&tx, COUNT)? {
+        Some(v) => v.parse::<u64>().map_err(|_| Refused)?,
+        None => tx
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key>=?1 AND key<?2",
+                rusqlite::params![IDS, "projection_nonce_id;"],
+                |r| r.get(0),
+            )
+            .map_err(|_| Refused)?,
+    };
+    if count > 1_000_000 {
+        return Err(Refused);
+    }
+    let expired = {
+        let mut query = tx
+            .prepare("SELECT key,value FROM meta WHERE key>=?1 AND key<?2 ORDER BY key LIMIT 128")
+            .map_err(|_| Refused)?;
+        query
+            .query_map(
+                rusqlite::params![prefix, format!("{prefix}{now:020};")],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .map_err(|_| Refused)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| Refused)?
+    };
+    for (index, id) in expired {
+        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Refused);
+        }
+        let id_key = format!("{IDS}{id}");
+        let row: ObservedRow =
+            serde_json::from_str(&value(&tx, &id_key)?.ok_or(Refused)?).map_err(|_| Refused)?;
+        if row.version != 2
+            || row.receiver_generation != *clock.generation()
+            || row.retain_until_ms > now
+            || index != format!("{prefix}{:020}:{id}", row.retain_until_ms)
+        {
+            return Err(Refused);
+        }
+        tx.execute(
+            "DELETE FROM meta WHERE key=?1 OR key=?2",
+            rusqlite::params![index, id_key],
+        )
+        .map_err(|_| Refused)?;
+        count = count.checked_sub(1).ok_or(Refused)?;
+    }
+    for proof in proofs {
+        let id = data_encoding::HEXLOWER.encode(proof.checked.replay_key());
+        let id_key = format!("{IDS}{id}");
+        if count >= 1_000_000 || value(&tx, &id_key)?.is_some() {
+            return Err(Refused);
+        }
+        let row = ObservedRow {
+            version: 2,
+            receiver_generation: *clock.generation(),
+            retain_until_ms: proof.retention.ticks(),
+            source_domain: proof.source_domain.clone(),
+        };
+        let encoded = serde_json::to_string(&row).map_err(|_| Refused)?;
+        tx.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            rusqlite::params![id_key, encoded],
+        )
+        .map_err(|_| Refused)?;
+        tx.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            rusqlite::params![format!("{prefix}{:020}:{id}", row.retain_until_ms), id],
+        )
+        .map_err(|_| Refused)?;
+        count += 1;
+    }
+    put(&tx, COUNT, &count.to_string())?;
+    let result = operation(&tx)?;
+    guard(&tx)?;
+    check(&tx)?;
+    if receipt_key_store::load(&tx, revision)?
+        .ok_or(Refused)?
+        .encode()?
+        != registry
+    {
+        return Err(Refused);
+    }
+    tx.commit().map_err(|_| Refused)?;
+    Ok(result)
+}
 #[cfg(test)]
 mod tests {
     use super::super::{
