@@ -1358,11 +1358,31 @@ fn last_event_attr(f: &Fx, kind: &str, key: &str) -> Option<String> {
     f.store
         .conn()
         .query_row(
-            "SELECT CAST(json_extract(attrs, ?2) AS TEXT) FROM events WHERE kind=?1 ORDER BY at DESC, event_id DESC LIMIT 1",
+            // This helper asks for the last committed fixture mutation. Event
+            // IDs order generation, not commit, and bounded global ID state
+            // need not retain an old fixture millisecond during parallel tests.
+            "SELECT CAST(json_extract(attrs, ?2) AS TEXT) FROM events WHERE kind=?1 ORDER BY rowid DESC LIMIT 1",
             [kind, &format!("$.{key}")],
             |r| r.get(0),
         )
         .unwrap()
+}
+
+#[test]
+fn latest_admin_event_fixture_uses_commit_order_with_equal_times_and_reversed_ids() {
+    let f = fx();
+    let conn = f.store.conn();
+    for (id, attrs) in [
+        ("e_0000000000000000000000000Z", r#"{"actor":"first"}"#),
+        ("e_0000000000000000000000000A", r#"{"actor":"second"}"#),
+    ] {
+        conn.execute("INSERT INTO events(event_id,at,kind,outcome,request_id,attrs) VALUES (?1,10,'admin.grant','info','fixture',?2)",rusqlite::params![id,attrs]).unwrap();
+    }
+    drop(conn);
+    assert_eq!(
+        last_event_attr(&f, "admin.grant", "actor").as_deref(),
+        Some("second")
+    );
 }
 
 #[tokio::test]
