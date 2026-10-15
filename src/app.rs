@@ -2280,6 +2280,7 @@ mod tests {
             message.clone(),
             KEY,
             &tlsdir,
+            &issuer.validate().unwrap(),
         )
         .await;
         let call = |key: &str| {

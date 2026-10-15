@@ -588,3 +588,17 @@ requires retirement and final native owner checks. Generated mTLS tests exercise
 multiple subjects/revisions on one client, new-process proofs, old-proof refusal,
 policy mismatches and registry downgrade. This does not qualify arbitrary replica
 routing, durable replay, permit issuance or final credential output.
+
+
+The native SDK is additionally exercised against actual Hopae receipt/profile/
+application/key owners over mTLS in the projection-runtime qualification. Trust
+comes from the fixture's native issuer configuration, not the returned context.
+The fixture checks digest-only issuance, independent receiver observation and
+refresh, client-capability isolation, wrong caller/digest refusal and actual key
+withdrawal while the local observation is still unexpired. Its permission peer
+remains a protocol mock; this is not full-chain or Kubernetes qualification.
+The complete all-feature workspace passes 995 tests with 42 existing exclusions,
+plus strict all-target Clippy. An asynchronous store deadline test now separates
+the HTTP response budget from eventual worker interruption; a gated regression
+proves real SQLite interruption, rollback and connection restoration. Request
+limits and production store scheduling were not changed.

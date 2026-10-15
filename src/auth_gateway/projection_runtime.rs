@@ -489,6 +489,7 @@ pub(crate) mod tests {
         message: hopae_grpc::v1::ServiceReceiptRequest,
         key: &str,
         tlsdir: &std::path::Path,
+        native_issuer: &crate::auth_gateway::receipt_issuer::Configuration,
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = format!("https://{}", listener.local_addr().unwrap());
@@ -694,7 +695,7 @@ pub(crate) mod tests {
                 std::fs::read(tlsdir.join("client.pem")).unwrap(),
                 std::fs::read(tlsdir.join("client.key")).unwrap(),
             ));
-        let channel = tonic::transport::Endpoint::from_shared(address)
+        let channel = tonic::transport::Endpoint::from_shared(address.clone())
             .unwrap()
             .tls_config(tls)
             .unwrap()
@@ -755,8 +756,116 @@ pub(crate) mod tests {
             channel.clone(),
         )
         .await;
+        // The SDK now talks to actual Hopae profile/application/key owners;
+        // only the unrelated permission-service protocol peer remains mocked.
+        use hopae_grpc::observed_client::{
+            Client, EndpointConfig, Limits, ServiceScope, ServiceTrustPolicy,
+        };
+        let ca = std::fs::read(tlsdir.join("ca.pem")).unwrap();
+        let certificate = std::fs::read(tlsdir.join("client.pem")).unwrap();
+        let private_key = std::fs::read(tlsdir.join("client.key")).unwrap();
+        let make_client = |credential: &str| {
+            let mut generation = [0; 16];
+            services.rng.fill(&mut generation);
+            Client::new_service(
+                EndpointConfig {
+                    address: &address,
+                    server_name: "hopae.example.test",
+                    ca: &ca,
+                    certificate: &certificate,
+                    private_key: &private_key,
+                    caller_key: credential,
+                },
+                ServiceTrustPolicy {
+                    issuer_ref: native_issuer.issuer_ref.clone(),
+                    key_epoch: native_issuer.key_epoch,
+                    verifying_key: ed25519_dalek::VerifyingKey::from_bytes(
+                        &native_issuer.public_key,
+                    )
+                    .unwrap(),
+                    identity_authority: native_issuer.identity_authority_epoch.clone(),
+                    scopes: native_issuer
+                        .scopes
+                        .iter()
+                        .map(|s| ServiceScope {
+                            service: s.service.clone(),
+                            audience: s.audience.clone(),
+                        })
+                        .collect(),
+                    minimum_profile_revision: 1,
+                    minimum_application_generation: 1,
+                    minimum_key_registry_revision: 1,
+                },
+                Arc::new(hangang_runtime::time::ReceiverClock::new(generation).unwrap()),
+                hopae_grpc::receipt_time::ClockRates::EQUAL,
+                Limits {
+                    concurrent: 2,
+                    timeout: std::time::Duration::from_secs(1),
+                },
+            )
+            .unwrap()
+        };
+        let native_client = make_client(key);
+        let independent_client = make_client(key);
+        let intent = native_client
+            .prepare_issue_digest(
+                ServiceScope {
+                    service: message.service.clone(),
+                    audience: message.audience.clone(),
+                },
+                [3; 32],
+                message.verification.as_ref().unwrap().headers.clone(),
+            )
+            .unwrap();
+        let native_auth = native_client.issue(intent).await.unwrap();
+        assert!(
+            native_client
+                .check(&native_auth, native_auth.request())
+                .is_ok()
+        );
+        let independent_query = independent_client
+            .prepare_observation(native_auth.context().clone(), [3; 32])
+            .unwrap();
+        let independent_auth = independent_client
+            .observe(independent_query, native_auth.receipt())
+            .await
+            .unwrap();
+        let independent_auth = independent_client.refresh(independent_auth).await.unwrap();
+        assert!(
+            independent_client
+                .check(&independent_auth, independent_auth.request())
+                .is_ok()
+        );
+        assert!(
+            independent_client
+                .check(&native_auth, native_auth.request())
+                .is_err()
+        );
+        assert!(
+            independent_client
+                .prepare_observation(native_auth.context().clone(), [4; 32])
+                .is_err()
+        );
+        let wrong_client = make_client("wrong-native-sdk-caller-at-least-thirty-two-bytes");
+        let wrong_intent = wrong_client
+            .prepare_issue_digest(
+                ServiceScope {
+                    service: message.service.clone(),
+                    audience: message.audience.clone(),
+                },
+                [3; 32],
+                message.verification.as_ref().unwrap().headers.clone(),
+            )
+            .unwrap();
+        assert!(wrong_client.issue(wrong_intent).await.is_err());
         let request = fresh(&services, &router, &message, key, plan_revision).await;
         let output = runtime.project(request, caller).await.unwrap();
+        // Prove the following refusal is live key withdrawal, not incidental expiry.
+        assert!(
+            native_client
+                .check(&native_auth, native_auth.request())
+                .is_ok()
+        );
         services
             .receipt_authority
             .lock()
@@ -764,6 +873,16 @@ pub(crate) mod tests {
             .publish(&mut services.store.conn(), 1, &[], "operator", &|_| Ok(()))
             .unwrap();
         assert!(output.into_header().is_err());
+        assert!(native_client.refresh(native_auth).await.is_err());
+        let revoked_query = independent_client
+            .prepare_observation(independent_auth.context().clone(), [3; 32])
+            .unwrap();
+        assert!(
+            independent_client
+                .observe(revoked_query, independent_auth.receipt())
+                .await
+                .is_err()
+        );
         let signed_expiry =
             u64::from_be_bytes(observed_request.receipt[10..18].try_into().unwrap());
         assert!((services.clock.now().0 as u64) < signed_expiry);
