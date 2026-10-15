@@ -130,3 +130,5 @@ redacted_human_debug!(
 
 #[cfg(feature = "native-client")]
 pub mod human_observed_client;
+
+pub mod human_scope;

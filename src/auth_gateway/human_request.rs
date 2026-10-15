@@ -34,6 +34,7 @@ pub(crate) struct Scope {
     header_revision: u64,
     headers: Vec<String>,
     maximum_entity_bytes: u64,
+    fingerprint: [u8; 32],
 }
 /// No raw body, cookies, application header values or target are retained here.
 /// This value proves data validation only; an actual native Checked is separate.
@@ -87,6 +88,18 @@ impl Scope {
         // identity reservations; no prehashed-body API is added to that SDK.
         request_binding_v2::HeaderPolicy::new(c.header_revision, c.headers, c.reserved_headers)
             .map_err(|_| Refused)?;
+        let fingerprint = hopae_grpc::human_scope::fingerprint(hopae_grpc::human_scope::Scope {
+            service: c.service,
+            audience: c.audience,
+            app_id: c.application,
+            route_id: c.route,
+            route_revision: c.route_revision,
+            destination_sha256: &c.destination,
+            header_policy_revision: c.header_revision,
+            header_names: c.headers,
+            reserved_names: c.reserved_headers,
+        })
+        .map_err(|_| Refused)?;
         let mut headers = c
             .headers
             .iter()
@@ -103,6 +116,7 @@ impl Scope {
             header_revision: c.header_revision,
             headers,
             maximum_entity_bytes: c.maximum_entity_bytes,
+            fingerprint,
         }))
     }
     pub(crate) fn validate(
@@ -184,6 +198,9 @@ impl Scope {
 }
 #[allow(dead_code)]
 impl Binding {
+    pub(crate) fn scope_sha256(&self) -> [u8; 32] {
+        self.scope.fingerprint
+    }
     pub(crate) fn sha256(&self) -> [u8; 32] {
         self.sha256
     }
@@ -204,6 +221,43 @@ impl Binding {
     }
     pub(crate) fn belongs_to(&self, scope: &Arc<Scope>) -> bool {
         Arc::ptr_eq(&self.scope, scope)
+    }
+}
+
+#[allow(dead_code)] // Native source integration.
+impl Scope {
+    /// Requested retained allocation capacity, excluding allocator overhead.
+    pub(crate) fn retained_bytes(&self) -> Result<usize, Refused> {
+        let mut bytes = std::mem::size_of::<Self>();
+        for text in [
+            &self.service,
+            &self.audience,
+            &self.application,
+            &self.route,
+        ] {
+            bytes = bytes.checked_add(text.capacity()).ok_or(Refused)?;
+        }
+        bytes = bytes
+            .checked_add(
+                self.headers
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<String>())
+                    .ok_or(Refused)?,
+            )
+            .ok_or(Refused)?;
+        for header in &self.headers {
+            bytes = bytes.checked_add(header.capacity()).ok_or(Refused)?;
+        }
+        Ok(bytes)
+    }
+}
+#[allow(dead_code)] // Native source integration.
+impl Binding {
+    /// Shared compiled Scope is charged once by the source, not per record.
+    pub(crate) fn retained_bytes(&self) -> Result<usize, Refused> {
+        std::mem::size_of::<Self>()
+            .checked_add(self.method.capacity())
+            .ok_or(Refused)
     }
 }
 
@@ -552,42 +606,5 @@ mod tests {
         c.route_revision = SAFE;
         c.header_revision = SAFE;
         assert!(Scope::compile(c).is_ok());
-    }
-}
-
-#[allow(dead_code)] // Native source integration.
-impl Scope {
-    /// Requested retained allocation capacity, excluding allocator overhead.
-    pub(crate) fn retained_bytes(&self) -> Result<usize, Refused> {
-        let mut bytes = std::mem::size_of::<Self>();
-        for text in [
-            &self.service,
-            &self.audience,
-            &self.application,
-            &self.route,
-        ] {
-            bytes = bytes.checked_add(text.capacity()).ok_or(Refused)?;
-        }
-        bytes = bytes
-            .checked_add(
-                self.headers
-                    .capacity()
-                    .checked_mul(std::mem::size_of::<String>())
-                    .ok_or(Refused)?,
-            )
-            .ok_or(Refused)?;
-        for header in &self.headers {
-            bytes = bytes.checked_add(header.capacity()).ok_or(Refused)?;
-        }
-        Ok(bytes)
-    }
-}
-#[allow(dead_code)] // Native source integration.
-impl Binding {
-    /// Shared compiled Scope is charged once by the source, not per record.
-    pub(crate) fn retained_bytes(&self) -> Result<usize, Refused> {
-        std::mem::size_of::<Self>()
-            .checked_add(self.method.capacity())
-            .ok_or(Refused)
     }
 }

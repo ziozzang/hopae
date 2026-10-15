@@ -140,4 +140,5 @@ message HumanReceiptTimeReply {
   uint64 application_generation = 7;
   uint64 key_registry_revision = 8;
   uint32 cache_ttl_ms = 9;
+  bytes scope_sha256 = 10;
 }
