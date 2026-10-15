@@ -19,6 +19,7 @@ def prepare(target,output,signer=None,seed=None):
  output.mkdir(parents=True,exist_ok=True);raw=output/('hopae-'+target);raw.write_bytes(binary.read_bytes());raw.chmod(0o755)
  folder=f'hopae-v{version}-{platform}-{arch}'
  sources={'hopae':binary,'LICENSE':ROOT/'LICENSE','README.md':ROOT/'README.md','README.ko.md':ROOT/'README.ko.md','docs/HANGANG_NATIVE.md':ROOT/'docs/HANGANG_NATIVE.md','docs/ko/HANGANG_NATIVE.md':ROOT/'docs/ko/HANGANG_NATIVE.md'}
+ for name in ('docs/AUTH_GATEWAY.md','docs/ko/AUTH_GATEWAY.md'):sources[name]=ROOT/name
  for name in ('manifest.json','index.js','style.css'):sources['plugins/hopae/'+name]=ROOT/'plugins/hopae'/name
  with (output/(folder+'.tar.gz')).open('wb') as f,gzip.GzipFile(fileobj=f,mode='wb',filename='',mtime=0) as gz,tarfile.open(fileobj=gz,mode='w') as tar:
   for name,path in sources.items():

@@ -1,5 +1,5 @@
 """Release contract tests use actual OpenSSL signatures and isolated fixture keys."""
-import base64,importlib.util,json,subprocess,tempfile,unittest
+import base64,importlib.util,json,subprocess,tarfile,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('release',Path(__file__).with_name('prepare_release.py'));release=importlib.util.module_from_spec(spec);spec.loader.exec_module(release)
@@ -10,7 +10,7 @@ class ReleaseTests(unittest.TestCase):
   self.real_run(['openssl','genpkey','-algorithm','ED25519','-out',str(self.key)],check=True,capture_output=True)
   public=self.real_output(['openssl','pkey','-in',str(self.key),'-pubout','-outform','DER'])[-32:];self.pin=base64.b64encode(public).decode();(self.repo/'release-public-key.txt').write_text(self.pin+'\n');(self.repo/'Cargo.toml').write_text('[package]\nversion="0.0.3"\n')
   binary=self.repo/'target'/self.target/'release/hopae';binary.parent.mkdir(parents=True);binary.write_bytes(b'qualified fixture executable')
-  for name in ['LICENSE','README.md','README.ko.md','docs/HANGANG_NATIVE.md','docs/ko/HANGANG_NATIVE.md','plugins/hopae/manifest.json','plugins/hopae/index.js','plugins/hopae/style.css']:
+  for name in ['LICENSE','README.md','README.ko.md','docs/HANGANG_NATIVE.md','docs/ko/HANGANG_NATIVE.md','docs/AUTH_GATEWAY.md','docs/ko/AUTH_GATEWAY.md','plugins/hopae/manifest.json','plugins/hopae/index.js','plugins/hopae/style.css']:
    p=self.repo/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text('public fixture')
   p=patch.object(release,'ROOT',self.repo);p.start();self.addCleanup(p.stop)
   p=patch.object(subprocess,'check_output',side_effect=self.output_command);p.start();self.addCleanup(p.stop)
@@ -29,6 +29,9 @@ class ReleaseTests(unittest.TestCase):
  def prepare(self):release.prepare(self.target,self.output,self.signer,self.key)
  def test_actual_signature_and_payload_binding(self):
   self.prepare();e=json.loads((self.output/('hopae-'+self.target+'.manifest.json')).read_text());p=json.loads(base64.b64decode(e['payload']));self.assertEqual(p['target'],self.target);self.assertEqual(p['artifact_url'],'https://github.com/ziozzang/hopae/releases/download/v0.0.3/hopae-'+self.target)
+  with tarfile.open(next(self.output.glob('*.tar.gz'))) as archive:
+   for name in ('docs/AUTH_GATEWAY.md','docs/ko/AUTH_GATEWAY.md'):
+    self.assertEqual(archive.extractfile('hopae-v0.0.3-linux-amd64/'+name).read(),(self.repo/name).read_bytes())
  def test_forged_signature_is_refused(self):
   self.forge=True
   with self.assertRaises(subprocess.CalledProcessError):self.prepare()
