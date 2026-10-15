@@ -2181,3 +2181,31 @@ async fn native_human_source_publication_is_fixed_and_final_check_has_no_clock_c
     assert!(publication.require_current().is_err());
     assert!(!publication.accepts(&checked));
 }
+
+#[tokio::test]
+async fn native_human_source_facts_never_promote_aal_from_session_alone() {
+    let f = Fx::new(None).await;
+    let (old, _) = f.login().await;
+    let cookie = f.elevate(&old).await;
+    // Deliberate downgrade fixture: retain actual native TOTP session but
+    // present an AAL1 handle. A session's stronger level cannot promote it.
+    f.store
+        .conn()
+        .execute(
+            "UPDATE session_handles SET issued_aal=1 WHERE handle_sha256=?1",
+            [cookie.digest().as_slice()],
+        )
+        .unwrap();
+    let witness = f.witness(&cookie).await;
+    assert_eq!(witness.view.session.aal, Aal::Two);
+    assert_eq!(witness.view.handle.issued_aal, Aal::One);
+    let checked = witness.finish(&f.input(&cookie)).await.unwrap();
+    let facts = checked
+        .source_facts(
+            "native-issuer",
+            &source_binding("app", "owned-route", "GET"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(facts.aal, 1);
+}

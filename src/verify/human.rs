@@ -491,7 +491,7 @@ impl Checked {
                 .subject_for_witness(issuer, w)?;
             let facts = SourceFacts {
                 subject,
-                aal: w.view.session.aal as u8,
+                aal: w.view.handle.issued_aal as u8,
                 user_revision: w.view.user.authz_version,
                 credential_generation: w.view.session.cred_gen,
                 application_generation: w.snapshot.generation,
