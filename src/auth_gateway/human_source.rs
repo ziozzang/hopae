@@ -8,7 +8,7 @@ use crate::{
         receipt_issuer::{Issued, Issuer},
         receipt_keys::Refused,
     },
-    verify::human::{Checked, Owner, SourcePublication},
+    verify::human::{Checked, Owner, SourcePublication, SourceTime},
 };
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -465,7 +465,7 @@ impl Source {
         receipt: &[u8],
         request_sha256: &[u8; 32],
     ) -> Result<Observation, Refused> {
-        self.observe_with_final(context, receipt, request_sha256, &|| Ok(()))
+        self.observe_with_final(context, receipt, request_sha256, &|_| Ok(u64::MAX))
             .await
     }
     pub(crate) async fn observe_with_final(
@@ -475,7 +475,9 @@ impl Source {
         request_sha256: &[u8; 32],
         // Must be a known callback-free owner/caller fence. Counted or external
         // callbacks run before this method's durable current read, never here.
-        final_check: &(dyn Fn() -> Result<(), Refused> + Send + Sync),
+        // The borrowed native sample is the final sample. A numeric return can
+        // only shorten admission; it cannot extend the retained proof/record.
+        final_check: &(dyn Fn(&SourceTime) -> Result<u64, Refused> + Send + Sync),
     ) -> Result<Observation, Refused> {
         if !self.active.load(Ordering::Acquire)
             || receipt.len() != super::receipt::LENGTH
@@ -532,13 +534,14 @@ impl Source {
             .checked
             .require_publication_current()
             .map_err(|_| Refused)?;
-        final_check()?;
         let now = record.checked.source_time().map_err(|_| Refused)?;
+        let constraint = final_check(&now)?;
         let remaining = record
             .expires
             .min(now.expires_ms)
             .checked_sub(now.owner_now_ms)
             .and_then(|n| n.checked_sub(1))
+            .map(|n| n.min(constraint))
             .filter(|n| *n > 0 && *n <= 1000)
             .ok_or(Refused)?;
         observation.owner_now_ms = now.owner_now_ms;

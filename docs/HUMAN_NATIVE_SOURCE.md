@@ -17,3 +17,5 @@ The requested-capacity charge is conservative: inline Checked/Binding payloads m
 The signing-key registry publication is also fixed once per Source. Any registry change retires its usability; a replacement source must be prepared. This avoids retaining a distinct old registry graph per record outside the record capacity quota. Allocated HashMap buckets may exceed the entry-count bound and remain part of the explicitly separate opaque index baseline.
 
 Independent observation also returns the cached canonical `scope_sha256` from the retained validated Binding. This authenticates the exact application/route/destination/header policy in addition to service/audience and the request digest; a shared source revision alone does not establish that scope. RPC/SDK integration must require this field.
+
+The final pure constraint receives the same last native SourceTime sample and may only shorten admission. It does not change the signed expiry, retained record, or retention. An independent query must intersect its original sealed Admission at this sample, without resampling a clock.

@@ -17,3 +17,5 @@ count 기본 131,072, 최대 1,048,576입니다. 요청한 retained capacity 기
 서명 key registry publication도 Source마다 한 번 고정합니다. registry가 바뀌면 이전 source 사용을 거부하고 새 source를 준비해야 합니다. record마다 서로 다른 이전 registry graph를 숨겨 보유하지 않습니다. HashMap의 실제 할당 bucket 수는 항목 수 제한보다 클 수 있으며 별도로 명시한 불투명 index 기반 비용에 속합니다.
 
 독립 observation은 보존한 검증 Binding의 canonical `scope_sha256`도 반환합니다. service/audience와 요청 digest에 더해 정확한 application/route/destination/header policy를 인증하며, 공유 source revision만으로 이 범위를 증명하지 않습니다. RPC·SDK 통합은 이 필드를 필수로 검사해야 합니다.
+
+최종 순수 제약 함수는 마지막 native SourceTime sample 자체를 받아 admission만 줄일 수 있습니다. 서명 expiry·보존 record·retention은 바꾸지 않습니다. 독립 query는 시계를 다시 읽지 않고 이 sample에서 원래의 sealed Admission과 교집합을 계산해야 합니다.

@@ -573,8 +573,8 @@ async fn native_human_source_signing_callback_withdrawal_cannot_publish_record()
 }
 
 #[tokio::test]
-async fn native_human_source_final_callback_refusal_and_original_age_charge() {
-    for mode in ["refuse", "cost", "publication"] {
+async fn native_human_source_final_constraint_refusal_and_publication_fence() {
+    for mode in ["refuse", "publication"] {
         let mut f = Fx::new(None).await;
         let ticks = Arc::new(AtomicU64::new(100));
         let now = ticks.clone();
@@ -591,17 +591,13 @@ async fn native_human_source_final_callback_refusal_and_original_age_charge() {
             .unwrap();
         let context = record.issued().context();
         let called = std::sync::atomic::AtomicBool::new(false);
-        let callback = || {
+        let callback = |_: &human::SourceTime| {
             called.store(true, Ordering::Release);
             match mode {
                 "refuse" => Err(crate::auth_gateway::receipt_keys::Refused),
-                "cost" => {
-                    ticks.store(2000, Ordering::Release);
-                    Ok(())
-                }
                 _ => {
                     f.ctx.snapshot.store(Arc::new(f.config.snapshot(2)));
-                    Ok(())
+                    Ok(u64::MAX)
                 }
             }
         };
@@ -649,4 +645,63 @@ async fn native_human_source_signed_assurance_uses_downgraded_actual_handle() {
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn native_human_source_same_sample_constraint_only_shortens_and_keeps_record() {
+    let mut f = Fx::new(None).await;
+    let ticks = Arc::new(AtomicU64::new(100));
+    let clock = ticks.clone();
+    Arc::get_mut(&mut f.owner).unwrap().ticks =
+        Some(Arc::new(move || Ok(clock.load(Ordering::Acquire))));
+    let (cookie, _) = f.login().await;
+    let (source, _, _) = source(&f, configuration());
+    let record = source
+        .issue(
+            captured(&f, &cookie).await,
+            source.validate("orders", "orders-api", &request()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let context = record.issued().context();
+    let before = source
+        .observe(&context, record.issued().bytes(), &context.request_sha256)
+        .await
+        .unwrap();
+    let shortened = source
+        .observe_with_final(
+            &context,
+            record.issued().bytes(),
+            &context.request_sha256,
+            &|sample| {
+                assert_eq!(sample.owner_now_ms, before.owner_now_ms);
+                Ok(7)
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(shortened.remaining_ms, 7);
+    assert!(
+        source
+            .observe_with_final(
+                &context,
+                record.issued().bytes(),
+                &context.request_sha256,
+                &|_| Ok(0)
+            )
+            .await
+            .is_err()
+    );
+    let unchanged = source
+        .observe_with_final(
+            &context,
+            record.issued().bytes(),
+            &context.request_sha256,
+            &|_| Ok(u64::MAX),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unchanged.remaining_ms, before.remaining_ms);
+    assert_eq!(unchanged.receipt_sha256, before.receipt_sha256);
+    assert_eq!(source.usage_for_test().0, 1);
 }
