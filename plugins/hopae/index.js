@@ -36,8 +36,8 @@ export async function mount(host) {
     if(applied&&!disposed&&!paused)await load();
   }
   function table(items){
-    const columns=view==='users'?['user_id','primary_email','username','display_name','status','role']:view==='sessions'?['session_id','user_id','provider_id','aal','auth_time']:['event_id','kind','outcome','reason','user_id','request_id'];
-    const t=node('table'), head=node('thead'), row=node('tr');for(const c of columns)row.append(node('th',c));if(view!=='events')row.append(node('th',()=>label('Actions','작업')));head.append(row);t.append(head);const body=node('tbody');
+    const columns=view==='users'?['user_id','human_subject','primary_email','username','display_name','status','role']:view==='sessions'?['session_id','user_id','provider_id','aal','auth_time']:['event_id','kind','outcome','reason','user_id','request_id'];
+    const t=node('table'), head=node('thead'), row=node('tr');for(const c of columns)row.append(node('th',c==='human_subject'?()=>label('Human policy subject','사람 권한 주체'):c));if(view!=='events')row.append(node('th',()=>label('Actions','작업')));head.append(row);t.append(head);const body=node('tbody');
     for(const item of items){const data=item.user??item.session??item, tr=node('tr');for(const c of columns)tr.append(node('td',show(data[c]??item[c])));
       if(view!=='events'){const td=node('td'), id=view==='users'?data.user_id:data.session_id;
         const actions=view==='users'?[[()=>label('Disable','비활성화'),'users/disable'],[()=>label('Enable','활성화'),'users/enable'],[()=>label('End sessions','세션 회수'),'users/sessions-terminate']]:[[()=>label('Terminate','회수'),'sessions/terminate']];

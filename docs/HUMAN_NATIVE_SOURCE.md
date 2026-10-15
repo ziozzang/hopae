@@ -19,3 +19,20 @@ The signing-key registry publication is also fixed once per Source. Any registry
 Independent observation also returns the cached canonical `scope_sha256` from the retained validated Binding. This authenticates the exact application/route/destination/header policy in addition to service/audience and the request digest; a shared source revision alone does not establish that scope. RPC/SDK integration must require this field.
 
 The final pure constraint receives the same last native SourceTime sample and may only shorten admission. It does not change the signed expiry, retained record, or retention. An independent query must intersect its original sealed Admission at this sample, without resampling a clock.
+
+## Administrator policy coordinates
+
+When native Human receipts are configured, authenticated administrator user
+responses expose `human_subject` for supported existing accounts. The detail page
+and Hopae console package display the same coordinate used by the actual signed
+native proof. The value derives from the configured issuer, immutable Store realm
+and exact user ID; it is not an email, session, AAL or permission grant. Disabled
+accounts retain their coordinate, while native eligibility checks still refuse
+authentication. The metadata lookup does not establish primary/factor provenance.
+
+List metadata uses one bounded Store query for at most 200 requested accounts,
+joining current users, historical ID reservations and the actual realm. It does
+not make a DB request per row. Unsupported legacy IDs remain visible in user
+administration without a Human coordinate; they are not normalized, truncated or
+given an alternative identity, and native proof issuance remains strict. The
+issuer and realm cannot be supplied by an administrator API query parameter.

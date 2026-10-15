@@ -258,3 +258,6 @@
 "external.totp" = "인증 앱 코드"
 "external.intro" = "인증 서비스에서 제공한 응답을 입력하세요."
 "external.response" = "인증 응답"
+
+"admin.users.human_subject" = "사람 권한 주체"
+"admin.users.human_subject_help" = "안정적인 정책 식별자이며 로그인·인증 수준·권한 부여 증명이 아닙니다."

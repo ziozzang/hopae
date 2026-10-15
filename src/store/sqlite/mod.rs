@@ -10,6 +10,7 @@ mod directory;
 mod events;
 mod factors;
 pub(crate) mod human_owner;
+mod human_subject;
 mod identity_owner;
 pub(crate) mod material_owner;
 pub(crate) mod primary_owner;

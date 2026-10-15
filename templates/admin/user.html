@@ -4,6 +4,7 @@
 <h1>{{ c.t.get("admin.users.detail_title") }}</h1>
 <dl>
 <dt>{{ c.t.get("admin.users.col_user") }}</dt><dd>{{ user_id }}</dd>
+{% if !human_subject.is_empty() %}<dt>{{ c.t.get("admin.users.human_subject") }}</dt><dd><code>{{ human_subject }}</code><p>{{ c.t.get("admin.users.human_subject_help") }}</p></dd>{% endif %}
 <dt>{{ c.t.get("admin.users.col_email") }}</dt><dd>{{ email }}{% if !email_flags.is_empty() %} ({{ email_flags }}){% endif %}</dd>
 <dt>{{ c.t.get("admin.users.col_name") }}</dt><dd>{{ display_name }}</dd>
 <dt>{{ c.t.get("admin.users.col_username") }}</dt><dd>{{ username }}</dd>

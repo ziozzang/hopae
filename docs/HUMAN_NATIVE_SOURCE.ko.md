@@ -19,3 +19,18 @@ count 기본 131,072, 최대 1,048,576입니다. 요청한 retained capacity 기
 독립 observation은 보존한 검증 Binding의 canonical `scope_sha256`도 반환합니다. service/audience와 요청 digest에 더해 정확한 application/route/destination/header policy를 인증하며, 공유 source revision만으로 이 범위를 증명하지 않습니다. RPC·SDK 통합은 이 필드를 필수로 검사해야 합니다.
 
 최종 순수 제약 함수는 마지막 native SourceTime sample 자체를 받아 admission만 줄일 수 있습니다. 서명 expiry·보존 record·retention은 바꾸지 않습니다. 독립 query는 시계를 다시 읽지 않고 이 sample에서 원래의 sealed Admission과 교집합을 계산해야 합니다.
+
+## 관리자 정책 식별자
+
+네이티브 Human 증명을 설정하면 인증된 관리자 사용자 응답에서 지원되는 현재 계정의
+`human_subject`를 조회할 수 있다. 상세 페이지와 호패 콘솔 패키지는 실제 네이티브 서명
+증명에 쓰이는 동일 식별자를 표시한다. 설정 issuer·불변 Store realm·정확한 사용자 ID로
+도출하며 이메일·세션·AAL·권한 부여 증명이 아니다. 비활성 계정도 식별자를 유지하지만
+네이티브 인증 적격성 검사는 여전히 거부한다. 이 메타데이터 조회는 primary/factor
+인증 이력을 확립하지 않는다.
+
+목록은 최대 200개 계정을 한 번의 제한된 Store 쿼리로 조회하고 현재 사용자·ID 영구
+예약·실제 realm을 결합한다. 행마다 DB를 질의하지 않는다. 지원하지 않는 기존 ID도
+사용자 관리에 표시하되 Human 식별자만 생략한다. 정규화·절단·대체 신원을 만들지 않고
+네이티브 증명 발급의 엄격한 조건은 유지한다. 관리자 API 질의로 issuer나 realm을
+지정할 수 없다.

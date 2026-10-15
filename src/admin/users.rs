@@ -422,6 +422,7 @@ struct UserPage<'a> {
     user_id: String,
     email: String,
     email_flags: String,
+    human_subject: String,
     display_name: String,
     username: String,
     status: String,
@@ -509,10 +510,41 @@ pub async fn list_api(State(st): State<Arc<AdminState>>, c: Ctx, uri: Uri) -> Re
     let run = async {
         let params = users_params(&st, &Query::parse(&uri))?;
         let page = users_page(&st, &c, params).await?;
+        let subjects = if let Some(issuer) = st
+            .profile_config
+            .receipt_issuer
+            .as_ref()
+            .filter(|issuer| issuer.human_receipts.is_some())
+        {
+            st.profile_store
+                .admin_human_subjects(
+                    issuer.issuer_ref.clone(),
+                    page.items
+                        .iter()
+                        .map(|item| item.user.user_id.to_string())
+                        .collect(),
+                    api::deadline(&st),
+                )
+                .await
+                .map_err(|error| store_failure(&c, "human_subjects", &error))?
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        let items = page
+            .items
+            .iter()
+            .map(|item| {
+                let mut value = user_summary_json(item);
+                if let Some(subject) = subjects.get(item.user.user_id.as_str()) {
+                    value["human_subject"] = json!(subject);
+                }
+                value
+            })
+            .collect::<Vec<_>>();
         Ok::<_, Fail>(api::json(
             StatusCode::OK,
             &json!({
-                "items": page.items.iter().map(user_summary_json).collect::<Vec<_>>(),
+                "items": items,
                 "next_cursor": cursor_json(&st, &page.next),
             }),
         ))
@@ -588,6 +620,29 @@ async fn load_detail(st: &AdminState, c: &Ctx, id: &str) -> Result<Detail, Fail>
     })
 }
 
+async fn human_subject(
+    st: &AdminState,
+    c: &Ctx,
+    user: &crate::identity::UserId,
+) -> Result<Option<String>, Fail> {
+    let Some(issuer) = st
+        .profile_config
+        .receipt_issuer
+        .as_ref()
+        .filter(|issuer| issuer.human_receipts.is_some())
+    else {
+        return Ok(None);
+    };
+    st.profile_store
+        .admin_human_subject(
+            issuer.issuer_ref.clone(),
+            user.to_string(),
+            api::deadline(st),
+        )
+        .await
+        .map_err(|error| store_failure(c, "human_subject", &error))
+}
+
 pub async fn detail_api(
     State(st): State<Arc<AdminState>>,
     c: Ctx,
@@ -608,6 +663,7 @@ pub async fn detail_api(
             StatusCode::OK,
             &json!({
                 "user": common::user_json(&d.user),
+                "human_subject": human_subject(&st, &c, &d.user.user_id).await?,
                 "identities": d.identities.iter().map(common::identity_json).collect::<Vec<_>>(),
                 "sessions_live": d.sessions_live.iter().map(session_json).collect::<Vec<_>>(),
                 "sessions_live_total": d.sessions_live_total,
@@ -653,6 +709,9 @@ pub async fn detail_page(
                     .map(ToString::to_string)
                     .unwrap_or_default(),
                 email_flags: flags,
+                human_subject: human_subject(&st, &c, &u.user_id)
+                    .await?
+                    .unwrap_or_default(),
                 display_name: u.display_name.clone().unwrap_or_default(),
                 username: u.username.clone().unwrap_or_default(),
                 status: u.status.as_str().to_string(),

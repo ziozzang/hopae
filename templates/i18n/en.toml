@@ -259,3 +259,6 @@
 "external.totp" = "Authenticator code"
 "external.intro" = "Enter the response supplied by your verification service."
 "external.response" = "Verification response"
+
+"admin.users.human_subject" = "Human policy subject"
+"admin.users.human_subject_help" = "Stable policy identifier only; not a login, assurance level or permission grant."

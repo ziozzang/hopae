@@ -4664,3 +4664,105 @@ async fn external_completion_tolerates_second_boundary_but_refuses_stale_or_futu
 
 #[path = "totp_owner_tests.rs"]
 mod totp_owner_tests;
+
+#[tokio::test]
+async fn admin_human_subject_uses_actual_store_namespace_and_existing_account() {
+    let f = fx();
+    let u = f.user(91).await;
+    let deadline = || Deadline(std::time::Instant::now() + Duration::from_secs(5));
+    let get = || {
+        f.store
+            .admin_human_subject("owned".into(), u.user_id.to_string(), deadline())
+    };
+    let first = get().await.unwrap().unwrap();
+    let batch = f
+        .store
+        .admin_human_subjects(
+            "owned".into(),
+            vec![u.user_id.to_string(), "u_missing".into()],
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(batch.len(), 1);
+    assert_eq!(batch[u.user_id.as_str()], first);
+    assert!(
+        f.store
+            .admin_human_subjects("owned".into(), vec!["u_missing".into(); 201], deadline())
+            .await
+            .is_err()
+    );
+    assert!(first.starts_with("human1:") && first.len() == 71);
+    assert!(
+        f.store
+            .admin_human_subject("owned".into(), "u_missing".into(), deadline())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let other = fx();
+    // Metadata-only account fixture: the same UID in a distinct actual realm.
+    // This creates no session, primary/factor evidence or authentication capability.
+    other
+        .store
+        .conn()
+        .execute(
+            "INSERT INTO users(user_id,created_at,updated_at) VALUES(?1,?2,?2)",
+            rusqlite::params![u.user_id.as_str(), T0],
+        )
+        .unwrap();
+    assert_ne!(
+        first,
+        other
+            .store
+            .admin_human_subject("owned".into(), u.user_id.to_string(), deadline())
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    f.store
+        .conn()
+        .execute(
+            "UPDATE users SET status='disabled',authz_version=authz_version+1 WHERE user_id=?1",
+            [u.user_id.as_str()],
+        )
+        .unwrap();
+    assert_eq!(get().await.unwrap().unwrap(), first);
+    assert_ne!(
+        f.store
+            .admin_human_subject("other".into(), u.user_id.to_string(), deadline())
+            .await
+            .unwrap()
+            .unwrap(),
+        first
+    );
+}
+
+#[tokio::test]
+async fn admin_human_subject_omits_unsupported_legacy_ids_without_hiding_valid_accounts() {
+    let f = fx();
+    let u = f.user(92).await;
+    let long = "legacy".repeat(50);
+    let controlled = "legacy\naccount".to_string();
+    for id in [&long, &controlled] {
+        // Metadata-only historical accounts; no session/provenance is created.
+        f.store
+            .conn()
+            .execute(
+                "INSERT INTO users(user_id,created_at,updated_at) VALUES(?1,?2,?2)",
+                rusqlite::params![id, T0],
+            )
+            .unwrap();
+    }
+    let result = f
+        .store
+        .admin_human_subjects(
+            "owned".into(),
+            vec![u.user_id.to_string(), long, controlled],
+            Deadline(std::time::Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 1);
+    assert!(result.contains_key(u.user_id.as_str()));
+}

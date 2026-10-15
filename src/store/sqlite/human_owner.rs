@@ -131,44 +131,7 @@ impl Current {
         issuer: &str,
         witness: &Witness,
     ) -> StoreResult<String> {
-        use sha2::{Digest as _, Sha256};
-        let user = witness.view.session.user_id.as_str();
-        if issuer.is_empty()
-            || issuer.len() > 128
-            || !issuer
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
-            || user.is_empty()
-            || user.len() > 256
-            || user.chars().any(char::is_control)
-            || self.realm.len() != 64
-            || !self
-                .realm
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
-            return Err(refused());
-        }
-        let realm = data_encoding::HEXLOWER
-            .decode(self.realm.as_bytes())
-            .map_err(|_| refused())?;
-        if realm.len() != 32 || realm.iter().all(|b| *b == 0) {
-            return Err(refused());
-        }
-        let mut hash = Sha256::new();
-        hash.update(b"hopae:native-human-subject:v1\0");
-        for value in [issuer.as_bytes(), realm.as_slice(), user.as_bytes()] {
-            hash.update(
-                u32::try_from(value.len())
-                    .map_err(|_| refused())?
-                    .to_be_bytes(),
-            );
-            hash.update(value);
-        }
-        Ok(format!(
-            "human1:{}",
-            data_encoding::HEXLOWER.encode(&hash.finalize())
-        ))
+        super::human_subject::derive(issuer, &self.realm, witness.view.session.user_id.as_str())
     }
 }
 

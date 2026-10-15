@@ -121,6 +121,19 @@ async fn native_human_source_actual_oidc_signed_pair_independent_observation_and
     );
     assert!(context.identity.subject_ref.starts_with("human1:"));
     let subject = context.identity.subject_ref.to_owned();
+    assert_eq!(
+        f.store
+            .admin_human_subject(
+                native.issuer_ref.clone(),
+                view.session.user_id.to_string(),
+                crate::store::Deadline(std::time::Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(subject.as_str()),
+        "administrator policy coordinate must match actual signed native identity",
+    );
     let first = source
         .observe(&context, record.issued().bytes(), &expected)
         .await

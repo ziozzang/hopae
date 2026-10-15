@@ -101,3 +101,21 @@ test('maximum safe revision cannot publish an overflowing successor',async({page
  await page.locator('textarea').fill('{"draft":true}');await expect(page.getByRole('button',{name:'Save profiles',exact:true})).toBeDisabled();
  expect(await page.evaluate(()=>calls.filter(c=>c.path.endsWith('/publish')).length)).toBe(0);
 });
+
+test('Human policy subject is shown as read-only localized metadata without mutation',async({page})=>{
+ await page.setViewportSize({width:390,height:900});
+ await page.goto('about:blank');
+ const subject='human1:'+'a'.repeat(64);
+ await page.evaluate(async({source,subject,style})=>{
+  document.head.innerHTML='<style>'+style+'</style>';document.body.innerHTML='<main></main>';window.calls=[];window.lang='en';window.localeCallbacks=[];
+  window.host={root:document.querySelector('main'),locale:()=>window.lang,authentication:'hangang',signal:new AbortController().signal,onLocaleChange:fn=>{localeCallbacks.push(fn);return ()=>{};},api:async(path,options)=>{
+   calls.push({path,options});if(path==='me')return {data:{role:'viewer'}};
+   if(path==='users/query')return {data:{items:[{user_id:'u_fixture',human_subject:subject,display_name:'<img src=x onerror=window.injected=true>'}],next_cursor:null}};
+   return {data:{}};
+  }};
+  window.plugin=await (await import(URL.createObjectURL(new Blob([source],{type:'text/javascript'})))).mount(host);
+ },{source,subject,style:fs.readFileSync(require('path').join(__dirname,'../../plugins/hopae/style.css'),'utf8')});
+ await page.locator('[data-tab="users"]').click();await expect(page.getByRole('columnheader',{name:'Human policy subject',exact:true})).toBeVisible();await expect(page.locator('td').filter({hasText:subject})).toHaveText(subject);expect(await page.locator('img').count()).toBe(0);expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+ await page.evaluate(()=>{lang='ko';localeCallbacks.forEach(fn=>fn());});await expect(page.getByRole('columnheader',{name:'사람 권한 주체',exact:true})).toBeVisible();await expect(page.locator('td').filter({hasText:subject})).toHaveText(subject);
+ expect(await page.evaluate(()=>calls.filter(c=>c.path.includes('disable')||c.path.includes('enable')||c.path.includes('terminate')||c.path.includes('publish')).length)).toBe(0);
+});
