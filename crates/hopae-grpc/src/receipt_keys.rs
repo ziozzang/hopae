@@ -1,7 +1,7 @@
 //! Immutable receiver-owned receipt keys. In-memory transition fences require
 //! durable publication/floors before distributed or restart-safe activation.
 use super::{
-    receipt::{self, Purpose, VerifiedReceipt},
+    receipt::{self, Purpose, SignatureEvidence, VerifiedReceipt},
     receipt_binding::{self, Context, Permit},
 };
 use ed25519_dalek::VerifyingKey;
@@ -267,6 +267,25 @@ impl Registry {
         bytes: &[u8],
         now_ms: u64,
     ) -> Result<VerifiedReceipt, Refused> {
+        let (key, purpose, binding) = self.verification_inputs(context, permit)?;
+        receipt::verify(key, bytes, purpose, &binding, now_ms).map_err(|_| Refused)
+    }
+    /// Receiver-owned key selection and signature evidence only. Native callers
+    /// must separately fence this registry and authenticate source time/owners.
+    pub fn verify_signature(
+        &self,
+        context: &Context<'_>,
+        permit: Option<&Permit<'_>>,
+        bytes: &[u8],
+    ) -> Result<SignatureEvidence, Refused> {
+        let (key, purpose, binding) = self.verification_inputs(context, permit)?;
+        receipt::verify_signature(key, bytes, purpose, &binding).map_err(|_| Refused)
+    }
+    fn verification_inputs(
+        &self,
+        context: &Context<'_>,
+        permit: Option<&Permit<'_>>,
+    ) -> Result<(&VerifyingKey, Purpose, [u8; 32]), Refused> {
         let purpose = if permit.is_some() {
             Purpose::Permit
         } else {
@@ -278,7 +297,7 @@ impl Registry {
             .and_then(|keys| keys.get(&(purpose as u8, context.key_epoch)))
             .ok_or(Refused)?;
         let binding = receipt_binding::digest(context, permit).map_err(|_| Refused)?;
-        receipt::verify(key, bytes, purpose, &binding, now_ms).map_err(|_| Refused)
+        Ok((key, purpose, binding))
     }
 }
 #[cfg(test)]
@@ -431,13 +450,20 @@ mod tests {
         .unwrap();
         let old = Registry::compile(1, &[key(7, Purpose::Authentication, 1)], None).unwrap();
         assert!(old.verify(&context, None, &bytes, 101).is_ok());
+        assert!(old.verify(&context, None, &bytes, 1000).is_err());
+        assert!(old.verify_signature(&context, None, &bytes).is_ok());
+        let retired = Registry::compile(2, &[], Some(&old)).unwrap();
+        assert!(retired.verify_signature(&context, None, &bytes).is_err());
         let changed =
             Registry::compile(2, &[key(8, Purpose::Authentication, 2)], Some(&old)).unwrap();
         assert!(changed.verify(&context, None, &bytes, 101).is_err());
+        assert!(changed.verify_signature(&context, None, &bytes).is_err());
         context.key_epoch = 2;
         assert!(changed.verify(&context, None, &bytes, 101).is_err());
+        assert!(changed.verify_signature(&context, None, &bytes).is_err());
         context.key_epoch = 1;
         let wrong = Registry::compile(1, &[key(7, Purpose::Permit, 1)], None).unwrap();
         assert!(wrong.verify(&context, None, &bytes, 101).is_err());
+        assert!(wrong.verify_signature(&context, None, &bytes).is_err());
     }
 }

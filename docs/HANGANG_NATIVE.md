@@ -475,3 +475,38 @@ authentication work, ambiguous/missing caller metadata refusal, capacity-one
 issuance followed by nested observation, and cancellation releasing the admission
 permit. The early-ID test reproduced unnecessary authentication before the guard
 was added; only the observed contract gains this stricter early check.
+
+### Signature evidence and early transport authentication
+
+`receipt::verify_signature` returns opaque `SignatureEvidence`: canonical
+signature/purpose/binding/nonce/lifetime evidence without a current-time claim.
+The receiver-owned registry exposes the same separate selection path. The strict
+`receipt::verify(..., now)` still checks the original issuing-domain interval and
+returns `VerifiedReceipt`; signature evidence cannot be converted into it.
+`Bounds::from_signature` reuses the existing arithmetic without a synthetic
+current time. Native authenticated observations and replay admission remain
+separate, unimplemented integration boundaries.
+
+Seven public evidence tests pass, including an independent Python Ed25519 wire
+vector, externally signed invalid structures, strict time-boundary controls and
+hostile owner reports. Signing and verification now use a fixed stack buffer for
+the canonical domain-prefixed payload instead of allocating its message buffer.
+
+All four production gRPC services authenticate initial caller metadata before
+generated protobuf decoding, in addition to their existing domain checks. Bearer
+authorization must be in initial metadata; trailer-only credentials are refused.
+Configured message limits are preserved. This closes wrong/missing-bearer decode
+work, but does not provide a process-wide decode memory budget or a cumulative
+unary body limit for an authenticated caller. Those shared ingress limits remain
+an explicit follow-up; per-message limits and handler semaphores are insufficient
+to claim them.
+
+`receipt_time::ClockRates` adds explicit independent source/receiver oscillator
+limits. The new `from_signature_with_rates` rounds admission downward and full
+signed-lifetime retention upward using checked rational arithmetic. Five public
+tests pass, including 6,912 exact rate/phase/latency cases and physical
+counterexamples to an equal-rate assumption. Existing entry points preserve the
+original equal-rate numeric contract. Native observed clients must choose and
+qualify their clock model; quantization alone does not bound rate error, source
+suspension or restore. Source issuer/proof age still uses `Instant` in this source
+milestone; suspend-inclusive source-budget adoption remains a release gate.

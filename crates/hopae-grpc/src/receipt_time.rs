@@ -1,13 +1,57 @@
 //! ADR 0018 interval arithmetic only, not authenticated transport or authorization.
 //! Native adapters must bind owner role, request/client identity and live generation
 //! before using this result. No caller-provided time value may grant access.
-use crate::receipt::VerifiedReceipt;
+use crate::receipt::{SignatureEvidence, VerifiedReceipt};
 use subtle::ConstantTimeEq;
 const MAXIMUM: u64 = 9_007_199_254_740_991;
 // Independent millisecond clocks may have different fractional tick phases.
 const QUANTUM_MS: u64 = 1;
+const PARTS: u128 = 1_000_000;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Refused;
+/// Independently established oscillator error bounds in parts per million.
+/// This numeric model does not cover suspension, restore or a source clock step;
+/// an observation remains point-in-time evidence, never a revocation lease.
+pub struct ClockRates {
+    source_ppm: u32,
+    receiver_ppm: u32,
+}
+impl ClockRates {
+    /// Explicit equal-rate assumption used by the original arithmetic API.
+    pub const EQUAL: Self = Self {
+        source_ppm: 0,
+        receiver_ppm: 0,
+    };
+    pub fn new(source_ppm: u32, receiver_ppm: u32) -> Result<Self, Refused> {
+        if u128::from(source_ppm) >= PARTS || u128::from(receiver_ppm) >= PARTS {
+            return Err(Refused);
+        }
+        Ok(Self {
+            source_ppm,
+            receiver_ppm,
+        })
+    }
+    fn admission_delta(&self, remaining: u32) -> Result<u64, Refused> {
+        let source_ticks = u64::from(remaining)
+            .checked_sub(QUANTUM_MS)
+            .ok_or(Refused)?;
+        let delta = u128::from(source_ticks)
+            .checked_mul(PARTS - u128::from(self.receiver_ppm))
+            .ok_or(Refused)?
+            / (PARTS + u128::from(self.source_ppm));
+        u64::try_from(delta).map_err(|_| Refused)
+    }
+    fn retention_delta(&self, remaining: u64) -> Result<u64, Refused> {
+        let delta = u128::from(remaining)
+            .checked_mul(PARTS + u128::from(self.receiver_ppm))
+            .ok_or(Refused)?
+            .div_ceil(PARTS - u128::from(self.source_ppm));
+        u64::try_from(delta)
+            .map_err(|_| Refused)?
+            .checked_add(QUANTUM_MS)
+            .ok_or(Refused)
+    }
+}
 /// Owner-domain values from an authenticated, request-bound native response.
 pub struct Report {
     pub owner_now_ms: u64,
@@ -33,6 +77,26 @@ impl Bounds {
         proof: &VerifiedReceipt,
         report: &Report,
         exchange: &Exchange,
+    ) -> Result<Self, Refused> {
+        Self::from_signature(proof.evidence(), report, exchange)
+    }
+    /// Numeric conversion of signature evidence plus a separately authenticated
+    /// source report. Neither argument authenticates transport or grants access.
+    pub fn from_signature(
+        proof: &SignatureEvidence,
+        report: &Report,
+        exchange: &Exchange,
+    ) -> Result<Self, Refused> {
+        Self::from_signature_with_rates(proof, report, exchange, &ClockRates::EQUAL)
+    }
+    /// Conservative numeric bounds under explicit source/receiver oscillator
+    /// limits. Admission rounds down; retention rounds up. Native adapters own
+    /// qualification of those limits and authentication of the source report.
+    pub fn from_signature_with_rates(
+        proof: &SignatureEvidence,
+        report: &Report,
+        exchange: &Exchange,
+        rates: &ClockRates,
     ) -> Result<Self, Refused> {
         let claims = proof.claims();
         let signed_remaining = claims
@@ -65,18 +129,13 @@ impl Bounds {
         );
         let admit_until_ms = exchange
             .before_ms
-            .checked_add(
-                u64::from(report.remaining_ms)
-                    .checked_sub(QUANTUM_MS)
-                    .ok_or(Refused)?,
-            )
+            .checked_add(rates.admission_delta(report.remaining_ms)?)
             .ok_or(Refused)?;
         // Retain for the complete signed proof, not a shorter current observation.
         // A later owner query may report a longer prerequisite bound while the
         // same signed nonce is still alive. Cleaning at admit_until opens replay.
         let retain_until_ms = finish
-            .checked_add(signed_remaining)
-            .and_then(|value| value.checked_add(QUANTUM_MS))
+            .checked_add(rates.retention_delta(signed_remaining)?)
             .ok_or(Refused)?;
         if admit_until_ms <= finish || retain_until_ms > MAXIMUM {
             return Err(Refused);

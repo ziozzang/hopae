@@ -23,12 +23,15 @@ pub struct Claims {
     /// Native CSPRNG nonce. Receivers must consume it atomically, not cache acceptance.
     pub nonce: [u8; 32],
 }
-/// Authenticated bytes only, not live authorization; cannot be directly constructed.
-pub struct VerifiedReceipt {
+/// Signature, purpose, binding and bounded structural lifetime evidence only.
+/// No temporal admission, live ownership, permission or replay consumption.
+/// Native observed-time clients must authenticate the issuing clock domain.
+/// Intentionally no Clone/Debug/serde and no public constructor.
+pub struct SignatureEvidence {
     claims: Claims,
     sha256: [u8; 32],
 }
-impl VerifiedReceipt {
+impl SignatureEvidence {
     pub fn claims(&self) -> &Claims {
         &self.claims
     }
@@ -37,14 +40,33 @@ impl VerifiedReceipt {
         &self.sha256
     }
 }
+/// Evidence additionally checked at the supplied instant in the issuing domain.
+/// This strict primitive is still not live authorization or replay admission.
+pub struct VerifiedReceipt {
+    evidence: SignatureEvidence,
+}
+impl VerifiedReceipt {
+    pub fn claims(&self) -> &Claims {
+        self.evidence.claims()
+    }
+    pub fn sha256(&self) -> &[u8; 32] {
+        self.evidence.sha256()
+    }
+    pub fn evidence(&self) -> &SignatureEvidence {
+        &self.evidence
+    }
+}
 fn valid(claims: &Claims) -> bool {
     claims.issued_ms > 0
         && claims.expires_ms > claims.issued_ms
         && claims.expires_ms - claims.issued_ms <= 1000
         && claims.nonce != [0; 32]
 }
-fn message(payload: &[u8]) -> Vec<u8> {
-    [DOMAIN, payload].concat()
+fn message(payload: &[u8]) -> [u8; DOMAIN.len() + PAYLOAD] {
+    let mut message = [0; DOMAIN.len() + PAYLOAD];
+    message[..DOMAIN.len()].copy_from_slice(DOMAIN);
+    message[DOMAIN.len()..].copy_from_slice(payload);
+    message
 }
 pub fn sign(key: &SigningKey, claims: &Claims) -> Result<[u8; LENGTH], InvalidReceipt> {
     if !valid(claims) {
@@ -68,6 +90,22 @@ pub fn verify(
     binding: &[u8; 32],
     now_ms: u64,
 ) -> Result<VerifiedReceipt, InvalidReceipt> {
+    let evidence = verify_signature(key, bytes, purpose, binding)?;
+    let claims = evidence.claims();
+    if now_ms < claims.issued_ms || now_ms >= claims.expires_ms {
+        return Err(InvalidReceipt);
+    }
+    Ok(VerifiedReceipt { evidence })
+}
+/// Verify cryptographic evidence without comparing foreign absolute timestamps.
+/// Success alone must never admit a request. An authenticated owner observation,
+/// local conservative bounds, live owner fences and replay handling are separate.
+pub fn verify_signature(
+    key: &VerifyingKey,
+    bytes: &[u8],
+    purpose: Purpose,
+    binding: &[u8; 32],
+) -> Result<SignatureEvidence, InvalidReceipt> {
     if bytes.len() != LENGTH || bytes[0] != 1 || bytes[1] != purpose as u8 || key.is_weak() {
         return Err(InvalidReceipt);
     }
@@ -81,14 +119,10 @@ pub fn verify(
         binding: bytes[18..50].try_into().map_err(|_| InvalidReceipt)?,
         nonce: bytes[50..82].try_into().map_err(|_| InvalidReceipt)?,
     };
-    if !valid(&claims)
-        || now_ms < claims.issued_ms
-        || now_ms >= claims.expires_ms
-        || !bool::from(claims.binding.ct_eq(binding))
-    {
+    if !valid(&claims) || !bool::from(claims.binding.ct_eq(binding)) {
         return Err(InvalidReceipt);
     }
-    Ok(VerifiedReceipt {
+    Ok(SignatureEvidence {
         claims,
         sha256: Sha256::digest(bytes).into(),
     })

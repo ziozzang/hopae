@@ -27,6 +27,18 @@ pub(super) struct Service {
     pub(super) keys: Arc<CallerKeys>,
     pub(super) requests: Arc<Semaphore>,
 }
+// Generated unary handlers decode before invoking the domain service. Reject
+// unauthenticated initial metadata before that allocation/decoding work, while
+// retaining domain checks for internal calls and final caller freshness.
+fn authenticate_transport<S>(
+    service: S,
+    pipeline: Service,
+) -> tonic::service::interceptor::InterceptedService<S, impl tonic::service::Interceptor + Clone> {
+    tonic::service::interceptor::InterceptedService::new(service, move |request: Request<()>| {
+        pipeline.caller(request.metadata())?;
+        Ok(request)
+    })
+}
 impl Service {
     pub(super) fn caller(
         &self,
@@ -530,14 +542,21 @@ pub async fn serve_with_receipts(
                 .max_encoding_message_size(2048)
         });
     hangang_runtime::server(tls)?
-        .add_service(
-            AuthenticationServer::new(pipeline)
+        .add_service(authenticate_transport(
+            AuthenticationServer::new(pipeline.clone())
                 .max_decoding_message_size(wire::MAX_FRAME)
                 .max_encoding_message_size(wire::MAX_FRAME),
+            pipeline.clone(),
+        ))
+        .add_optional_service(
+            receipt_service.map(|service| authenticate_transport(service, pipeline.clone())),
         )
-        .add_optional_service(receipt_service)
-        .add_optional_service(plan_service)
-        .add_optional_service(projection_service)
+        .add_optional_service(
+            plan_service.map(|service| authenticate_transport(service, pipeline.clone())),
+        )
+        .add_optional_service(
+            projection_service.map(|service| authenticate_transport(service, pipeline.clone())),
+        )
         .serve_with_incoming_shutdown(hangang_runtime::incoming(listener), async move {
             let _ = stop.wait_for(|v| *v).await;
         })
@@ -1300,5 +1319,240 @@ mod observed_boundary_tests {
         assert_eq!(next.observation.unwrap().request_id, 41);
         assert_eq!(fixture.router_calls.load(Ordering::SeqCst), 2);
         assert_eq!(fixture.service.pipeline.requests.available_permits(), 1);
+    }
+
+    struct CountedGrpcStream {
+        polls: Arc<AtomicUsize>,
+        forbid_poll: bool,
+        chunks: std::collections::VecDeque<bytes::Bytes>,
+    }
+    impl tonic::codegen::tokio_stream::Stream for CountedGrpcStream {
+        type Item = Result<bytes::Bytes, std::io::Error>;
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                !self.forbid_poll,
+                "unauthenticated protobuf body was polled"
+            );
+            std::task::Poll::Ready(self.chunks.pop_front().map(Ok))
+        }
+    }
+
+    fn grpc_body(chunks: Vec<bytes::Bytes>, forbid_poll: bool) -> (Body, Arc<AtomicUsize>) {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let body = Body::from_stream(CountedGrpcStream {
+            polls: polls.clone(),
+            forbid_poll,
+            chunks: chunks.into(),
+        });
+        (body, polls)
+    }
+
+    fn protobuf_frame(message: &impl prost::Message) -> Vec<u8> {
+        let payload = message.encode_to_vec();
+        let mut frame = vec![0];
+        frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+        frame.extend_from_slice(&payload);
+        frame
+    }
+
+    fn grpc_http_request(method: &str, credentials: &[&str], body: Body) -> HttpRequest<Body> {
+        let mut request = HttpRequest::builder()
+            .method("POST")
+            .version(http::Version::HTTP_2)
+            .uri(format!("/hangang.hopae.v1.AuthenticationReceipts/{method}"))
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(body)
+            .unwrap();
+        for value in credentials {
+            request
+                .headers_mut()
+                .append("authorization", value.parse().unwrap());
+        }
+        request
+    }
+
+    async fn grpc_response<B>(response: http::Response<B>) -> (u16, Vec<u8>)
+    where
+        B: tonic::codegen::Body<Data = bytes::Bytes> + Unpin,
+        B::Error: std::fmt::Debug,
+    {
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let mut status = response
+            .headers()
+            .get("grpc-status")
+            .map(|value| value.to_str().unwrap().parse::<u16>().unwrap());
+        let mut body = response.into_body();
+        let mut data = Vec::new();
+        while let Some(frame) =
+            std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+        {
+            match frame.unwrap().into_data() {
+                Ok(bytes) => data.extend_from_slice(&bytes),
+                Err(frame) => {
+                    if let Ok(trailers) = frame.into_trailers()
+                        && let Some(value) = trailers.get("grpc-status")
+                    {
+                        status = Some(value.to_str().unwrap().parse::<u16>().unwrap());
+                    }
+                }
+            }
+        }
+        (status.expect("gRPC status in headers or trailers"), data)
+    }
+
+    #[tokio::test]
+    async fn predecode_auth_refuses_initial_metadata_without_polling_protobuf() {
+        for method in ["IssueServiceObserved", "ObserveServiceTime"] {
+            for credentials in [
+                vec![],
+                vec!["Bearer incorrect"],
+                vec!["Bearer owned-boundary-gateway-key", "Bearer incorrect"],
+                vec!["Bearer incorrect", "Bearer owned-boundary-gateway-key"],
+                vec![
+                    "Bearer owned-boundary-gateway-key",
+                    "Bearer owned-boundary-gateway-key",
+                ],
+            ] {
+                let fixture = fixture();
+                let pipeline = fixture.service.pipeline.clone();
+                let capacity = pipeline.requests.clone();
+                let generated =
+                    v1::authentication_receipts_server::AuthenticationReceiptsServer::new(
+                        fixture.service,
+                    )
+                    .max_decoding_message_size(wire::MAX_FRAME)
+                    .max_encoding_message_size(2048);
+                let service = authenticate_transport(generated, pipeline);
+                // Even the gRPC prefix is deliberately hostile. If protobuf
+                // decoding runs first, poll_next panics instead of hiding the
+                // ordering mistake behind a normal decoder error.
+                let (body, polls) = grpc_body(
+                    vec![bytes::Bytes::from_static(&[255, 255, 255, 255, 255])],
+                    true,
+                );
+                let response = service
+                    .oneshot(grpc_http_request(method, &credentials, body))
+                    .await
+                    .unwrap();
+                let (status, data) = grpc_response(response).await;
+                assert_eq!(status, tonic::Code::Unauthenticated as u16);
+                assert!(data.is_empty());
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                assert_eq!(fixture.router_calls.load(Ordering::SeqCst), 0);
+                assert_eq!(fixture.clock.0.load(Ordering::SeqCst), 0);
+                assert_eq!(capacity.available_permits(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn predecode_auth_preserves_valid_metadata_framing_and_observed_execution() {
+        use prost::Message;
+        let fixture = fixture();
+        let pipeline = fixture.service.pipeline.clone();
+        let capacity = pipeline.requests.clone();
+        let generated =
+            v1::authentication_receipts_server::AuthenticationReceiptsServer::new(fixture.service)
+                .max_decoding_message_size(wire::MAX_FRAME)
+                .max_encoding_message_size(2048);
+        let service = authenticate_transport(generated, pipeline);
+        let frame = protobuf_frame(&issue(50).into_inner());
+        // Split the five-byte framing prefix across chunks to exercise the
+        // generated decoder instead of relying on one contiguous request body.
+        let (body, polls) = grpc_body(
+            vec![
+                bytes::Bytes::copy_from_slice(&frame[..2]),
+                bytes::Bytes::copy_from_slice(&frame[2..5]),
+                bytes::Bytes::copy_from_slice(&frame[5..]),
+            ],
+            false,
+        );
+        let response = service
+            .clone()
+            .oneshot(grpc_http_request(
+                "IssueServiceObserved",
+                &["Bearer owned-boundary-gateway-key"],
+                body,
+            ))
+            .await
+            .unwrap();
+        let (status, data) = grpc_response(response).await;
+        assert_eq!(status, tonic::Code::Ok as u16);
+        assert!(polls.load(Ordering::SeqCst) >= 3);
+        assert!(data.len() >= 5);
+        assert_eq!(data[0], 0);
+        assert_eq!(
+            u32::from_be_bytes(data[1..5].try_into().unwrap()) as usize,
+            data.len() - 5
+        );
+        let issued = v1::ServiceReceiptObservedReply::decode(&data[5..]).unwrap();
+        let initial = issued.observation.unwrap();
+        assert_eq!(initial.request_id, 50);
+        let refresh = observation(issued.receipt.unwrap()).into_inner();
+        let (body, polls) = grpc_body(vec![bytes::Bytes::from(protobuf_frame(&refresh))], false);
+        let response = service
+            .oneshot(grpc_http_request(
+                "ObserveServiceTime",
+                &["Bearer owned-boundary-gateway-key"],
+                body,
+            ))
+            .await
+            .unwrap();
+        let (status, data) = grpc_response(response).await;
+        assert_eq!(status, tonic::Code::Ok as u16);
+        assert!(polls.load(Ordering::SeqCst) > 0);
+        assert!(data.len() >= 5);
+        assert_eq!(data[0], 0);
+        assert_eq!(
+            u32::from_be_bytes(data[1..5].try_into().unwrap()) as usize,
+            data.len() - 5
+        );
+        let refreshed = v1::ServiceReceiptTimeReply::decode(&data[5..]).unwrap();
+        assert_eq!(refreshed.request_id, 51);
+        assert_eq!(refreshed.receipt_sha256, initial.receipt_sha256);
+        assert_eq!(refreshed.clock_domain, initial.clock_domain);
+        assert_eq!(fixture.router_calls.load(Ordering::SeqCst), 1);
+        assert!(fixture.clock.0.load(Ordering::SeqCst) > 0);
+        assert_eq!(capacity.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn predecode_auth_keeps_generated_message_size_limits_for_authorized_calls() {
+        for method in ["IssueServiceObserved", "ObserveServiceTime"] {
+            let fixture = fixture();
+            let pipeline = fixture.service.pipeline.clone();
+            let capacity = pipeline.requests.clone();
+            let generated = v1::authentication_receipts_server::AuthenticationReceiptsServer::new(
+                fixture.service,
+            )
+            .max_decoding_message_size(wire::MAX_FRAME)
+            .max_encoding_message_size(2048);
+            let service = authenticate_transport(generated, pipeline);
+            let mut frame = vec![0];
+            frame.extend_from_slice(&u32::try_from(wire::MAX_FRAME + 1).unwrap().to_be_bytes());
+            let (body, polls) = grpc_body(vec![bytes::Bytes::from(frame)], false);
+            let response = service
+                .oneshot(grpc_http_request(
+                    method,
+                    &["Bearer owned-boundary-gateway-key"],
+                    body,
+                ))
+                .await
+                .unwrap();
+            let (status, data) = grpc_response(response).await;
+            // Tonic rejects the declared frame size before reserving/decoding
+            // the message, even though this body never supplies its payload.
+            assert_eq!(status, tonic::Code::OutOfRange as u16);
+            assert!(data.is_empty());
+            assert!(polls.load(Ordering::SeqCst) > 0);
+            assert_eq!(fixture.router_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(fixture.clock.0.load(Ordering::SeqCst), 0);
+            assert_eq!(capacity.available_permits(), 1);
+        }
     }
 }
