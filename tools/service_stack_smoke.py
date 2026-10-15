@@ -49,7 +49,9 @@ def main():
             elif self.headers.get('Authorization')!='Bearer '+(remote_key if args.composition else api_key):status,reply=401,{}
             elif body.get('service_id')!='orders':status,reply=200,{'active':False}
             else:status,reply=200,{'active':True,'subject':('partner-other' if verifier_state['ambiguous'] else 'partner-worker') if args.composition else 'worker','service_id':'orders','expires_at':int(time.time()*1000)+1000}
-            self.send_response(status);self.send_header('Content-Type','application/json');self.end_headers();self.wfile.write(json.dumps(reply).encode())
+            verifier_state['last_status']=status
+            payload=json.dumps(reply).encode()
+            self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload)
         def log_message(self,*args):pass
     verifier=http.server.ThreadingHTTPServer(('127.0.0.1',0),Verifier);threading.Thread(target=verifier.serve_forever,daemon=True).start()
     origin=http.server.ThreadingHTTPServer(('127.0.0.1',0),Origin);threading.Thread(target=origin.serve_forever,daemon=True).start()
@@ -218,7 +220,23 @@ def main():
                 headers={'Authorization':'Bearer '+system,'Content-Type':'application/json'}
                 if extra:headers.update(extra)
                 with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{admin}'+path,data=None if document is None else json.dumps(document).encode(),headers=headers,method=method),timeout=3) as r:return json.loads(r.read()),dict(r.headers)
-            assert request()==200,f'initial projection status={request.last_status}, elapsed_ms={request.last_elapsed_ms}'
+            if args.composition:
+                source_headers={'x-hopae-gateway-key':caller,'x-hopae-contract':'1','x-forwarded-host':'app.example.test','x-forwarded-proto':'https','x-forwarded-port':str(public),'x-forwarded-for':'127.0.0.1','x-original-method':'GET','x-original-url':f'https://app.example.test:{public}/secure','Authorization':'Hopae-Compose '+composition_key}
+                source=http.client.HTTPConnection('127.0.0.1',http_verify,timeout=3)
+                source.request('GET','/_hopae/verify',headers=source_headers)
+                source_reply=source.getresponse();source_status=source_reply.status;source_reply.read();source.close()
+                assert source_status==200,f'composition HTTP source status={source_status}, relay_calls={verifier_state["calls"]}, relay_status={verifier_state.get("last_status")}'
+            if args.receipt_probe_binary:
+                receipt_config={'settings':{'transport':'grpc','address':f'localhost:{hop_grpc}','tls':tls('hopae.example.test')},'issuer_ref':'owned','key_epoch':1,'public_key':issuer_pin,'service':'orders','audience':'orders-api','identity_authority':'world1','source_ppm':500,'receiver_ppm':500,'credential_scheme':'hopae_compose','method':'GET','target':'/api/secure','body':'owned final entity','headers':[['x-hopae-contract','1'],['x-forwarded-host','app.example.test'],['x-forwarded-proto','https'],['x-forwarded-port',str(public)],['x-forwarded-for','127.0.0.1'],['x-original-method','GET'],['x-original-url',f'https://app.example.test:{public}/secure']]}
+                (root/'receipt-probe.json').write_text(json.dumps(receipt_config))
+                probe_env=dict(env,OWNED_RECEIPT_CALLER=caller,OWNED_RECEIPT_CREDENTIAL=composition_key)
+                probe=subprocess.run([str(args.receipt_probe_binary.resolve()),str(root/'receipt-probe.json')],env=probe_env,input='allow\n',text=True,capture_output=True,timeout=10)
+                assert probe.returncode==0,f'composition SDK probe refused phase={json.loads(probe.stdout).get("probe_error")}, relay_calls={verifier_state["calls"]}, relay_status={verifier_state.get("last_status")}'
+                report=json.loads(probe.stdout)
+                assert report['contract']=='hopae-observed-sdk-v1' and all(report.get(field) is True for field in ['allowed','issued','independently_observed','refreshed'])
+                assert all(secret not in probe.stdout+probe.stderr for secret in [api_key,remote_key,composition_key,caller]),'probe disclosed credentials'
+                print('PASS: actual native SDK composition issue, independent observe, consuming refresh and final checks; safe output only.')
+            assert request()==200,f'initial projection status={request.last_status}, elapsed_ms={request.last_elapsed_ms}, relay_calls={verifier_state["calls"]}, relay_status={verifier_state.get("last_status")}'
             assert request()==200,f'repeated projection status={request.last_status}, elapsed_ms={request.last_elapsed_ms}'
             assert len(seen)==2
             if args.observed:print('PASS: actual observed authentication, separate Pumgye permit and Hopae output clocks reach the final backend through Hangang.')
@@ -226,16 +244,6 @@ def main():
             if not args.credential_projection:assert all(not any(k.lower()=='authorization' for k in h) for h in seen)
             if args.native_resource:assert seen_paths==['/api/secure','/api/secure'] and seen_bodies==[b'owned final entity']*2, 'final target/entity mismatch'
             assert all(h.get('x-forwarded-user')==subject and h.get('x-hopae-aal')=='0' for h in seen)
-            if args.receipt_probe_binary:
-                receipt_config={'settings':{'transport':'grpc','address':f'localhost:{hop_grpc}','tls':tls('hopae.example.test')},'issuer_ref':'owned','key_epoch':1,'public_key':issuer_pin,'service':'orders','audience':'orders-api','identity_authority':'world1','source_ppm':500,'receiver_ppm':500,'credential_scheme':'hopae_compose','method':'GET','target':'/api/secure','body':'owned final entity','headers':[['x-hopae-contract','1'],['x-forwarded-host','app.example.test'],['x-forwarded-proto','https'],['x-forwarded-port',str(public)],['x-forwarded-for','127.0.0.1'],['x-original-method','GET'],['x-original-url',f'https://app.example.test:{public}/secure']]}
-                (root/'receipt-probe.json').write_text(json.dumps(receipt_config))
-                probe_env=dict(env,OWNED_RECEIPT_CALLER=caller,OWNED_RECEIPT_CREDENTIAL=composition_key)
-                probe=subprocess.run([str(args.receipt_probe_binary.resolve()),str(root/'receipt-probe.json')],env=probe_env,input='allow\n',text=True,capture_output=True,timeout=10)
-                assert probe.returncode==0,'composition SDK probe refused'
-                report=json.loads(probe.stdout)
-                assert report['contract']=='hopae-observed-sdk-v1' and all(report.get(field) is True for field in ['allowed','issued','independently_observed','refreshed'])
-                assert all(secret not in probe.stdout+probe.stderr for secret in [api_key,remote_key,composition_key,caller]),'probe disclosed credentials'
-                print('PASS: actual native SDK composition issue, independent observe, consuming refresh and final checks; safe output only.')
             if args.composition:
                 for entries in [[('local',api_key)],[('partner',remote_key)],[('local','invalid-local-key-at-least-thirty-two'),('partner',remote_key)],[('local',api_key),('partner','invalid-partner-key-at-least-thirty-two')]]:
                     assert request(key=composition_wire(entries))==401,'All missing/invalid factor accepted'
