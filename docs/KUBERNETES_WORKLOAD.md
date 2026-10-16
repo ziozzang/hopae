@@ -1,6 +1,6 @@
 # Kubernetes workload authentication
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [Documentation](README.md) · [한국어](ko/KUBERNETES_WORKLOAD.md)
 
@@ -200,9 +200,19 @@ per-authority watch.
 
 Before ADR 0022, `kubernetes_tokenreview` published a subject hashed over the
 namespace, ServiceAccount name/UID **and Pod name/UID** (`w_…`, wire subject
-`s_…`), so a grant died with its Pod. Both connectors now publish the
-ServiceAccount principal by default. Upgrade path:
+`s_…`), so a grant died with its Pod. New `kubernetes_workload` profiles
+publish the ServiceAccount principal by default. An existing
+`kubernetes_tokenreview` profile must **declare** `subject`: without it the
+configuration load, the preflight check and a profile publication fail with
+`kubernetes_tokenreview.subject is required since Hangang ADR 0022 …` and a
+pointer to this section, so an upgrade never changes a published subject
+silently. Operator migration:
 
+0. **Declare the current behaviour.** Before (or with) the upgrade, add
+   `"subject": "legacy_pod"` with `"legacy_until_ms"` (the end of the
+   migration window) and `"legacy_mapping_until_ms"` to every existing
+   TokenReview profile. Callers keep their Pod-bound subjects; nothing else
+   changes.
 1. **Observe mappings.** Set `legacy_mapping_until_ms` (for example two weeks
    ahead). Each Pod-bound legacy subject that authenticates is reported once
    per process as `workload.legacy_subject_mapped` with `legacy_subject_ref`
@@ -211,16 +221,14 @@ ServiceAccount principal by default. Upgrade path:
    `include_workloads: true`; the ADR 0021 converter maps a Pod-bound grant to
    the ServiceAccount principal only after an administrator confirms the
    namespace/ServiceAccount, otherwise it stays a deprecated legacy entry.
-3. **Compatibility window (optional).** While Pumgye still evaluates Pod-bound
-   grants, `subject: "legacy_pod"` with a mandatory `legacy_until_ms` keeps
-   publishing the legacy subject (Pod-bound tokens only). At that instant the
-   connector refuses with `503`; it never silently switches subjects.
-4. **Cut over.** Remove `subject`/`legacy_until_ms` (default
-   `service_account`), keep or drop the mapping window.
-
-An upgrade that does nothing changes the published subject of existing
-TokenReview profiles: Pod-bound grants keyed on the old `s_` stop matching and
-the caller is denied (fail closed), never granted more.
+3. **Re-grant.** Create the bindings on the ServiceAccount principals (the
+   Pumgye v2 converter consumes the `legacy_subject_mapped` events). While
+   Pumgye still evaluates Pod-bound grants, `legacy_pod` keeps publishing the
+   legacy subject (Pod-bound tokens only). At `legacy_until_ms` the connector
+   refuses with `503`; it never silently switches subjects.
+4. **Cut over.** Set `"subject": "service_account"`, remove
+   `legacy_until_ms`, keep or drop the mapping window, then retire the
+   Pod-bound grants.
 
 ## SPIFFE alignment and Hangang workload mTLS
 
@@ -343,9 +351,9 @@ for the chosen cluster version and authenticator.
 The resulting principal is Workload, not Human: no human MFA assurance is inferred.
 It is the ServiceAccount principal of the [identity model](#workload-identity-model)
 (issuer, cluster, namespace, ServiceAccount name and UID); the Pod name/UID is an
-audit attribute. Optional `trust_domain` adds the SPIFFE ID. The previous
-Pod-bound subject is published only with `subject: "legacy_pod"` and a mandatory
-`legacy_until_ms` ([migration](#migration-from-pod-bound-subjects)).
+audit attribute. Optional `trust_domain` adds the SPIFFE ID. `subject` is
+required (`service_account`, or `legacy_pod` with a mandatory
+`legacy_until_ms`, [migration](#migration-from-pod-bound-subjects)).
 Evidence is service-scoped, expires at the earlier of token expiry
 and one second after authentication start, and contains no credential or Pod
 labels. The native caller supplies trusted time. Without `cache_ttl_ms` there is
@@ -406,6 +414,7 @@ credential; neither value is part of the owner document or UI. Example fragment:
     "ca_pem_env": "HOPAE_KUBERNETES_CA_PEM",
     "reviewer_token_env": "HOPAE_KUBERNETES_REVIEWER",
     "token_prefix": "k8s:",
+    "subject": "service_account",
     "trust_domain": "cluster.example.test",
     "cache_ttl_ms": 0
   }

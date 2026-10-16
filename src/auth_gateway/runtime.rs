@@ -793,7 +793,7 @@ mod tests {
     use super::*;
     #[test]
     fn kubernetes_profile_requires_distinct_prefix_realm_and_reference_material() {
-        let mut config: Config = serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"app.example.test","ports":[443],"realm":"example-cluster","api_keys":[{"token_env":"OWNED_KEY","subject":"worker"}],"kubernetes_tokenreview":{"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"k8s:"}}]})).unwrap();
+        let mut config: Config = serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"app.example.test","ports":[443],"realm":"example-cluster","api_keys":[{"token_env":"OWNED_KEY","subject":"worker"}],"kubernetes_tokenreview":{"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"k8s:","subject":"service_account"}}]})).unwrap();
         config.validate().unwrap();
         assert!(
             Runtime::compile(&config, &|name| (name == "OWNED_KEY")

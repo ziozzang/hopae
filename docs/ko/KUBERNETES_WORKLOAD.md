@@ -1,6 +1,6 @@
 # Kubernetes 워크로드 인증
 
-<!-- translation-status: source=../KUBERNETES_WORKLOAD.md source-rev=6 status=current -->
+<!-- translation-status: source=../KUBERNETES_WORKLOAD.md source-rev=7 status=current -->
 
 [문서](README.md) · [English](../KUBERNETES_WORKLOAD.md)
 
@@ -185,25 +185,28 @@ ADR 0022의 controller tombstone(서명된 폐기 delta)이 이 authority별 감
 
 ADR 0022 이전에 `kubernetes_tokenreview`는 namespace, ServiceAccount 이름/UID와
 **Pod 이름/UID**를 해시한 주체(`w_…`, 전송 주체 `s_…`)를 게시했기 때문에 권한이
-Pod와 함께 사라졌습니다. 이제 두 connector 모두 기본으로 ServiceAccount 주체를
-게시합니다. 업그레이드 경로:
+Pod와 함께 사라졌습니다. 새 `kubernetes_workload` 프로필은 기본으로 ServiceAccount
+주체를 게시합니다. 기존 `kubernetes_tokenreview` 프로필은 `subject`를 **명시**해야
+합니다. 없으면 설정 로드, preflight 검사, 프로필 게시가
+`kubernetes_tokenreview.subject is required since Hangang ADR 0022 …` 메시지와 이 절을
+가리키는 안내와 함께 실패하므로, 업그레이드가 게시 주체를 조용히 바꾸는 일은
+없습니다. 운영자 이전 절차:
 
+0. **현재 동작 선언.** 업그레이드 전(또는 함께) 모든 기존 TokenReview 프로필에
+   `"subject": "legacy_pod"`, `"legacy_until_ms"`(이전 기간 끝), `"legacy_mapping_until_ms"`를
+   추가합니다. 호출자는 Pod 기반 주체를 유지하며 그 밖에는 바뀌지 않습니다.
 1. **대응 관계 관찰.** `legacy_mapping_until_ms`를 설정합니다(예: 2주 뒤). 인증되는
    각 Pod 기반 레거시 주체는 프로세스마다 한 번 `workload.legacy_subject_mapped`로
    `legacy_subject_ref`와 새 `principal`/`subject_ref`를 함께 보고합니다.
 2. **품계에서 조정.** `include_workloads: true`로 수명주기 피드를 소비합니다.
    ADR 0021 변환기는 관리자가 namespace/ServiceAccount를 확인한 뒤에만 Pod 기반
    권한을 ServiceAccount 주체로 옮기고, 그렇지 않으면 사용 중단된 레거시 항목으로 둡니다.
-3. **호환 기간(선택).** 품계가 아직 Pod 기반 권한을 평가하는 동안
-   `subject: "legacy_pod"`와 필수 `legacy_until_ms`로 레거시 주체를 계속 게시합니다
-   (Pod 바인딩 토큰만). 그 시각이 되면 connector는 `503`으로 거절하며 조용히 주체를
-   바꾸지 않습니다.
-4. **전환.** `subject`/`legacy_until_ms`를 제거하고(기본 `service_account`) 대응 관찰
-   기간은 유지하거나 제거합니다.
-
-아무 조치 없이 업그레이드하면 기존 TokenReview 프로필의 게시 주체가 바뀝니다.
-이전 `s_`에 묶인 Pod 기반 권한은 더 이상 맞지 않아 호출자가 거절됩니다(실패 시
-닫힘). 권한이 늘어나는 일은 없습니다.
+3. **권한 재부여.** ServiceAccount 주체에 binding을 만듭니다(품계 v2 변환기는
+   `legacy_subject_mapped` 이벤트를 소비합니다). 품계가 아직 Pod 기반 권한을 평가하는
+   동안 `legacy_pod`는 레거시 주체를 계속 게시합니다(Pod 바인딩 토큰만).
+   `legacy_until_ms`가 되면 connector는 `503`으로 거절하며 조용히 주체를 바꾸지 않습니다.
+4. **전환.** `"subject": "service_account"`로 바꾸고 `legacy_until_ms`를 제거하며 대응
+   관찰 기간은 유지하거나 제거한 뒤 Pod 기반 권한을 정리합니다.
 
 ## SPIFFE 정렬과 한강 워크로드 mTLS
 
@@ -312,9 +315,9 @@ audience·만료·선택적 nbf·ServiceAccount namespace/name/UID·Pod name/UID
 신원 종류는 Workload이며 사람 MFA 등급을 만들지 않습니다. 주체는
 [신원 모델](#워크로드-신원-모델)의 ServiceAccount 주체(issuer, cluster, namespace,
 ServiceAccount 이름과 UID)이고 Pod 이름/UID는 감사 속성입니다. 선택적
-`trust_domain`을 주면 SPIFFE ID를 추가합니다. 이전 Pod 기반 주체는
-`subject: "legacy_pod"`와 필수 `legacy_until_ms`를 줄 때만 게시합니다
-([이전](#pod-기반-주체에서-이전)). 근거는 서비스 범위와 토큰 만료/인증 시작 후 1초 중
+`trust_domain`을 주면 SPIFFE ID를 추가합니다. `subject`는 필수입니다
+(`service_account`, 또는 필수 `legacy_until_ms`와 함께 `legacy_pod`,
+[이전](#pod-기반-주체에서-이전)). 근거는 서비스 범위와 토큰 만료/인증 시작 후 1초 중
 이른 기한에 제한합니다. 토큰·Pod labels는 근거에 포함하지 않으며 신뢰 시각은
 네이티브 호출자가 제공합니다. `cache_ttl_ms`가 없으면 결과 캐시가 없어 매 호출
 TokenReview를 요청합니다. `cache_ttl_ms`(최대 10,000)는 토큰 digest를 키로 양성
@@ -365,6 +368,7 @@ CA PEM·reviewer는 별도 네이티브 환경 참조이며 owner 문서/UI에 �
     "ca_pem_env": "HOPAE_KUBERNETES_CA_PEM",
     "reviewer_token_env": "HOPAE_KUBERNETES_REVIEWER",
     "token_prefix": "k8s:",
+    "subject": "service_account",
     "trust_domain": "cluster.example.test",
     "cache_ttl_ms": 0
   }

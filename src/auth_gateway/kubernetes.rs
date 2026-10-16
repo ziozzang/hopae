@@ -39,9 +39,10 @@ pub struct Profile {
     /// SPIFFE trust domain; when set, evidence carries the SPIFFE ID.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust_domain: Option<String>,
-    /// `service_account` (default) or the deprecated `legacy_pod`.
-    #[serde(default)]
-    pub subject: SubjectMode,
+    /// Required (no default, so an upgrade never changes a published subject
+    /// silently): `service_account` or the deprecated `legacy_pod`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<SubjectMode>,
     /// Required with `legacy_pod`: the end of the compatibility window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_until_ms: Option<u64>,
@@ -83,11 +84,12 @@ impl Profile {
             "invalid Kubernetes TokenReview trust domain, cache or migration window"
         );
         match self.subject {
-            SubjectMode::ServiceAccount => ensure!(
+            None => anyhow::bail!("{MIGRATION_REQUIRED}"),
+            Some(SubjectMode::ServiceAccount) => ensure!(
                 self.legacy_until_ms.is_none(),
                 "legacy_until_ms requires subject legacy_pod"
             ),
-            SubjectMode::LegacyPod => ensure!(
+            Some(SubjectMode::LegacyPod) => ensure!(
                 self.legacy_until_ms
                     .is_some_and(|t| t > 0 && t <= i64::MAX as u64),
                 "subject legacy_pod is deprecated and requires legacy_until_ms"
@@ -106,7 +108,7 @@ impl Profile {
         let mut connector = Connector::compile(&self.connection, ca.as_bytes(), reviewer)?;
         connector.identity = IdentityPolicy {
             trust_domain: self.trust_domain.clone(),
-            subject: self.subject,
+            subject: self.subject.unwrap_or_default(),
             legacy_until_ms: self.legacy_until_ms,
             legacy_mapping_until_ms: self.legacy_mapping_until_ms,
         };
@@ -123,6 +125,11 @@ impl Profile {
         Ok(connector)
     }
 }
+/// Refusal text when a TokenReview profile does not declare its subject.
+pub const MIGRATION_REQUIRED: &str = "kubernetes_tokenreview.subject is required since Hangang ADR 0022: \
+set \"legacy_pod\" with legacy_until_ms to keep the Pod-bound subject during migration, or \
+\"service_account\" after re-granting on ServiceAccount principals \
+(docs/KUBERNETES_WORKLOAD.md#migration-from-pod-bound-subjects)";
 /// How verified facts become the published subject.
 #[derive(Clone, Debug, Default, Serialize)]
 pub(crate) struct IdentityPolicy {
@@ -750,6 +757,17 @@ mod tests {
         );
         let mut legacy = connector();
         legacy.identity.subject = SubjectMode::LegacyPod;
+        // A profile must declare its subject (no silent change on upgrade).
+        let mut profile: Profile = serde_json::from_value(serde_json::json!({"connection": config(), "ca_pem_env": "OWNED_CA", "reviewer_token_env": "OWNED_REVIEWER", "token_prefix": "k8s:"})).unwrap();
+        assert!(
+            profile
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("subject is required")
+        );
+        profile.subject = Some(SubjectMode::ServiceAccount);
+        profile.validate().unwrap();
         legacy.identity.legacy_until_ms = Some(10_000);
         let le = legacy
             .evidence("orders", &legacy.claims(&t, 100).unwrap(), reply(), 100)

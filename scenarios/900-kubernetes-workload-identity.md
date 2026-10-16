@@ -92,6 +92,12 @@ tokens are refused and no Pod fact or token reaches the wire, events or status.
 - When: prefixed and unprefixed credentials from inside and outside the networks; connector status; explain verdicts; republication with identical material; a profile with both Kubernetes connectors.
 - Then: only prefixed credentials reach the workload verifier; network denial first; local keys unaffected; status shows a `kubernetes-workload` row with fresh keys and no material or reference name; explain verdicts as in S900-8 plus `NoProfile`; the resumed runtime keeps the connector; the combined profile is refused.
 
+### S900-11 An existing TokenReview profile must declare its subject
+
+- Given: a root configuration whose `kubernetes_tokenreview` profile has no `subject`.
+- When: it is loaded; then with `legacy_pod` alone; with `legacy_pod`, `legacy_until_ms` and `legacy_mapping_until_ms`; with `service_account`; and a new `kubernetes_workload` profile without `subject`.
+- Then: the first load fails with `kubernetes_tokenreview.subject is required …`, naming `legacy_pod` and the migration section; `legacy_pod` without a window fails on `legacy_until_ms`; the declared forms load; the new offline profile defaults to `service_account`.
+
 ### S900-10 The response carries the principal and SPIFFE ID, never Pod facts
 
 - Given: an authenticated workload.
@@ -140,6 +146,7 @@ tokens are refused and no Pod fact or token reaches the wire, events or status.
 | S900-8 | `s900_8_lifecycle_feed_and_explain` | `tests/scenarios/s900_kubernetes_workload.rs` | integration | passing |
 | S900-9 | `s900_9_runtime_routing_status_and_explain` | `src/auth_gateway/workload/tests.rs` | unit | passing |
 | S900-10 | `s900_10_workload_response_carries_principal_and_spiffe_id` | `src/gateway/hangang/service_identity.rs` | unit | passing |
+| S900-11 | `s900_11_tokenreview_profile_without_subject_fails_loud_at_load` | `src/config/mod.rs` | unit | passing |
 | S900-A1 | `s900_a1_configuration_refuses_unsafe_profiles` | `src/auth_gateway/workload/tests.rs` | unit | passing |
 
 ## Live verification

@@ -932,7 +932,7 @@ async fn s900_9_runtime_routing_status_and_explain() {
     assert_eq!(again.subject(), e.subject());
     // A profile cannot combine the offline connector with the deprecated one.
     let mut both = serde_json::to_value(&config).unwrap();
-    both["profiles"][0]["kubernetes_tokenreview"] = json!({"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://kubernetes.default.svc.cluster.local","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"tr:"});
+    both["profiles"][0]["kubernetes_tokenreview"] = json!({"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://kubernetes.default.svc.cluster.local","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"tr:","subject":"service_account"});
     let both: crate::auth_gateway::runtime::Config = serde_json::from_value(both).unwrap();
     assert!(both.validate().is_err());
 }

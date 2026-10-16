@@ -104,10 +104,10 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 ### Changed
 
 - Kubernetes workload callers authenticate as their ServiceAccount
-  principal (issuer, cluster, namespace, ServiceAccount name and UID) for
-  both connectors; the Pod name/UID is an audit attribute. The previous
-  Pod-bound subject is published only with `subject: "legacy_pod"` and a
-  mandatory `legacy_until_ms`. `kubernetes_tokenreview` is deprecated and
+  principal (issuer, cluster, namespace, ServiceAccount name and UID); the
+  Pod name/UID is an audit attribute. `kubernetes_tokenreview` profiles must
+  declare `subject` (`service_account`, or `legacy_pod` with a mandatory
+  `legacy_until_ms`); a profile without it fails at load and preflight. `kubernetes_tokenreview` is deprecated and
   gains an optional positive cache (`cache_ttl_ms`, at most 10 s).
 - A recovery factor entry no longer counts as AAL 2 evidence in step-up
   evaluation (no such entry existed before).
@@ -142,12 +142,11 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Migration
 
-- Kubernetes workloads: the published subject of existing
-  `kubernetes_tokenreview` profiles changes from the Pod-bound to the
-  ServiceAccount principal; Pod-bound grants stop matching (fail closed).
-  Use `legacy_mapping_until_ms` to report legacy-to-principal mappings and,
-  if needed, `subject: "legacy_pod"` with `legacy_until_ms` as a bounded
-  compatibility window ([migration](docs/KUBERNETES_WORKLOAD.md#migration-from-pod-bound-subjects)).
+- Kubernetes workloads: existing `kubernetes_tokenreview` profiles fail to
+  load until they declare `subject`. Add `"subject": "legacy_pod"` with
+  `legacy_until_ms` and `legacy_mapping_until_ms` to keep today's subjects,
+  re-grant on the ServiceAccount principals reported by
+  `workload.legacy_subject_mapped`, then switch to `"service_account"` ([migration](docs/KUBERNETES_WORKLOAD.md#migration-from-pod-bound-subjects)).
   Threat model TM-70 to TM-74.
 - Schema version 14 (`0014_groups`) adds `directory_groups`, `group_members`,
   `group_changes` and `group_sync_state`. Versions 11–13 are reserved by the

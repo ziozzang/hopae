@@ -148,7 +148,7 @@ impl Fixture {
         let bound = crate::app::bind(&config).await.unwrap();
         let mut services = bound.services().clone();
         services.caller_keys = Arc::new(CallerKeys::from_env(&config, |_| Some(CALLER.into())));
-        let runtime:runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"orders.example.test","ports":[443],"realm":"example-cluster","api_keys":[{"token_env":"OWNED_LOCAL_KEY","subject":"worker"}],"kubernetes_tokenreview":{"connection":{"api_origin":format!("https://127.0.0.1:{port}"),"issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":1000},"ca_pem_env":"OWNED_KUBE_CA","reviewer_token_env":"OWNED_KUBE_REVIEWER","token_prefix":"k8s:"},"networks":["203.0.113.0/24"]}]})).unwrap();
+        let runtime:runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"orders.example.test","ports":[443],"realm":"example-cluster","api_keys":[{"token_env":"OWNED_LOCAL_KEY","subject":"worker"}],"kubernetes_tokenreview":{"connection":{"api_origin":format!("https://127.0.0.1:{port}"),"issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":1000},"ca_pem_env":"OWNED_KUBE_CA","reviewer_token_env":"OWNED_KUBE_REVIEWER","token_prefix":"k8s:","subject":"service_account"},"networks":["203.0.113.0/24"]}]})).unwrap();
         let env = |name: &str| match name {
             "OWNED_KUBE_CA" => Some(ca.clone()),
             "OWNED_KUBE_REVIEWER" => Some("owned-kubernetes-reviewer-at-least-thirty-two".into()),

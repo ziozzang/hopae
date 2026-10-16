@@ -188,7 +188,12 @@ impl Authority {
         configuration
             .map(|config| {
                 validate(config)?;
-                runtime::Runtime::compile(config, env).map_err(|_| publication::Error::Invalid)
+                runtime::Runtime::compile(config, env).map_err(|error| {
+                    // Validation messages carry no material; surface migration
+                    // refusals (ADR 0022 explicit subject) instead of a bare code.
+                    tracing::error!(%error, "authentication profiles refused");
+                    publication::Error::Invalid
+                })
             })
             .transpose()
     }
@@ -232,8 +237,12 @@ impl Authority {
             .as_ref()
             .map(|config| {
                 validate(config)?;
-                runtime::Runtime::compile_resuming(config, env, previous.runtime.as_ref())
-                    .map_err(|_| publication::Error::Invalid)
+                runtime::Runtime::compile_resuming(config, env, previous.runtime.as_ref()).map_err(
+                    |error| {
+                        tracing::warn!(%error, "authentication profile publication refused");
+                        publication::Error::Invalid
+                    },
+                )
             })
             .transpose()?;
         if let Some(runtime) = &mut runtime {
