@@ -13,6 +13,7 @@ mod groups;
 mod handoff;
 pub mod import;
 mod passkeys;
+mod traits;
 mod write;
 
 use std::sync::Arc;

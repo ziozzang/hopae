@@ -3148,6 +3148,9 @@ mod postgres_backend_tests {
         let e = super::refuse_incomplete_backend(&cfg)
             .unwrap_err()
             .to_string();
-        assert!(e.contains("slice 5") && e.contains("migrate-to-postgres"), "{e}");
+        assert!(
+            e.contains("slice 5") && e.contains("migrate-to-postgres"),
+            "{e}"
+        );
     }
 }

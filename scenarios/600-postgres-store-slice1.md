@@ -160,6 +160,18 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - When: the store is migrated; the migration runs again; a SQLite table the migration does not know gets a row and the migration runs into another empty store.
 - Then: the SQLite file is byte for byte unchanged; users, passkeys, TOTP, the configuration generation, groups and the mirror, the realm and the lifecycle feed read the same on PostgreSQL; the migrated nonce is still refused; one `store.migrated` event carries the report digest and has its delivery row; the second run is refused (not empty); the unknown table is refused by name and nothing is written.
 
+### S600-25 The Directory trait agrees (slice 5)
+
+- Given: providers `mock` and `two` in the file; users with grants.
+- When: providers are imported, a file row changed and re-imported, an import forces a provider the file does not list; users are read under an expired deadline; grant targets are resolved by address and by an unknown ID; `admin.users[]` is imported (by ID, an unknown ID, by address), re-imported, imported after a runtime grant with a file row dropped, and forced.
+- Then: inserted, then updated, the forced unknown refused; `Unavailable(deadline)`; the user with every identity, `None`; one insert and `no_such_user`, then unchanged, then `changed_at_run_time` with the dropped file row revoked (with its `admin.revoke` event), then the forced row rewritten as file-managed.
+
+### S600-26 The Sessions trait agrees (slice 5)
+
+- Given: a user with portal sessions and handles.
+- When: a handle is minted replacing another, and with a handle of another session; a snapshot is refreshed forward then backward; switch, logout and login transactions are bound, retry-bound, consumed for a disabled then a live provider; a logout ticket ends its session twice; a session is reauthenticated with the wrong provider, then right, then again on the spent transaction; an administrator ends a user's sessions twice; transactions are evicted and the store swept.
+- Then: the old handle revoked as `replaced` and the new one capped at the session level, the foreign one refused; only the forward refresh applies; each binding once, the wrong purpose refused, the retry bind once; `ProviderDisabled`, then consumed once; the ticket and its session end once; `provider_mismatch`, then one handle event, `provider_claim` and a new factor, then `Conflict`; 2 then 0; the oldest rows evicted and expired rows swept.
+
 ### S600-5 PostgreSQL ledger, migrations and newer schema
 
 - Given: a PostgreSQL store.
@@ -218,6 +230,8 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-22 | `s600_22_human_realm_and_subjects_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-23 | `s600_23_postgres_owner_triggers_match_sqlite` | `src/store/conformance.rs` | unit | passing |
 | S600-24 | `s600_24_sqlite_store_migrates_to_an_empty_postgres_store` | `src/store/conformance.rs` | unit | passing |
+| S600-25 | `s600_25_directory_trait_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-26 | `s600_26_sessions_trait_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
 | S600-6 | `s600_6_serving_refuses_the_incomplete_postgres_backend` | `src/app.rs` | unit | passing |

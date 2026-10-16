@@ -37,6 +37,8 @@ pub(crate) struct Backend {
     pub console: Arc<dyn ConsoleStore>,
     pub groups: Arc<dyn GroupStore>,
     pub directory: Arc<dyn SubjectDirectoryStore>,
+    pub dir: Arc<dyn super::Directory>,
+    pub sess: Arc<dyn super::Sessions>,
     pub clock: Arc<TestClock>,
     pub rng: Arc<SeededRng>,
     _dir: Option<tempfile::TempDir>,
@@ -80,7 +82,9 @@ fn sqlite() -> Backend {
         events: store.clone(),
         console: store.clone(),
         groups: store.clone(),
-        directory: store,
+        directory: store.clone(),
+        dir: store.clone(),
+        sess: store,
         clock,
         rng,
         _dir: Some(dir),
@@ -133,6 +137,8 @@ pub(crate) async fn postgres_with(realm: bool) -> Option<Backend> {
         console: store.clone(),
         groups: store.clone(),
         directory: store.clone(),
+        dir: store.clone(),
+        sess: store.clone(),
         store: store.clone(),
         clock,
         rng: Arc::new(SeededRng::new(42)),
@@ -4247,4 +4253,595 @@ async fn s600_24_sqlite_store_migrates_to_an_empty_postgres_store() {
     );
     other.cleanup().await;
     target.cleanup().await;
+}
+
+// ---- slice 5 step 1: Directory and Sessions parity ------------------------
+
+fn seed(index: usize, key: SeedKey, role: AdminRole) -> SeedEntry {
+    SeedEntry {
+        index,
+        key,
+        role,
+        note: None,
+    }
+}
+
+async fn directory_parity(b: &Backend) {
+    let name = b.store.backend();
+    // Provider import: insert, update file rows, leave api rows, force.
+    let r = b
+        .dir
+        .import_providers(
+            vec![provider("mock", true), provider("two", true)],
+            None,
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!((r.inserted.len(), r.updated.len()), (2, 0), "{name}");
+    let mut changed = provider("mock", false);
+    changed.display_name = "Changed".into();
+    let r = b
+        .dir
+        .import_providers(vec![changed.clone()], None, vec![])
+        .await
+        .unwrap();
+    assert_eq!(r.updated, vec![ProviderId::new("mock")], "{name}");
+    assert!(conflict(
+        b.dir
+            .import_providers(vec![changed], Some(&ProviderId::new("ghost")), vec![])
+            .await
+    ));
+    let all = b.dir.providers().await.unwrap();
+    assert_eq!(all.len(), 2, "{name}");
+    assert!(
+        all.iter()
+            .any(|p| p.provider_id.as_str() == "mock" && p.display_name == "Changed" && !p.enabled)
+    );
+    b.dir
+        .import_providers(vec![provider("mock", true)], None, vec![])
+        .await
+        .unwrap();
+    // Users through the trait; deadline reads.
+    let u = user(b, 1).await;
+    let (_, email) = new_user(1);
+    assert!(
+        b.dir
+            .user_within(&u.user_id, deadline())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let gone = Deadline(std::time::Instant::now() - Duration::from_millis(1));
+    assert!(
+        matches!(b.dir.user_within(&u.user_id, gone).await, Err(StoreError::Unavailable(ref m)) if m == "deadline"),
+        "{name}"
+    );
+    let (found, ids) = b
+        .dir
+        .resolve_grant_target(&GrantTarget::Email(email.clone()), deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (found.user_id.clone(), ids.len()),
+        (u.user_id.clone(), 1),
+        "{name}"
+    );
+    assert!(
+        b.dir
+            .resolve_grant_target(
+                &GrantTarget::Id(crate::identity::types::UserId::new("u_NONE")),
+                deadline()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // The file import of administrator grants.
+    let u2 = user(b, 2).await;
+    let mk = |user: &crate::identity::types::UserId,
+              kind: EventKind,
+              _p: Option<AdminRole>,
+              _r: AdminRole,
+              _f: bool| {
+        let mut e = EventBuilder::new(
+            b.clock.as_ref(),
+            b.rng.as_ref(),
+            kind,
+            Outcome::Success,
+            "req-import",
+        )
+        .build();
+        e.user_id = Some(user.clone());
+        e
+    };
+    let entries = vec![
+        seed(0, SeedKey::ById(u.user_id.clone()), AdminRole::Admin),
+        seed(
+            1,
+            SeedKey::ById(crate::identity::types::UserId::new("u_GHOST")),
+            AdminRole::Admin,
+        ),
+        seed(2, SeedKey::ByEmail(email.clone()), AdminRole::Viewer),
+    ];
+    let rep = b
+        .dir
+        .import_grants(entries.clone(), None, deadline(), b.clock.now(), &mk)
+        .await
+        .unwrap();
+    assert_eq!(rep.inserted, vec![u.user_id.clone()], "{name}");
+    assert!(
+        rep.skipped
+            .iter()
+            .any(|(i, why)| *i == 1 && *why == skip::NO_SUCH_USER),
+        "{name}"
+    );
+    // Email entry: verified but not authoritative → skipped (resolution), or row exists.
+    let rep = b
+        .dir
+        .import_grants(entries[..1].to_vec(), None, deadline(), b.clock.now(), &mk)
+        .await
+        .unwrap();
+    assert_eq!(
+        rep.unchanged,
+        vec![u.user_id.clone()],
+        "{name}: re-import is no change"
+    );
+    // A runtime grant is not overridden; a removed file row is revoked by the file.
+    b.dir
+        .grant_admin(
+            &u2.user_id,
+            AdminRole::Admin,
+            GrantManagedBy::Api,
+            None,
+            "op",
+            None,
+            b.clock.now(),
+            grant_event(b),
+        )
+        .await
+        .unwrap();
+    let rep = b
+        .dir
+        .import_grants(
+            vec![seed(
+                0,
+                SeedKey::ById(u2.user_id.clone()),
+                AdminRole::Viewer,
+            )],
+            None,
+            deadline(),
+            b.clock.now(),
+            &mk,
+        )
+        .await
+        .unwrap();
+    assert!(
+        rep.skipped
+            .iter()
+            .any(|(_, why)| *why == skip::CHANGED_AT_RUN_TIME),
+        "{name}"
+    );
+    assert_eq!(rep.revoked, vec![u.user_id.clone()], "{name}");
+    let rep = b
+        .dir
+        .import_grants(
+            vec![seed(
+                0,
+                SeedKey::ById(u2.user_id.clone()),
+                AdminRole::Viewer,
+            )],
+            Some(ForceTarget::ById(u2.user_id.clone())),
+            deadline(),
+            b.clock.now(),
+            &mk,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rep.forced, vec![u2.user_id.clone()], "{name}");
+    let g = b
+        .dir
+        .admin_grant(&u2.user_id, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (g.role, g.managed_by),
+        (AdminRole::Viewer, GrantManagedBy::File),
+        "{name}"
+    );
+    let events = b.store.recent_events(100).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == EventKind::AdminRevoke && e.user_id.as_ref() == Some(&u.user_id)),
+        "{name}"
+    );
+}
+
+async fn sessions_parity(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let u = user(b, 1).await;
+    let (row, h) = session(b, &u).await;
+    let host = Host::parse(PORTAL).unwrap();
+    // A second handle replacing the first; a handle of another session is refused.
+    let mut h2 = handle(b, &row.session_id);
+    h2.issued_aal = Aal::Two;
+    b.sess
+        .mint_handle(h2.clone(), Some(h.handle_sha256), vec![])
+        .await
+        .unwrap();
+    let v1 = b
+        .sess
+        .lookup_handle_within(&h.handle_sha256, &host, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        v1.handle.revoked_reason.as_deref(),
+        Some(reasons::REPLACED.0),
+        "{name}"
+    );
+    let v2 = b
+        .sess
+        .lookup_handle(&h2.handle_sha256, &host)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        v2.handle.issued_aal,
+        Aal::One,
+        "{name}: never above the session level"
+    );
+    let (other, oh) = session(b, &u).await;
+    assert!(
+        conflict(
+            b.sess
+                .mint_handle(handle(b, &row.session_id), Some(oh.handle_sha256), vec![])
+                .await
+        ),
+        "{name}"
+    );
+    // Snapshot refresh only moves forward.
+    let snap = IdentitySnapshot {
+        email: None,
+        display_name: Some("New".into()),
+        username: None,
+        groups: vec!["g".into()],
+    };
+    b.sess
+        .refresh_snapshot(&row.session_id, snap.clone(), 5)
+        .await
+        .unwrap();
+    b.sess
+        .refresh_snapshot(
+            &row.session_id,
+            IdentitySnapshot {
+                display_name: Some("Old".into()),
+                ..snap.clone()
+            },
+            4,
+        )
+        .await
+        .unwrap();
+    let s = b.store.session(&row.session_id).await.unwrap().unwrap();
+    assert_eq!(
+        (s.snapshot.display_name.as_deref(), s.authz_version),
+        (Some("New"), 5),
+        "{name}"
+    );
+    // Transactions: switch and logout bindings once; retry bind once; provider-checked consume.
+    let make = |purpose: TxnPurpose| {
+        let (mut t, d) = new_txn(b, "192.0.2.20");
+        t.purpose = purpose;
+        t.reauth_max_age = None;
+        (t, d)
+    };
+    let (t, sw) = make(TxnPurpose::Switch);
+    b.sess.create_transaction(t, vec![]).await.unwrap();
+    assert!(
+        b.sess
+            .bind_switch_transaction(&sw, Digest([1; 32]))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.sess
+            .bind_switch_transaction(&sw, Digest([2; 32]))
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    assert!(
+        !b.sess
+            .bind_logout_transaction(&sw, Digest([2; 32]))
+            .await
+            .unwrap(),
+        "{name}: wrong purpose"
+    );
+    b.sess
+        .record_retry_bind(&sw, Digest([3; 32]))
+        .await
+        .unwrap();
+    assert!(conflict(
+        b.sess.record_retry_bind(&sw, Digest([4; 32])).await
+    ));
+    b.store
+        .ensure_provider(provider("off", false))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            b.sess
+                .consume_transaction_for_provider(
+                    &sw,
+                    &ProviderId::new("off"),
+                    None,
+                    reasons::OK,
+                    b.clock.now(),
+                    vec![]
+                )
+                .await,
+            Err(StoreError::ProviderDisabled)
+        ),
+        "{name}"
+    );
+    assert!(
+        b.sess
+            .consume_transaction_for_provider(
+                &sw,
+                &ProviderId::new("mock"),
+                None,
+                reasons::OK,
+                b.clock.now(),
+                vec![]
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.sess
+            .consume_transaction_for_provider(
+                &sw,
+                &ProviderId::new("mock"),
+                None,
+                reasons::OK,
+                b.clock.now(),
+                vec![]
+            )
+            .await
+            .unwrap()
+    );
+    // A logout ticket ends its session in the same write, once.
+    let (t, lo) = make(TxnPurpose::Logout);
+    b.sess.create_transaction(t, vec![]).await.unwrap();
+    assert!(
+        b.sess
+            .bind_logout_transaction(&lo, Digest([5; 32]))
+            .await
+            .unwrap()
+    );
+    let mut ev = grant_event(b);
+    ev.session_id = Some(other.session_id.clone());
+    assert!(
+        b.sess
+            .consume_logout_ticket(
+                &lo,
+                Some(&other.session_id),
+                reasons::LOGOUT,
+                b.clock.now(),
+                vec![ev.clone()]
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.sess
+            .consume_logout_ticket(
+                &lo,
+                Some(&other.session_id),
+                reasons::LOGOUT,
+                b.clock.now(),
+                vec![ev]
+            )
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    assert_eq!(
+        b.store
+            .session(&other.session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminated_reason
+            .as_deref(),
+        Some(reasons::LOGOUT.0)
+    );
+    // Reauthentication: one transaction consumed, handles rotated with one event each.
+    let (t, ra) = make(TxnPurpose::Login);
+    b.sess.create_transaction(t, vec![]).await.unwrap();
+    let mut fresh = handle(b, &row.session_id);
+    fresh.issued_aal = Aal::Two;
+    let mk = |h: &HandleRow| {
+        let mut e = EventBuilder::new(
+            b.clock.as_ref(),
+            b.rng.as_ref(),
+            EventKind::HandleRevoked,
+            Outcome::Success,
+            "req-reauth",
+        )
+        .build();
+        e.attrs.insert("host".into(), h.host.as_str().into());
+        e
+    };
+    let factor = FactorEntry {
+        kind: FactorKind::Oidc,
+        provider: Some(ProviderId::new("mock")),
+        at: b.clock.now(),
+    };
+    assert!(
+        matches!(
+            b.sess
+                .reauthenticate_session(
+                    &row.session_id,
+                    &ProviderId::new("off"),
+                    None,
+                    b.clock.now(),
+                    AuthTimeSource::ProviderClaim,
+                    factor.clone(),
+                    fresh.clone(),
+                    (ra, reasons::OK),
+                    deadline(),
+                    vec![],
+                    &mk
+                )
+                .await,
+            Err(StoreError::Conflict("provider_mismatch"))
+        ),
+        "{name}"
+    );
+    let before = b.store.recent_events(200).await.unwrap().len();
+    b.sess
+        .reauthenticate_session(
+            &row.session_id,
+            &ProviderId::new("mock"),
+            None,
+            b.clock.now(),
+            AuthTimeSource::ProviderClaim,
+            factor.clone(),
+            fresh.clone(),
+            (ra, reasons::OK),
+            deadline(),
+            vec![],
+            &mk,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        b.store.recent_events(200).await.unwrap().len(),
+        before + 1,
+        "{name}: one live handle revoked"
+    );
+    let s = b.store.session(&row.session_id).await.unwrap().unwrap();
+    assert_eq!(
+        (s.auth_time_source, s.factors.len()),
+        (AuthTimeSource::ProviderClaim, 2),
+        "{name}"
+    );
+    assert_eq!(
+        b.sess
+            .lookup_handle(&fresh.handle_sha256, &host)
+            .await
+            .unwrap()
+            .unwrap()
+            .handle
+            .issued_aal,
+        Aal::One
+    );
+    assert!(
+        conflict(
+            b.sess
+                .reauthenticate_session(
+                    &row.session_id,
+                    &ProviderId::new("mock"),
+                    None,
+                    b.clock.now(),
+                    AuthTimeSource::ProviderClaim,
+                    factor,
+                    handle(b, &row.session_id),
+                    (ra, reasons::OK),
+                    deadline(),
+                    vec![],
+                    &mk
+                )
+                .await
+        ),
+        "{name}: the transaction is spent"
+    );
+    // Fenced termination of a user's sessions.
+    let (actor, policy) = admin_actor(b, 50).await;
+    let target = user(b, 3).await;
+    session(b, &target).await;
+    session(b, &target).await;
+    let mks = |s: &SessionRow| {
+        let mut e = grant_event(b);
+        e.session_id = Some(s.session_id.clone());
+        e
+    };
+    assert_eq!(
+        b.sess
+            .admin_terminate_user_sessions(
+                &actor,
+                &policy,
+                &target.user_id,
+                deadline(),
+                grant_event(b),
+                &mks
+            )
+            .await
+            .unwrap(),
+        2,
+        "{name}"
+    );
+    assert_eq!(
+        b.sess
+            .admin_terminate_user_sessions(
+                &actor,
+                &policy,
+                &target.user_id,
+                deadline(),
+                grant_event(b),
+                &mks
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        !b.sess
+            .session_aal3_evidence(&row.session_id, s.cred_gen)
+            .await
+            .unwrap()
+    );
+    // Eviction and the sweep.
+    for i in 0..4 {
+        let (t, _) = new_txn(b, &format!("192.0.2.{}", 30 + i));
+        b.sess.create_transaction(t, vec![]).await.unwrap();
+    }
+    assert!(
+        b.sess.evict_transactions(2, b.clock.now()).await.unwrap() >= 4,
+        "{name}"
+    );
+    b.clock.advance(Duration::from_secs(40 * 86_400));
+    let swept = b
+        .sess
+        .sweep(b.clock.now(), Duration::from_secs(86_400))
+        .await
+        .unwrap();
+    assert!(
+        swept.sessions >= 3 && swept.transactions >= 2,
+        "{name}: {swept:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_25_directory_trait_agrees_on_both_backends() {
+    for b in backends().await {
+        directory_parity(&b).await;
+        b.cleanup().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_26_sessions_trait_agrees_on_both_backends() {
+    for b in backends().await {
+        sessions_parity(&b).await;
+        b.cleanup().await;
+    }
 }

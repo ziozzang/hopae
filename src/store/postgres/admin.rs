@@ -253,6 +253,9 @@ impl AdminStore for PgStore {
         super::retry(|| async {
             let mut client = self.client().await?;
             let tx = self.begin(&mut client).await?;
+            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&super::traits::GRANTS_LOCK])
+                .await
+                .map_err(pg)?;
             let status = tx
                 .query_opt("SELECT status FROM users WHERE user_id=$1 FOR SHARE", &[&user.as_str()])
                 .await
@@ -330,6 +333,9 @@ impl AdminStore for PgStore {
         super::retry(|| async {
             let mut client = self.client().await?;
             let tx = self.begin(&mut client).await?;
+            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&super::traits::GRANTS_LOCK])
+                .await
+                .map_err(pg)?;
             let Some(g) = tx
                 .query_opt(
                     &format!("SELECT {GRANT_COLS} FROM admin_grants WHERE user_id=$1 FOR UPDATE"),
