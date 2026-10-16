@@ -87,6 +87,7 @@ fn refusal_key(r: Refusal) -> Option<&'static str> {
         Refusal::Capacity => "refusal.capacity",
         Refusal::NotAllowedAuthenticator => "refusal.not_allowed",
         Refusal::CloneSuspected => "refusal.clone",
+        Refusal::HighAssuranceRequired => "stepup.high_assurance_missing",
         Refusal::InvalidCode => "refusal.invalid_code",
         Refusal::RateLimited => "refusal.rate_limited",
         Refusal::LastFactor => "passkeys.last_factor",
@@ -179,9 +180,24 @@ fn clone_page(rq: &Rq) -> Response {
     )
 }
 
+/// An AAL 3 step-up without a qualifying security key (ADR-0018).
+fn high_assurance_page(rq: &Rq, plant: &[String]) -> Response {
+    render_page_status(
+        rq,
+        StatusCode::FORBIDDEN,
+        pages::StepUpHighAssurancePage {
+            t: rq.t(),
+            request_id: rq.rid(),
+        },
+        plant,
+        &[],
+    )
+}
+
 fn refusal_page(rq: &Rq, r: Refusal) -> Response {
     match r {
         Refusal::CloneSuspected => clone_page(rq),
+        Refusal::HighAssuranceRequired => high_assurance_page(rq, &[]),
         Refusal::Failure(f) if f.kind == FailKind::Forbidden => signin_page(rq),
         Refusal::Failure(f) => fail_response(rq, f),
         _ => error_response(rq.t(), rq.rid(), ErrorPage::Failed),
@@ -835,7 +851,10 @@ pub(super) async fn stepup_passkey_page(
         .await
     {
         Ok(entry) => {
-            let page = entry.page?;
+            let Some(page) = entry.page else {
+                // AAL 3 without a qualifying key: nothing else can satisfy it.
+                return entry.high_assurance.then(|| high_assurance_page(rq, plant));
+            };
             let binding = stepup_csrf_binding(rq, transaction)?;
             let csrf = token_for(st, &binding, Purpose::PasskeyStepUp);
             Some(ceremony_response(render_page_status(
@@ -851,8 +870,9 @@ pub(super) async fn stepup_passkey_page(
                     ceremony: page.ceremony.expose(),
                     options: &page.options,
                     totp: entry.totp,
-                    choices,
+                    choices: if entry.high_assurance { &[] } else { choices },
                     integrity: pages::script_integrity(),
+                    high_assurance: entry.high_assurance,
                 },
                 plant,
                 &[entry.form_origin],

@@ -178,6 +178,15 @@ impl Trace {
     }
 }
 
+/// Whether a stored session's current elevation is a qualifying
+/// high-assurance passkey (a read; a failed read is no evidence).
+async fn aal3_evidence(st: &AdminState, session: &SessionRow) -> bool {
+    st.sessions
+        .session_aal3_evidence(&session.session_id, session.cred_gen)
+        .await
+        .unwrap_or(false)
+}
+
 fn aal_num(a: Aal) -> i64 {
     a.as_i64()
 }
@@ -226,12 +235,14 @@ fn step_up_of(
     path: &str,
     session: &SessionRow,
     handle_aal: Aal,
+    aal3: bool,
     now: Timestamp,
 ) -> (step_up::StepUpVerdict, Value) {
     let verdict = step_up::evaluate(
         &app.step_up,
         path,
         handle_aal,
+        aal3,
         session.auth_time,
         &session.factors,
         now,
@@ -250,6 +261,7 @@ fn step_up_of(
             std::slice::from_ref(&app.step_up[i]),
             path,
             handle_aal,
+            aal3,
             session.auth_time,
             &session.factors,
             now,
@@ -262,12 +274,21 @@ fn step_up_of(
         .map(|r| aal_num(r.aal))
         .max()
         .unwrap_or(1);
+    // What the application would be shown (ADR-0018): AAL 3 only for an
+    // application that opted in, while the evidence holds.
+    let presented = if handle_aal == Aal::Two && aal3 && app.max_emitted_aal == Aal::Three {
+        3
+    } else {
+        aal_num(handle_aal)
+    };
     (
         verdict,
         json!({
             "matched_rules": matched,
             "deciding_rule": deciding,
             "required_aal": required,
+            "aal3_evidence": aal3,
+            "presented_aal": presented,
             "verdict": match verdict {
                 step_up::StepUpVerdict::NotRequired => json!("not_required"),
                 step_up::StepUpVerdict::Required { aal, max_age } => json!({
@@ -286,8 +307,9 @@ fn post_auth(
     app: &AppPolicy,
     session: &SessionRow,
     handle_aal: Aal,
+    aal3: bool,
 ) -> (Verdict, Value, Value) {
-    let (verdict, detail) = step_up_of(app, env.path.as_str(), session, handle_aal, env.now);
+    let (verdict, detail) = step_up_of(app, env.path.as_str(), session, handle_aal, aal3, env.now);
     let mut freshness_json = Value::Null;
     if let step_up::StepUpVerdict::Required { aal, .. } = verdict {
         t.step("step_up", "fail", Some("step_up_required"), detail.clone());
@@ -369,6 +391,8 @@ fn hypothetical_session(
 ) -> Result<(SessionRow, HandleRow), Fail> {
     let aal = match h.aal {
         None => Aal::One,
+        // AAL 3 is a qualified AAL 2 session (ADR-0018).
+        Some(3) => Aal::Two,
         Some(n) => Aal::from_i64(n).ok_or_else(reads::invalid)?,
     };
     let auth_time = Timestamp::from_secs(env.now.secs().saturating_sub(
@@ -615,7 +639,8 @@ async fn evaluate_session(
         Some(_) => t.step("user", "pass", None, json!({})),
     }
     let handle_aal = handle.issued_aal.min(session.aal);
-    let (verdict, step, fresh) = post_auth(t, env, app, session, handle_aal);
+    let aal3 = handle_aal == Aal::Two && aal3_evidence(st, session).await;
+    let (verdict, step, fresh) = post_auth(t, env, app, session, handle_aal, aal3);
     Ok((verdict, Some(handle), step, fresh))
 }
 
@@ -1045,7 +1070,8 @@ async fn explain(st: &AdminState, c: &Ctx, req: Request) -> Result<Value, Fail> 
                 // a handle at the session's level (the portal handle's cap is
                 // assumed to be the session's).
                 let s = session.as_ref().ok_or_else(reads::invalid)?;
-                let (verdict, step, fresh) = post_auth(&mut later, &env, app, s, s.aal);
+                let aal3 = s.aal == Aal::Two && aal3_evidence(st, s).await;
+                let (verdict, step, fresh) = post_auth(&mut later, &env, app, s, s.aal, aal3);
                 after_login = json!({
                     "basis": "handoff",
                     "session": session_json(s, None, false),
@@ -1066,8 +1092,10 @@ async fn explain(st: &AdminState, c: &Ctx, req: Request) -> Result<Value, Fail> 
             }
             _ => {
                 let (s, h) = hypothetical_session(&env, person.as_ref(), &hypothetical)?;
+                // `aal: 3` hypothesizes a high-assurance passkey elevation.
+                let aal3 = hypothetical.aal == Some(3);
                 let (verdict, step, fresh) =
-                    post_auth(&mut later, &env, app, &s, h.issued_aal.min(s.aal));
+                    post_auth(&mut later, &env, app, &s, h.issued_aal.min(s.aal), aal3);
                 after_login = json!({
                     "basis": "sign_in",
                     "session": session_json(&s, Some(&h), true),

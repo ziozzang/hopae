@@ -57,6 +57,10 @@ pub struct StepUpCeremony {
     /// Origin of the step-up's return target (`form-action`).
     pub form_origin: Origin,
     pub totp: bool,
+    /// The target requires AAL 3: only high-assurance keys are offered, and
+    /// without one (`page: None`) the user is told so instead of being sent
+    /// to methods that cannot satisfy the rule.
+    pub high_assurance: bool,
 }
 
 /// A refusal the page explains (the user can act on it), or a plain failure page.
@@ -78,6 +82,8 @@ pub enum Refusal {
     NotAllowedAuthenticator,
     /// The passkey reported a lower use counter: it was disabled.
     CloneSuspected,
+    /// The target needs a high-assurance security key (AAL 3, ADR-0018).
+    HighAssuranceRequired,
     /// The authenticator or recovery code is wrong or used.
     InvalidCode,
     /// Too many attempts from this address.

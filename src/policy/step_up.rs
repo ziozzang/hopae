@@ -39,41 +39,67 @@ pub enum StepUpVerdict {
     Required { aal: Aal, max_age: Option<Duration> },
 }
 
+/// The highest level a rule matching `canonical_path` requires, if any.
+pub fn required_level(rules: &[StepUpRule], canonical_path: &str) -> Option<Aal> {
+    rules
+        .iter()
+        .filter(|r| rule_matches(r, canonical_path))
+        .map(|r| r.aal)
+        .max()
+}
+
+/// The latest satisfaction of one of `kinds`, `None` when there is none or
+/// any of them lies in the future (clock skew is refused, not trusted).
+fn latest_of(factors: &[FactorEntry], kinds: &[FactorKind], now: Timestamp) -> Option<Timestamp> {
+    let mut latest = None;
+    for factor in factors.iter().filter(|f| kinds.contains(&f.kind)) {
+        if factor.at > now {
+            return None;
+        }
+        latest = Some(latest.map_or(factor.at, |at: Timestamp| at.max(factor.at)));
+    }
+    latest
+}
+
 /// Evaluate every matching rule. A second-factor freshness bound uses the
 /// latest actual factor satisfaction, never the primary login timestamp.
+///
+/// An AAL 3 rule (ADR-0018) needs an AAL 2 handle **and** `aal3`: the
+/// caller's evidence that the session's current elevation is a qualifying
+/// high-assurance passkey (attested, allowlisted, not synchronized, still
+/// active). Its freshness is the latest passkey use, which is that
+/// elevation's (any later elevation replaces the evidence).
 pub fn evaluate(
     rules: &[StepUpRule],
     canonical_path: &str,
     handle_aal: Aal,
+    aal3: bool,
     auth_time: Timestamp,
     factors: &[FactorEntry],
     now: Timestamp,
 ) -> StepUpVerdict {
     for rule in rules.iter().filter(|r| rule_matches(r, canonical_path)) {
-        let satisfied_at = if rule.aal == Aal::Two {
-            let second_factors = factors.iter().filter(|f| {
-                // A recovery code is AAL 1 evidence only: it never satisfies
-                // or refreshes an AAL 2 rule (ADR-0017 decision 9).
-                matches!(
-                    f.kind,
-                    FactorKind::Totp | FactorKind::Webauthn | FactorKind::External
-                )
-            });
-            let mut latest = None;
-            for factor in second_factors {
-                if factor.at > now {
-                    latest = None;
-                    break;
-                }
-                latest = Some(latest.map_or(factor.at, |at: Timestamp| at.max(factor.at)));
-            }
-            latest
+        let satisfied_at = match rule.aal {
+            // A recovery code is AAL 1 evidence only: it never satisfies or
+            // refreshes an AAL 2 rule (ADR-0017 decision 9).
+            Aal::Two => latest_of(
+                factors,
+                &[FactorKind::Totp, FactorKind::Webauthn, FactorKind::External],
+                now,
+            ),
+            Aal::Three if aal3 => latest_of(factors, &[FactorKind::Webauthn], now),
+            Aal::Three => None,
+            _ => (auth_time <= now).then_some(auth_time),
+        };
+        // The stored level a rule needs: AAL 3 is a qualified AAL 2 session.
+        let stored = if rule.aal == Aal::One {
+            Aal::One
         } else {
-            (auth_time <= now).then_some(auth_time)
+            Aal::Two
         };
         let insufficient_evidence =
             satisfied_at.is_none_or(|at| rule.max_age.is_some_and(|m| now.since(at) > m));
-        if handle_aal < rule.aal || insufficient_evidence {
+        if handle_aal < stored || insufficient_evidence {
             return StepUpVerdict::Required {
                 aal: rule.aal,
                 max_age: rule.max_age,
@@ -131,24 +157,72 @@ mod tests {
             at: t0,
         }];
         assert_eq!(
-            evaluate(&rules, "/public", Aal::One, t0, &factors, now),
+            evaluate(&rules, "/public", Aal::One, false, t0, &factors, now),
             StepUpVerdict::NotRequired
         );
         assert!(matches!(
-            evaluate(&rules, "/admin/x", Aal::One, t0, &factors, now),
+            evaluate(&rules, "/admin/x", Aal::One, false, t0, &factors, now),
             StepUpVerdict::Required { aal: Aal::Two, .. }
         ));
         assert_eq!(
-            evaluate(&rules, "/admin/x", Aal::Two, t0, &factors, now),
+            evaluate(&rules, "/admin/x", Aal::Two, false, t0, &factors, now),
             StepUpVerdict::NotRequired
         );
         let later = t0.add(Duration::from_secs(601));
         assert!(matches!(
-            evaluate(&rules, "/admin/x", Aal::Two, t0, &factors, later),
+            evaluate(&rules, "/admin/x", Aal::Two, false, t0, &factors, later),
             StepUpVerdict::Required { .. }
         ));
         assert!(forces_no_store(&rules));
         assert!(!forces_no_store(&[]));
+    }
+
+    #[test]
+    fn aal3_rules_need_evidence_a_fresh_passkey_and_an_aal2_handle() {
+        let rules = [rule(Some("/vault"), Aal::Three, Some(600))];
+        let t0 = Timestamp(1_000_000);
+        let now = t0.add(Duration::from_secs(60));
+        let passkey = FactorEntry {
+            kind: FactorKind::Webauthn,
+            provider: None,
+            at: t0,
+        };
+        let totp = FactorEntry {
+            kind: FactorKind::Totp,
+            provider: None,
+            at: now,
+        };
+        let req =
+            |aal, aal3, f: &[FactorEntry], at| evaluate(&rules, "/vault/x", aal, aal3, t0, f, at);
+        assert_eq!(
+            req(Aal::Two, true, std::slice::from_ref(&passkey), now),
+            StepUpVerdict::NotRequired
+        );
+        // No evidence (a TOTP elevation, a synced passkey): required at AAL 3.
+        assert!(matches!(
+            req(Aal::Two, false, &[passkey.clone(), totp.clone()], now),
+            StepUpVerdict::Required {
+                aal: Aal::Three,
+                ..
+            }
+        ));
+        // A TOTP use never freshens an AAL 3 rule.
+        assert!(matches!(
+            req(Aal::Two, true, std::slice::from_ref(&totp), now),
+            StepUpVerdict::Required { .. }
+        ));
+        // An AAL 1 handle is never enough, whatever the evidence says.
+        assert!(matches!(
+            req(Aal::One, true, std::slice::from_ref(&passkey), now),
+            StepUpVerdict::Required { .. }
+        ));
+        // Stale passkey.
+        assert!(matches!(
+            req(Aal::Two, true, &[passkey], t0.add(Duration::from_secs(601))),
+            StepUpVerdict::Required { .. }
+        ));
+        assert_eq!(required_level(&rules, "/vault/x"), Some(Aal::Three));
+        assert_eq!(required_level(&rules, "/x"), None);
     }
 
     #[test]
@@ -172,6 +246,7 @@ mod tests {
                 &rules,
                 "/admin/x",
                 Aal::Two,
+                false,
                 t0,
                 &[webauthn.clone(), recovery.clone()],
                 later
@@ -180,7 +255,7 @@ mod tests {
         ));
         // A recovery code alone: no AAL 2 evidence at all.
         assert!(matches!(
-            evaluate(&rules, "/admin/x", Aal::Two, t0, &[recovery], later),
+            evaluate(&rules, "/admin/x", Aal::Two, false, t0, &[recovery], later),
             StepUpVerdict::Required { .. }
         ));
         // A fresh passkey satisfies the rule.
@@ -190,7 +265,15 @@ mod tests {
             at: later,
         };
         assert_eq!(
-            evaluate(&rules, "/admin/x", Aal::Two, t0, &[webauthn, fresh], later),
+            evaluate(
+                &rules,
+                "/admin/x",
+                Aal::Two,
+                false,
+                t0,
+                &[webauthn, fresh],
+                later
+            ),
             StepUpVerdict::NotRequired
         );
     }
