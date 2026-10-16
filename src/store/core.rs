@@ -7,6 +7,7 @@ use async_trait::async_trait;
 
 use super::Deadline;
 use super::StoreResult;
+use super::sqlite::groups;
 use super::types::*;
 use crate::crypto::{Digest, Timestamp};
 use crate::event::types::{Event, Reason};
@@ -247,3 +248,109 @@ pub trait ConsoleStore: Send + Sync {
         deadline: Deadline,
     ) -> StoreResult<Option<(SessionSummary, Vec<HandleRow>)>>;
 }
+
+/// Slice 3 (ADR-0020, ADR-0019): groups, memberships and the signed
+/// projection journal. Every write appends its journal rows and `group.*`
+/// events in the same transaction; journal revisions are gapless and become
+/// visible in order, so a projection consumer never skips one.
+#[async_trait]
+pub trait GroupStore: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
+    async fn groups_admin_edit(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        edit: groups::Edit,
+        settings: groups::WritePolicy,
+        template: Event,
+        deadline: Deadline,
+    ) -> StoreResult<groups::Cas<groups::GroupRow>>;
+    #[allow(clippy::too_many_arguments)]
+    async fn groups_sync_user(
+        &self,
+        provider: ProviderId,
+        source: crate::groups::Source,
+        user: UserId,
+        asserted: Vec<crate::groups::config::Mapped>,
+        grace_secs: u64,
+        settings: groups::WritePolicy,
+        template: Event,
+        deadline: Deadline,
+    ) -> StoreResult<groups::SyncReport>;
+    #[allow(clippy::too_many_arguments)]
+    async fn groups_maintenance(
+        &self,
+        grace: std::collections::HashMap<String, u64>,
+        stale_before: i64,
+        suspend_before: i64,
+        journal_before: i64,
+        settings: groups::WritePolicy,
+        template: Event,
+        deadline: Deadline,
+    ) -> StoreResult<groups::MaintenanceReport>;
+    #[allow(clippy::too_many_arguments)]
+    async fn groups_list(
+        &self,
+        q: Option<String>,
+        source: Option<crate::groups::Source>,
+        provider: Option<String>,
+        include_deleted: bool,
+        after: Option<(i64, String)>,
+        limit: usize,
+        deadline: Deadline,
+    ) -> StoreResult<(Vec<groups::GroupRow>, bool)>;
+    async fn group_get(
+        &self,
+        id: String,
+        deadline: Deadline,
+    ) -> StoreResult<Option<groups::GroupRow>>;
+    async fn group_members(
+        &self,
+        id: String,
+        after: Option<String>,
+        limit: usize,
+        now: i64,
+        deadline: Deadline,
+    ) -> StoreResult<(Vec<groups::MemberRow>, bool)>;
+    async fn groups_of_users(
+        &self,
+        users: Vec<String>,
+        after: Option<String>,
+        limit: usize,
+        now: i64,
+        deadline: Deadline,
+    ) -> StoreResult<GroupsOfUsers>;
+    async fn groups_journal_bounds(&self, deadline: Deadline) -> StoreResult<(i64, Option<i64>)>;
+    async fn groups_projection_snapshot(
+        &self,
+        vocabulary: Vec<String>,
+        after: Option<String>,
+        limit: usize,
+        now: i64,
+        deadline: Deadline,
+    ) -> StoreResult<(Vec<groups::SnapshotEntry>, bool)>;
+    async fn groups_projection_changes(
+        &self,
+        vocabulary: Vec<String>,
+        after: i64,
+        limit: usize,
+        deadline: Deadline,
+    ) -> StoreResult<Result<groups::JournalPage, groups::RevisionLost>>;
+    async fn groups_sync_batch(
+        &self,
+        provider: String,
+        interval_secs: u64,
+        batch: usize,
+        deadline: Deadline,
+    ) -> StoreResult<Option<Vec<(String, String)>>>;
+    async fn groups_sync_result(
+        &self,
+        provider: String,
+        error: Option<&'static str>,
+        deadline: Deadline,
+    ) -> StoreResult<()>;
+}
+
+/// Each person's live groups (and whether the list was cut).
+pub type GroupsOfUsers =
+    std::collections::BTreeMap<String, (Vec<(groups::MemberRow, groups::GroupRow)>, bool)>;

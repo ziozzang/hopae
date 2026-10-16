@@ -7,8 +7,9 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::core::{AdminStore, ConsoleStore, CoreStore, HandoffStore, NonceStore};
+use super::core::{AdminStore, ConsoleStore, CoreStore, GroupStore, HandoffStore, NonceStore};
 use super::passkeys::*;
+use super::sqlite::groups::{Cas, Edit, WritePolicy};
 use super::types::*;
 use super::{Events, Factors, Passkeys};
 use super::{StoreError, StoreResult};
@@ -30,6 +31,7 @@ pub(crate) struct Backend {
     pub passkeys: Arc<dyn Passkeys>,
     pub events: Arc<dyn Events>,
     pub console: Arc<dyn ConsoleStore>,
+    pub groups: Arc<dyn GroupStore>,
     pub clock: Arc<TestClock>,
     pub rng: Arc<SeededRng>,
     _dir: Option<tempfile::TempDir>,
@@ -71,7 +73,8 @@ fn sqlite() -> Backend {
         factors: store.clone(),
         passkeys: store.clone(),
         events: store.clone(),
-        console: store,
+        console: store.clone(),
+        groups: store,
         clock,
         rng,
         _dir: Some(dir),
@@ -112,6 +115,7 @@ pub(crate) async fn postgres() -> Option<Backend> {
         passkeys: store.clone(),
         events: store.clone(),
         console: store.clone(),
+        groups: store.clone(),
         store: store.clone(),
         clock,
         rng: Arc::new(SeededRng::new(42)),
@@ -3157,6 +3161,411 @@ async fn s600_17_event_relay_agrees_on_both_backends() {
 async fn s600_18_console_listings_agree_on_both_backends() {
     for b in backends().await {
         console_listings(&b).await;
+        b.cleanup().await;
+    }
+}
+
+// ---- slice 3b: groups and the projection journal -------------------------
+
+const GROUP_POLICY: WritePolicy = WritePolicy {
+    max_groups_per_user: 3,
+    gateway_header: true,
+};
+
+/// An administrator actor (granted) and its fence policy.
+async fn admin_actor(b: &Backend, n: u32) -> (Actor, ActorPolicy) {
+    let admin = user(b, n).await;
+    let (row, h) = session(b, &admin).await;
+    b.admin
+        .grant_admin(
+            &admin.user_id,
+            AdminRole::Admin,
+            GrantManagedBy::Api,
+            None,
+            "op",
+            None,
+            b.clock.now(),
+            grant_event(b),
+        )
+        .await
+        .unwrap();
+    (actor_of(&row, &h), console_policy(b))
+}
+
+/// Every journal revision from 1 to the head, in order, with no gap.
+async fn journal_is_gapless(b: &Backend, vocabulary: Vec<String>) -> i64 {
+    let (head, oldest) = b.groups.groups_journal_bounds(deadline()).await.unwrap();
+    assert_eq!(oldest, Some(1));
+    let page = b
+        .groups
+        .groups_projection_changes(vocabulary, 0, 500, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.next, head);
+    let revisions: Vec<i64> = page.changes.iter().map(|c| c.revision).collect();
+    assert!(revisions.windows(2).all(|w| w[1] > w[0]), "ordered");
+    head
+}
+
+async fn local_groups(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let (actor, policy) = admin_actor(b, 1).await;
+    let member = user(b, 2).await;
+    let edit = |e: Edit| {
+        let groups = b.groups.clone();
+        let (actor, policy) = (actor.clone(), policy.clone());
+        let template = ev(b, EventKind::GroupCreated);
+        async move {
+            groups
+                .groups_admin_edit(&actor, &policy, e, GROUP_POLICY, template, deadline())
+                .await
+                .unwrap()
+        }
+    };
+    let gid = crate::groups::new_ref(b.rng.as_ref());
+    let create = |id: &str, key: &str| Edit::Create {
+        group_id: id.into(),
+        key: key.into(),
+        name: "Engineering".into(),
+        description: None,
+    };
+    let Cas::Done(g) = edit(create(&gid, "eng")).await else {
+        panic!("{name}: create")
+    };
+    assert_eq!(
+        (g.revision, g.members, g.source.as_str()),
+        (1, 0, "local"),
+        "{name}"
+    );
+    assert_eq!(
+        edit(create(&crate::groups::new_ref(b.rng.as_ref()), "eng")).await,
+        Cas::Conflict("key_in_use"),
+        "{name}"
+    );
+    let add = |expected| Edit::AddMember {
+        group_id: gid.clone(),
+        expected,
+        user_id: member.user_id.to_string(),
+        expires_at: None,
+        reason: "on call".into(),
+    };
+    let Cas::Done(g) = edit(add(1)).await else {
+        panic!("{name}: add")
+    };
+    assert_eq!((g.revision, g.members), (2, 1), "{name}");
+    assert_eq!(
+        edit(add(2)).await,
+        Cas::Conflict("already_member"),
+        "{name}"
+    );
+    assert_eq!(edit(add(1)).await, Cas::Stale(2), "{name}");
+    // The membership is mirrored into the person's authorization snapshot.
+    let u = b.store.user(&member.user_id).await.unwrap().unwrap();
+    assert_eq!(u.groups, vec![gid.clone()], "{name}");
+    assert_eq!(u.authz_version, member.authz_version + 1, "{name}");
+    let Cas::Done(g) = edit(Edit::Update {
+        group_id: gid.clone(),
+        expected: 2,
+        name: Some("Platform".into()),
+        description: None,
+    })
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!((g.revision, g.name.as_str()), (3, "Platform"));
+    // Reads: case-insensitive search, members, a person's groups.
+    let (found, more) = b
+        .groups
+        .groups_list(Some("PLAT".into()), None, None, false, None, 10, deadline())
+        .await
+        .unwrap();
+    assert_eq!((found.len(), more), (1, false), "{name}");
+    let (members, _) = b
+        .groups
+        .group_members(gid.clone(), None, 10, b.clock.now().secs(), deadline())
+        .await
+        .unwrap();
+    assert_eq!(members[0].user_id, member.user_id.to_string(), "{name}");
+    let of = b
+        .groups
+        .groups_of_users(
+            vec![member.user_id.to_string()],
+            None,
+            10,
+            b.clock.now().secs(),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(of[member.user_id.as_str()].0.len(), 1, "{name}");
+    // The projection: journal and snapshot.
+    assert_eq!(journal_is_gapless(b, vec![gid.clone()]).await, 3, "{name}");
+    let page = b
+        .groups
+        .groups_projection_changes(vec![gid.clone()], 1, 10, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    let kinds: Vec<_> = page.changes.iter().map(|c| c.change.as_str()).collect();
+    assert_eq!(kinds, ["member_added", "group_updated"], "{name}");
+    assert!(
+        b.groups
+            .groups_projection_changes(vec![gid.clone()], 9, 10, deadline())
+            .await
+            .unwrap()
+            .is_err(),
+        "{name}: beyond the head"
+    );
+    let (snap, more) = b
+        .groups
+        .groups_projection_snapshot(
+            vec![gid.clone()],
+            None,
+            10,
+            b.clock.now().secs(),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!((snap.len(), more), (1, false));
+    assert_eq!(
+        (snap[0].status.as_str(), snap[0].groups.clone()),
+        ("active", vec![gid.clone()]),
+        "{name}"
+    );
+    // A non-empty group is deleted only with force; a tombstone stays readable.
+    assert_eq!(
+        edit(Edit::Delete {
+            group_id: gid.clone(),
+            expected: 3,
+            force: false
+        })
+        .await,
+        Cas::Conflict("group_not_empty")
+    );
+    let Cas::Done(g) = edit(Edit::Delete {
+        group_id: gid.clone(),
+        expected: 3,
+        force: true,
+    })
+    .await
+    else {
+        panic!()
+    };
+    assert_eq!((g.state.as_str(), g.members), ("deleted", 0), "{name}");
+    assert_eq!(edit(add(4)).await, Cas::Deleted, "{name}");
+    assert!(
+        b.store
+            .user(&member.user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .groups
+            .is_empty(),
+        "{name}: mirror cleared"
+    );
+    assert!(
+        b.groups
+            .group_get(gid.clone(), deadline())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // A revoked administrator is fenced out.
+    b.admin
+        .revoke_admin(
+            &actor.user_id,
+            "op",
+            GrantManagedBy::Api,
+            b.clock.now(),
+            grant_event(b),
+        )
+        .await
+        .unwrap();
+    let out = b
+        .groups
+        .groups_admin_edit(
+            &actor,
+            &policy,
+            create(&crate::groups::new_ref(b.rng.as_ref()), "ops"),
+            GROUP_POLICY,
+            ev(b, EventKind::GroupCreated),
+            deadline(),
+        )
+        .await;
+    assert!(
+        matches!(out, Err(StoreError::Conflict("actor_revoked"))),
+        "{name}"
+    );
+}
+
+async fn provider_groups(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let people: Vec<User> = {
+        let mut v = Vec::new();
+        for n in 1..=8 {
+            v.push(user(b, n).await);
+        }
+        v
+    };
+    let mapped = |keys: &[&str]| {
+        keys.iter()
+            .map(|k| crate::groups::config::Mapped {
+                key: (*k).into(),
+                name: k.to_uppercase(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let sync = |u: &User, keys: &[&str], grace: u64| {
+        let groups = b.groups.clone();
+        let (uid, asserted, template) = (
+            u.user_id.clone(),
+            mapped(keys),
+            ev(b, EventKind::GroupCreated),
+        );
+        async move {
+            groups
+                .groups_sync_user(
+                    ProviderId::new("mock"),
+                    crate::groups::Source::Ldap,
+                    uid,
+                    asserted,
+                    grace,
+                    GROUP_POLICY,
+                    template,
+                    deadline(),
+                )
+                .await
+                .unwrap()
+        }
+    };
+    let r = sync(&people[0], &["g1", "g2"], 3600).await;
+    assert_eq!((r.added, r.groups_created), (2, 2), "{name}");
+    // More than the per-person bound is refused whole.
+    let r = sync(&people[0], &["g1", "g2", "g3", "g4"], 3600).await;
+    assert_eq!(r.refused, Some("too_many_groups"), "{name}");
+    assert_eq!(
+        b.store
+            .user(&people[0].user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .groups
+            .len(),
+        2
+    );
+    // No longer asserted: kept within the grace, then removed by maintenance.
+    let r = sync(&people[0], &["g1"], 3600).await;
+    assert_eq!((r.pending, r.removed), (1, 0), "{name}");
+    let grace: std::collections::HashMap<String, u64> = [("mock".to_string(), 0)].into();
+    let report = b
+        .groups
+        .groups_maintenance(
+            grace,
+            0,
+            i64::MIN,
+            0,
+            GROUP_POLICY,
+            ev(b, EventKind::GroupCreated),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.grace_removed, 1, "{name}");
+    assert_eq!(
+        b.store
+            .user(&people[0].user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .groups
+            .len(),
+        1,
+        "{name}"
+    );
+    // Eight syncs race: the journal stays gapless and ordered.
+    let mut tasks = Vec::new();
+    for p in &people[1..] {
+        tasks.push(tokio::spawn(sync(p, &["g1", "g5"], 3600)));
+    }
+    for t in tasks {
+        assert_eq!(t.await.unwrap().refused, None);
+    }
+    let (all, _) = b
+        .groups
+        .groups_list(
+            None,
+            Some(crate::groups::Source::Ldap),
+            Some("mock".into()),
+            true,
+            None,
+            50,
+            deadline(),
+        )
+        .await
+        .unwrap();
+    let vocabulary: Vec<String> = all.iter().map(|g| g.group_id.clone()).collect();
+    let head = journal_is_gapless(b, vocabulary.clone()).await;
+    let changes = b
+        .groups
+        .groups_projection_changes(vocabulary, 0, 500, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        changes.changes.len() as i64,
+        head,
+        "{name}: every revision present"
+    );
+    assert_eq!(changes.changes.last().unwrap().revision, head);
+    // The periodic sync cursor: one batch, then nothing until the interval.
+    let batch = b
+        .groups
+        .groups_sync_batch("mock".into(), 3600, 100, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(batch.len(), 8, "{name}");
+    assert!(
+        b.groups
+            .groups_sync_batch("mock".into(), 3600, 100, deadline())
+            .await
+            .unwrap()
+            .is_none(),
+        "{name}"
+    );
+    b.groups
+        .groups_sync_result("mock".into(), None, deadline())
+        .await
+        .unwrap();
+    b.groups
+        .groups_sync_result("mock".into(), Some("ldap_unreachable"), deadline())
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_19_local_groups_and_projection_agree_on_both_backends() {
+    for b in backends().await {
+        local_groups(&b).await;
+        b.cleanup().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_20_provider_groups_and_journal_order_agree_on_both_backends() {
+    for b in backends().await {
+        provider_groups(&b).await;
         b.cleanup().await;
     }
 }

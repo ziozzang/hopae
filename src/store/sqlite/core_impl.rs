@@ -11,7 +11,8 @@ use crate::policy::types::Host;
 use crate::provider::types::ProviderId;
 use crate::session::types::SessionId;
 use crate::store::core::{
-    AdminStore, ConsoleStore, CoreStore, HandoffStore, NonceStore, nonce_key_ok,
+    AdminStore, ConsoleStore, CoreStore, GroupStore, GroupsOfUsers, HandoffStore, NonceStore,
+    nonce_key_ok,
 };
 use crate::store::types::*;
 use crate::store::{Deadline, Directory, Events, Sessions, StoreError, StoreResult};
@@ -358,5 +359,146 @@ impl ConsoleStore for Store {
         deadline: Deadline,
     ) -> StoreResult<Option<(SessionSummary, Vec<HandleRow>)>> {
         Sessions::session_summary(self, id, deadline).await
+    }
+}
+
+#[async_trait]
+impl GroupStore for Store {
+    async fn groups_admin_edit(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        edit: super::groups::Edit,
+        settings: super::groups::WritePolicy,
+        template: Event,
+        deadline: Deadline,
+    ) -> StoreResult<super::groups::Cas<super::groups::GroupRow>> {
+        Store::groups_admin_edit(self, actor, policy, edit, settings, template, deadline).await
+    }
+    async fn groups_sync_user(
+        &self,
+        provider: ProviderId,
+        source: crate::groups::Source,
+        user: UserId,
+        asserted: Vec<crate::groups::config::Mapped>,
+        grace_secs: u64,
+        settings: super::groups::WritePolicy,
+        template: Event,
+        deadline: Deadline,
+    ) -> StoreResult<super::groups::SyncReport> {
+        Store::groups_sync_user(
+            self, provider, source, user, asserted, grace_secs, settings, template, deadline,
+        )
+        .await
+    }
+    async fn groups_maintenance(
+        &self,
+        grace: std::collections::HashMap<String, u64>,
+        stale_before: i64,
+        suspend_before: i64,
+        journal_before: i64,
+        settings: super::groups::WritePolicy,
+        template: Event,
+        deadline: Deadline,
+    ) -> StoreResult<super::groups::MaintenanceReport> {
+        Store::groups_maintenance(
+            self,
+            grace,
+            stale_before,
+            suspend_before,
+            journal_before,
+            settings,
+            template,
+            deadline,
+        )
+        .await
+    }
+    async fn groups_list(
+        &self,
+        q: Option<String>,
+        source: Option<crate::groups::Source>,
+        provider: Option<String>,
+        include_deleted: bool,
+        after: Option<(i64, String)>,
+        limit: usize,
+        deadline: Deadline,
+    ) -> StoreResult<(Vec<super::groups::GroupRow>, bool)> {
+        Store::groups_list(
+            self,
+            q,
+            source,
+            provider,
+            include_deleted,
+            after,
+            limit,
+            deadline,
+        )
+        .await
+    }
+    async fn group_get(
+        &self,
+        id: String,
+        deadline: Deadline,
+    ) -> StoreResult<Option<super::groups::GroupRow>> {
+        Store::group_get(self, id, deadline).await
+    }
+    async fn group_members(
+        &self,
+        id: String,
+        after: Option<String>,
+        limit: usize,
+        now: i64,
+        deadline: Deadline,
+    ) -> StoreResult<(Vec<super::groups::MemberRow>, bool)> {
+        Store::group_members(self, id, after, limit, now, deadline).await
+    }
+    async fn groups_of_users(
+        &self,
+        users: Vec<String>,
+        after: Option<String>,
+        limit: usize,
+        now: i64,
+        deadline: Deadline,
+    ) -> StoreResult<GroupsOfUsers> {
+        Store::groups_of_users(self, users, after, limit, now, deadline).await
+    }
+    async fn groups_journal_bounds(&self, deadline: Deadline) -> StoreResult<(i64, Option<i64>)> {
+        Store::groups_journal_bounds(self, deadline).await
+    }
+    async fn groups_projection_snapshot(
+        &self,
+        vocabulary: Vec<String>,
+        after: Option<String>,
+        limit: usize,
+        now: i64,
+        deadline: Deadline,
+    ) -> StoreResult<(Vec<super::groups::SnapshotEntry>, bool)> {
+        Store::groups_projection_snapshot(self, vocabulary, after, limit, now, deadline).await
+    }
+    async fn groups_projection_changes(
+        &self,
+        vocabulary: Vec<String>,
+        after: i64,
+        limit: usize,
+        deadline: Deadline,
+    ) -> StoreResult<Result<super::groups::JournalPage, super::groups::RevisionLost>> {
+        Store::groups_projection_changes(self, vocabulary, after, limit, deadline).await
+    }
+    async fn groups_sync_batch(
+        &self,
+        provider: String,
+        interval_secs: u64,
+        batch: usize,
+        deadline: Deadline,
+    ) -> StoreResult<Option<Vec<(String, String)>>> {
+        Store::groups_sync_batch(self, provider, interval_secs, batch, deadline).await
+    }
+    async fn groups_sync_result(
+        &self,
+        provider: String,
+        error: Option<&'static str>,
+        deadline: Deadline,
+    ) -> StoreResult<()> {
+        Store::groups_sync_result(self, provider, error, deadline).await
     }
 }

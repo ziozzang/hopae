@@ -51,7 +51,12 @@ fn secs(d: Duration) -> i64 {
 }
 
 /// The actor fence (ADR-0016, P2-02) with the rows it depends on locked.
-async fn fence(tx: &Transaction<'_>, now: i64, actor: &Actor, p: &ActorPolicy) -> StoreResult<()> {
+pub(super) async fn fence(
+    tx: &Transaction<'_>,
+    now: i64,
+    actor: &Actor,
+    p: &ActorPolicy,
+) -> StoreResult<()> {
     if let Some(proof) = &p.authority {
         return if proof.valid_for(actor) {
             Ok(())

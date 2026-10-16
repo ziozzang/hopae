@@ -8,6 +8,7 @@
 mod admin;
 mod events;
 mod factors;
+mod groups;
 mod handoff;
 mod passkeys;
 mod write;
