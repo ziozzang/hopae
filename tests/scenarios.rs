@@ -65,6 +65,8 @@ mod scenarios {
     mod s309_authentication_explain;
     #[path = "s310_groups.rs"]
     mod s310_groups;
+    #[path = "s318_service_credentials.rs"]
+    mod s318_service_credentials;
     #[path = "s480_passkeys.rs"]
     mod s480_passkeys;
 }

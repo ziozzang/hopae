@@ -72,6 +72,7 @@ fn open_applies_migration_and_sets_pragmas() {
             "providers",
             "recovery_codes",
             "schema_migrations",
+            "service_credentials",
             "session_handles",
             "session_primary_provenance",
             "session_totp_provenance",

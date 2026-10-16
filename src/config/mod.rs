@@ -184,6 +184,10 @@ pub struct AdminCfg {
     pub directory_privacy: Option<DirectoryPrivacy>,
     #[serde(default)]
     pub users: Vec<AdminUserEntry>,
+    /// The audience route-scoped service credentials must name
+    /// (`x-hopae-audience`); default the console origin.
+    #[serde(default)]
+    pub service_audience: Option<String>,
 }
 
 /// `admin.directory_privacy`: the operator's floor for the privacy profile of
@@ -878,6 +882,11 @@ impl Config {
                     .any(|p| !p.is_absolute()))
         {
             errs.push("listen.admin_tls requires an enabled console and absolute TLS paths".into());
+        }
+        if let Some(a) = &self.admin.service_audience
+            && (a.is_empty() || a.len() > 256 || !a.bytes().all(|b| b.is_ascii_graphic()))
+        {
+            errs.push("admin.service_audience must be 1-256 visible ASCII characters".into());
         }
         if let Some(a) = &self.listen.admin {
             match a.parse::<SocketAddr>() {

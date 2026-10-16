@@ -212,6 +212,25 @@ pub(crate) fn admit_delegated(
         ipnet::IpNet::new(peer, if peer.is_ipv4() { 32 } else { 128 }).expect("host prefix");
     admit_with_trust(st, peer, headers, rid, std::slice::from_ref(&network))
 }
+/// A service-credential request over the admin mTLS listener: the TLS peer
+/// is the client (no forwarding header is trusted) and the addressed host
+/// must be the console. Whether the peer may call at all is the
+/// credential's mTLS binding, checked next.
+pub(crate) fn admit_service(
+    st: &AdminState,
+    peer: IpAddr,
+    headers: &HeaderMap,
+) -> Result<Client, Refused> {
+    let client = clientinfo::resolve(peer, headers, &[]);
+    if !addressed_host(headers, false).is_some_and(|h| host_is_console(h, &st.cfg.host)) {
+        return Err(Refused {
+            denial: Denial::WrongHost,
+            client_ip: Some(client.ip),
+            requester: None,
+        });
+    }
+    Ok(client)
+}
 fn admit_with_trust(
     st: &AdminState,
     peer: IpAddr,

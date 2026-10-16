@@ -131,6 +131,7 @@ const ADMIN: Node = Obj(&[
     ("query_budget_ms", Leaf),
     ("directory_privacy", Leaf),
     ("users", Arr(&ADMIN_USER)),
+    ("service_audience", Leaf),
 ]);
 
 pub(super) const ROOT: Node = Obj(&[

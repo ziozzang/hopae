@@ -261,7 +261,18 @@ async fn gate(
 ) -> Response {
     let rid = request_id(&req);
     let path = req.uri().path().to_string();
-    let admission = if req
+    let admission = if crate::admin::service_credentials::presented(req.headers()).is_some()
+        && req
+            .extensions()
+            .get::<hangang_runtime::AuthenticatedTlsPeer>()
+            .is_some()
+        && req
+            .extensions()
+            .get::<crate::admin::delegation::ValidatedDelegation>()
+            .is_none()
+    {
+        auth::admit_service(&st, peer.ip(), req.headers())
+    } else if req
         .extensions()
         .get::<crate::admin::delegation::ValidatedDelegation>()
         .is_some()
@@ -295,7 +306,52 @@ async fn gate(
         .get(header::USER_AGENT)
         .map(|v| crate::policy::binding::normalize_user_agent(v.as_bytes()));
     info.user_agent = user_agent.clone();
-    let principal = if let Some(p) = req.extensions().get::<crate::admin::Principal>().cloned() {
+    // A route-scoped service credential (`Bearer hsc1.…`): mTLS-bound,
+    // audience-checked, exact read routes only; never combined with a
+    // delegation or a browser session.
+    let mut service = None;
+    let service_principal = if crate::admin::service_credentials::presented(req.headers()).is_some()
+    {
+        if req
+            .extensions()
+            .get::<crate::admin::delegation::ValidatedDelegation>()
+            .is_some()
+        {
+            count(&st, "service", "denied");
+            return crate::admin::service_credentials::Refusal::Credential.respond();
+        }
+        let peer = req
+            .extensions()
+            .get::<crate::admin::service_credentials::PeerCertificate>()
+            .cloned();
+        match scoped(
+            &st,
+            crate::admin::service_credentials::authenticate(
+                &st,
+                req.method(),
+                &path,
+                req.headers(),
+                peer.as_ref(),
+                &rid,
+            ),
+        )
+        .await
+        {
+            Ok((p, caller)) => {
+                service = Some(caller);
+                Some(p)
+            }
+            Err(refusal) => {
+                count(&st, "service", "denied");
+                return refusal.respond();
+            }
+        }
+    } else {
+        None
+    };
+    let principal = if let Some(p) = service_principal {
+        p
+    } else if let Some(p) = req.extensions().get::<crate::admin::Principal>().cloned() {
         if !p.authority.as_ref().is_some_and(|v| v.valid()) {
             return api::json_error(StatusCode::FORBIDDEN, "delegation_rejected");
         }
@@ -336,9 +392,16 @@ async fn gate(
     let role = principal.role.as_str();
     let ctx = Ctx {
         delegated_actor,
+        service,
         principal,
         req: info,
     };
+    // Defense in depth: a service caller never reaches a mutation, whatever
+    // its stored routes say.
+    if ctx.service.is_some() && auth::is_mutation(req.method(), ctx.req.pattern) {
+        count(&st, "service", "denied");
+        return crate::admin::service_credentials::Refusal::Route.respond();
+    }
     // A mutation is checked here, before its handler: the form token or the
     // API header first, then the role, so no handler can forget either and
     // none reads the body again (it receives `Mutation` in the extensions).

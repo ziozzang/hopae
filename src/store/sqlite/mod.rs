@@ -19,6 +19,7 @@ pub(crate) mod primary_owner;
 #[allow(dead_code)]
 pub(crate) mod provider_owner;
 mod rows;
+pub mod service_credentials;
 mod sessions;
 pub(crate) mod subject_directory;
 // Provenance infrastructure; actual native Human candidate integration is queued.
@@ -118,6 +119,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         14,
         "0014_groups",
         include_str!("../migrations/0014_groups.sql"),
+    ),
+    (
+        15,
+        "0015_service_credentials",
+        include_str!("../migrations/0015_service_credentials.sql"),
     ),
 ];
 
