@@ -98,6 +98,12 @@ tokens are refused and no Pod fact or token reaches the wire, events or status.
 - When: it is loaded; then with `legacy_pod` alone; with `legacy_pod`, `legacy_until_ms` and `legacy_mapping_until_ms`; with `service_account`; and a new `kubernetes_workload` profile without `subject`.
 - Then: the first load fails with `kubernetes_tokenreview.subject is required …`, naming `legacy_pod` and the migration section; `legacy_pod` without a window fails on `legacy_until_ms`; the declared forms load; the new offline profile defaults to `service_account`.
 
+### S900-12 The workload snapshot recovers principals after a lost cursor
+
+- Given: lifecycle signals for a principal (observed, legacy mapping, retired with a replacement), its replacement, and a late observation of the retired one; then outbox retention removes the events; and the real binary after one authentication.
+- When: `POST /v1/subjects/workloads/snapshot` is read, paged by its cursor, and an un-retire is attempted in SQL; a foreign cursor is presented.
+- Then: both principals are listed in registry order, the retired one with `cause`, `replacement` and its legacy subject; the late observation did not revive it and the schema refuses un-retiring; the binary's snapshot contains the active principal and a feed `watermark`; a foreign cursor is `400`.
+
 ### S900-10 The response carries the principal and SPIFFE ID, never Pod facts
 
 - Given: an authenticated workload.
@@ -147,6 +153,7 @@ tokens are refused and no Pod fact or token reaches the wire, events or status.
 | S900-9 | `s900_9_runtime_routing_status_and_explain` | `src/auth_gateway/workload/tests.rs` | unit | passing |
 | S900-10 | `s900_10_workload_response_carries_principal_and_spiffe_id` | `src/gateway/hangang/service_identity.rs` | unit | passing |
 | S900-11 | `s900_11_tokenreview_profile_without_subject_fails_loud_at_load` | `src/config/mod.rs` | unit | passing |
+| S900-12 | `s900_12_registry_snapshot_survives_outbox_retention` | `src/auth_gateway/workload/events.rs` | unit | passing |
 | S900-A1 | `s900_a1_configuration_refuses_unsafe_profiles` | `src/auth_gateway/workload/tests.rs` | unit | passing |
 
 ## Live verification

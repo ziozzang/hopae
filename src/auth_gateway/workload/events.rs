@@ -7,8 +7,6 @@ use super::metrics;
 use super::signals::{Signal, WorkloadRef};
 use crate::event::bus::Emitter;
 use crate::event::types::{EventBuilder, EventKind, Outcome};
-use crate::store::Events;
-use std::sync::Arc;
 
 const BATCH: usize = 64;
 
@@ -31,12 +29,14 @@ fn workload(b: EventBuilder, w: &WorkloadRef) -> EventBuilder {
 pub async fn pump(
     mut rx: tokio::sync::mpsc::Receiver<Signal>,
     emitter: Emitter,
-    events: Arc<dyn Events>,
+    store: crate::store::sqlite::Store,
 ) {
+    use crate::store::sqlite::workloads::WorkloadChange;
     let mut buffer = Vec::with_capacity(BATCH);
     while rx.recv_many(&mut buffer, BATCH).await > 0 {
         let mut required = Vec::new();
         let mut kinds = Vec::new();
+        let mut changes = Vec::new();
         for signal in buffer.drain(..) {
             let kind = signal.kind();
             match signal {
@@ -48,6 +48,7 @@ pub async fn pump(
                         |b| workload(b, &w).attr("status", "active"),
                     ));
                     kinds.push(kind);
+                    changes.push(WorkloadChange::Observed(w));
                 }
                 Signal::Retired {
                     workload: w,
@@ -69,6 +70,11 @@ pub async fn pump(
                         },
                     ));
                     kinds.push(kind);
+                    changes.push(WorkloadChange::Retired {
+                        workload: w,
+                        cause,
+                        replacement,
+                    });
                 }
                 Signal::LegacyMapped {
                     workload: w,
@@ -81,6 +87,10 @@ pub async fn pump(
                         |b| workload(b, &w).attr("legacy_subject_ref", legacy_subject_ref.as_str()),
                     ));
                     kinds.push(kind);
+                    changes.push(WorkloadChange::LegacyMapped {
+                        workload: w,
+                        legacy_subject_ref,
+                    });
                 }
                 Signal::KeysRotated {
                     service,
@@ -111,7 +121,8 @@ pub async fn pump(
         if required.is_empty() {
             continue;
         }
-        let result = events.append_required(required).await;
+        // The registry rows and their events commit together.
+        let result = store.workload_record(changes, required).await;
         for kind in kinds {
             metrics::signal(kind, if result.is_ok() { "recorded" } else { "failed" });
         }
@@ -132,6 +143,7 @@ mod tests {
     use crate::store::sqlite::Store;
     use crate::store::sqlite::subject_directory::OutboxPosition;
     use crate::store::types::Deadline;
+    use std::sync::Arc;
 
     fn workload(uid: &str) -> WorkloadRef {
         WorkloadRef {
@@ -175,7 +187,7 @@ mod tests {
             false,
         );
         let (sink, rx) = signals::channel();
-        let pump = tokio::spawn(pump(rx, emitter, store.events()));
+        let pump = tokio::spawn(pump(rx, emitter, store.clone()));
         sink.emit(Signal::Observed(workload("sa-1")));
         sink.emit(Signal::LegacyMapped {
             workload: workload("sa-1"),
@@ -237,5 +249,80 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(page.changes.is_empty());
+    }
+
+    /// S900-12: the registry keeps live and retired principals with their
+    /// legacy subjects for the workload snapshot; retirement is final.
+    #[tokio::test]
+    async fn s900_12_registry_snapshot_survives_outbox_retention() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = Arc::new(TestClock::new(Timestamp(1_700_000_000_000)));
+        let store = Store::open(&dir.path().join("hopae.db"), clock.clone(), vec![], None).unwrap();
+        let (bus, _rx) = bus::channel(16);
+        let emitter = Emitter::new(
+            clock,
+            Arc::new(SeededRng::new(7)),
+            bus,
+            Arc::new(Sampler::default()),
+            Arc::new(PruneTrigger::new(1000)),
+            false,
+        );
+        let (sink, rx) = signals::channel();
+        let pump = tokio::spawn(pump(rx, emitter, store.clone()));
+        let legacy = format!("s_{}", "c".repeat(48));
+        sink.emit(Signal::Observed(workload("sa-1")));
+        sink.emit(Signal::LegacyMapped {
+            workload: workload("sa-1"),
+            legacy_subject_ref: legacy.clone(),
+        });
+        sink.emit(Signal::Retired {
+            workload: workload("sa-1"),
+            cause: "uid_changed",
+            replacement: Some(workload("sa-2").principal),
+        });
+        sink.emit(Signal::Observed(workload("sa-2")));
+        // A late observation of the retired incarnation never revives it.
+        sink.emit(Signal::Observed(workload("sa-1")));
+        drop(sink);
+        pump.await.unwrap();
+        // Outbox retention removes the events; the registry remains.
+        store
+            .conn()
+            .execute_batch("DELETE FROM event_deliveries; DELETE FROM events;")
+            .unwrap();
+        let deadline = || Deadline(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        let rows = store
+            .workload_snapshot_after(0, 10, deadline())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let old = &rows[0];
+        assert_eq!(old.principal, workload("sa-1").principal);
+        assert_eq!(old.status, "retired");
+        assert_eq!(old.cause.as_deref(), Some("uid_changed"));
+        assert_eq!(old.replacement, Some(workload("sa-2").principal));
+        assert_eq!(old.legacy_subject_refs, vec![legacy]);
+        assert_eq!(
+            old.spiffe_id.as_deref(),
+            Some("spiffe://cluster.example.test/ns/blue/sa/worker")
+        );
+        assert_eq!(rows[1].status, "active");
+        // Pagination by position.
+        let page = store
+            .workload_snapshot_after(rows[0].position, 1, deadline())
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].principal, workload("sa-2").principal);
+        // The schema itself refuses un-retiring.
+        assert!(
+            store
+                .conn()
+                .execute(
+                    "UPDATE workload_principals SET status='active', retired_at=NULL WHERE position=?1",
+                    [rows[0].position],
+                )
+                .is_err()
+        );
     }
 }

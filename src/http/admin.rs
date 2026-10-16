@@ -93,6 +93,10 @@ pub fn router(state: Arc<AdminState>) -> Router {
             post(crate::admin::subjects::snapshot_api),
         )
         .route(
+            "/v1/subjects/workloads/snapshot",
+            post(crate::admin::subjects::workloads_snapshot_api),
+        )
+        .route(
             "/v1/explain/authentication",
             post(crate::admin::explain::explain_api),
         )
