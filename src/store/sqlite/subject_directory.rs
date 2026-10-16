@@ -63,7 +63,24 @@ pub struct StatusChange {
     pub user_id: Option<String>,
     /// The group of a group change.
     pub group_id: Option<String>,
+    /// The identifiers of a Kubernetes workload change (ADR 0021/0022).
+    pub workload: Option<serde_json::Map<String, serde_json::Value>>,
 }
+
+/// The `attrs` keys a workload lifecycle change reports.
+pub const WORKLOAD_CHANGE_KEYS: &[&str] = &[
+    "service",
+    "principal",
+    "subject_ref",
+    "spiffe_id",
+    "cluster",
+    "namespace",
+    "service_account",
+    "service_account_uid",
+    "cause",
+    "replacement",
+    "legacy_subject_ref",
+];
 
 /// A position in the outbox: the row and its event id, so a reused or
 /// pruned row is detected.
@@ -301,7 +318,8 @@ impl Store {
         limit: usize,
         deadline: Deadline,
     ) -> StoreResult<Result<StatusPage, PositionLost>> {
-        self.admin_feed_changes(after, limit, false, deadline).await
+        self.admin_feed_changes(after, limit, false, false, deadline)
+            .await
     }
 
     /// As [`Store::admin_status_changes`], also reporting the `group.*`
@@ -311,6 +329,7 @@ impl Store {
         after: OutboxPosition,
         limit: usize,
         groups: bool,
+        workloads: bool,
         deadline: Deadline,
     ) -> StoreResult<Result<StatusPage, PositionLost>> {
         let limit = limit.min(MAX_BATCH);
@@ -335,7 +354,7 @@ impl Store {
             let head: i64 =
                 c.query_row("SELECT COALESCE(MAX(rowid), 0) FROM events", [], |r| r.get(0))?;
             let mut st = c.prepare_cached(
-                "SELECT rowid, event_id, at, kind, user_id, json_extract(attrs, '$.group_id') FROM events WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+                "SELECT rowid, event_id, at, kind, user_id, json_extract(attrs, '$.group_id'), CASE WHEN kind LIKE 'workload.%' THEN attrs END FROM events WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
             )?;
             let mut q = st.query(params![after.row, FEED_SCAN])?;
             let mut changes = Vec::new();
@@ -346,11 +365,12 @@ impl Store {
                 if examined.is_multiple_of(1024) {
                     check.now()?;
                 }
-                let (row, id, at, kind, user, group): (
+                let (row, id, at, kind, user, group, attrs): (
                     i64,
                     String,
                     f64,
                     String,
+                    Option<String>,
                     Option<String>,
                     Option<String>,
                 ) = (
@@ -360,6 +380,7 @@ impl Store {
                     r.get(3)?,
                     r.get(4)?,
                     r.get(5).unwrap_or(None),
+                    r.get(6).unwrap_or(None),
                 );
                 let change = match kind.as_str() {
                     "admin.user_disable" => Some("disabled"),
@@ -371,9 +392,25 @@ impl Store {
                     "group.member_removed" if groups => Some("member_removed"),
                     "group.membership_stale" if groups => Some("member_suspended"),
                     "group.membership_restored" if groups => Some("member_restored"),
+                    "workload.principal_observed" if workloads => Some("workload_observed"),
+                    "workload.principal_retired" if workloads => Some("workload_retired"),
+                    "workload.legacy_subject_mapped" if workloads => {
+                        Some("workload_legacy_mapped")
+                    }
                     _ => None,
                 };
+                let workload = attrs
+                    .filter(|_| change.is_some_and(|c| c.starts_with("workload_")))
+                    .and_then(|a| serde_json::from_str::<serde_json::Value>(&a).ok())
+                    .and_then(|v| v.as_object().cloned())
+                    .map(|mut m| {
+                        m.retain(|k, _| WORKLOAD_CHANGE_KEYS.contains(&k.as_str()));
+                        m
+                    });
                 let wanted = match change {
+                    Some(c) if c.starts_with("workload_") => workload
+                        .as_ref()
+                        .is_some_and(|w| w.contains_key("principal")),
                     Some("disabled" | "enabled") => user.is_some(),
                     Some("member_added" | "member_removed" | "member_suspended" | "member_restored") => {
                         user.is_some() && group.is_some()
@@ -391,7 +428,12 @@ impl Store {
                         at: at.floor() as i64,
                         change,
                         user_id: user,
-                        group_id: group.filter(|_| change != "disabled" && change != "enabled"),
+                        group_id: group.filter(|_| {
+                            change != "disabled"
+                                && change != "enabled"
+                                && !change.starts_with("workload_")
+                        }),
+                        workload,
                     });
                 }
                 next = OutboxPosition {

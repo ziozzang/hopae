@@ -125,6 +125,10 @@ const SERVICE_REFUSALS: &[&str] = &[
     "credential_expired",
     "network_denied",
     "eligibility_denied",
+    "workload_subject_invalid",
+    "workload_namespace_not_allowed",
+    "workload_service_account_not_allowed",
+    "workload_service_account_absent",
 ];
 
 impl Verdict {
@@ -725,6 +729,8 @@ async fn explain(st: &AdminState, c: &Ctx, req: Request) -> Result<Value, Fail> 
     let mut person: Option<Person> = None;
     let mut session: Option<SessionRow> = None;
     let mut service_principal = false;
+    // A Kubernetes workload named by SPIFFE ID or `system:serviceaccount:`.
+    let mut workload_principal = false;
     if let Some(id) = &req.session_id {
         if !super::users::common::valid_session_id(id) {
             return Err(reads::invalid());
@@ -749,6 +755,8 @@ async fn explain(st: &AdminState, c: &Ctx, req: Request) -> Result<Value, Fail> 
             .map_err(fetch(c))?;
         subject_item = serde_json::to_value(&items[0]).unwrap_or(Value::Null);
         service_principal = subjects::classify(id) == Ref::Service;
+        workload_principal = crate::auth_gateway::runtime::is_workload_subject(id);
+        service_principal |= workload_principal;
     }
     let person_id = session
         .as_ref()
@@ -883,44 +891,129 @@ async fn explain(st: &AdminState, c: &Ctx, req: Request) -> Result<Value, Fail> 
                     }
                     let id = subject_ref.as_deref().unwrap_or_default();
                     let now_ms = u64::try_from(now.0).unwrap_or(0);
-                    let key =
-                        runtime.admin_explain_key(host.as_str(), port, id, req.client_ip, now_ms);
-                    let code = match key {
-                        KeyVerdict::Allowed { network_evaluated } => {
+                    if workload_principal {
+                        use crate::auth_gateway::runtime::WorkloadVerdict as W;
+                        let verdict = runtime.admin_explain_workload(
+                            host.as_str(),
+                            port,
+                            id,
+                            req.client_ip,
+                            now_ms,
+                        );
+                        let code = match &verdict {
+                            W::NoProfile => Some((Outcome::Deny, "service_profile_absent")),
+                            W::NotConfigured => Some((Outcome::Deny, "service_principal_unknown")),
+                            W::SubjectInvalid => Some((Outcome::Deny, "workload_subject_invalid")),
+                            W::NetworkDenied => Some((Outcome::Deny, "network_denied")),
+                            W::NamespaceNotAllowed => {
+                                Some((Outcome::Deny, "workload_namespace_not_allowed"))
+                            }
+                            W::ServiceAccountNotAllowed => {
+                                Some((Outcome::Deny, "workload_service_account_not_allowed"))
+                            }
+                            W::ServiceAccountAbsent => {
+                                Some((Outcome::Deny, "workload_service_account_absent"))
+                            }
+                            W::KeysUnavailable => {
+                                Some((Outcome::Unavailable, "workload_keys_unavailable"))
+                            }
+                            W::RevocationStale => {
+                                Some((Outcome::Unavailable, "workload_revocation_stale"))
+                            }
+                            W::LegacyWindowExpired => {
+                                Some((Outcome::Unavailable, "workload_legacy_window_expired"))
+                            }
+                            W::Allowed { .. } => None,
+                        };
+                        if let Some((outcome, code)) = code {
+                            t.step("workload_credential", "fail", Some(code), json!({}));
+                            break 'decide v(outcome, code);
+                        }
+                        if let W::Allowed {
+                            verification,
+                            network_evaluated,
+                            revocation_evaluated,
+                            spiffe_id,
+                            principal,
+                            subject_ref: wire_subject,
+                        } = verdict
+                        {
                             if !network_evaluated {
                                 t.step("network", "skip", Some("network_not_evaluated"), json!({}));
                             }
-                            None
+                            if !revocation_evaluated {
+                                t.step(
+                                    "workload_revocation",
+                                    "skip",
+                                    Some("workload_revocation_not_evaluated"),
+                                    json!({}),
+                                );
+                            }
+                            t.step(
+                                "workload_credential",
+                                "pass",
+                                Some("workload_token_not_simulated"),
+                                json!({
+                                    "connector": if verification == "tokenreview" { "kubernetes_tokenreview" } else { "kubernetes_workload" },
+                                    "verification": verification,
+                                    "spiffe_id": spiffe_id,
+                                    "principal": principal,
+                                    "subject_ref": wire_subject,
+                                }),
+                            );
                         }
-                        KeyVerdict::NoProfile => Some((Outcome::Deny, "service_profile_absent")),
-                        KeyVerdict::Composition => {
-                            Some((Outcome::Indeterminate, "remote_verifier"))
+                    } else {
+                        let key = runtime.admin_explain_key(
+                            host.as_str(),
+                            port,
+                            id,
+                            req.client_ip,
+                            now_ms,
+                        );
+                        let code = match key {
+                            KeyVerdict::Allowed { network_evaluated } => {
+                                if !network_evaluated {
+                                    t.step(
+                                        "network",
+                                        "skip",
+                                        Some("network_not_evaluated"),
+                                        json!({}),
+                                    );
+                                }
+                                None
+                            }
+                            KeyVerdict::NoProfile => {
+                                Some((Outcome::Deny, "service_profile_absent"))
+                            }
+                            KeyVerdict::Composition => {
+                                Some((Outcome::Indeterminate, "remote_verifier"))
+                            }
+                            KeyVerdict::NotConfigured
+                                if facts.connectors.iter().any(|c| *c != "api_key") =>
+                            {
+                                Some((Outcome::Indeterminate, "remote_verifier"))
+                            }
+                            KeyVerdict::NotConfigured => {
+                                Some((Outcome::Deny, "service_principal_unknown"))
+                            }
+                            KeyVerdict::Expired => Some((Outcome::Deny, "credential_expired")),
+                            KeyVerdict::NetworkDenied => Some((Outcome::Deny, "network_denied")),
+                            KeyVerdict::Ineligible => Some((Outcome::Deny, "eligibility_denied")),
+                            KeyVerdict::Unavailable => {
+                                Some((Outcome::Unavailable, "eligibility_unavailable"))
+                            }
+                        };
+                        if let Some((outcome, code)) = code {
+                            t.step("service_credential", "fail", Some(code), json!({}));
+                            break 'decide v(outcome, code);
                         }
-                        KeyVerdict::NotConfigured
-                            if facts.connectors.iter().any(|c| *c != "api_key") =>
-                        {
-                            Some((Outcome::Indeterminate, "remote_verifier"))
-                        }
-                        KeyVerdict::NotConfigured => {
-                            Some((Outcome::Deny, "service_principal_unknown"))
-                        }
-                        KeyVerdict::Expired => Some((Outcome::Deny, "credential_expired")),
-                        KeyVerdict::NetworkDenied => Some((Outcome::Deny, "network_denied")),
-                        KeyVerdict::Ineligible => Some((Outcome::Deny, "eligibility_denied")),
-                        KeyVerdict::Unavailable => {
-                            Some((Outcome::Unavailable, "eligibility_unavailable"))
-                        }
-                    };
-                    if let Some((outcome, code)) = code {
-                        t.step("service_credential", "fail", Some(code), json!({}));
-                        break 'decide v(outcome, code);
+                        t.step(
+                            "service_credential",
+                            "pass",
+                            None,
+                            json!({"connector": "api_key"}),
+                        );
                     }
-                    t.step(
-                        "service_credential",
-                        "pass",
-                        None,
-                        json!({"connector": "api_key"}),
-                    );
                     // The live path resolves the application after the
                     // credential, without the return-target checks.
                     let app = match apps::resolve(&snapshot, &host) {

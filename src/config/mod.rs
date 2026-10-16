@@ -1033,12 +1033,13 @@ impl Config {
                         self.authentication_gateway.as_ref().is_none_or(|gateway| {
                             !gateway.profiles.iter().any(|profile| {
                                 profile.service_id == scope.service
-                                    && profile.kubernetes_tokenreview.is_some()
+                                    && (profile.kubernetes_tokenreview.is_some()
+                                        || profile.kubernetes_workload.is_some())
                             })
                         })
                     }))
             {
-                errs.push("workload_receipts requires mTLS gRPC and native TokenReview profiles for every scope".into());
+                errs.push("workload_receipts requires mTLS gRPC and native Kubernetes workload profiles for every scope".into());
             }
             if let Some(humans) = &config.human_receipts {
                 if self.listen.grpc_gateway.is_none() || self.listen.native_gateway_tls.is_none() {
@@ -2133,7 +2134,7 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_str(BASE).unwrap();
         value["apps"] =
             serde_json::json!([{"app_id":"orders","hosts":["app.example.test"],"ports":[443]}]);
-        value["authentication_gateway"] = serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"app.example.test","ports":[443],"realm":"example-cluster","kubernetes_tokenreview":{"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"k8s:"}}]});
+        value["authentication_gateway"] = serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"app.example.test","ports":[443],"realm":"example-cluster","kubernetes_tokenreview":{"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"k8s:","subject":"service_account"}}]});
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
         let loaded = load(file.path()).unwrap();
@@ -2152,6 +2153,60 @@ mod tests {
         assert!(
             error.contains("environment variable name")
                 && !error.contains("do-not-display-fixture")
+        );
+    }
+    /// ADR 0022 migration: an existing TokenReview profile without an explicit
+    /// `subject` fails at load (before deploy) with a pointer to the migration,
+    /// instead of silently changing the published subject.
+    #[test]
+    fn s900_11_tokenreview_profile_without_subject_fails_loud_at_load() {
+        let mut value: serde_json::Value = serde_json::from_str(BASE).unwrap();
+        value["apps"] =
+            serde_json::json!([{"app_id":"orders","hosts":["app.example.test"],"ports":[443]}]);
+        value["authentication_gateway"] = serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"app.example.test","ports":[443],"realm":"example-cluster","kubernetes_tokenreview":{"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"k8s:"}}]});
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = load(file.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("kubernetes_tokenreview.subject is required")
+                && error.contains("legacy_pod")
+                && error.contains("KUBERNETES_WORKLOAD.md#migration-from-pod-bound-subjects"),
+            "{error}"
+        );
+        let tr = &mut value["authentication_gateway"]["profiles"][0]["kubernetes_tokenreview"];
+        tr["subject"] = "legacy_pod".into();
+        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            load(file.path())
+                .unwrap_err()
+                .to_string()
+                .contains("legacy_until_ms")
+        );
+        let tr = &mut value["authentication_gateway"]["profiles"][0]["kubernetes_tokenreview"];
+        tr["legacy_until_ms"] = 4_000_000_000_000u64.into();
+        tr["legacy_mapping_until_ms"] = 4_000_000_000_000u64.into();
+        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        load(file.path()).unwrap();
+        let tr = &mut value["authentication_gateway"]["profiles"][0]["kubernetes_tokenreview"];
+        tr["subject"] = "service_account".into();
+        tr.as_object_mut().unwrap().remove("legacy_until_ms");
+        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        load(file.path()).unwrap();
+        // New offline profiles default to the ServiceAccount principal.
+        value["authentication_gateway"]["profiles"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("kubernetes_tokenreview");
+        value["authentication_gateway"]["profiles"][0]["kubernetes_workload"] = serde_json::json!({"issuer":"https://kubernetes.default.svc.cluster.local","cluster_id":"example-cluster","trust_domain":"cluster.example.test","audience":"world.hangang.dev/example-cluster","namespaces":["blue"],"keys":{"source":"static","jwks_env":"OWNED_JWKS"},"token_prefix":"k8s:"});
+        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        let loaded = load(file.path()).unwrap();
+        assert_eq!(
+            loaded.authentication_gateway.unwrap().profiles[0]
+                .kubernetes_workload
+                .as_ref()
+                .unwrap()
+                .subject,
+            crate::auth_gateway::workload::SubjectMode::ServiceAccount
         );
     }
     #[test]

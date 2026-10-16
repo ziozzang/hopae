@@ -125,9 +125,27 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   rate limit, `admin.read` with `credential_id`; `hopae admin
   service-credentials create|rotate|promote|revoke|list` (preset
   `pumgye-v2`); `admin.service_audience`. Threat model TM-75 to TM-77.
+- Offline Kubernetes workload identity (Hangang ADR 0022 P0,
+  [Kubernetes workloads](docs/KUBERNETES_WORKLOAD.md)): the
+  `kubernetes_workload` connector verifies projected ServiceAccount tokens
+  against the issuer's discovery/JWKS (pinned issuer and CA, bounded key
+  cache with rotation and rate-limited `kid`-miss refetch, dedicated
+  exclusive audience, `exp`/`nbf`/`iat` with skew, bound-object claims,
+  short positive cache) with no API-server request on the request path; an
+  optional watch-backed revocation index with bounded staleness; the
+  ServiceAccount principal `wk2:` and SPIFFE ID in `x-hopae-principal` and
+  `x-hopae-workload-spiffe-id`; `workload.*` lifecycle events and
+  `include_workloads` on the subject lifecycle feed; workload subjects in
+  the authentication explain API; `hopae_workload_*` counters.
 
 ### Changed
 
+- Kubernetes workload callers authenticate as their ServiceAccount
+  principal (issuer, cluster, namespace, ServiceAccount name and UID); the
+  Pod name/UID is an audit attribute. `kubernetes_tokenreview` profiles must
+  declare `subject` (`service_account`, or `legacy_pod` with a mandatory
+  `legacy_until_ms`); a profile without it fails at load and preflight. `kubernetes_tokenreview` is deprecated and
+  gains an optional positive cache (`cache_ttl_ms`, at most 10 s).
 - A recovery factor entry no longer counts as AAL 2 evidence in step-up
   evaluation (no such entry existed before).
 - With a passkey enrolled, adding an authenticator app needs a second factor
@@ -163,6 +181,12 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 - Schema version 15 (`0015_service_credentials`) adds `service_credentials`.
 
+- Kubernetes workloads: existing `kubernetes_tokenreview` profiles fail to
+  load until they declare `subject`. Add `"subject": "legacy_pod"` with
+  `legacy_until_ms` and `legacy_mapping_until_ms` to keep today's subjects,
+  re-grant on the ServiceAccount principals reported by
+  `workload.legacy_subject_mapped`, then switch to `"service_account"` ([migration](docs/KUBERNETES_WORKLOAD.md#migration-from-pod-bound-subjects)).
+  Threat model TM-70 to TM-74.
 - Schema version 14 (`0014_groups`) adds `directory_groups`, `group_members`,
   `group_changes` and `group_sync_state`. Versions 11–13 are reserved by the
   passkey work, which must be merged and released first; back up the store

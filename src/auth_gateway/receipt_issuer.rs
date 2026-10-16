@@ -838,7 +838,8 @@ impl Issued {
     }
 }
 
-/// Actual gateway TokenReview capture. Never serialized or reconstructed from claims.
+/// Actual gateway Kubernetes workload capture (offline-verified or TokenReview).
+/// Never serialized or reconstructed from claims.
 pub(crate) struct CapturedWorkload {
     authentication: super::authority::ServiceAuthentication,
     profile: Arc<super::authority::Snapshot>,
@@ -853,7 +854,10 @@ impl CapturedWorkload {
         attempt: Arc<super::workload_owner::Attempt>,
     ) -> Result<Self, Refused> {
         if authentication.evidence.subject.kind != PrincipalKind::Workload
-            || authentication.evidence.connector != "kubernetes-tokenreview"
+            || !matches!(
+                authentication.evidence.connector.as_str(),
+                "kubernetes-tokenreview" | super::workload::verify::CONNECTOR
+            )
             || authentication.revision != profile.revision
             || !profile.available()
         {

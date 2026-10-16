@@ -71,4 +71,6 @@ mod scenarios {
     mod s318_service_credentials;
     #[path = "s480_passkeys.rs"]
     mod s480_passkeys;
+    #[path = "s900_kubernetes_workload.rs"]
+    mod s900_kubernetes_workload;
 }

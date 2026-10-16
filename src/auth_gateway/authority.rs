@@ -134,6 +134,7 @@ pub struct Authorization<'a> {
 pub struct Authority {
     observed_time: Arc<std::sync::atomic::AtomicU64>,
     snapshot: Arc<ArcSwap<Snapshot>>,
+    workload_signals: Option<super::workload::signals::Sink>,
 }
 impl Authority {
     /// Load durable state before readiness. Bootstrap is imported only if no durable row exists.
@@ -158,6 +159,9 @@ impl Authority {
             .as_ref()
             .map(|runtime| runtime.observed_time.clone())
             .unwrap_or_default();
+        if let Some(runtime) = &runtime {
+            runtime.activate(None);
+        }
         Ok(Self {
             observed_time,
             snapshot: Arc::new(ArcSwap::from_pointee(Snapshot {
@@ -165,7 +169,16 @@ impl Authority {
                 revision,
                 runtime,
             })),
+            workload_signals: None,
         })
+    }
+    /// Route workload lifecycle signals (ADR 0021/0022) of this and every
+    /// later published runtime to `sink`.
+    pub fn attach_workload_signals(&mut self, sink: super::workload::signals::Sink) {
+        if let Some(runtime) = &self.snapshot.load().runtime {
+            runtime.activate(Some(sink.clone()));
+        }
+        self.workload_signals = Some(sink);
     }
     fn compile(
         configuration: Option<&runtime::Config>,
@@ -175,7 +188,12 @@ impl Authority {
         configuration
             .map(|config| {
                 validate(config)?;
-                runtime::Runtime::compile(config, env).map_err(|_| publication::Error::Invalid)
+                runtime::Runtime::compile(config, env).map_err(|error| {
+                    // Validation messages carry no material; surface migration
+                    // refusals (ADR 0022 explicit subject) instead of a bare code.
+                    tracing::error!(%error, "authentication profiles refused");
+                    publication::Error::Invalid
+                })
             })
             .transpose()
     }
@@ -219,8 +237,12 @@ impl Authority {
             .as_ref()
             .map(|config| {
                 validate(config)?;
-                runtime::Runtime::compile_resuming(config, env, previous.runtime.as_ref())
-                    .map_err(|_| publication::Error::Invalid)
+                runtime::Runtime::compile_resuming(config, env, previous.runtime.as_ref()).map_err(
+                    |error| {
+                        tracing::warn!(%error, "authentication profile publication refused");
+                        publication::Error::Invalid
+                    },
+                )
             })
             .transpose()?;
         if let Some(runtime) = &mut runtime {
@@ -250,6 +272,9 @@ impl Authority {
                 return Err(error);
             }
         };
+        if let Some(runtime) = &prepared.runtime {
+            runtime.activate(self.workload_signals.clone());
+        }
         self.snapshot.store(prepared);
         previous
             .publication
