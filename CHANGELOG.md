@@ -26,6 +26,10 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   messages, evaluated by the live verify and service predicates without any
   state change; scenario 309 compares it with the live verify endpoint.
 - Hangang delegated console actors may call the new reads with a signed body.
+- Console package 0.1.8: the manifest declares `subjects/resolve`,
+  `subjects/search`, `subjects/lifecycle`, `subjects/lifecycle/snapshot` and
+  `explain/authentication` as `POST`, `mutation: false` routes so the Hangang
+  broker forwards them; operators re-pin the new manifest SHA-256.
 
 ### Security
 
