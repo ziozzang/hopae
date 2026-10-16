@@ -309,6 +309,7 @@ pub async fn middleware(
         return denied();
     }
     let mut profile_publication: Option<(u64, Vec<u8>)> = None;
+    let mut read_body = false;
     let translated = match (method.as_str(), original_path.as_str()) {
         (
             "GET",
@@ -341,6 +342,18 @@ pub async fn middleware(
             };
             profile_publication = Some((publication.revision, body));
             path.trim_end_matches("/publish").to_owned()
+        }
+        // Audited reads with a JSON query: the body is passed through as signed.
+        (
+            "POST",
+            "/v1/subjects/resolve"
+            | "/v1/subjects/search"
+            | "/v1/subjects/lifecycle"
+            | "/v1/subjects/lifecycle/snapshot"
+            | "/v1/explain/authentication",
+        ) => {
+            read_body = true;
+            original_path.clone()
         }
         ("POST", path @ ("/v1/users/query" | "/v1/sessions/query" | "/v1/events/query")) => {
             #[derive(Deserialize)]
@@ -409,6 +422,8 @@ pub async fn middleware(
         parts,
         if let Some((_, body)) = &profile_publication {
             Body::from(body.clone())
+        } else if read_body {
+            Body::from(bytes.clone())
         } else if method == Method::POST && !listing {
             Body::from("{}")
         } else {

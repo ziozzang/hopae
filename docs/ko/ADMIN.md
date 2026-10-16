@@ -311,6 +311,11 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'`을 가집니다. 어
 | `POST /v1/sessions/{session_id}/terminate` | admin | `{changed}` |
 | `GET /v1/events?kind=&outcome=&user_id=&session_id=&client_ip=&since=&until=&limit=&cursor=` | viewer | `{items: [로그 싱크가 쓰는 형식의 이벤트 JSON], next_cursor}` 최신순 |
 | `GET /v1/status` | viewer | [상태](#상태) 참조 |
+| `POST /v1/subjects/resolve` | viewer | 주체 참조 최대 100개를 표시 정보로 해석. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
+| `POST /v1/subjects/search` | viewer | 선택기를 위한 사람 또는 서비스 주체 검색. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
+| `POST /v1/subjects/lifecycle` | viewer | 지속 커서 이후의 주체 생성과 상태 변경. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
+| `POST /v1/subjects/lifecycle/snapshot` | viewer | 예약된 모든 주체와 상태, 피드 워터마크. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
+| `POST /v1/explain/authentication` | viewer | 인증 검사가 무엇을 왜 답할지. [인증 설명](AUTHENTICATION_EXPLAIN.md) 참조 |
 
 오류 본문은 거부 표의 코드를 담은 `{"error": "<code>"}`입니다.
 
@@ -347,8 +352,11 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'`을 가집니다. 어
 | `admin.grant`, `admin.revoke` | `user_id` = 부여된 사용자 | `actor`(`cli` 또는 `file`), `role`, `previous_role`, `managed_by` | `admin_grants` 행 |
 | `admin.denied` | `user_id`, `session_id` = 요청자 | `endpoint`(라우트 패턴), `method`. `reason` ∈ `not_admin`, `role_insufficient`, `auth_too_old`, `aal_insufficient`, `self_target`, `actor_revoked` | 없음(단독 필수 이벤트) |
 | `csrf.rejected` | `user_id`, `session_id` = 요청자 | `purpose=admin`, `cause` | 없음 |
+| `admin.read` | `user_id`, `session_id` = 설명한 사용자와 세션(설명 API만) | `actor`, `actor_session`, `purpose`, `endpoint`, `query_sha256`, `requested`, `count`, `status`, `host`, `port`, `app`, `navigation` | 없음(응답 전에 쓰는 단독 필수 이벤트) |
 
-읽기는 감사하지 않습니다. 콘솔 로그인은 `app_id = admin`인 일반
+읽기는 감사하지 않습니다. 다만 [주체 디렉터리](SUBJECT_DIRECTORY.md)와
+[인증 설명](AUTHENTICATION_EXPLAIN.md) 읽기는 `admin.read`를 쓰며, 이를 쓸 수 없으면
+거부합니다. 콘솔 로그인은 `app_id = admin`인 일반
 `session.handoff` 이벤트로, 재인증은 `attrs.reauth = true`와
 `attrs.auth_time_source`가 있는 `login.succeeded`로 보입니다.
 

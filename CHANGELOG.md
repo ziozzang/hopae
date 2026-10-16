@@ -35,6 +35,27 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   gRPC server, Human permission parser and the `hopae-grpc` Human observed
   client accept AAL 3.
 
+- Subject directory API on the admin listener (Hangang ADR 0020/0021 owner
+  APIs): `POST /v1/subjects/resolve` turns up to 100 `u_…`, `human1:…` and
+  `s_…` references into display data with explicit `unknown` items and
+  tombstones (`deleted`), masking e-mail addresses by default
+  (`privacy_profile: standard|strict`); `POST /v1/subjects/search` serves
+  subject pickers for people and service principals; `POST
+  /v1/subjects/lifecycle` is a durable feed of subject creations and status
+  changes and `POST /v1/subjects/lifecycle/snapshot` the reconcile snapshot
+  with its watermark (`410 cursor_expired` when a position was pruned).
+- Authentication explain API `POST /v1/explain/authentication`: which
+  application policy or service profile, providers, factors, assurance level,
+  step-up rule and freshness bound apply to a URL and a session, subject or
+  anonymous request, with stable `hopae.*` reason codes and English/Korean
+  messages, evaluated by the live verify and service predicates without any
+  state change; scenario 309 compares it with the live verify endpoint.
+- Hangang delegated console actors may call the new reads with a signed body.
+- Console package 0.1.8: the manifest declares `subjects/resolve`,
+  `subjects/search`, `subjects/lifecycle`, `subjects/lifecycle/snapshot` and
+  `explain/authentication` as `POST`, `mutation: false` routes so the Hangang
+  broker forwards them; operators re-pin the new manifest SHA-256.
+
 ### Changed
 
 - A recovery factor entry no longer counts as AAL 2 evidence in step-up
@@ -59,6 +80,11 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   sign-in is not configured; AAL 3 decisions are never cached.
 - New dependencies: `webauthn-rs` 0.5.5 (MPL-2.0) with OpenSSL vendored
   into the binary, `argon2` 0.5, `serde_cbor_2` 0.13.
+- The new reads follow the console's JSON API rule, are bounded and
+  rate-limited per actor, and write a required `admin.read` audit event
+  (actor, purpose, query digest, counts; never the references) before the
+  answer; a read whose record cannot be written is refused with `503
+  audit_unavailable`. Threat model TM-60, TM-61.
 
 ## 0.0.8 — 2026-10-15
 

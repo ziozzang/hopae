@@ -318,6 +318,11 @@ identifiers are the `u_`, `s_`, `e_` forms.
 | `POST /v1/sessions/{session_id}/terminate` | admin | `{changed}` |
 | `GET /v1/events?kind=&outcome=&user_id=&session_id=&client_ip=&since=&until=&limit=&cursor=` | viewer | `{items: [event JSON as the log sink writes it], next_cursor}` newest first |
 | `GET /v1/status` | viewer | See [status](#status) |
+| `POST /v1/subjects/resolve` | viewer | Up to 100 subject references to display data; see [subject directory](SUBJECT_DIRECTORY.md) |
+| `POST /v1/subjects/search` | viewer | People or service principals for a picker; see [subject directory](SUBJECT_DIRECTORY.md) |
+| `POST /v1/subjects/lifecycle` | viewer | Subject creations and status changes after a durable cursor; see [subject directory](SUBJECT_DIRECTORY.md) |
+| `POST /v1/subjects/lifecycle/snapshot` | viewer | Every reserved subject with its status and the feed watermark; see [subject directory](SUBJECT_DIRECTORY.md) |
+| `POST /v1/explain/authentication` | viewer | What the authentication check would answer and why; see [authentication explain](AUTHENTICATION_EXPLAIN.md) |
 
 Error bodies are `{"error": "<code>"}` with the codes of the denial table.
 
@@ -354,8 +359,11 @@ target; `attrs.actor` names the acting user (or `cli`, or `file`) and
 | `admin.grant`, `admin.revoke` | `user_id` = granted user | `actor` (`cli` or `file`), `role`, `previous_role`, `managed_by` | the `admin_grants` row |
 | `admin.denied` | `user_id`, `session_id` = the requester | `endpoint` (route pattern), `method`; `reason` ∈ `not_admin`, `role_insufficient`, `auth_too_old`, `aal_insufficient`, `self_target`, `actor_revoked` | nothing (required event on its own) |
 | `csrf.rejected` | `user_id`, `session_id` = the requester | `purpose=admin`, `cause` | nothing |
+| `admin.read` | `user_id`, `session_id` = the explained user and session (explain only) | `actor`, `actor_session`, `purpose`, `endpoint`, `query_sha256`, `requested`, `count`, `status`, `host`, `port`, `app`, `navigation` | nothing (required event on its own, written before the answer) |
 
-Reads are not audited. A console sign-in is visible as the ordinary
+Reads are not audited, except the [subject directory](SUBJECT_DIRECTORY.md) and
+[authentication explain](AUTHENTICATION_EXPLAIN.md) reads, which write
+`admin.read` and are refused when it cannot be written. A console sign-in is visible as the ordinary
 `session.handoff` event with `app_id = admin`; a reauthentication as
 `login.succeeded` with `attrs.reauth = true` and `attrs.auth_time_source`.
 

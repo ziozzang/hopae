@@ -129,10 +129,13 @@ pub enum EventKind {
     AdminDenied,
     /// `hopae admin factors reset` (ADR-0017, required).
     AdminFactorReset,
+    /// An audited administrative read of the subject directory or the
+    /// authentication explain API (required; travels alone).
+    AdminRead,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 42] = [
+    pub const ALL: [EventKind; 43] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -175,6 +178,7 @@ impl EventKind {
         EventKind::AdminSessionsTerminate,
         EventKind::AdminDenied,
         EventKind::AdminFactorReset,
+        EventKind::AdminRead,
     ];
 
     /// Required kinds travel in the transaction of the state change they
@@ -235,6 +239,7 @@ impl EventKind {
             EventKind::AdminSessionsTerminate => "admin.sessions_terminate",
             EventKind::AdminDenied => "admin.denied",
             EventKind::AdminFactorReset => "admin.factor_reset",
+            EventKind::AdminRead => "admin.read",
         }
     }
 
@@ -474,8 +479,10 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "provider",
     "providers",
     "purpose",
+    "query_sha256",
     "recorded_sha256",
     "recovery_depth",
+    "requested",
     "reauth",
     "retry_after",
     "role",
@@ -641,14 +648,14 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 37);
+        assert_eq!(required, 38);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 42);
+        assert_eq!(EventKind::ALL.len(), 43);
         for (kind, name) in [
             (
                 EventKind::FactorExternalConsumed,
@@ -664,6 +671,7 @@ mod tests {
                 "admin.sessions_terminate",
             ),
             (EventKind::AdminDenied, "admin.denied"),
+            (EventKind::AdminRead, "admin.read"),
         ] {
             assert_eq!(kind.name(), name);
             assert!(kind.is_required(), "{name} travels in the outbox");

@@ -27,13 +27,17 @@ pub mod cursor;
 pub mod delegation;
 pub mod delegation_wire;
 pub mod events;
+pub mod explain;
+mod explain_messages;
 pub mod me;
 pub mod pages;
 pub mod profiles;
 pub mod projections;
+pub mod reads;
 pub mod seed;
 pub mod sessions;
 pub mod status;
+pub mod subjects;
 pub mod users;
 
 use std::collections::HashMap;
