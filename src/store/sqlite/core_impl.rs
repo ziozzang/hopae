@@ -10,9 +10,9 @@ use crate::identity::types::{NormalizedEmail, UserId};
 use crate::policy::types::Host;
 use crate::provider::types::ProviderId;
 use crate::session::types::SessionId;
-use crate::store::core::{CoreStore, HandoffStore};
+use crate::store::core::{AdminStore, CoreStore, HandoffStore, NonceStore, nonce_key_ok};
 use crate::store::types::*;
-use crate::store::{Directory, Events, Sessions, StoreResult};
+use crate::store::{Deadline, Directory, Events, Sessions, StoreError, StoreResult};
 
 #[async_trait]
 impl CoreStore for Store {
@@ -192,5 +192,130 @@ impl HandoffStore for Store {
         since: Timestamp,
     ) -> StoreResult<u32> {
         Sessions::count_handoff_failures_since(self, ip, since).await
+    }
+}
+
+#[async_trait]
+impl AdminStore for Store {
+    async fn admin_grant(
+        &self,
+        user: &UserId,
+        deadline: Deadline,
+    ) -> StoreResult<Option<AdminGrant>> {
+        Directory::admin_grant(self, user, deadline).await
+    }
+    async fn admin_grants(&self, all: bool, deadline: Deadline) -> StoreResult<Vec<AdminGrant>> {
+        Directory::admin_grants(self, all, deadline).await
+    }
+    async fn grant_admin(
+        &self,
+        user: &UserId,
+        role: AdminRole,
+        managed_by: GrantManagedBy,
+        source_email: Option<NormalizedEmail>,
+        by: &str,
+        note: Option<String>,
+        at: Timestamp,
+        event: Event,
+    ) -> StoreResult<(Option<AdminRole>, bool)> {
+        Directory::grant_admin(
+            self,
+            user,
+            role,
+            managed_by,
+            source_email,
+            by,
+            note,
+            at,
+            event,
+        )
+        .await
+    }
+    async fn revoke_admin(
+        &self,
+        user: &UserId,
+        by: &str,
+        managed_by: GrantManagedBy,
+        at: Timestamp,
+        event: Event,
+    ) -> StoreResult<bool> {
+        Directory::revoke_admin(self, user, by, managed_by, at, event).await
+    }
+    async fn set_user_status(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        user: &UserId,
+        status: UserStatus,
+        deadline: Deadline,
+        admin_event: Event,
+        mk: &(dyn for<'a> Fn(&'a SessionRow) -> Event + Sync),
+    ) -> StoreResult<(bool, u32)> {
+        Directory::set_user_status(self, actor, policy, user, status, deadline, admin_event, mk)
+            .await
+    }
+    async fn admin_terminate_session(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        id: &SessionId,
+        deadline: Deadline,
+        admin_event: Event,
+        session_event: Event,
+    ) -> StoreResult<bool> {
+        Sessions::admin_terminate_session(
+            self,
+            actor,
+            policy,
+            id,
+            deadline,
+            admin_event,
+            session_event,
+        )
+        .await
+    }
+}
+
+/// SQLite keeps replay ledgers in `meta` (`nonce:<scope>:<nonce>` → expiry),
+/// as the receipt replay index already does; the single writer serializes.
+#[async_trait]
+impl NonceStore for Store {
+    async fn admit_nonce(
+        &self,
+        scope: &str,
+        nonce: &str,
+        expires_at: Timestamp,
+        now: Timestamp,
+        capacity: u32,
+    ) -> StoreResult<bool> {
+        if !nonce_key_ok(scope, nonce) {
+            return Err(StoreError::Conflict("invalid nonce key"));
+        }
+        let key = format!("nonce:{scope}:{nonce}");
+        let prefix = format!("nonce:{scope}:");
+        self.write("admit_nonce", move |env| {
+            let shared = env.shared.clone();
+            let tx = env.begin()?;
+            // Prune expired entries of this scope (value = expiry seconds).
+            tx.execute(
+                "DELETE FROM meta WHERE key >= ?1 AND key < ?2 AND CAST(value AS INTEGER) <= ?3",
+                rusqlite::params![prefix, format!("{prefix}\u{10FFFF}"), now.secs()],
+            )?;
+            let live: i64 = tx.query_row(
+                "SELECT count(*) FROM meta WHERE key >= ?1 AND key < ?2",
+                rusqlite::params![prefix, format!("{prefix}\u{10FFFF}")],
+                |r| r.get(0),
+            )?;
+            if live >= i64::from(capacity) {
+                return Ok(false);
+            }
+            let n = tx.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![key, expires_at.secs().to_string()],
+            )?;
+            super::commit(tx, &shared, None)?;
+            Ok(n == 1)
+        })
+        .await
     }
 }

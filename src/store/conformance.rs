@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::core::{CoreStore, HandoffStore};
+use super::core::{AdminStore, CoreStore, HandoffStore, NonceStore};
 use super::types::*;
 use super::{StoreError, StoreResult};
 use crate::crypto::{Clock, Digest, SeededRng, TestClock, Timestamp, random_id, random_token};
@@ -22,6 +22,8 @@ const T0: i64 = 1_700_000_000_000;
 pub(crate) struct Backend {
     pub store: Arc<dyn CoreStore>,
     pub handoff: Arc<dyn HandoffStore>,
+    pub admin: Arc<dyn AdminStore>,
+    pub nonces: Arc<dyn NonceStore>,
     pub clock: Arc<TestClock>,
     pub rng: Arc<SeededRng>,
     _dir: Option<tempfile::TempDir>,
@@ -57,7 +59,9 @@ fn sqlite() -> Backend {
     let store = Arc::new(store);
     Backend {
         store: store.clone(),
-        handoff: store,
+        handoff: store.clone(),
+        admin: store.clone(),
+        nonces: store,
         clock,
         rng,
         _dir: Some(dir),
@@ -92,6 +96,8 @@ pub(crate) async fn postgres() -> Option<Backend> {
     let store = Arc::new(store);
     Some(Backend {
         handoff: store.clone(),
+        admin: store.clone(),
+        nonces: store.clone(),
         store: store.clone(),
         clock,
         rng: Arc::new(SeededRng::new(42)),
@@ -1090,4 +1096,670 @@ async fn s600_5_postgres_ledger_migrations_and_newer_schema() {
     drop(client);
     let _ = schema;
     b.cleanup().await;
+}
+
+// ---- slice 2b: administrator grants, the actor fence, replay ledger -------
+
+fn grant_event(b: &Backend) -> Event {
+    EventBuilder::new(
+        b.clock.as_ref(),
+        b.rng.as_ref(),
+        EventKind::IdentityLinked,
+        Outcome::Info,
+        "req-conformance",
+    )
+    .build()
+}
+
+fn deadline() -> Deadline {
+    Deadline::after(Duration::from_secs(10))
+}
+
+fn actor_of(row: &SessionRow, h: &HandleRow) -> Actor {
+    Actor {
+        user_id: row.user_id.clone(),
+        session_id: row.session_id.clone(),
+        handle_sha256: h.handle_sha256,
+    }
+}
+
+fn console_policy(b: &Backend) -> ActorPolicy {
+    ActorPolicy {
+        authority: None,
+        console_host: Host::parse("auth.example.test").unwrap(),
+        session: Default::default(),
+        handle: Default::default(),
+        max_auth_age: Duration::from_secs(86400),
+        capability_requires_claim: false,
+        require_aal: Aal::One,
+        now: b.clock.now(),
+        skew: Duration::from_secs(60),
+    }
+}
+
+async fn admin_grants(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let u = user(b, 1).await;
+    let (_, email) = new_user(1);
+    let at = b.clock.now();
+    let ghost = crate::identity::types::UserId::new("u_GHOST");
+    assert!(
+        matches!(
+            b.admin
+                .grant_admin(
+                    &ghost,
+                    AdminRole::Admin,
+                    GrantManagedBy::Api,
+                    None,
+                    "op",
+                    None,
+                    at,
+                    grant_event(b)
+                )
+                .await,
+            Err(StoreError::Conflict("unknown user"))
+        ),
+        "{name}"
+    );
+    let first = b
+        .admin
+        .grant_admin(
+            &u.user_id,
+            AdminRole::Viewer,
+            GrantManagedBy::File,
+            Some(email.clone()),
+            "op",
+            None,
+            at,
+            grant_event(b),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first, (None, true), "{name}");
+    // The same live grant again is no change and writes no event.
+    let before = b.store.recent_events(100).await.unwrap().len();
+    let again = b
+        .admin
+        .grant_admin(
+            &u.user_id,
+            AdminRole::Viewer,
+            GrantManagedBy::File,
+            Some(email.clone()),
+            "op",
+            None,
+            at,
+            grant_event(b),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again, (Some(AdminRole::Viewer), false), "{name}");
+    assert_eq!(
+        b.store.recent_events(100).await.unwrap().len(),
+        before,
+        "{name}"
+    );
+    // A binding is never replaced by another address.
+    let other = NormalizedEmail::parse("other@example.test").unwrap();
+    assert!(
+        matches!(
+            b.admin
+                .grant_admin(
+                    &u.user_id,
+                    AdminRole::Admin,
+                    GrantManagedBy::File,
+                    Some(other),
+                    "op",
+                    None,
+                    at,
+                    grant_event(b)
+                )
+                .await,
+            Err(StoreError::Conflict("source_email_bound"))
+        ),
+        "{name}"
+    );
+    // A role change is a write that records the previous role.
+    let promote = grant_event(b);
+    let promote_id = promote.event_id.clone();
+    let up = b
+        .admin
+        .grant_admin(
+            &u.user_id,
+            AdminRole::Admin,
+            GrantManagedBy::Api,
+            None,
+            "op2",
+            Some("note".into()),
+            at,
+            promote,
+        )
+        .await
+        .unwrap();
+    assert_eq!(up, (Some(AdminRole::Viewer), true), "{name}");
+    let e = b
+        .store
+        .recent_events(100)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.event_id == promote_id)
+        .unwrap();
+    assert_eq!(
+        e.attrs.get("previous_role").and_then(|v| v.as_str()),
+        Some("viewer"),
+        "{name}"
+    );
+    let g = b
+        .admin
+        .admin_grant(&u.user_id, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (g.role, g.managed_by, g.granted_by.as_str()),
+        (AdminRole::Admin, GrantManagedBy::Api, "op2"),
+        "{name}"
+    );
+    assert_eq!(g.source_email, Some(email.clone()), "{name}: binding kept");
+    assert_eq!(g.note.as_deref(), Some("note"), "{name}");
+    // Revocation: once, then nothing to revoke; the row stays for audit.
+    assert!(
+        b.admin
+            .revoke_admin(&u.user_id, "op3", GrantManagedBy::Api, at, grant_event(b))
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    assert!(
+        !b.admin
+            .revoke_admin(&u.user_id, "op3", GrantManagedBy::Api, at, grant_event(b))
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    assert!(
+        b.admin
+            .admin_grants(false, deadline())
+            .await
+            .unwrap()
+            .is_empty(),
+        "{name}"
+    );
+    let all = b.admin.admin_grants(true, deadline()).await.unwrap();
+    assert_eq!(all.len(), 1, "{name}");
+    assert_eq!(all[0].revoked_by.as_deref(), Some("op3"), "{name}");
+    // Re-granting a revoked row revives it and reports the old role.
+    let back = b
+        .admin
+        .grant_admin(
+            &u.user_id,
+            AdminRole::Admin,
+            GrantManagedBy::Api,
+            None,
+            "op",
+            None,
+            at,
+            grant_event(b),
+        )
+        .await
+        .unwrap();
+    assert_eq!(back, (Some(AdminRole::Admin), true), "{name}");
+    assert!(
+        b.admin
+            .admin_grant(&u.user_id, deadline())
+            .await
+            .unwrap()
+            .unwrap()
+            .revoked_at
+            .is_none()
+    );
+}
+
+async fn fenced_console_mutations(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let admin = user(b, 1).await;
+    let (row, h) = session(b, &admin).await;
+    let actor = actor_of(&row, &h);
+    let policy = console_policy(b);
+    let target = user(b, 2).await;
+    let (t1, _) = session(b, &target).await;
+    let (t2, _) = session(b, &target).await;
+    let mk = |s: &SessionRow| {
+        let mut e = grant_event(b);
+        e.session_id = Some(s.session_id.clone());
+        e
+    };
+    // No grant: the fence refuses before anything is written.
+    let out = b
+        .admin
+        .set_user_status(
+            &actor,
+            &policy,
+            &target.user_id,
+            UserStatus::Disabled,
+            deadline(),
+            grant_event(b),
+            &mk,
+        )
+        .await;
+    assert!(
+        matches!(out, Err(StoreError::Conflict("actor_revoked"))),
+        "{name}: {out:?}"
+    );
+    assert_eq!(
+        b.store
+            .user_authz(&target.user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        UserStatus::Active
+    );
+    b.admin
+        .grant_admin(
+            &admin.user_id,
+            AdminRole::Admin,
+            GrantManagedBy::Api,
+            None,
+            "op",
+            None,
+            b.clock.now(),
+            grant_event(b),
+        )
+        .await
+        .unwrap();
+    // A viewer-only requirement the session cannot meet is refused too.
+    let mut strict = console_policy(b);
+    strict.capability_requires_claim = true;
+    assert!(
+        conflict(
+            b.admin
+                .set_user_status(
+                    &actor,
+                    &strict,
+                    &target.user_id,
+                    UserStatus::Disabled,
+                    deadline(),
+                    grant_event(b),
+                    &mk
+                )
+                .await
+        ),
+        "{name}: claim"
+    );
+    let mut other_host = console_policy(b);
+    other_host.console_host = Host::parse("console.example.test").unwrap();
+    assert!(
+        conflict(
+            b.admin
+                .set_user_status(
+                    &actor,
+                    &other_host,
+                    &target.user_id,
+                    UserStatus::Disabled,
+                    deadline(),
+                    grant_event(b),
+                    &mk
+                )
+                .await
+        ),
+        "{name}: host"
+    );
+    // An expired deadline writes nothing.
+    let gone = Deadline(std::time::Instant::now() - Duration::from_millis(1));
+    assert!(
+        matches!(
+            b.admin.set_user_status(&actor, &policy, &target.user_id, UserStatus::Disabled, gone, grant_event(b), &mk).await,
+            Err(StoreError::Unavailable(ref m)) if m == "deadline"
+        ),
+        "{name}: deadline"
+    );
+    // Disabling ends every live session, one event each, and counts them.
+    let disable = grant_event(b);
+    let disable_id = disable.event_id.clone();
+    let out = b
+        .admin
+        .set_user_status(
+            &actor,
+            &policy,
+            &target.user_id,
+            UserStatus::Disabled,
+            deadline(),
+            disable,
+            &mk,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out, (true, 2), "{name}");
+    for s in [&t1, &t2] {
+        let r = b.store.session(&s.session_id).await.unwrap().unwrap();
+        assert_eq!(
+            r.terminated_reason,
+            Some(reasons::USER_DISABLED.0.to_string()),
+            "{name}"
+        );
+    }
+    let events = b.store.recent_events(100).await.unwrap();
+    let e = events.iter().find(|e| e.event_id == disable_id).unwrap();
+    assert_eq!(
+        e.attrs.get("count").and_then(|v| v.as_u64()),
+        Some(2),
+        "{name}"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e
+                .session_id
+                .as_ref()
+                .is_some_and(|s| *s == t1.session_id || *s == t2.session_id))
+            .count(),
+        2,
+        "{name}"
+    );
+    let authz = b.store.user_authz(&target.user_id).await.unwrap().unwrap();
+    assert_eq!(
+        (authz.status, authz.authz_version),
+        (UserStatus::Disabled, 2),
+        "{name}"
+    );
+    // Idempotent, unknown user, and a disabled user cannot be granted.
+    assert_eq!(
+        b.admin
+            .set_user_status(
+                &actor,
+                &policy,
+                &target.user_id,
+                UserStatus::Disabled,
+                deadline(),
+                grant_event(b),
+                &mk
+            )
+            .await
+            .unwrap(),
+        (false, 0)
+    );
+    let ghost = crate::identity::types::UserId::new("u_GHOST");
+    assert!(matches!(
+        b.admin
+            .set_user_status(
+                &actor,
+                &policy,
+                &ghost,
+                UserStatus::Disabled,
+                deadline(),
+                grant_event(b),
+                &mk
+            )
+            .await,
+        Err(StoreError::Conflict("unknown user"))
+    ));
+    assert!(matches!(
+        b.admin
+            .grant_admin(
+                &target.user_id,
+                AdminRole::Admin,
+                GrantManagedBy::Api,
+                None,
+                "op",
+                None,
+                b.clock.now(),
+                grant_event(b)
+            )
+            .await,
+        Err(StoreError::Conflict("user_disabled"))
+    ));
+    assert_eq!(
+        b.admin
+            .set_user_status(
+                &actor,
+                &policy,
+                &target.user_id,
+                UserStatus::Active,
+                deadline(),
+                grant_event(b),
+                &mk
+            )
+            .await
+            .unwrap(),
+        (true, 0)
+    );
+    // A single session: ended once; a second termination is no change.
+    let (t3, _) = session(b, &target).await;
+    let mut sev = grant_event(b);
+    sev.session_id = Some(t3.session_id.clone());
+    assert!(
+        b.admin
+            .admin_terminate_session(
+                &actor,
+                &policy,
+                &t3.session_id,
+                deadline(),
+                grant_event(b),
+                sev.clone()
+            )
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    assert_eq!(
+        b.store
+            .session(&t3.session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminated_reason,
+        Some(reasons::ADMIN.0.to_string())
+    );
+    assert!(
+        !b.admin
+            .admin_terminate_session(
+                &actor,
+                &policy,
+                &t3.session_id,
+                deadline(),
+                grant_event(b),
+                sev
+            )
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    // Revoking the actor's grant closes the fence for the next mutation.
+    b.admin
+        .revoke_admin(
+            &admin.user_id,
+            "op",
+            GrantManagedBy::Api,
+            b.clock.now(),
+            grant_event(b),
+        )
+        .await
+        .unwrap();
+    let (t4, _) = session(b, &target).await;
+    assert!(
+        matches!(
+            b.admin
+                .admin_terminate_session(
+                    &actor,
+                    &policy,
+                    &t4.session_id,
+                    deadline(),
+                    grant_event(b),
+                    grant_event(b)
+                )
+                .await,
+            Err(StoreError::Conflict("actor_revoked"))
+        ),
+        "{name}"
+    );
+    assert!(
+        b.store
+            .session(&t4.session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminated_at
+            .is_none()
+    );
+    // An actor whose own session ended is fenced out once re-granted.
+    b.admin
+        .grant_admin(
+            &admin.user_id,
+            AdminRole::Admin,
+            GrantManagedBy::Api,
+            None,
+            "op",
+            None,
+            b.clock.now(),
+            grant_event(b),
+        )
+        .await
+        .unwrap();
+    assert!(
+        b.admin
+            .admin_terminate_session(
+                &actor,
+                &policy,
+                &t4.session_id,
+                deadline(),
+                grant_event(b),
+                grant_event(b)
+            )
+            .await
+            .unwrap()
+    );
+    b.store
+        .terminate_session(&row.session_id, reasons::LOGOUT, b.clock.now(), vec![])
+        .await
+        .unwrap();
+    let (t5, _) = session(b, &target).await;
+    assert!(
+        conflict(
+            b.admin
+                .admin_terminate_session(
+                    &actor,
+                    &policy,
+                    &t5.session_id,
+                    deadline(),
+                    grant_event(b),
+                    grant_event(b)
+                )
+                .await
+        ),
+        "{name}"
+    );
+}
+
+async fn replay_ledger(b: &Backend) {
+    let name = b.store.backend();
+    let now = Timestamp::from_secs(1000);
+    let exp = Timestamp::from_secs(1031);
+    assert!(
+        b.nonces
+            .admit_nonce("delegation", "n-1", exp, now, 8)
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    assert!(
+        !b.nonces
+            .admit_nonce("delegation", "n-1", exp, now, 8)
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    // Scopes are separate ledgers.
+    assert!(
+        b.nonces
+            .admit_nonce("other", "n-1", exp, now, 8)
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    // Malformed keys are refused, never stored.
+    for (scope, nonce) in [
+        ("", "n"),
+        ("delegation", ""),
+        ("bad scope", "n"),
+        ("delegation", "a%b"),
+    ] {
+        assert!(
+            conflict(b.nonces.admit_nonce(scope, nonce, exp, now, 8).await),
+            "{name}: {scope:?} {nonce:?}"
+        );
+    }
+    // Capacity is per scope and fails closed until entries expire.
+    assert!(b.nonces.admit_nonce("cap", "a", exp, now, 2).await.unwrap());
+    assert!(
+        b.nonces
+            .admit_nonce("cap", "b", Timestamp::from_secs(2000), now, 2)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.nonces.admit_nonce("cap", "c", exp, now, 2).await.unwrap(),
+        "{name}: full"
+    );
+    assert!(
+        !b.nonces
+            .admit_nonce("cap", "a", exp, Timestamp::from_secs(1030), 2)
+            .await
+            .unwrap(),
+        "{name}: still live"
+    );
+    assert!(
+        b.nonces
+            .admit_nonce("cap", "a", exp, Timestamp::from_secs(1031), 2)
+            .await
+            .unwrap(),
+        "{name}: expired"
+    );
+    // Concurrent replicas presenting one nonce: exactly one is admitted.
+    let mut tasks = Vec::new();
+    for _ in 0..16 {
+        let n = b.nonces.clone();
+        tasks.push(tokio::spawn(async move {
+            n.admit_nonce("race", "same", exp, now, 64).await
+        }));
+    }
+    let mut admitted = 0;
+    for t in tasks {
+        if t.await.unwrap().unwrap() {
+            admitted += 1;
+        }
+    }
+    assert_eq!(admitted, 1, "{name}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_9_admin_grants_agree_on_both_backends() {
+    for b in backends().await {
+        admin_grants(&b).await;
+        b.cleanup().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_10_fenced_console_mutations_agree_on_both_backends() {
+    for b in backends().await {
+        fenced_console_mutations(&b).await;
+        b.cleanup().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_11_replay_ledger_admits_each_nonce_once_on_both_backends() {
+    for b in backends().await {
+        replay_ledger(&b).await;
+        b.cleanup().await;
+    }
 }

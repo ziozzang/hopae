@@ -5,6 +5,7 @@
 //! uniqueness (user-ID ledger, identities, handles, events) is enforced by
 //! constraints, so several replicas behave like the single SQLite writer.
 //! Times come from the application clock, never from `now()`.
+mod admin;
 mod handoff;
 
 use std::sync::Arc;
@@ -31,6 +32,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         2,
         "0002_slice2_handoff",
         include_str!("migrations/0002_slice2_handoff.sql"),
+    ),
+    (
+        3,
+        "0003_slice2b_admin_nonces",
+        include_str!("migrations/0003_slice2b_admin_nonces.sql"),
     ),
 ];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
@@ -785,42 +791,10 @@ impl PgStore {
     ) -> StoreResult<()> {
         let mut client = self.client().await?;
         let tx = self.begin(&mut client).await?;
-        let state = tx
-            .query_opt(
-                "SELECT terminated_at FROM sessions WHERE session_id=$1 FOR UPDATE",
-                &[&id.as_str()],
-            )
-            .await
-            .map_err(pg)?;
-        let live = state.is_some_and(|r| r.get::<_, Option<i64>>(0).is_none());
-        if !live {
-            return Ok(());
+        if admin::terminate_in(self, &tx, id, reason, at, events).await? {
+            tx.commit().await.map_err(pg)?;
         }
-        tx.execute(
-            "UPDATE sessions SET terminated_at=$2, terminated_reason=$3, cred_gen = cred_gen + 1 WHERE session_id=$1",
-            &[&id.as_str(), &at.secs(), &reason.0],
-        )
-        .await
-        .map_err(pg)?;
-        tx.execute(
-            "UPDATE session_handles SET revoked_at=$2, revoked_reason=$3 WHERE session_id=$1 AND revoked_at IS NULL",
-            &[&id.as_str(), &at.secs(), &reasons::SESSION_TERMINATED.0],
-        )
-        .await
-        .map_err(pg)?;
-        let code_reason = if reason == reasons::ADMIN {
-            reasons::SESSION_TERMINATED
-        } else {
-            reason
-        };
-        tx.execute(
-            "UPDATE handoff_codes SET consumed_at=$2, consumed_reason=$3 WHERE session_id=$1 AND consumed_at IS NULL",
-            &[&id.as_str(), &at.secs(), &code_reason.0],
-        )
-        .await
-        .map_err(pg)?;
-        self.insert_events(&tx, events).await?;
-        tx.commit().await.map_err(pg)
+        Ok(())
     }
 }
 

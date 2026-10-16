@@ -5,6 +5,7 @@
 //! conformance suite (`store::conformance`) runs against both.
 use async_trait::async_trait;
 
+use super::Deadline;
 use super::StoreResult;
 use super::types::*;
 use crate::crypto::{Digest, Timestamp};
@@ -132,4 +133,87 @@ pub trait HandoffStore: Send + Sync {
         ip: std::net::IpAddr,
         since: Timestamp,
     ) -> StoreResult<u32>;
+}
+
+/// Slice 2b (ADR-0020): administrator grants and the fenced console
+/// mutations. The fence re-evaluates the acting administrator inside the
+/// write (ADR-0016 decision 11).
+#[async_trait]
+pub trait AdminStore: Send + Sync {
+    async fn admin_grant(
+        &self,
+        user: &UserId,
+        deadline: Deadline,
+    ) -> StoreResult<Option<AdminGrant>>;
+    async fn admin_grants(
+        &self,
+        include_revoked: bool,
+        deadline: Deadline,
+    ) -> StoreResult<Vec<AdminGrant>>;
+    #[allow(clippy::too_many_arguments)]
+    async fn grant_admin(
+        &self,
+        user: &UserId,
+        role: AdminRole,
+        managed_by: GrantManagedBy,
+        source_email: Option<NormalizedEmail>,
+        by: &str,
+        note: Option<String>,
+        at: Timestamp,
+        event: Event,
+    ) -> StoreResult<(Option<AdminRole>, bool)>;
+    async fn revoke_admin(
+        &self,
+        user: &UserId,
+        by: &str,
+        managed_by: GrantManagedBy,
+        at: Timestamp,
+        event: Event,
+    ) -> StoreResult<bool>;
+    #[allow(clippy::too_many_arguments)]
+    async fn set_user_status(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        user: &UserId,
+        status: UserStatus,
+        deadline: Deadline,
+        admin_event: Event,
+        mk_session_event: &(dyn for<'a> Fn(&'a SessionRow) -> Event + Sync),
+    ) -> StoreResult<(bool, u32)>;
+    async fn admin_terminate_session(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        id: &SessionId,
+        deadline: Deadline,
+        admin_event: Event,
+        session_event: Event,
+    ) -> StoreResult<bool>;
+}
+
+/// Slice 2b (ADR-0020): replay ledgers shared by every replica (Hangang
+/// delegation nonces, receipt replay). `admit` is true exactly once per
+/// `(scope, nonce)` while the entry is live; expired entries are pruned.
+#[async_trait]
+pub trait NonceStore: Send + Sync {
+    async fn admit_nonce(
+        &self,
+        scope: &str,
+        nonce: &str,
+        expires_at: Timestamp,
+        now: Timestamp,
+        capacity: u32,
+    ) -> StoreResult<bool>;
+}
+
+/// Bounds of a replay-ledger key.
+pub fn nonce_key_ok(scope: &str, nonce: &str) -> bool {
+    let ok = |s: &str, n: usize| {
+        !s.is_empty()
+            && s.len() <= n
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+    };
+    ok(scope, 64) && ok(nonce, 256)
 }

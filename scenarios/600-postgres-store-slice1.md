@@ -64,6 +64,24 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - When: a code with a stale generation is minted; a valid code is redeemed, then replayed with and without the minted handle; a code is redeemed on the wrong host; an unknown code is redeemed; eight redemptions of one code race.
 - Then: `Conflict`; `Minted` with a lookup-able handle; `AlreadyRedeemed` and `Rejected(code_consumed)`; `Rejected(code_host_mismatch)` with the code burned; `Rejected(code_unknown)`; failures counted per address; exactly one redemption mints, the others see `code_consumed`.
 
+### S600-9 Administrator grants agree (slice 2b)
+
+- Given: a user and an unknown user id.
+- When: the unknown user is granted; the user is granted `viewer` through an address; the same grant is repeated; a grant through another address; a role change to `admin`; two revocations; listings of live and all grants; a re-grant.
+- Then: `Conflict(unknown user)`; `(None, true)`; `(Some(viewer), false)` with no event; `Conflict(source_email_bound)`; `(Some(viewer), true)` with `previous_role = viewer` and the binding kept; the first revocation is true and the second false; no live grant but one audited row; the re-grant revives the row with `revoked_at` cleared.
+
+### S600-10 Fenced console mutations agree (slice 2b)
+
+- Given: an administrator session and handle on `auth.example.test`, a target user with two sessions.
+- When: the target is disabled without a grant; with a grant but a policy that requires a provider claim or another console host; with an expired deadline; then within policy; repeated; an unknown user; the disabled user is granted; the target is enabled; a session is terminated twice; the actor's grant is revoked; the actor's own session ends.
+- Then: `Conflict(actor_revoked)` with nothing written; again refused; `Unavailable(deadline)`; `(true, 2)` with both sessions ended as `user_disabled`, one session event each and the administrator event carrying `count = 2`, `authz_version` moved; `(false, 0)`; `Conflict(unknown user)`; `Conflict(user_disabled)`; `(true, 0)`; true then false with reason `admin`; the next mutation is `Conflict(actor_revoked)` and the session stays live; once re-granted it succeeds, and after the actor's session ends it is refused.
+
+### S600-11 Replay ledger admits each nonce once (slice 2b)
+
+- Given: scopes `delegation`, `other`, `cap` (capacity 2) and `race`.
+- When: a nonce is admitted twice; the same nonce in another scope; malformed scopes and nonces; a full scope before and after expiry; sixteen concurrent admissions of one nonce.
+- Then: true then false; true; `Conflict` and nothing stored; refused while full and while the entry is live (expiry is exclusive), admitted at expiry; exactly one admission wins.
+
 ### S600-5 PostgreSQL ledger, migrations and newer schema
 
 - Given: a PostgreSQL store.
@@ -80,11 +98,11 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 
 | Category | Case | Applies |
 | --- | --- | --- |
-| Replay | S600-5 | yes: a reserved user ID is never reused, whichever replica inserts |
+| Replay | S600-5, S600-11 | yes: a reserved user ID is never reused, and a nonce is admitted once, whichever replica inserts |
 | Tampering | S600-6 | yes: credentials only by environment reference; unknown keys refused |
-| Race / timing | S600-3 | yes: racing writers on two backends |
+| Race / timing | S600-3, S600-10, S600-11 | yes: racing writers on two backends; the fence locks the actor's rows so a revocation orders before or after a mutation, never inside it |
 | Resource exhaustion | — | no: pool bounds and statement timeouts are configuration (validated in S600-6); load is slice 4 |
-| Confused deputy | S600-6 | yes: no silent fallback from PostgreSQL to a local SQLite file |
+| Confused deputy | S600-6, S600-10 | yes: no silent fallback from PostgreSQL to a local SQLite file; a revoked or out-of-policy administrator cannot mutate |
 | Spoofed or duplicated headers | — | no: no HTTP surface in this slice |
 | Downgrade | S600-5 | yes: a newer schema is refused, never down-migrated |
 | Enumeration | — | no: no external surface |
@@ -105,6 +123,10 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-4 | `s600_4_outbox_rules_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-7 | `s600_7_login_transactions_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-8 | `s600_8_handoff_redemption_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-9 | `s600_9_admin_grants_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-10 | `s600_10_fenced_console_mutations_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-11 | `s600_11_replay_ledger_admits_each_nonce_once_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-11 | `s600_11_store_backed_delegation_nonces_match_the_file_window_across_replicas` | `src/admin/delegation.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
 | S600-6 | `s600_6_serving_refuses_the_incomplete_postgres_backend` | `src/app.rs` | unit | passing |
@@ -117,8 +139,8 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 
 ## Open questions
 
-- Slice 2–4 scope and order (ADR-0020) and the CI service definition.
+- Slice 2c–4 scope (ADR-0020). Hosted CI stays disabled; `make test-postgres` is the PostgreSQL run.
 
 ## 한국어 요약
 
-슬라이스 1 저장소 계약(사용자·신원·사용자 ID 원장, 제공자 부트스트랩, 세션·핸들, 아웃박스)이 SQLite와 PostgreSQL에서 동시 쓰기 상황을 포함해 똑같이 동작하는지 확인합니다. 예약된 사용자 ID는 어느 복제본에서도 재사용되지 않고, 더 새로운 스키마는 거부되며, 미완성 PostgreSQL 설정은 서비스되지 않고 SQLite로 대체되지도 않습니다.
+슬라이스 1 저장소 계약(사용자·신원·사용자 ID 원장, 제공자 부트스트랩, 세션·핸들, 아웃박스)이 SQLite와 PostgreSQL에서 동시 쓰기 상황을 포함해 똑같이 동작하는지 확인합니다. 예약된 사용자 ID는 어느 복제본에서도 재사용되지 않고, 더 새로운 스키마는 거부되며, 미완성 PostgreSQL 설정은 서비스되지 않고 SQLite로 대체되지도 않습니다. 슬라이스 2b는 관리자 권한 부여·회수, 행 잠금(`FOR SHARE`)으로 재평가하는 관리자 펜스와 그 아래의 사용자 상태 변경·세션 종료, 복제본 간에 공유되는 재사용 방지 논스 원장을 두 저장소에서 같은 결과로 검증합니다.

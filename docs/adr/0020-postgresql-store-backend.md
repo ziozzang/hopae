@@ -181,7 +181,8 @@ against both backends.
 | --- | --- |
 | 1 | `CoreStore`, PostgreSQL schema v1 (users, identities, providers, the user-ID ledger, sessions, handles, login transactions, handoff codes, events, deliveries), the conformance harness, config `store.kind = postgres` validated at preflight and refused by `serve` as incomplete |
 | 2a | Login transactions (cap, eviction bound, binding, consume-once) and the ADR-0004 handoff redemption (`HandoffStore`; code and session rows locked `FOR UPDATE`; the transaction count/evict/insert serialized by an advisory lock) — implemented |
-| 2b | Administrator fences and grants, factors and passkeys, the delegation and replay nonces moved into the store |
+| 2b | Administrator grants (`AdminStore`), the actor fence re-evaluated with the actor's session, handle, user and grant rows locked `FOR SHARE` and the deadline as `statement_timeout`, fenced status changes and session termination, and the shared replay ledger (`NonceStore`, table `replay_nonces`; the Hangang delegation nonce admission can use it instead of its per-process file), PostgreSQL schema 3 — implemented |
+| 2c | Factors and passkeys (TOTP, WebAuthn credentials and challenges, recovery codes, elevations) |
 | 3 | Groups, subject directory and console listings (window queries rewritten without `INDEXED BY`), the event relay and pruning |
 | 4 | Authentication-gateway owners (publication, receipts, projections), the migration tool, `serve` enabled, two-replica qualification (ROADMAP M2 exit) |
 
@@ -209,7 +210,8 @@ against both backends.
 - New config keys: `store.kind = postgres` (alias `store.backend`) and
   `store.postgres.{url_env, ca_file, pool_size, connect_timeout_ms,
   statement_timeout_ms}`.
-- Follow-up scenarios 601–604 (slices 2–4, two-replica qualification).
+- Follow-up scenarios 601–604 (slices 2c–4, two-replica qualification).
+  Slices 2a and 2b extend scenario 600 (S600-7 to S600-11).
 
 ## Alternatives considered
 

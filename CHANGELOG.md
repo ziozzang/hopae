@@ -100,6 +100,12 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 - PostgreSQL store slice 2a: login transactions and the handoff-code
   redemption (`HandoffStore`) on both backends, PostgreSQL schema 2, and
   `make test-postgres` (ephemeral tmpfs container, removed on exit).
+- PostgreSQL store slice 2b: administrator grants, the actor fence (actor
+  rows locked `FOR SHARE`, deadline as `statement_timeout`), fenced status
+  changes and session termination (`AdminStore`), and a replay ledger shared
+  across replicas (`NonceStore`, PostgreSQL schema 3 `replay_nonces`); the
+  Hangang delegation nonce admission can use the store ledger. Factors and
+  passkeys move in slice 2c.
 
 ### Changed
 
