@@ -1207,17 +1207,21 @@ version = "0.0.3"
 dependencies = [
  "ed25519-dalek",
  "hangang-runtime",
+ "hyper-util",
  "prost",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
  "subtle",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tower-service",
 ]
 
 [[package]]

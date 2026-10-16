@@ -76,6 +76,10 @@ mod projection_privacy_tests {
     }
 }
 
+/// Native client endpoint input: fixed PEM or a reloadable rustls configuration.
+#[cfg(feature = "native-client")]
+pub mod client_endpoint;
+
 #[cfg(feature = "native-client")]
 pub mod observed_client;
 
