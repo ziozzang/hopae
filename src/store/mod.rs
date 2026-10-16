@@ -6,8 +6,13 @@
 //! takes `events: Vec<Event>` writes the rows and one `event_deliveries`
 //! `pending` row per configured sink in the same transaction.
 
+#[cfg(test)]
+pub mod conformance;
+pub mod core;
 pub mod hooks;
 pub mod passkeys;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 pub mod sqlite;
 pub mod types;
 

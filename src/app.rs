@@ -561,6 +561,7 @@ async fn bind_environment(
     cfg: &Config,
     real_env: &(dyn Fn(&str) -> Option<String> + Sync),
 ) -> anyhow::Result<Bound> {
+    refuse_incomplete_backend(cfg)?;
     let receiver_keys = crate::auth_gateway::receipt_config::receiver_keys(
         cfg.receipt_issuer.as_ref(),
         &cfg.receipt_permit_keys,
@@ -1666,7 +1667,20 @@ fn cli_event(
 
 /// Open the store as a command-line administrator: precheck, no lock, no
 /// migration, no backup.
+/// ADR-0020: until the remaining slices land, a PostgreSQL configuration is
+/// refused by every command that would open the store (never a silent
+/// fallback to a local SQLite file).
+fn refuse_incomplete_backend(cfg: &Config) -> anyhow::Result<()> {
+    if cfg.store.kind == crate::config::StoreKind::Postgres {
+        anyhow::bail!(
+            "store.kind = \"postgres\": ADR-0020 slice 1 provides the store contract and its conformance tests only; serving and store commands on PostgreSQL arrive with slice 4"
+        );
+    }
+    Ok(())
+}
+
 async fn open_cli_store(cfg: &Config, env: &Env) -> anyhow::Result<Store> {
+    refuse_incomplete_backend(cfg)?;
     let path = cfg.store_path();
     let (clock, sinks) = (env.clock.clone(), cfg.event_sinks());
     let p = path.clone();
@@ -3114,5 +3128,24 @@ mod tests {
                 "hopae_verify_unauthorized_total{}",
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod postgres_backend_tests {
+    /// S600-6: a PostgreSQL configuration is never served by a slice-1 binary
+    /// and never silently falls back to SQLite.
+    #[test]
+    fn s600_6_serving_refuses_the_incomplete_postgres_backend() {
+        let mut cfg = crate::config::parse(
+            r#"{"state_dir": "/tmp/hopae-unused", "portal": {"public_url": "https://auth.example.test"}, "gateway": {"kind": "hangang", "caller_key_env": "K"}}"#,
+        )
+        .unwrap();
+        assert!(super::refuse_incomplete_backend(&cfg).is_ok());
+        cfg.store.kind = crate::config::StoreKind::Postgres;
+        let e = super::refuse_incomplete_backend(&cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("slice 1") && e.contains("slice 4"), "{e}");
     }
 }

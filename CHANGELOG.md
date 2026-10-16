@@ -88,6 +88,16 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   canonical in lower case. The owned OpenLDAP fixture enables `memberof` and
   checks group sync against a real directory.
 
+- PostgreSQL store backend, slice 1 ([ADR-0020](docs/adr/0020-postgresql-store-backend.md)):
+  the backend-neutral `CoreStore` contract (users, identities and the
+  user-ID ledger, provider bootstrap, sessions and handles, outbox), a
+  PostgreSQL implementation behind the `postgres` cargo feature
+  (`tokio-postgres`, `deadpool-postgres`, rustls), its schema and migration
+  runner, and a dual-backend conformance suite (scenario 600). Configuration
+  `store.kind`/`store.backend = "postgres"` with `store.postgres` is
+  validated; serving on it is refused until slice 4. SQLite stays the
+  default and unchanged.
+
 ### Changed
 
 - A recovery factor entry no longer counts as AAL 2 evidence in step-up
