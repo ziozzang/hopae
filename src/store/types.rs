@@ -630,8 +630,24 @@ impl Deadline {
 pub struct UsersQuery {
     pub q: Option<String>,
     pub status: Option<UserStatus>,
+    /// Residual filters over the candidate window (console listings).
+    pub filters: UserFilters,
     pub limit: usize,
     pub cursor: Option<Cursor>,
+}
+
+/// Optional user-listing filters, applied to the bounded candidate window
+/// like `q` and `status`: a sparse filter yields short pages, never a scan.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UserFilters {
+    /// Users with an identity at this provider.
+    pub provider: Option<String>,
+    /// `Some(true)`: users with an active passkey or authenticator app;
+    /// `Some(false)`: users with neither.
+    pub mfa_enrolled: Option<bool>,
+    /// Users with an effective membership (active group, not suspended, not
+    /// expired) in this group (`grp1:` reference).
+    pub group: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -657,6 +673,8 @@ pub struct UserDetail {
 #[derive(Clone, Debug)]
 pub struct SessionsQuery {
     pub user_id: Option<UserId>,
+    /// Sessions at exactly this stored level (1 or 2).
+    pub aal: Option<Aal>,
     pub limit: usize,
     pub cursor: Option<Cursor>,
     pub now: Timestamp,
@@ -701,6 +719,9 @@ pub struct EventsQuery {
     pub user_id: Option<UserId>,
     pub session_id: Option<SessionId>,
     pub client_ip: Option<IpAddr>,
+    /// Kinds starting with this text (`factor.`, `admin.user_`): a residual
+    /// filter over the window the other filters choose.
+    pub kind_prefix: Option<String>,
     pub since: Option<Timestamp>,
     pub until: Option<Timestamp>,
     pub limit: usize,

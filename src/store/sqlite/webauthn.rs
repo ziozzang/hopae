@@ -1393,6 +1393,149 @@ impl Passkeys for Store {
     }
 }
 
+impl Store {
+    /// The console's factor reset (ADR-0017): the administrator's write fence,
+    /// then what `scope` names, the sessions that factor vouched for and the
+    /// `admin.factor_reset` record with the counts, in one transaction. A
+    /// reset that finds nothing to remove writes nothing (`changed: false`).
+    /// `Conflict("unknown user")` for a user that does not exist and
+    /// `Conflict("unknown factor")` for a passkey the user does not hold.
+    pub async fn admin_reset_factors(
+        &self,
+        actor: &crate::store::Actor,
+        policy: &crate::store::ActorPolicy,
+        user: &UserId,
+        scope: FactorResetScope,
+        deadline: crate::store::Deadline,
+        admin_event: Event,
+    ) -> StoreResult<(bool, FactorResetReport)> {
+        let (actor, policy, user) = (actor.clone(), policy.clone(), user.clone());
+        self.write_checked("admin_reset_factors", Some(deadline), move |env, check| {
+            let (tx, shared) = super::admin::begin_fenced(env, check, &actor, &policy)?;
+            let now = shared.clock.now();
+            let request_id = admin_event.request_id.clone();
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE user_id=?1)",
+                [user.as_str()],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Err(conflict("unknown user"));
+            }
+            let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+            let mut report = FactorResetReport::default();
+            let end = |tx: &Transaction<'_>, ids: Vec<String>| -> StoreResult<u32> {
+                let mut n = 0;
+                for id in ids {
+                    let id = SessionId::new(id);
+                    let ev = event(&shared, EventKind::SessionTerminated, Outcome::Success, &request_id)
+                        .user(&user)
+                        .session(&id)
+                        .reason(reasons::FACTOR_RESET)
+                        .build();
+                    super::sessions::terminate_in(tx, &shared, &id, reasons::FACTOR_RESET, now, &[ev])?;
+                    n += 1;
+                }
+                Ok(n)
+            };
+            let live_sessions = |tx: &Transaction<'_>, extra: &str| -> StoreResult<Vec<String>> {
+                Ok(tx
+                    .prepare(&format!(
+                        "SELECT s.session_id FROM sessions s WHERE s.user_id=?1 AND s.terminated_at IS NULL{extra} ORDER BY s.session_id"
+                    ))?
+                    .query_map([user.as_str()], |r| r.get(0))?
+                    .collect::<Result<_, _>>()?)
+            };
+            let revoke_totp = |tx: &Transaction<'_>| -> StoreResult<u32> {
+                Ok(count(tx.execute(
+                    "UPDATE totp_enrollments SET state='revoked',revision=revision+1,pending_expires_at=NULL,updated_at=?2 WHERE user_id=?1 AND state!='revoked'",
+                    params![user.as_str(), now.secs()],
+                )?))
+            };
+            let drop_codes = |tx: &Transaction<'_>| -> StoreResult<u32> {
+                let unused = count(tx.execute(
+                    "DELETE FROM recovery_codes WHERE user_id=?1 AND used_at IS NULL",
+                    [user.as_str()],
+                )?);
+                Ok(unused)
+            };
+            match &scope {
+                FactorResetScope::All => {
+                    report.passkeys = count(tx.execute(
+                        "UPDATE webauthn_credentials SET state='revoked',revoked_at=?2,revoked_reason='factor_reset',revision=revision+1 WHERE user_id=?1 AND state='active'",
+                        params![user.as_str(), now.secs()],
+                    )?);
+                    report.totp = revoke_totp(&tx)?;
+                    report.recovery_codes = drop_codes(&tx)?;
+                    let used = tx.execute("DELETE FROM recovery_codes WHERE user_id=?1", [user.as_str()])?;
+                    let flag = tx.execute(
+                        "UPDATE users SET factor_recovery_required_at=NULL WHERE user_id=?1 AND factor_recovery_required_at IS NOT NULL",
+                        [user.as_str()],
+                    )?;
+                    tx.execute("DELETE FROM webauthn_challenges WHERE user_id=?1", [user.as_str()])?;
+                    let factors_changed = report.passkeys + report.totp + report.recovery_codes > 0
+                        || used > 0
+                        || flag > 0;
+                    let ids = live_sessions(&tx, "")?;
+                    if !factors_changed && ids.is_empty() {
+                        return Ok((false, report));
+                    }
+                    report.sessions = end(&tx, ids)?;
+                }
+                FactorResetScope::Passkey(wanted) => {
+                    let ids: Vec<Vec<u8>> = tx
+                        .prepare("SELECT credential_id FROM webauthn_credentials WHERE user_id=?1 AND state='active'")?
+                        .query_map([user.as_str()], |r| r.get(0))?
+                        .collect::<Result<_, _>>()?;
+                    let Some(credential) = ids.into_iter().find(|c| factor_id(c) == *wanted) else {
+                        return Err(conflict("unknown factor"));
+                    };
+                    tx.execute(
+                        "UPDATE webauthn_credentials SET state='revoked',revoked_at=?3,revoked_reason='factor_reset',revision=revision+1 WHERE credential_id=?1 AND user_id=?2 AND state='active'",
+                        params![credential, user.as_str(), now.secs()],
+                    )?;
+                    tx.execute(
+                        "DELETE FROM webauthn_challenges WHERE user_id=?1",
+                        [user.as_str()],
+                    )?;
+                    report.passkeys = 1;
+                    report.sessions = end_elevated_sessions(&tx, &shared, &user, &credential, None, reasons::FACTOR_RESET, &request_id)?;
+                }
+                FactorResetScope::Totp => {
+                    report.totp = revoke_totp(&tx)?;
+                    if report.totp == 0 {
+                        return Ok((false, report));
+                    }
+                    // The sessions a TOTP code elevated or refreshed.
+                    let ids = live_sessions(
+                        &tx,
+                        " AND EXISTS (SELECT 1 FROM json_each(s.factors) f WHERE json_extract(f.value, '$.kind') = 'totp')",
+                    )?;
+                    report.sessions = end(&tx, ids)?;
+                }
+                FactorResetScope::RecoveryCodes => {
+                    report.recovery_codes = drop_codes(&tx)?;
+                    if report.recovery_codes == 0 {
+                        return Ok((false, report));
+                    }
+                }
+            }
+            check.now()?;
+            // The counts are known only now: they travel in the same transaction.
+            let mut admin_event = admin_event;
+            admin_event.attrs.insert(
+                "count".into(),
+                serde_json::json!(report.passkeys + report.totp + report.recovery_codes),
+            );
+            insert_events(&tx, &shared, &[admin_event])?;
+            super::admin::before_commit(&shared, check)?;
+            super::commit_checked(tx, &shared, Some("admin_factor_reset"), check)?;
+            Ok((true, report))
+        })
+        .await
+    }
+}
+
 /// Read-only foundation check: the v11 tables match the embedded migration exactly.
 pub(crate) fn validate_foundation(conn: &rusqlite::Connection) -> StoreResult<()> {
     let migration = include_str!("../migrations/0011_webauthn.sql");

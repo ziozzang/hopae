@@ -1,6 +1,6 @@
 # Administration
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/ADMIN.md)
 
@@ -308,15 +308,18 @@ identifiers are the `u_`, `s_`, `e_` forms.
 | Method and path | Role | Answer |
 | --- | --- | --- |
 | `GET /v1/me` | viewer | `{user_id, email, display_name, role, session_id, auth_time, auth_time_source, aal}` |
-| `GET /v1/users?q=&status=&limit=&cursor=` | viewer | `{items: [{user_id, primary_email, email_verified, email_authoritative, display_name, username, status, authz_version, created_at, last_login_at, live_sessions, role}], next_cursor}` |
+| `GET /v1/users?q=&status=&provider=&mfa=&group=&limit=&cursor=` | viewer | `{items: [{user_id, primary_email, email_verified, email_authoritative, display_name, username, status, authz_version, created_at, last_login_at, live_sessions, role}], next_cursor}` |
 | `GET /v1/users/{user_id}` | viewer | `{user, identities: [≤ 50 of {provider_id, subject, email, email_verified, name, first_seen_at, last_seen_at}], sessions_live: [≤ 20 summaries, newest created first], sessions_live_total, sessions_terminated: [≤ 20 most recent], events: [≤ 50 most recent], grant: {role, managed_by, granted_at, granted_by, note} or null}`; `sessions_url` and `events_url` carry the filtered listings |
 | `POST /v1/users/{user_id}/disable` | admin | `{changed, sessions_terminated}`; disables, bumps `authz_version`, terminates every live session |
 | `POST /v1/users/{user_id}/enable` | admin | `{changed}`; no session is revived |
 | `POST /v1/users/{user_id}/sessions/terminate` | admin | `{terminated}` |
-| `GET /v1/sessions?user_id=&limit=&cursor=` | viewer | `{items: [{session_id, user_id, primary_email, provider_id, aal, factors, hosts, created_at, last_seen_at, absolute_expires_at, auth_time, auth_time_source, bound_ip, ua_prefix}], next_cursor}` (live sessions only, newest created first) |
+| `GET /v1/users/{user_id}/factors` | viewer | `{user_id, second_factors, passkeys: [{factor_id, label, aaguid, authenticator, kind (synced or device_bound), backup_eligible, backup_state, user_verified, attested, attestation_format, assurance, transports, created_at, last_used_at}], totp: {active}, recovery_codes: {remaining, generated_at, reenrollment_required_at}}`; an audited read (`admin.read`, purpose `users.factors`); see [factor management](#factor-management) |
+| `POST /v1/users/{user_id}/factors/reset` | admin | `{"scope": "all" \| "passkey" \| "totp" \| "recovery_codes", "factor_id": "pk_…" (passkey only), "reason": "…"}` → `{changed, scope, passkeys_revoked, totp_revoked, recovery_codes_removed, sessions_terminated}` |
+| `POST /v1/users/bulk/disable` | admin | `{"ids": [1 to 100 distinct user ids], "reason": "…"}` → `{bulk_operation, requested, disabled, failed, halted, items: [{id, result, sessions_terminated or error}]}`; see [bulk disable](#bulk-disable) |
+| `GET /v1/sessions?user_id=&aal=&limit=&cursor=` | viewer | `{items: [{session_id, user_id, primary_email, provider_id, aal, factors, hosts, created_at, last_seen_at, absolute_expires_at, auth_time, auth_time_source, bound_ip, ua_prefix}], next_cursor}` (live sessions only, newest created first) |
 | `GET /v1/sessions/{session_id}` | viewer | The summary plus `handles: [≤ 100 of {host, issued_aal, created_at, last_seen_at, absolute_expires_at, revoked_at, revoked_reason}]`, `terminated_at`, `terminated_reason` |
 | `POST /v1/sessions/{session_id}/terminate` | admin | `{changed}` |
-| `GET /v1/events?kind=&outcome=&user_id=&session_id=&client_ip=&since=&until=&limit=&cursor=` | viewer | `{items: [event JSON as the log sink writes it], next_cursor}` newest first |
+| `GET /v1/events?kind=&kind_prefix=&outcome=&user_id=&session_id=&client_ip=&since=&until=&limit=&cursor=` | viewer | `{items: [event JSON as the log sink writes it], next_cursor}` newest first |
 | `GET /v1/status` | viewer | See [status](#status) |
 | `POST /v1/subjects/resolve` | viewer | Up to 100 subject references to display data; see [subject directory](SUBJECT_DIRECTORY.md) |
 | `POST /v1/subjects/search` | viewer | People or service principals for a picker; see [subject directory](SUBJECT_DIRECTORY.md) |
@@ -326,6 +329,9 @@ identifiers are the `u_`, `s_`, `e_` forms.
 | `POST /v1/groups/search`, `/v1/groups/get`, `/v1/subjects/groups` | viewer | Groups, a group's members, a person's groups; see [groups](GROUPS.md) |
 | `POST /v1/groups/create`, `/update`, `/delete`, `/members/add`, `/members/remove` | admin | Local group writes with a reason and `expected_revision`; see [groups](GROUPS.md) |
 | `POST /v1/groups/projection/snapshot`, `/changes` | viewer | The signed membership projection for Pumgye; see [groups](GROUPS.md) |
+| `GET`, `PUT /v1/authentication/profiles` | viewer, admin | The service authentication profiles; see [profile publication](AUTH_PROFILE_PUBLICATION.md) |
+| `POST /v1/authentication/profiles/validate` | viewer | `{"configuration": …}` → `{valid, errors: [{path, code, message}]}` without publishing; see [profile publication](AUTH_PROFILE_PUBLICATION.md#dry-run-validation) |
+| `GET`, `PUT /v1/authentication/projections` | viewer, admin | The credential projection plans |
 
 Error bodies are `{"error": "<code>"}` with the codes of the denial table.
 
@@ -334,9 +340,9 @@ Error bodies are `{"error": "<code>"}` with the codes of the denial table.
 - `limit` is 1 to 200 (default 50). `next_cursor` is an opaque, tamper-evident position; pass it back as `cursor` to continue; a forged or stale one is `400 invalid_cursor`. The walk ends when `next_cursor` is absent.
 - Every page examines at most **10,000 candidate rows**: one range scan of one index, followed by the remaining filters inside that window. The window's size and its last candidate are known whether or not anything matched, so when the window was full `next_cursor` points past the last candidate examined even if the page returned no item; a sparse filter over a large table therefore yields short pages and several requests, never a scan of the whole table in one request. A cursor page seeks directly to its position (a composite row-value comparison on the index), so a deep page costs no more than the first. A dense walk takes about `rows / limit` requests; a sparse one at most `rows / 10,000` more. A page that reaches `admin.query_budget_ms` is interrupted inside the store and answered `503`.
 - Ordering is fixed and immutable: users by creation (newest first), sessions by creation (newest first, with `last_seen_at` displayed), events by time (newest first). A walk neither skips nor repeats a row that existed when it started, whatever activity happens meanwhile; rows created after the walk started are not part of it.
-- Users: `q` (at most 128 characters) matches `primary_email` and `username` by prefix and `display_name` by substring, within the window; `status` is `active` or `disabled`.
-- Sessions: `user_id` narrows to one user; only live sessions are listed (terminated ones are previewed on the user detail).
-- Events: `kind` is an exact event kind (`login.failed`, `admin.user_disable`, …), `outcome` is `success`, `failure` or `info`, `client_ip` is one exact address (IPv4-mapped IPv6 normalized), `since` and `until` are unix seconds (`since` must not exceed `until`). Filters combine with AND. The index is chosen by `session_id`, else `user_id`, else `client_ip`, else `kind`, else time; the other filters are applied inside the window.
+- Users: `q` (at most 128 characters) matches `primary_email` and `username` by prefix and `display_name` by substring, within the window; `status` is `active` or `disabled`; `provider` (a configured provider id) keeps users with an identity at that provider; `mfa=enrolled` keeps users with an active passkey or authenticator app and `mfa=none` users with neither (recovery codes do not count); `group` (a `grp1:` reference) keeps users with an effective membership — the group active, the membership neither suspended nor expired ([groups](GROUPS.md)).
+- Sessions: `user_id` narrows to one user; `aal` (`1` or `2`) keeps sessions at that stored level (AAL 3 is never stored, [ADR-0018](adr/0018-aal3-emission.md)); only live sessions are listed (terminated ones are previewed on the user detail).
+- Events: `kind` is an exact event kind (`login.failed`, `admin.user_disable`, …), `kind_prefix` keeps kinds starting with it (`factor.`, `admin.user_`; lowercase letters, digits, `_` and `.`), `outcome` is `success`, `failure` or `info`, `client_ip` is one exact address (IPv4-mapped IPv6 normalized), `since` and `until` are unix seconds (`since` must not exceed `until`). Filters combine with AND. The index is chosen by `session_id`, else `user_id`, else `client_ip`, else `kind`, else time; the other filters are applied inside the window.
 
 ### Requests that change state
 
@@ -345,6 +351,51 @@ Error bodies are `{"error": "<code>"}` with the codes of the denial table.
 - Every mutation re-evaluates the actor as the first statement of its store transaction, with the verify engine's own lifetime semantics: session live and within its effective absolute (`min(stored, created_at + session.absolute)`) and idle deadlines, handle for the console host unrevoked and within its effective deadlines and at the required level, neither created in the future beyond 60 s, user `active` with its authorization baseline unchanged, the freshness predicate satisfied, grant live with role `admin`. A change committed first refuses the write (`403 actor_revoked`) and changes nothing.
 - A mutation runs under `admin.query_budget_ms` too: a disable or a terminate-all that cannot finish by the deadline — because of its own work or because another connection holds the write lock — is interrupted, rolled back and answered `503`; nothing partial is committed and nothing commits after the deadline.
 - A mutation that changes nothing (disabling a disabled user, terminating an ended session) answers `200` with `changed: false` and writes no event.
+- **Reasons.** Disable, enable, terminate-all, terminate, the factor reset, the bulk disable and the profile and projection publications accept an optional `reason` — the form field `reason`, or `"reason"` in the JSON body. It is trimmed, at most 256 characters, without control or invisible formatting characters (bidirectional overrides, zero-width characters); anything else is `400 invalid_reason` and changes nothing. It is recorded as `attrs.note` of the mutation's `admin.*` event. An empty reason is none.
+
+### Factor management
+
+`GET /v1/users/{user_id}/factors` lists a user's second factors for support:
+each passkey by its `pk_` factor id (never the credential id or key), its
+label, the authenticator's AAGUID and, for a known AAGUID, its name (an all-zero
+AAGUID — synced passkeys and `none` attestation — is shown as `null`), whether
+it is synced (`backup_eligible`) and currently backed up, user verification,
+attestation, its assurance class and transports, when it was registered and
+last used; whether an authenticator app is active; and how many recovery codes
+remain, with the time a used code made re-enrollment necessary. Any grant may
+read it; every answer writes `admin.read` (purpose `users.factors`) first and
+is rate-limited per actor (60, refilling one per second).
+
+`POST /v1/users/{user_id}/factors/reset` (role `admin`) removes, in one
+transaction with the `admin.factor_reset` record:
+
+| `scope` | Removes | Ends |
+| --- | --- | --- |
+| `passkey` (with `factor_id`) | That passkey | The sessions it established or elevated (`reason=factor_reset`) |
+| `totp` | The authenticator app | The sessions a TOTP code elevated |
+| `recovery_codes` | The unused recovery codes | Nothing (a code is AAL 1 evidence) |
+| `all` | Every passkey, the authenticator app, every recovery code, the re-enrollment requirement | Every session of the user |
+
+A passkey the user does not hold is `404 factor_not_found`; a reset that finds
+nothing to remove answers `changed: false` and writes nothing; an
+administrator cannot reset their own factors here (`403 self_target`: it would
+end the console session itself). The user enrolls again after a fresh sign-in
+([WebAuthn passkeys](WEBAUTHN.md)). The command line keeps `hopae admin factors
+reset` for recovery without the console.
+
+### Bulk disable
+
+`POST /v1/users/bulk/disable` disables up to 100 distinct users, each in its
+own fenced transaction exactly as `POST /v1/users/{id}/disable` would: its
+sessions end and its `admin.user_disable` record carries the reason and
+`attrs.bulk_operation`, the call's request id, so the whole batch can be found
+again. The answer lists every item in order with `result`: `disabled`,
+`unchanged` (already disabled) or `error` with the code (`invalid_id`,
+`not_found`, `self_target`). After a refusal of the actor itself
+(`actor_revoked`) or a store failure the remaining items are `not_attempted`
+and `halted` names the cause. An empty list, more than 100 ids or a repeated id
+is `400`. Bulk calls are rate-limited per actor (10, refilling one per ten
+seconds).
 
 ### Audit events
 
@@ -362,11 +413,19 @@ target; `attrs.actor` names the acting user (or `cli`, or `file`) and
 | `admin.grant`, `admin.revoke` | `user_id` = granted user | `actor` (`cli` or `file`), `role`, `previous_role`, `managed_by` | the `admin_grants` row |
 | `admin.denied` | `user_id`, `session_id` = the requester | `endpoint` (route pattern), `method`; `reason` ∈ `not_admin`, `role_insufficient`, `auth_too_old`, `aal_insufficient`, `self_target`, `actor_revoked` | nothing (required event on its own) |
 | `csrf.rejected` | `user_id`, `session_id` = the requester | `purpose=admin`, `cause` | nothing |
-| `admin.read` | `user_id`, `session_id` = the explained user and session (explain only) | `actor`, `actor_session`, `purpose`, `endpoint`, `query_sha256`, `requested`, `count`, `status`, `host`, `port`, `app`, `navigation` | nothing (required event on its own, written before the answer) |
+| `admin.read` | `user_id`, `session_id` = the explained user and session (explain only); `user_id` = the user whose factors were listed | `actor`, `actor_session`, `purpose`, `endpoint`, `query_sha256`, `requested`, `count`, `status`, `host`, `port`, `app`, `navigation` | nothing (required event on its own, written before the answer) |
+| `admin.factor_reset` | `user_id` = target | `actor` (or `cli`), `actor_session`, `scope`, `factor_id` (passkey scope), `count` (factors removed), `note`; `reason=factor_reset` | the revocations and one `session.terminated` (`reason=factor_reset`) per session ended |
+| `admin.profiles_publish`, `admin.projections_publish` | — | `actor`, `actor_session`, `revision` (the new one), `status` (`enabled` or `disabled`), `note` | the publication, in its transaction (a refused or conflicting publication records nothing) |
 
-Reads are not audited, except the [subject directory](SUBJECT_DIRECTORY.md) and
-[authentication explain](AUTHENTICATION_EXPLAIN.md) reads, which write
-`admin.read` and are refused when it cannot be written. A console sign-in is visible as the ordinary
+Every console mutation's event also carries `attrs.note` when a reason was
+given, `attrs.bulk_operation` when it was part of a bulk call, and
+`delegated_issuer`, `delegated_actor`, `delegated_operation` when the Hangang
+console sent it.
+
+Reads are not audited, except the [subject directory](SUBJECT_DIRECTORY.md),
+[authentication explain](AUTHENTICATION_EXPLAIN.md), factor listing and profile
+validation reads, which write `admin.read` and are refused when it cannot be
+written. A console sign-in is visible as the ordinary
 `session.handoff` event with `app_id = admin`; a reauthentication as
 `login.succeeded` with `attrs.reauth = true` and `attrs.auth_time_source`.
 
@@ -381,6 +440,8 @@ Reads are not audited, except the [subject directory](SUBJECT_DIRECTORY.md) and
 | `store` | `kind`, `schema_version`, `users`, `live_sessions`, `events`, `deliveries` per sink (`pending`, `failed`), `last_prune_at` |
 | `build` | `version`, `contract` (`1.1`), `started_at` |
 | `config` | `generation`, `digest`, `insecure_mode`, `unauthenticated_caller`, `listeners` |
+| `portal` | `public_url`, `passkeys` (WebAuthn configured), `passwordless` |
+| `console` | `public_url` (the console origin), `authority`: `{mode, delegation}` — `mode` is `local` (the native grant table decides) or `hangang` (the Hangang console is the authority, `admin.hangang_delegation.authority = hangang`); `delegation` is `none`, `mapped` (Hangang actors mapped onto native sessions) or `hangang` |
 
 Runtime changes to providers and applications are not part of M4-min. When
 they are added, a provider changed through the API becomes `managed_by = api`
@@ -393,13 +454,42 @@ operator sees that the configuration file no longer owns the row.
 | --- | --- | --- |
 | `hopae_admin_requests_total` | `role` (`admin`, `viewer`, `none` before authentication), `outcome` (`ok`, `denied`, `client_error`, `server_error`, or the refusal code of a request refused before authentication); `insecure_mode="true"` is added when `cookie.secure` is `false` | Requests answered by the admin listener |
 | `hopae_admin_denied_total` | `reason` | Refusals of the listener and its handlers, by reason (`untrusted_peer`, `login_required`, `not_admin`, `role_insufficient`, `auth_too_old`, `aal_insufficient`, `self_target`, `actor_revoked`, `overloaded`) |
-| `hopae_admin_mutations_total` | `kind` (`user_disable`, `user_enable`, `sessions_terminate`, `session_terminate`) | Mutations that changed something |
+| `hopae_admin_mutations_total` | `kind` (`user_disable`, `user_enable`, `sessions_terminate`, `session_terminate`, `factor_reset`) | Mutations that changed something |
 | `hopae_admin_rows_examined_total` | `list` (`users`, `sessions`, `events`) | Candidate rows examined by listings |
 | `hopae_admin_grants_imported_total` | `outcome` (`inserted`, `updated`, `revoked`, `unchanged`, `skipped`) | Grants applied by the import at start |
 | `hopae_store_interrupts_total` | none | Store jobs interrupted inside SQLite at their deadline |
 
 Exposition is M7; a `test-hooks` build exposes them meanwhile (see
 [operations](OPERATIONS.md#counters)).
+
+### Hangang console routes
+
+With `admin.hangang_delegation`, the Hangang console broker calls these routes
+of the console package (`plugins/hopae/manifest.json`, version 0.1.10) as
+signed `POST`s; the adapter checks the signature, the replay window and the
+body, then forwards the request to the native endpoint, where the grant (or
+the Hangang authority), the JSON API rule, the role and the write fence apply
+as for any console request. A field the adapter does not know is refused
+(`403 delegation_rejected`); a value the native endpoint refuses keeps its own
+answer (`400 invalid_filter`, …).
+
+| Route | Mutation | Body | Native endpoint |
+| --- | --- | --- | --- |
+| `status`, `me` | no | none (`GET`) | `GET /v1/status`, `GET /v1/me` |
+| `users/query` | no | `{cursor, limit, q, status, provider, mfa, group}` | `GET /v1/users?…` |
+| `sessions/query` | no | `{cursor, limit, user_id, aal}` | `GET /v1/sessions?…` |
+| `events/query` | no | `{cursor, limit, kind, kind_prefix, outcome, user_id, session_id, client_ip, since, until}` | `GET /v1/events?…` |
+| `users/get` | no | `{id}` | `GET /v1/users/{id}` |
+| `users/factors` | no | `{id}` | `GET /v1/users/{id}/factors` |
+| `users/factors/reset` | yes | `{id, scope, factor_id, reason}` | `POST /v1/users/{id}/factors/reset` |
+| `users/disable`, `users/enable`, `users/sessions-terminate`, `sessions/terminate` | yes | `{id, reason}` | `POST /v1/users/{id}/disable`, `/enable`, `/sessions/terminate`, `POST /v1/sessions/{id}/terminate` |
+| `users/bulk-disable` | yes | `{ids, reason}` | `POST /v1/users/bulk/disable` |
+| `authentication/profiles`, `authentication/projections` | no | none (`GET`) | `GET /v1/authentication/profiles`, `/projections` |
+| `authentication/profiles/publish`, `authentication/projections/publish` | yes | `{revision, configuration, reason}` | `PUT …` with `If-Match` |
+| `authentication/profiles/validate` | no | `{configuration}` | `POST /v1/authentication/profiles/validate` |
+| `subjects/resolve`, `subjects/search`, `subjects/lifecycle`, `subjects/lifecycle/snapshot`, `explain/authentication` | no | as the native endpoint | the same path |
+| `groups/search`, `groups/get`, `subjects/groups` | no | as the native endpoint | the same path |
+| `groups/create`, `groups/update`, `groups/delete`, `groups/members/add`, `groups/members/remove` | yes | as the native endpoint | the same path |
 
 ## Limitations and compatibility
 

@@ -29,6 +29,7 @@ pub mod delegation_wire;
 pub mod events;
 pub mod explain;
 mod explain_messages;
+pub mod factors;
 pub mod groups;
 pub mod me;
 pub mod pages;

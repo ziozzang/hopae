@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 10 -->
+<!-- doc-rev: 11 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
@@ -58,6 +58,34 @@ before and after commit, persistence failure, failed snapshot installation, and
 open-stream revocation. Exercise actual Hopae/Hangang processes and preserve old
 provider sessions. DB-backed distributed followers require separate signed/revisioned
 snapshot leases and are not implemented by this single-owner publication contract.
+
+A console publication writes `admin.profiles_publish` (`revision`, `status`
+`enabled` or `disabled`, the optional `reason` as `note`, the actor) inside the
+publication's own transaction, so a refused or conflicting publication records
+nothing ([administration](ADMIN.md#audit-events)).
+
+## Dry-run validation
+
+`POST /v1/authentication/profiles/validate` with `{"configuration": …}` runs
+the checks a publication would run and publishes nothing. It answers `200` with
+`{"valid": bool, "errors": [{"path", "code", "message"}]}`; `path` points into
+the posted configuration (`profiles[0].ports[1]`, `""` for the whole
+document). Codes, in the order the checks run:
+
+| Code | Meaning |
+| --- | --- |
+| `invalid_document` | The shape is wrong (unknown field, wrong type, missing field); only the first mismatch is reported |
+| `undeclared_reference` | An API key variable, or a relay with a verifier key, a CA file or private endpoints, that the configuration file does not declare |
+| `invalid_profile` | A profile breaks the runtime rules (identifiers, bounds, connectors, networks) |
+| `configuration_rule` | A rule of the whole configuration, such as a profile that matches no application host and port |
+| `invalid_configuration` | A rule no single profile explains (duplicates across profiles) |
+| `compile_failed` | The profiles could not be compiled, for example a referenced variable is absent from the environment |
+
+`null` (disable the gateway) is always valid. Any grant may validate; the
+request follows the console's JSON API rule, is rate-limited per actor (30,
+refilling one every two seconds) and writes `admin.read` (purpose
+`profiles.validate`, the body's digest and the number of findings) before the
+answer. Messages never contain a secret value.
 
 ## Implemented storage primitive
 

@@ -497,6 +497,16 @@ impl Store {
             .unwrap_or_else(|p| p.into_inner()) = rng;
     }
 
+    /// Record required events on the caller's already-open publication
+    /// transaction (they commit or roll back with it).
+    pub(crate) fn record_in(
+        &self,
+        connection: &Connection,
+        events: &[crate::event::types::Event],
+    ) -> crate::store::StoreResult<()> {
+        events::insert_events(connection, self.shared(), events)
+    }
+
     /// Check administrator authority on the caller's already-open publication transaction.
     pub(crate) fn fence_profile_actor(
         &self,

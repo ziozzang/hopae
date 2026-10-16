@@ -645,6 +645,7 @@ pub async fn search_api(
                             UsersQuery {
                                 q: Some(escape_like(q)),
                                 status,
+                                filters: Default::default(),
                                 limit,
                                 cursor: after,
                             },

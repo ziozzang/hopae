@@ -20,7 +20,7 @@ use crate::config::valid_user_id;
 use crate::event::types::{EventKind, Outcome, reasons};
 use crate::identity::types::UserId;
 use crate::store::types::{
-    AdminRole, Cursor, EventsQuery, SessionRow, UserStatus, UserSummary, UsersQuery,
+    AdminRole, Cursor, EventsQuery, SessionRow, UserFilters, UserStatus, UserSummary, UsersQuery,
 };
 use crate::telemetry::counters;
 
@@ -335,6 +335,37 @@ pub mod common {
         }
     }
 
+    /// Longest `reason` a console mutation accepts (characters, trimmed).
+    pub const MAX_REASON_CHARS: usize = 256;
+
+    /// The optional `reason` of a console mutation: the form field `reason`,
+    /// or `"reason"` in a JSON body (a body without it, or not a JSON object,
+    /// has none: the console historically ignored mutation bodies). An empty
+    /// reason is none; one longer than 256 characters or carrying control or
+    /// invisible formatting characters is `400 invalid_reason`. Recorded as
+    /// the `note` of the mutation's `admin.*` event.
+    pub fn reason_of(m: &crate::admin::csrf::Mutation) -> Result<Option<String>, Fail> {
+        let raw: Option<String> = match &m.form {
+            Some(f) => f.get("reason").map(str::to_string),
+            None => match serde_json::from_slice::<Value>(&m.body) {
+                Ok(Value::Object(o)) => match o.get("reason") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(s)) => Some(s.clone()),
+                    Some(_) => return Err(Fail(StatusCode::BAD_REQUEST, "invalid_reason")),
+                },
+                _ => None,
+            },
+        };
+        match raw {
+            None => Ok(None),
+            Some(r) if r.trim().is_empty() => Ok(None),
+            Some(r) if crate::groups::valid_text(&r, MAX_REASON_CHARS) => {
+                Ok(Some(r.trim().to_string()))
+            }
+            Some(_) => Err(Fail(StatusCode::BAD_REQUEST, "invalid_reason")),
+        }
+    }
+
     /// Unused-import guard for `Cursor` in this module's signatures.
     pub type Pos = Cursor;
 }
@@ -458,8 +489,44 @@ fn escape_like(v: &str) -> String {
 struct UsersParams {
     q: Option<String>,
     status: Option<UserStatus>,
+    filters: UserFilters,
     limit: usize,
     cursor: Option<Cursor>,
+}
+
+/// A provider id as configured: `[a-z0-9][a-z0-9_-]{0,31}`.
+pub(crate) fn valid_provider_slug(v: &str) -> bool {
+    let b = v.as_bytes();
+    !b.is_empty()
+        && b.len() <= 32
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
+        && b.iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'_' | b'-'))
+}
+
+/// `provider`, `mfa` (`enrolled` or `none`) and `group` (`grp1:` reference).
+fn user_filters(q: &Query) -> Result<UserFilters, Fail> {
+    let provider = match q.get("provider") {
+        None | Some("") => None,
+        Some(v) if valid_provider_slug(v) => Some(v.to_string()),
+        Some(_) => return Err(invalid_filter()),
+    };
+    let mfa_enrolled = match q.get("mfa") {
+        None | Some("") => None,
+        Some("enrolled") => Some(true),
+        Some("none") => Some(false),
+        Some(_) => return Err(invalid_filter()),
+    };
+    let group = match q.get("group") {
+        None | Some("") => None,
+        Some(v) if crate::groups::valid_ref(v) => Some(v.to_string()),
+        Some(_) => return Err(invalid_filter()),
+    };
+    Ok(UserFilters {
+        provider,
+        mfa_enrolled,
+        group,
+    })
 }
 
 fn users_params(st: &AdminState, q: &Query) -> Result<UsersParams, Fail> {
@@ -479,6 +546,7 @@ fn users_params(st: &AdminState, q: &Query) -> Result<UsersParams, Fail> {
     Ok(UsersParams {
         q: text,
         status,
+        filters: user_filters(q)?,
         limit: limit_of(q)?,
         cursor: cursor_of(st, q)?,
     })
@@ -495,6 +563,7 @@ async fn users_page(
             UsersQuery {
                 q: p.q,
                 status: p.status,
+                filters: p.filters,
                 limit: p.limit,
                 cursor: p.cursor,
             },
@@ -562,10 +631,17 @@ pub async fn list_page(State(st): State<Arc<AdminState>>, c: Ctx, uri: Uri) -> R
             q.get("q").unwrap_or_default().to_string(),
             q.get("status").unwrap_or_default().to_string(),
         );
+        let raw = |n: &str| q.get(n).unwrap_or_default().to_string();
         let next = next_url(
             &st,
             "/users",
-            &[("q", qs.clone()), ("status", status.clone())],
+            &[
+                ("q", qs.clone()),
+                ("status", status.clone()),
+                ("provider", raw("provider")),
+                ("mfa", raw("mfa")),
+                ("group", raw("group")),
+            ],
             &page.next,
         );
         let chrome = Chrome::signed_in(&st, &c.req, &c.principal, "users");
@@ -807,7 +883,14 @@ impl Action {
 
 /// One mutation from `self_target` to the store call. The listener already
 /// checked CSRF and the role.
-async fn mutate(st: &AdminState, c: &Ctx, action: Action, id: &str) -> Result<Done, Fail> {
+async fn mutate(
+    st: &AdminState,
+    c: &Ctx,
+    action: Action,
+    id: &str,
+    reason: Option<&str>,
+    bulk: bool,
+) -> Result<Done, Fail> {
     if !valid_user_id(id) {
         return Err(fail(StatusCode::BAD_REQUEST, "invalid_id"));
     }
@@ -847,9 +930,13 @@ async fn mutate(st: &AdminState, c: &Ctx, action: Action, id: &str) -> Result<Do
             } else {
                 (EventKind::AdminUserEnable, UserStatus::Active)
             };
-            let ev = common::admin_event(st, c, kind, Outcome::Success)
-                .user(&target)
-                .build();
+            let mut ev =
+                with_note(common::admin_event(st, c, kind, Outcome::Success), reason).user(&target);
+            if bulk {
+                // Every item of one bulk call carries the call's request id.
+                ev = ev.attr("bulk_operation", c.req.rid.as_str());
+            }
+            let ev = ev.build();
             let res = st
                 .directory
                 .set_user_status(&actor, &policy, &target, status, dl, ev, &session_event)
@@ -874,10 +961,12 @@ async fn mutate(st: &AdminState, c: &Ctx, action: Action, id: &str) -> Result<Do
             }
         }
         Action::TerminateSessions => {
-            let ev =
-                common::admin_event(st, c, EventKind::AdminSessionsTerminate, Outcome::Success)
-                    .user(&target)
-                    .build();
+            let ev = with_note(
+                common::admin_event(st, c, EventKind::AdminSessionsTerminate, Outcome::Success),
+                reason,
+            )
+            .user(&target)
+            .build();
             let res = st
                 .sessions
                 .admin_terminate_user_sessions(&actor, &policy, &target, dl, ev, &session_event)
@@ -910,8 +999,29 @@ async fn mutate(st: &AdminState, c: &Ctx, action: Action, id: &str) -> Result<Do
     Ok(done)
 }
 
-async fn api_action(st: Arc<AdminState>, c: Ctx, id: String, action: Action) -> Response {
-    match mutate(&st, &c, action, &id).await {
+/// The event with `attrs.note` set to the mutation's reason, when one was given.
+pub(super) fn with_note(
+    ev: crate::event::types::EventBuilder,
+    reason: Option<&str>,
+) -> crate::event::types::EventBuilder {
+    match reason {
+        Some(r) => ev.attr("note", r),
+        None => ev,
+    }
+}
+
+async fn api_action(
+    st: Arc<AdminState>,
+    c: Ctx,
+    id: String,
+    m: Mutation,
+    action: Action,
+) -> Response {
+    let run = async {
+        let reason = common::reason_of(&m)?;
+        mutate(&st, &c, action, &id, reason.as_deref(), false).await
+    };
+    match run.await {
         Ok(done) => api::json(StatusCode::OK, &done.json()),
         Err(f) => f.respond(&st, &c),
     }
@@ -924,7 +1034,11 @@ async fn page_action(
     m: Mutation,
     action: Action,
 ) -> Response {
-    match mutate(&st, &c, action, &id).await {
+    let run = async {
+        let reason = common::reason_of(&m)?;
+        mutate(&st, &c, action, &id, reason.as_deref(), false).await
+    };
+    match run.await {
         Ok(_) => {
             let default = format!("/users/{id}");
             let get = |n: &str| m.form.as_ref().and_then(|f| f.get(n));
@@ -944,8 +1058,9 @@ pub async fn disable_api(
     State(st): State<Arc<AdminState>>,
     c: Ctx,
     Path(id): Path<String>,
+    Extension(m): Extension<Mutation>,
 ) -> Response {
-    api_action(st, c, id, Action::Disable).await
+    api_action(st, c, id, m, Action::Disable).await
 }
 
 pub async fn disable_page(
@@ -961,8 +1076,9 @@ pub async fn enable_api(
     State(st): State<Arc<AdminState>>,
     c: Ctx,
     Path(id): Path<String>,
+    Extension(m): Extension<Mutation>,
 ) -> Response {
-    api_action(st, c, id, Action::Enable).await
+    api_action(st, c, id, m, Action::Enable).await
 }
 
 pub async fn enable_page(
@@ -978,8 +1094,9 @@ pub async fn terminate_sessions_api(
     State(st): State<Arc<AdminState>>,
     c: Ctx,
     Path(id): Path<String>,
+    Extension(m): Extension<Mutation>,
 ) -> Response {
-    api_action(st, c, id, Action::TerminateSessions).await
+    api_action(st, c, id, m, Action::TerminateSessions).await
 }
 
 pub async fn terminate_sessions_page(
@@ -989,6 +1106,92 @@ pub async fn terminate_sessions_page(
     Extension(m): Extension<Mutation>,
 ) -> Response {
     page_action(st, c, id, m, Action::TerminateSessions).await
+}
+
+/// Most users one bulk call names.
+pub const MAX_BULK: usize = 100;
+
+/// `POST /v1/users/bulk/disable` with `{"ids": ["u_…", …], "reason": "…"}`:
+/// up to 100 distinct users, each disabled in its own fenced transaction
+/// exactly as `POST /v1/users/{id}/disable` would (its sessions end, its
+/// `admin.user_disable` record carries the reason and `bulk_operation`, the
+/// call's request id). The answer lists every item with its result:
+/// `disabled`, `unchanged` (already disabled) or an error code
+/// (`invalid_id`, `not_found`, `self_target`); after a refusal of the actor
+/// (`actor_revoked`) or a store failure the remaining items are
+/// `not_attempted`. Rate-limited per actor (`users.bulk`).
+pub async fn bulk_disable_api(
+    State(st): State<Arc<AdminState>>,
+    c: Ctx,
+    Extension(m): Extension<Mutation>,
+) -> Response {
+    if let Some(r) = super::reads::limit(&st, &c, super::reads::Op::Bulk) {
+        return r;
+    }
+    let run = async {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Input {
+            ids: Vec<String>,
+            #[serde(default)]
+            #[allow(dead_code)]
+            reason: Option<Value>,
+        }
+        let input: Input = serde_json::from_slice(&m.body)
+            .map_err(|_| fail(StatusCode::BAD_REQUEST, "invalid_request"))?;
+        if input.ids.is_empty() || input.ids.len() > MAX_BULK {
+            return Err(fail(StatusCode::BAD_REQUEST, "invalid_request"));
+        }
+        let mut seen = std::collections::HashSet::new();
+        if !input.ids.iter().all(|id| seen.insert(id.as_str())) {
+            return Err(fail(StatusCode::BAD_REQUEST, "duplicate_id"));
+        }
+        let reason = common::reason_of(&m)?;
+        let mut items = Vec::with_capacity(input.ids.len());
+        let (mut disabled, mut failed) = (0u32, 0u32);
+        let mut halted: Option<&'static str> = None;
+        for id in &input.ids {
+            if halted.is_some() {
+                items.push(json!({"id": id, "result": "not_attempted"}));
+                continue;
+            }
+            match mutate(&st, &c, Action::Disable, id, reason.as_deref(), true).await {
+                Ok(Done::Disable {
+                    changed,
+                    terminated,
+                }) => {
+                    if changed {
+                        disabled += 1;
+                    }
+                    items.push(json!({
+                        "id": id,
+                        "result": if changed { "disabled" } else { "unchanged" },
+                        "sessions_terminated": terminated,
+                    }));
+                }
+                Ok(_) => unreachable!("disable answers Done::Disable"),
+                Err(Fail(status, code)) => {
+                    failed += 1;
+                    if code == "actor_revoked" || status.is_server_error() {
+                        halted = Some(code);
+                    }
+                    items.push(json!({"id": id, "result": "error", "error": code}));
+                }
+            }
+        }
+        Ok::<_, Fail>(api::json(
+            StatusCode::OK,
+            &json!({
+                "bulk_operation": c.req.rid,
+                "requested": input.ids.len(),
+                "disabled": disabled,
+                "failed": failed,
+                "halted": halted,
+                "items": items,
+            }),
+        ))
+    };
+    run.await.unwrap_or_else(|f| f.respond(&st, &c))
 }
 
 #[cfg(test)]

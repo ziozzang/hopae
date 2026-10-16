@@ -2449,6 +2449,7 @@ async fn listing_pages_use_the_three_cursor_branches_and_break_ties_by_id() {
                 UsersQuery {
                     q: None,
                     status: None,
+                    filters: Default::default(),
                     limit: 7,
                     cursor: cursor.take(),
                 },
@@ -2488,6 +2489,7 @@ async fn listing_pages_use_the_three_cursor_branches_and_break_ties_by_id() {
             UsersQuery {
                 q: None,
                 status: None,
+                filters: Default::default(),
                 limit: 100,
                 cursor: None,
             },
@@ -2516,6 +2518,7 @@ async fn user_search_filters_inside_the_window_and_reports_sessions_and_role() {
     let q = |q: Option<&str>, status| UsersQuery {
         q: q.map(str::to_string),
         status,
+        filters: Default::default(),
         limit: 50,
         cursor: None,
     };
@@ -2596,6 +2599,7 @@ async fn live_session_listing_skips_terminated_and_expired_and_reports_hosts() {
         .unwrap();
     let q = SessionsQuery {
         user_id: None,
+        aal: None,
         limit: 50,
         cursor: None,
         now: f.now(),
@@ -3497,4 +3501,444 @@ fn v5_foundation_refuses_missing_or_weakened_totp_structures() {
             Err(StoreError::Corrupt(_))
         ));
     }
+}
+
+#[tokio::test]
+async fn user_listing_filters_by_provider_second_factor_and_group() {
+    let f = fx();
+    let a = f.user(1).await;
+    let b = f.user(2).await;
+    let c = f.user(3).await;
+    let now = f.now().secs();
+    let g = "grp1:aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    {
+        let conn = f.store.conn();
+        // `c` also signed in with another provider.
+        conn.execute(
+            "INSERT INTO identities (provider_id, subject, user_id, email, email_verified, email_authoritative, name, picture, raw_claims, first_seen_at, last_seen_at) \
+             SELECT 'corp', 'sub-corp', user_id, email, email_verified, email_authoritative, name, picture, raw_claims, first_seen_at, last_seen_at FROM identities WHERE user_id=?1",
+            [c.user_id.as_str()],
+        )
+        .unwrap();
+        // `a` has an authenticator app; `b` a revoked one and an active passkey.
+        conn.execute(
+            "INSERT INTO totp_enrollments (enrollment_id, user_id, envelope, revision, state, created_at, updated_at) VALUES ('e1', ?1, 'x', 1, 'active', ?2, ?2), ('e2', ?3, 'x', 1, 'revoked', ?2, ?2)",
+            rusqlite::params![a.user_id.as_str(), now, b.user_id.as_str()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO webauthn_credentials (credential_id, user_id, label, passkey, aaguid, transports, backup_eligible, backup_state, user_verified, attestation_format, attested, assurance, sign_count, created_at, state, revision) \
+             VALUES (?1, ?2, 'key', '{}', NULL, '[]', 1, 1, 1, 'none', 0, 'aal2', 0, ?3, 'active', 1)",
+            rusqlite::params![vec![7u8; 16], b.user_id.as_str(), now],
+        )
+        .unwrap();
+        // A group with `a` (effective) and `c` (suspended: stale), and an expired local membership of `b`.
+        conn.execute(
+            "INSERT INTO directory_groups (group_id, source, provider_id, external_key, name, state, revision, created_at, updated_at) VALUES (?1, 'local', NULL, 'eng', 'Eng', 'active', 1, ?2, ?2)",
+            rusqlite::params![g, now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO group_members (group_id, user_id, source, provider_id, first_seen_at, last_seen_at, expires_at) VALUES (?1, ?2, 'local', NULL, ?3, ?3, NULL), (?1, ?4, 'local', NULL, ?3, ?3, ?5)",
+            rusqlite::params![g, a.user_id.as_str(), now, b.user_id.as_str(), now - 1],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO group_members (group_id, user_id, source, provider_id, first_seen_at, last_seen_at, stale_at) VALUES (?1, ?2, 'ldap', 'corp', ?3, ?3, ?3)",
+            rusqlite::params![g, c.user_id.as_str(), now],
+        )
+        .unwrap();
+    }
+    let list = |filters: UserFilters| {
+        let store = f.store.clone();
+        async move {
+            let mut ids: Vec<String> = store
+                .list_users(
+                    UsersQuery {
+                        q: None,
+                        status: None,
+                        filters,
+                        limit: 50,
+                        cursor: None,
+                    },
+                    long(),
+                )
+                .await
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|s| s.user.user_id.to_string())
+                .collect();
+            ids.sort();
+            ids
+        }
+    };
+    let sorted = |v: &[&User]| {
+        let mut ids: Vec<String> = v.iter().map(|u| u.user_id.to_string()).collect();
+        ids.sort();
+        ids
+    };
+    let provider = |p: &str| UserFilters {
+        provider: Some(p.into()),
+        ..UserFilters::default()
+    };
+    assert_eq!(list(provider("corp")).await, sorted(&[&c]));
+    assert_eq!(list(provider("mock")).await, sorted(&[&a, &b, &c]));
+    assert!(list(provider("absent")).await.is_empty());
+    let mfa = |m: bool| UserFilters {
+        mfa_enrolled: Some(m),
+        ..UserFilters::default()
+    };
+    assert_eq!(list(mfa(true)).await, sorted(&[&a, &b]));
+    assert_eq!(list(mfa(false)).await, sorted(&[&c]));
+    let group = UserFilters {
+        group: Some(g.into()),
+        ..UserFilters::default()
+    };
+    assert_eq!(
+        list(group.clone()).await,
+        sorted(&[&a]),
+        "only effective memberships: not suspended, not expired"
+    );
+    // Filters combine.
+    assert!(
+        list(UserFilters {
+            mfa_enrolled: Some(false),
+            ..group
+        })
+        .await
+        .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn session_listing_filters_by_stored_level_and_events_by_kind_prefix() {
+    let f = fx();
+    let a = f.user(1).await;
+    let s1 = f.session(&a, vec![]).await;
+    let s2 = f.session(&a, vec![]).await;
+    f.store
+        .conn()
+        .execute(
+            "UPDATE sessions SET aal=2 WHERE session_id=?1",
+            [s2.row.session_id.as_str()],
+        )
+        .unwrap();
+    let q = |aal| SessionsQuery {
+        user_id: None,
+        aal,
+        limit: 50,
+        cursor: None,
+        now: f.now(),
+    };
+    let one = f
+        .store
+        .list_live_sessions(q(Some(Aal::One)), long())
+        .await
+        .unwrap();
+    assert_eq!(one.items.len(), 1);
+    assert_eq!(one.items[0].session.session_id, s1.row.session_id);
+    let two = f
+        .store
+        .list_live_sessions(q(Some(Aal::Two)), long())
+        .await
+        .unwrap();
+    assert_eq!(two.items.len(), 1);
+    assert_eq!(two.items[0].session.session_id, s2.row.session_id);
+    assert_eq!(
+        f.store
+            .list_live_sessions(q(None), long())
+            .await
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+
+    f.store
+        .append_required_within(
+            vec![
+                f.event(EventKind::AdminUserDisable),
+                f.event(EventKind::AdminUserEnable),
+                f.event(EventKind::AdminDenied),
+            ],
+            long(),
+        )
+        .await
+        .unwrap();
+    let kinds = |prefix: &str| {
+        let store = f.store.clone();
+        let prefix = prefix.to_string();
+        async move {
+            let mut k: Vec<String> = store
+                .query_page(
+                    EventsQuery {
+                        kind_prefix: Some(prefix),
+                        limit: 50,
+                        ..EventsQuery::default()
+                    },
+                    long(),
+                )
+                .await
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|e| e.kind.name().to_string())
+                .collect();
+            k.sort();
+            k
+        }
+    };
+    assert_eq!(
+        kinds("admin.user_").await,
+        ["admin.user_disable", "admin.user_enable"]
+    );
+    assert_eq!(kinds("admin.").await.len(), 3);
+    assert!(kinds("factor.").await.is_empty());
+}
+
+impl Console {
+    /// An active passkey `id` of `user` (`aal3`: a high-assurance, device-bound key).
+    fn passkey(&self, user: &User, id: u8, aal3: bool) -> Vec<u8> {
+        let cred = vec![id; 32];
+        self.f
+            .store
+            .conn()
+            .execute(
+                "INSERT INTO webauthn_credentials (credential_id, user_id, label, passkey, aaguid, transports, backup_eligible, backup_state, user_verified, attestation_format, attested, assurance, sign_count, created_at, state, revision) \
+                 VALUES (?1, ?2, 'key', '{}', NULL, '[]', ?3, 0, 1, 'packed', ?4, ?5, 0, ?6, 'active', 1)",
+                rusqlite::params![
+                    cred,
+                    user.user_id.as_str(),
+                    !aal3,
+                    aal3,
+                    if aal3 { "aal3" } else { "aal2" },
+                    self.f.now().secs()
+                ],
+            )
+            .unwrap();
+        cred
+    }
+
+    async fn reset(
+        &self,
+        scope: FactorResetScope,
+        policy: &ActorPolicy,
+    ) -> Result<(bool, crate::store::passkeys::FactorResetReport), StoreError> {
+        self.f
+            .store
+            .admin_reset_factors(
+                &self.actor,
+                policy,
+                &self.target.user_id,
+                scope,
+                long(),
+                self.f
+                    .ev_user(EventKind::AdminFactorReset, &self.target.user_id),
+            )
+            .await
+    }
+
+    fn live(&self, s: &Sess) -> bool {
+        self.f.count(&format!(
+            "SELECT COUNT(*) FROM sessions WHERE session_id='{}' AND terminated_at IS NULL",
+            s.row.session_id
+        )) == 1
+    }
+}
+
+use crate::store::passkeys::FactorResetScope;
+
+#[tokio::test]
+async fn console_factor_reset_removes_what_its_scope_names_and_the_sessions_it_vouched_for() {
+    let c = console().await;
+    let f = &c.f;
+    let now = f.now().secs();
+    let k1 = c.passkey(&c.target, 1, false);
+    let _k2 = c.passkey(&c.target, 2, false);
+    let by_k1 = f.session(&c.target, vec![]).await;
+    let by_totp = f.session(&c.target, vec![]).await;
+    let plain = f.session(&c.target, vec![]).await;
+    {
+        let conn = f.store.conn();
+        conn.execute(
+            "INSERT INTO session_webauthn_elevations (session_id, credential_id, at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![by_k1.row.session_id.as_str(), k1, now],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE sessions SET factors=?2 WHERE session_id=?1",
+            rusqlite::params![
+                by_totp.row.session_id.as_str(),
+                format!(
+                    r#"[{{"kind":"oidc","provider":"mock","at":{}}},{{"kind":"totp","at":{}}}]"#,
+                    now * 1000,
+                    now * 1000
+                )
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO totp_enrollments (enrollment_id, user_id, envelope, revision, state, created_at, updated_at) VALUES ('e1', ?1, 'x', 1, 'active', ?2, ?2)",
+            rusqlite::params![c.target.user_id.as_str(), now],
+        )
+        .unwrap();
+        for i in 0..3 {
+            conn.execute(
+                "INSERT INTO recovery_codes (user_id, lookup, hash, batch, created_at, used_at) VALUES (?1, ?2, 'h', 'b', ?3, ?4)",
+                rusqlite::params![c.target.user_id.as_str(), format!("ABCD{i}"), now, (i == 0).then_some(now)],
+            )
+            .unwrap();
+        }
+    }
+    // A passkey the user does not hold.
+    assert!(matches!(
+        c.reset(
+            FactorResetScope::Passkey("pk_0000000000000000".into()),
+            &c.policy
+        )
+        .await,
+        Err(StoreError::Conflict("unknown factor"))
+    ));
+    let pk1 = super::super::webauthn::factor_id(&k1);
+    let (changed, report) = c
+        .reset(FactorResetScope::Passkey(pk1.clone()), &c.policy)
+        .await
+        .unwrap();
+    assert!(changed);
+    assert_eq!((report.passkeys, report.sessions), (1, 1));
+    assert!(!c.live(&by_k1) && c.live(&by_totp) && c.live(&plain));
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM webauthn_credentials WHERE state='active'"),
+        1
+    );
+    // The same passkey again: no longer held.
+    assert!(matches!(
+        c.reset(FactorResetScope::Passkey(pk1), &c.policy).await,
+        Err(StoreError::Conflict("unknown factor"))
+    ));
+    let (_, report) = c.reset(FactorResetScope::Totp, &c.policy).await.unwrap();
+    assert_eq!((report.totp, report.sessions), (1, 1));
+    assert!(!c.live(&by_totp) && c.live(&plain));
+    // Nothing left to remove: no write, no record.
+    let before = f.count_kind("admin.factor_reset");
+    assert!(!c.reset(FactorResetScope::Totp, &c.policy).await.unwrap().0);
+    let (_, report) = c
+        .reset(FactorResetScope::RecoveryCodes, &c.policy)
+        .await
+        .unwrap();
+    assert_eq!((report.recovery_codes, report.sessions), (2, 0));
+    assert!(c.live(&plain));
+    assert!(
+        !c.reset(FactorResetScope::RecoveryCodes, &c.policy)
+            .await
+            .unwrap()
+            .0
+    );
+    assert_eq!(f.count_kind("admin.factor_reset"), before + 1);
+    // Everything: the last passkey, and every session of the user.
+    let (_, report) = c.reset(FactorResetScope::All, &c.policy).await.unwrap();
+    assert_eq!(report.passkeys, 1);
+    assert!(!c.live(&plain));
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM recovery_codes"),
+        0,
+        "used codes go too"
+    );
+    let ev: String = f
+        .store
+        .conn()
+        .query_row(
+            "SELECT attrs FROM events WHERE kind='admin.factor_reset' ORDER BY at DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(ev.contains("\"count\""), "{ev}");
+    // An unknown user, and a fenced-out actor.
+    assert!(matches!(
+        f.store
+            .admin_reset_factors(
+                &c.actor,
+                &c.policy,
+                &UserId::new("u_missing"),
+                FactorResetScope::All,
+                long(),
+                f.ev(EventKind::AdminFactorReset),
+            )
+            .await,
+        Err(StoreError::Conflict("unknown user"))
+    ));
+    let mut stale = c.policy.clone();
+    stale.max_auth_age = Duration::from_secs(0);
+    assert!(matches!(
+        c.reset(FactorResetScope::All, &stale).await,
+        Err(StoreError::Conflict("actor_revoked"))
+    ));
+}
+
+#[tokio::test]
+async fn an_aal3_console_requirement_needs_live_high_assurance_evidence_in_the_fence() {
+    let c = console().await;
+    let f = &c.f;
+    let mut policy = c.policy.clone();
+    policy.require_aal = Aal::Three;
+    // An AAL 1 console session.
+    assert!(matches!(
+        c.disable_with(&policy).await,
+        Err(StoreError::Conflict("actor_revoked"))
+    ));
+    // AAL 2 through a synced passkey: still no evidence.
+    let synced = c.passkey(&c.admin, 5, false);
+    let key = c.passkey(&c.admin, 6, true);
+    let elevate = |cred: &[u8], assurance: &str| {
+        let conn = f.store.conn();
+        conn.execute(
+            "UPDATE sessions SET aal=2 WHERE session_id=?1",
+            [c.sess.row.session_id.as_str()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE session_handles SET issued_aal=2 WHERE session_id=?1",
+            [c.sess.row.session_id.as_str()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_webauthn_provenance (session_id, user_id, credential_generation, credential_id, assurance, factor_index, verified_at_ms, config_generation) \
+             SELECT session_id, user_id, cred_gen, ?2, ?3, 0, 0, 1 FROM sessions WHERE session_id=?1 \
+             ON CONFLICT(session_id) DO UPDATE SET credential_id=excluded.credential_id, assurance=excluded.assurance",
+            rusqlite::params![c.sess.row.session_id.as_str(), cred, assurance],
+        )
+        .unwrap();
+    };
+    elevate(&synced, "aal2");
+    assert!(matches!(
+        c.disable_with(&policy).await,
+        Err(StoreError::Conflict("actor_revoked"))
+    ));
+    // The high-assurance key: allowed.
+    elevate(&key, "aal3");
+    assert_eq!(c.disable_with(&policy).await.unwrap(), (true, 0));
+    // Its revocation ends the evidence.
+    f.store
+        .conn()
+        .execute(
+            "UPDATE webauthn_credentials SET state='revoked', revoked_at=1 WHERE credential_id=?1",
+            [&key],
+        )
+        .unwrap();
+    assert!(matches!(
+        c.f.store
+            .set_user_status(
+                &c.actor,
+                &policy,
+                &c.target.user_id,
+                UserStatus::Active,
+                long(),
+                f.ev_user(EventKind::AdminUserEnable, &c.target.user_id),
+                &|row| f.session_event(row),
+            )
+            .await,
+        Err(StoreError::Conflict("actor_revoked"))
+    ));
 }

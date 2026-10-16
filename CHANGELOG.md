@@ -88,6 +88,36 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   canonical in lower case. The owned OpenLDAP fixture enables `memberof` and
   checks group sync against a real directory.
 
+- Console administration APIs for the Identities section (console package
+  0.1.10; [administration](docs/ADMIN.md)):
+  - `GET /v1/users/{id}/factors` lists a user's passkeys (`pk_` id, authenticator
+    name from the AAGUID, synced and backup state, last use), authenticator app and
+    remaining recovery codes as an audited read; `POST /v1/users/{id}/factors/reset`
+    removes all of them, one passkey, the authenticator app or the recovery codes
+    and ends the sessions the removed factor vouched for (scenario 314).
+  - Listing filters: users by `provider`, `mfa` (`enrolled`, `none`) and `group`;
+    sessions by `aal`; events by `kind_prefix` (with `user_id`, `since`, `until`),
+    natively and through the Hangang adapter; `users/get` returns the detail with
+    linked identities (scenario 315).
+  - An optional `reason` on disable, enable, session termination, the factor reset,
+    the bulk disable and the profile and projection publications, recorded as
+    `attrs.note`; `POST /v1/users/bulk/disable` for up to 100 users with a result
+    per item (scenario 316).
+  - `POST /v1/authentication/profiles/validate`: the publication's checks without
+    publishing, with structured errors and JSON paths; publications now write
+    `admin.profiles_publish` / `admin.projections_publish` in their transaction
+    (scenario 317).
+  - `GET /v1/status` reports `portal.public_url` and the console authority mode
+    (`local` or `hangang`).
+  - The console manifest declares `users/get`, `users/factors`,
+    `users/factors/reset`, `users/bulk-disable` and
+    `authentication/profiles/validate`; operators re-pin the manifest SHA-256.
+- AAL 3 requirements (ADR-0018 decisions 7–11, scenario 489): step-up rules and
+  `admin.require_aal` accept `3` with `webauthn.high_assurance`; the step-up page
+  then offers only high-assurance keys and tells users without one; the console's
+  write fence re-checks the evidence. The authentication explain API reports
+  `aal3_evidence` and `presented_aal`.
+
 ### Changed
 
 - A recovery factor entry no longer counts as AAL 2 evidence in step-up

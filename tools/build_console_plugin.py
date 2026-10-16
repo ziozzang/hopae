@@ -11,7 +11,11 @@ routes += [(v,'POST',False) for v in ('subjects/resolve','subjects/search','subj
 # Groups (ADR-0019): audited reads, and local group writes (reason + expected_revision in the body).
 routes += [(v,'POST',False) for v in ('groups/search','groups/get','subjects/groups')]
 routes += [(v,'POST',True) for v in ('groups/create','groups/update','groups/delete','groups/members/add','groups/members/remove')]
-manifest={'id':'hopae','name':'Hopae','version':'0.1.9','api_version':1,'entry':'index.js','assets':{f:hashlib.sha256((root/f).read_bytes()).hexdigest() for f in ('index.js','style.css')},'routes':[{'path':p,'method':m,'mutation':w} for p,m,w in routes]}
+# Identities administration (console package 0.1.10): user detail and factors (reads),
+# factor reset and bulk disable (writes; reason in the body), dry-run profile validation.
+routes += [(v,'POST',False) for v in ('users/get','users/factors','authentication/profiles/validate')]
+routes += [(v,'POST',True) for v in ('users/factors/reset','users/bulk-disable')]
+manifest={'id':'hopae','name':'Hopae','version':'0.1.10','api_version':1,'entry':'index.js','assets':{f:hashlib.sha256((root/f).read_bytes()).hexdigest() for f in ('index.js','style.css')},'routes':[{'path':p,'method':m,'mutation':w} for p,m,w in routes]}
 (root/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
 for f in root.iterdir():f.chmod(0o644)
 print('Hopae console manifest SHA-256:',hashlib.sha256((root/'manifest.json').read_bytes()).hexdigest())

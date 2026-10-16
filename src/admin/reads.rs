@@ -36,6 +36,12 @@ pub enum Op {
     GroupWrite,
     /// The signed membership projection (snapshot and changes).
     Projection,
+    /// A user's second factors (`GET /v1/users/{id}/factors`).
+    Factors,
+    /// A dry-run validation of service authentication profiles.
+    Validate,
+    /// A bulk console mutation (each call changes up to 100 users).
+    Bulk,
 }
 
 impl Op {
@@ -49,6 +55,9 @@ impl Op {
             Op::Groups => "groups.read",
             Op::GroupWrite => "groups.write",
             Op::Projection => "groups.projection",
+            Op::Factors => "users.factors",
+            Op::Validate => "profiles.validate",
+            Op::Bulk => "users.bulk",
         }
     }
 
@@ -62,6 +71,9 @@ impl Op {
             Op::Groups => (60.0, 1.0),
             Op::GroupWrite => (30.0, 0.5),
             Op::Projection => (120.0, 2.0),
+            Op::Factors => (60.0, 1.0),
+            Op::Validate => (30.0, 0.5),
+            Op::Bulk => (10.0, 0.1),
         }
     }
 }
