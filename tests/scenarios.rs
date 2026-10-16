@@ -61,4 +61,6 @@ mod scenarios {
     mod s307_subject_directory;
     #[path = "s308_subject_lifecycle.rs"]
     mod s308_subject_lifecycle;
+    #[path = "s309_authentication_explain.rs"]
+    mod s309_authentication_explain;
 }

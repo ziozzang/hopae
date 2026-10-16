@@ -92,6 +92,10 @@ pub fn router(state: Arc<AdminState>) -> Router {
             "/v1/subjects/lifecycle/snapshot",
             post(crate::admin::subjects::snapshot_api),
         )
+        .route(
+            "/v1/explain/authentication",
+            post(crate::admin::explain::explain_api),
+        )
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(state.clone(), gate))
         .layer(middleware::from_fn_with_state(state.clone(), limit))
