@@ -163,6 +163,8 @@ struct Inner {
     now_override_ms: Mutex<Option<i64>>,
     /// A chosen `auth_time` claim value (any JSON), replacing the profile's.
     auth_time_override: Mutex<Option<Value>>,
+    /// Claims merged into every ID token (e.g. a `groups` claim).
+    extra_claims: Mutex<serde_json::Map<String, Value>>,
     log: Log,
 }
 
@@ -200,6 +202,7 @@ impl MockIdp {
             next_sub: Mutex::new("sub-1".into()),
             now_override_ms: Mutex::new(None),
             auth_time_override: Mutex::new(None),
+            extra_claims: Mutex::new(serde_json::Map::new()),
             log: Arc::new(Mutex::new(Vec::new())),
         });
         let router = Router::new().fallback(handle).with_state(inner.clone());
@@ -238,6 +241,11 @@ impl MockIdp {
     /// (future-dated, a string, negative), or `None` for the profile's own.
     pub fn set_auth_time(&self, v: Option<Value>) {
         *self.inner.auth_time_override.lock().unwrap() = v;
+    }
+
+    /// Merge `claims` (an object) into the next ID tokens; `{}` clears.
+    pub fn set_extra_claims(&self, claims: Value) {
+        *self.inner.extra_claims.lock().unwrap() = claims.as_object().cloned().unwrap_or_default();
     }
 
     /// The `/authorize` parameters the provider recorded, `max_age` and `prompt` included.
@@ -587,6 +595,9 @@ fn id_token(s: &Inner, beh: &Behavior, entry: &CodeEntry) -> String {
         claims["iat"] = json!(now);
     }
     // `auth_time`: a chosen value, else the profile's (the code issue time by default).
+    for (k, v) in s.extra_claims.lock().unwrap().iter() {
+        claims[k.as_str()] = v.clone();
+    }
     match (s.auth_time_override.lock().unwrap().clone(), beh.auth_time) {
         (Some(v), _) => claims["auth_time"] = v,
         (None, AuthTime::IssueTime) => claims["auth_time"] = json!(entry.issued_at),

@@ -63,6 +63,8 @@ mod scenarios {
     mod s308_subject_lifecycle;
     #[path = "s309_authentication_explain.rs"]
     mod s309_authentication_explain;
+    #[path = "s310_groups.rs"]
+    mod s310_groups;
     #[path = "s480_passkeys.rs"]
     mod s480_passkeys;
 }

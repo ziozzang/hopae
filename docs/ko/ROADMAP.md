@@ -1,6 +1,6 @@
 # 로드맵
 
-<!-- translation-status: source=../ROADMAP.md source-rev=13 status=current -->
+<!-- translation-status: source=../ROADMAP.md source-rev=14 status=current -->
 
 [문서 목차](README.md) · [English](../ROADMAP.md)
 
@@ -282,7 +282,11 @@ Hopae는 각 변경에 의존하는 첫 릴리스에서 그 변경에 대한 게
 
 일정에 없지만, 처음부터 다시 논의하지 않도록 기록합니다.
 
-- 서드파티 애플리케이션을 위한 OIDC 제공자 모드, SAML, SCIM 프로비저닝.
+- 서드파티 애플리케이션을 위한 OIDC 제공자 모드, SAML.
+- **P2 — 사용자와 그룹의 SCIM 프로비저닝**(수신 SCIM 2.0 `/Users`, `/Groups`): 더
+  이상 로그인하지 않는 사람의 제공자 멤버십을 갱신합니다. 지금은 주기 LDAP 동기화만
+  이를 하며, 그전까지 그런 OIDC 멤버십은 `groups.max_staleness_secs`가 지나면
+  정지됩니다([그룹](GROUPS.md), [ADR-0019](../adr/0019-groups-and-membership-projection.md)).
 - ADR-0013 경계 뒤의 범용 forward-auth 어댑터 프로필(nginx `auth_request`, Traefik, Caddy, Envoy `ext_authz`).
 - 기기 인가 흐름. (패스키 우선 로그인은 M5의 다음 WebAuthn 단계로 옮김.)
 - 형제 서브도메인을 위한 `Domain=` 쿠키 모드(쿠키 토싱 때문에 M1에서 기각).

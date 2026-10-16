@@ -49,6 +49,7 @@ pub mod crypto;
 pub mod event;
 pub mod factor;
 pub mod gateway;
+pub mod groups;
 pub mod http;
 pub mod identity;
 pub mod lua;

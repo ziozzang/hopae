@@ -116,6 +116,14 @@ pub struct CallbackQuery {
     pub error_description: Option<String>,
 }
 
+/// One group a provider asserted, before the provider's mapping rules: a
+/// stable source key (an LDAP DN, an OIDC claim value) and a display name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawGroup {
+    pub key: String,
+    pub name: String,
+}
+
 pub struct ProviderIdentity {
     pub subject: String,
     pub email: Option<NormalizedEmail>,
@@ -129,6 +137,10 @@ pub struct ProviderIdentity {
     /// The ID token's `auth_time` claim, raw (any JSON): `freshness::validate_claim`
     /// is the only place it is interpreted (ADR-0016).
     pub auth_time: Option<serde_json::Value>,
+    /// The person's complete group set as the provider asserted it, when the
+    /// provider syncs groups and the assertion carried them; `None` means
+    /// "not asserted" (existing memberships are left as they are).
+    pub groups: Option<Vec<RawGroup>>,
 }
 
 /// A reauthentication request the portal passes to `Provider::begin` only for

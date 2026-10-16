@@ -30,6 +30,12 @@ pub enum Op {
     Search,
     Lifecycle,
     Explain,
+    /// Group listings, group detail and a person's groups (ADR-0019).
+    Groups,
+    /// Administrator writes of local groups and memberships.
+    GroupWrite,
+    /// The signed membership projection (snapshot and changes).
+    Projection,
 }
 
 impl Op {
@@ -40,6 +46,9 @@ impl Op {
             Op::Search => "subjects.search",
             Op::Lifecycle => "subjects.lifecycle",
             Op::Explain => "explain.authentication",
+            Op::Groups => "groups.read",
+            Op::GroupWrite => "groups.write",
+            Op::Projection => "groups.projection",
         }
     }
 
@@ -50,6 +59,9 @@ impl Op {
             Op::Search => (60.0, 1.0),
             Op::Lifecycle => (120.0, 2.0),
             Op::Explain => (30.0, 0.5),
+            Op::Groups => (60.0, 1.0),
+            Op::GroupWrite => (30.0, 0.5),
+            Op::Projection => (120.0, 2.0),
         }
     }
 }
@@ -195,6 +207,16 @@ impl Privacy {
         }
     }
 
+    /// The profile a read answers with: the requested one, raised to the
+    /// operator's floor (`admin.directory_privacy`). A request can make the
+    /// answer stricter, never less strict than the floor.
+    pub fn at_least(self, floor: Privacy) -> Privacy {
+        match (self, floor) {
+            (Privacy::Strict, _) | (_, Privacy::Strict) => Privacy::Strict,
+            _ => Privacy::Standard,
+        }
+    }
+
     pub fn email(self, email: Option<&str>) -> Option<String> {
         match self {
             Privacy::Standard => email.map(mask_email),
@@ -252,6 +274,15 @@ mod tests {
                 .as_deref(),
             Some("a***@example.test")
         );
+    }
+
+    #[test]
+    fn the_operator_floor_can_only_be_raised_by_a_request() {
+        use Privacy::{Standard, Strict};
+        assert_eq!(Standard.at_least(Standard), Standard);
+        assert_eq!(Strict.at_least(Standard), Strict);
+        assert_eq!(Standard.at_least(Strict), Strict);
+        assert_eq!(Strict.at_least(Strict), Strict);
     }
 
     #[test]

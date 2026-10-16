@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 39 -->
+<!-- doc-rev: 40 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -192,6 +192,7 @@ background is in [administration](ADMIN.md).
 | `admin.require_aal` | `1`, `2` | `1` | Minimum assurance level of the console handle. `2` also sets the implicit application's step-up rule for the whole host. Without a TOTP keyring, `--check` warns that console requests will be refused. |
 | `admin.untrusted_peers` | `refuse`, `as_client` | `refuse` | What the admin listener does with a TCP peer outside `trusted_proxies`: `refuse` answers `403 untrusted_peer` before reading a cookie (counted, a rate-limited warning); `as_client` treats the peer as the client, as the portal does. |
 | `admin.query_budget_ms` | integer, 100 to 30000 | `2000` | Deadline of one console store operation (listing, search or mutation). The deadline is handed to the store job, which interrupts the statement inside SQLite, rolls back and answers `503`. |
+| `admin.directory_privacy` | `standard`, `strict` | `standard` | Operator floor for the privacy profile of the audited directory reads ([subject directory](SUBJECT_DIRECTORY.md), [authentication explain](AUTHENTICATION_EXPLAIN.md)). A request's `privacy_profile` may only be stricter: with `strict` no read returns an e-mail address in any form, whatever the request asks for. |
 | `admin.users[]` | array of `{user_id?, email?, role?, note?}` | `[]` | Administrator grants seeded from the file at start and by `hopae admin import`. Each entry needs at least one of `user_id` (`u_` followed by letters, digits, `_` or `-`, at most 64 characters) and `email` (a valid address); `role` is `admin` (default) or `viewer`; `note` at most 256 characters; unknown keys are rejected. An entry given by email alone applies only when exactly one user holds that verified address and it is authoritative. A defective entry is a warning at start (skipped, never a start failure) and an error under `--check --strict`. Imported under the provider rule with `managed_by` and tombstones ([administration](ADMIN.md#grants-in-the-configuration-file)). |
 
 #### Events
@@ -203,6 +204,36 @@ background is in [administration](ADMIN.md).
 | `events.prune_every` | integer, at least 1 | `1000` | Inserted rows between prune passes (a pass also runs at least every 60 s). |
 | `events.max_pending_per_sink` | integer, at least 1 | `10000` | Undelivered rows kept per sink; beyond it the oldest pending rows become `failed` with `backlog_overflow`. |
 | `events.delivery_terminal_retention_days` | integer, at least 1 | `7` | How long delivered or failed delivery rows are kept. |
+
+#### Groups
+
+Groups, provider group sync and the signed membership projection ([groups](GROUPS.md), [ADR-0019](adr/0019-groups-and-membership-projection.md)). Every key is optional.
+
+| Key | Type | Default | Constraints and meaning |
+| --- | --- | --- | --- |
+| `groups.max_groups_per_user` | integer, 1 to 1024 | `256` | Most groups (all sources) one person may belong to; a sync or a write that would exceed it is refused and changes nothing. |
+| `groups.change_retention_days` | integer, 1 to 3650 | `30` | Age after which projection journal rows are pruned (the newest is kept); an older projection cursor is `410 cursor_expired`. |
+| `groups.maintenance_interval_secs` | integer, 10 to 86400 | `300` | Interval of the maintenance pass: local expiry, removal grace, deleted providers, stale provider groups, journal retention, periodic LDAP sync. |
+| `groups.stale_group_days` | integer, 1 to 3650 | `30` | A provider group with no member and no sync report for this long is deleted (tombstone). |
+| `groups.max_staleness_secs` | integer, 3600 to 31536000 | `604800` | A provider membership no successful assertion confirmed for this long is suspended: kept, but left out of the projection and the gateway mirror until asserted again. Must exceed every provider's `sync_interval_secs`. |
+| `groups.gateway_header` | boolean | `false` | Mirror up to 32 group references into `users.groups`, so `x-forwarded-groups` carries them; a change bumps `authz_version`. |
+| `groups.projection.issuer_ref` | string, 1 to 128 of `[A-Za-z0-9_.:-]` | none | Key identity in every projection envelope and payload. The projection endpoints answer `503 projection_unavailable` without `groups.projection`. |
+| `groups.projection.key_epoch` | integer, at least 1 | none | Key epoch; raise it when the key changes. |
+| `groups.projection.public_key` | base64 Ed25519 public key | none | Must match the seed and must differ from `receipt_issuer.public_key`, or the start fails. |
+| `groups.projection.seed_env` | environment variable name | none | Variable holding the base64 32-byte Ed25519 seed (never the seed itself). |
+| `groups.projection.audience` | string, 1 to 128 of `[A-Za-z0-9_.:-]` | none | The consumer the projection is bound to (Pumgye's identifier). |
+| `providers[].groups` | object | absent | The provider syncs groups. Absent: it syncs none. |
+| `providers[].groups.claim` | dotted path, at most 4 segments | `groups` | OIDC only: the claim holding an array of strings (ID token, else user-info). |
+| `providers[].groups.ldap.mode` | `member_of`, `search` | `member_of` | LDAP only: read the entry's `memberOf`, or search group entries whose member attribute holds the person's DN. |
+| `providers[].groups.ldap.member_of_attribute` | LDAP attribute | `memberOf` | `member_of` mode attribute. |
+| `providers[].groups.ldap.search_base_dn` | DN | the provider's `base_dn` | `search` mode base. |
+| `providers[].groups.ldap.object_class`, `member_attribute`, `name_attribute` | LDAP attributes | `groupOfNames`, `member`, `cn` | `search` mode filter `(&(objectClass=…)(member=<escaped DN>))` and the group's name. |
+| `providers[].groups.include`, `exclude` | regular expression, at most 512 bytes | none | Keep only source keys (claim values, group DNs) matching `include`, then drop those matching `exclude`. Linear-time matching. |
+| `providers[].groups.rewrite` | `{pattern, replacement}` | none | Rewrites the display name (`$1` groups); the key never changes. |
+| `providers[].groups.max_groups` | integer, 1 to 1024 | `100` | Most groups per person from this provider after filtering; more refuses the assertion. |
+| `providers[].groups.removal_grace_secs` | integer, 0 to 604800 | `0` | How long a membership the provider stopped asserting stays before removal. |
+| `providers[].groups.sync_interval_secs` | integer, 300 to 604800 | absent | LDAP only: refresh linked people periodically; a full cycle starts at most this often. Absent: sign-in only. |
+| `providers[].groups.sync_batch` | integer, 1 to 1000 | `200` | LDAP only: people refreshed per maintenance pass. |
 
 ### Keys decided and scheduled
 

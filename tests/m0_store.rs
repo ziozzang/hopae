@@ -51,12 +51,16 @@ fn open_applies_migration_and_sets_pragmas() {
         [
             "admin_grants",
             "apps",
+            "directory_groups",
             "event_deliveries",
             "events",
             "external_factor_authorities",
             "external_factor_budget",
             "external_factor_proofs",
             "external_factor_sessions",
+            "group_changes",
+            "group_members",
+            "group_sync_state",
             "handoff_codes",
             "human_authority_realm",
             "human_provider_material_owners",
@@ -74,6 +78,7 @@ fn open_applies_migration_and_sets_pragmas() {
             "session_webauthn_elevations",
             "session_webauthn_provenance",
             "sessions",
+            "sqlite_sequence",
             "totp_enrollments",
             "txn_admissions",
             "users",
@@ -88,17 +93,27 @@ fn open_applies_migration_and_sets_pragmas() {
 fn migrations_are_idempotent_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hopae.db");
-    drop(open(&path).unwrap());
+    let first = open(&path).unwrap();
+    let count = |s: &hopae::store::sqlite::Store| -> (i64, i64) {
+        s.conn()
+            .query_row(
+                "SELECT COUNT(*), MAX(version) FROM schema_migrations",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    };
+    let before = count(&first);
+    drop(first);
     let store = open(&path).unwrap();
     assert_eq!(
         migrate(&store.conn()).unwrap(),
         hopae::store::sqlite::LATEST_SCHEMA_VERSION
     );
-    let n: i64 = store
-        .conn()
-        .query_row("SELECT COUNT(*) FROM schema_migrations", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(n, i64::from(hopae::store::sqlite::LATEST_SCHEMA_VERSION));
+    // Versions may skip numbers reserved by another branch (ADR-0019).
+    let (n, max) = count(&store);
+    assert_eq!((n, max), before);
+    assert_eq!(max, i64::from(hopae::store::sqlite::LATEST_SCHEMA_VERSION));
 }
 
 #[test]

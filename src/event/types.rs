@@ -132,10 +132,23 @@ pub enum EventKind {
     /// An audited administrative read of the subject directory or the
     /// authentication explain API (required; travels alone).
     AdminRead,
+    /// Groups (ADR-0019, required): a group's lifecycle and memberships,
+    /// whether changed by an administrator, a provider sync or maintenance.
+    GroupCreated,
+    GroupUpdated,
+    GroupDeleted,
+    GroupMemberAdded,
+    GroupMemberRemoved,
+    /// A provider membership suspended because no successful assertion
+    /// refreshed it within `groups.max_staleness_secs`, and restored.
+    GroupMembershipStale,
+    GroupMembershipRestored,
+    /// A provider's group assertion was not applied (diagnostic).
+    GroupSyncRefused,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 43] = [
+    pub const ALL: [EventKind; 51] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -179,6 +192,14 @@ impl EventKind {
         EventKind::AdminDenied,
         EventKind::AdminFactorReset,
         EventKind::AdminRead,
+        EventKind::GroupCreated,
+        EventKind::GroupUpdated,
+        EventKind::GroupDeleted,
+        EventKind::GroupMemberAdded,
+        EventKind::GroupMemberRemoved,
+        EventKind::GroupMembershipStale,
+        EventKind::GroupMembershipRestored,
+        EventKind::GroupSyncRefused,
     ];
 
     /// Required kinds travel in the transaction of the state change they
@@ -191,6 +212,7 @@ impl EventKind {
                 | EventKind::TxnEvicted
                 | EventKind::EventsDropped
                 | EventKind::SinkBacklogOverflow
+                | EventKind::GroupSyncRefused
         )
     }
 
@@ -240,6 +262,14 @@ impl EventKind {
             EventKind::AdminDenied => "admin.denied",
             EventKind::AdminFactorReset => "admin.factor_reset",
             EventKind::AdminRead => "admin.read",
+            EventKind::GroupCreated => "group.created",
+            EventKind::GroupUpdated => "group.updated",
+            EventKind::GroupDeleted => "group.deleted",
+            EventKind::GroupMemberAdded => "group.member_added",
+            EventKind::GroupMemberRemoved => "group.member_removed",
+            EventKind::GroupMembershipStale => "group.membership_stale",
+            EventKind::GroupMembershipRestored => "group.membership_restored",
+            EventKind::GroupSyncRefused => "group.sync_refused",
         }
     }
 
@@ -450,6 +480,7 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "delegated_operation",
     "app",
     "apps",
+    "change",
     "auth_time_source",
     "bound_ip",
     "cause",
@@ -461,8 +492,10 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "dropped_by_kind",
     "endpoint",
     "error",
+    "expires_at",
     "forced",
     "from_user_id",
+    "group_id",
     "host",
     "insecure_mode",
     "kind",
@@ -485,10 +518,12 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "requested",
     "reauth",
     "retry_after",
+    "revision",
     "role",
     "route_id",
     "sampled_count",
     "sink",
+    "source",
     "sso",
     "status",
     "to_user_id",
@@ -648,14 +683,14 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 38);
+        assert_eq!(required, 45);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 43);
+        assert_eq!(EventKind::ALL.len(), 51);
         for (kind, name) in [
             (
                 EventKind::FactorExternalConsumed,

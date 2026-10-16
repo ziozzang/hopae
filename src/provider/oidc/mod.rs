@@ -76,6 +76,8 @@ pub struct OidcSettings {
     pub id_token_typ: Option<String>,
     /// Where the client may send requests (G7-IDP-03).
     pub endpoints: EndpointPolicy,
+    /// `groups.claim` of the row (default `groups`) when it syncs groups.
+    pub groups_claim: Option<String>,
 }
 
 fn cfg_str(cfg: &Value, key: &str) -> Option<String> {
@@ -186,6 +188,8 @@ impl OidcSettings {
             reauth_prompt: reauth_settings(row).1,
             id_token_typ: cfg_str(cfg, "id_token_typ"),
             endpoints,
+            groups_claim: crate::groups::ProviderGroups::of_row(cfg)
+                .map(|g| g.claim_path().to_string()),
         }
     }
 }
@@ -867,6 +871,7 @@ impl Provider for OidcProvider {
             &claims::Rules {
                 authoritative_domains: &self.s.authoritative_domains,
                 trust_email: self.s.trust_email,
+                groups_claim: self.s.groups_claim.as_deref(),
             },
         ))
     }

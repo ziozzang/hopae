@@ -85,6 +85,9 @@ pub struct Config {
     /// The management console (ADR-0016); enabled by `admin.public_url`.
     #[serde(default)]
     pub admin: AdminCfg,
+    /// Groups and the signed membership projection (ADR-0019).
+    #[serde(default)]
+    pub groups: Option<crate::groups::GroupsConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -175,8 +178,22 @@ pub struct AdminCfg {
     pub untrusted_peers: Option<UntrustedPeers>,
     #[serde(default)]
     pub query_budget_ms: Option<u64>,
+    /// The least private profile the subject directory and the explain API
+    /// may answer with; a request may only ask for a stricter one.
+    #[serde(default)]
+    pub directory_privacy: Option<DirectoryPrivacy>,
     #[serde(default)]
     pub users: Vec<AdminUserEntry>,
+}
+
+/// `admin.directory_privacy`: the operator's floor for the privacy profile of
+/// the audited directory reads. `strict` > `standard`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectoryPrivacy {
+    #[default]
+    Standard,
+    Strict,
 }
 
 /// One seeded grant: at least one of `user_id` and `email`.
@@ -201,6 +218,8 @@ pub struct AdminLimits {
     pub require_aal: Aal,
     pub untrusted_peers: UntrustedPeers,
     pub query_budget: Duration,
+    /// `admin.directory_privacy` (default `standard`).
+    pub directory_privacy: DirectoryPrivacy,
 }
 
 const ADMIN_MAX_AUTH_AGE_DEFAULT: Duration = Duration::from_secs(12 * 3600);
@@ -531,6 +550,9 @@ pub struct ProviderEntry {
     pub auto_link: bool,
     #[serde(default)]
     pub trust_email: bool,
+    /// Group sync rules (ADR-0019); absent: the provider syncs no groups.
+    #[serde(default)]
+    pub groups: Option<crate::groups::ProviderGroups>,
 }
 
 fn default_scope() -> String {
@@ -1375,8 +1397,23 @@ impl Config {
 
     fn validate_providers(&self, errs: &mut Vec<String>) {
         let mut ids = HashSet::new();
+        if let Some(g) = &self.groups {
+            g.validate(errs);
+        }
         for (i, p) in self.providers.iter().enumerate() {
             let at = format!("providers[{i}]");
+            if let Some(g) = &p.groups {
+                g.validate(&i.to_string(), p.kind == ProviderKind::Ldap, errs);
+                let staleness = self.groups.as_ref().map_or(
+                    crate::groups::GroupsConfig::default().max_staleness_secs,
+                    |c| c.max_staleness_secs,
+                );
+                if g.sync_interval_secs.is_some_and(|s| s >= staleness) {
+                    errs.push(format!(
+                        "{at}.groups.sync_interval_secs must be shorter than groups.max_staleness_secs"
+                    ));
+                }
+            }
             if !valid_slug(&p.provider_id) {
                 errs.push(format!(
                     "{at}.provider_id must match [a-z0-9][a-z0-9_-]{{0,31}}"
@@ -1592,6 +1629,7 @@ impl Config {
                 .unwrap_or(Aal::One),
             untrusted_peers: a.untrusted_peers.unwrap_or_default(),
             query_budget: Duration::from_millis(a.query_budget_ms.unwrap_or(2000)),
+            directory_privacy: a.directory_privacy.unwrap_or_default(),
         })
     }
 
@@ -1721,6 +1759,7 @@ impl Config {
                 enabled: p.enabled,
                 client_id: p.client_id.clone(),
                 ldap: p.ldap.clone(),
+                groups: p.groups.clone(),
                 client_secret_env: p.client_secret_env.clone(),
                 issuer: p.issuer.clone(),
                 scope: p.scope.clone(),
@@ -2389,6 +2428,8 @@ mod tests {
         assert!(invalid(r#"{"providers": [{"provider_id": "g", "kind": "oidc", "client_id": "c", "client_secret": "literal"}]}"#).contains("environment variable name"));
         assert!(!invalid(r#"{"providers": [{"provider_id": "g", "kind": "oidc", "client_id": "c", "client_secret": "literal"}]}"#).contains("literal\""));
         assert!(invalid(r#"{"providers": [{"provider_id": "g", "kind": "oidc", "client_id": "c", "issuer": "http://example.org"}]}"#).contains("providers[0].issuer"));
+        // A periodic group sync must refresh before memberships go stale.
+        assert!(invalid(r#"{"groups": {"max_staleness_secs": 3600}, "providers": [{"provider_id": "d", "kind": "ldap", "groups": {"sync_interval_secs": 3600}}]}"#).contains("must be shorter than groups.max_staleness_secs"));
         assert!(
             invalid(
                 r#"{"providers": [{"provider_id": "g", "kind": "password", "client_id": "c"}]}"#
@@ -2529,6 +2570,7 @@ mod tests {
             r#"{"listen": {"admin": "127.0.0.1:9999"},
                 "admin": {"session": {"idle": "10m", "absolute": "2h"}, "binding": {"ip": "prefix", "ua": "strict", "on_mismatch": "drop_handle"},
                           "max_auth_age": "45m", "untrusted_peers": "as_client", "query_budget_ms": 750,
+                          "directory_privacy": "strict",
                           "public_url": "https://hopae-admin.example.test:8443"}}"#,
         )
         .unwrap();
@@ -2548,6 +2590,13 @@ mod tests {
         assert_eq!(l.max_auth_age, Duration::from_secs(45 * 60));
         assert_eq!(l.untrusted_peers, UntrustedPeers::AsClient);
         assert_eq!(l.query_budget, Duration::from_millis(750));
+        assert_eq!(l.directory_privacy, DirectoryPrivacy::Strict);
+        let d = admin_with(r#"{"admin": {}}"#).unwrap();
+        assert_eq!(
+            d.admin_limits().unwrap().directory_privacy,
+            DirectoryPrivacy::Standard
+        );
+        assert!(admin_with(r#"{"admin": {"directory_privacy": "open"}}"#).is_err());
     }
 
     #[test]

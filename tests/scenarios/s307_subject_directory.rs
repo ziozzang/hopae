@@ -404,6 +404,33 @@ fn s307_5_delegated_console_actor_resolves() {
 }
 
 #[test]
+fn s307_6_operator_privacy_floor_cannot_be_lowered_by_a_request() {
+    let k = console(json!({"admin": {"directory_privacy": "strict"}}), &[]);
+    let a = k.admin("ha307g", AdminRole::Admin);
+    seed(&k);
+    for body in [
+        json!({"ids": ["u_live"]}),
+        json!({"ids": ["u_live"], "privacy_profile": "standard"}),
+        json!({"ids": ["u_live"], "privacy_profile": "strict"}),
+    ] {
+        let r = resolve(&k, &a, body);
+        assert_eq!(r.status, 200, "{r:?}");
+        let j = r.json();
+        assert_eq!(j["privacy_profile"], "strict");
+        assert_eq!(item(&j, "u_live")["email"], Value::Null);
+        assert_eq!(item(&j, "u_live")["display_name"], "Alice Live");
+        assert!(!r.body.contains("example.test"));
+    }
+    let r = k.client(&a).post_json(
+        "/v1/subjects/search",
+        json!({"q": "alice", "privacy_profile": "standard"}),
+    );
+    assert_eq!(r.status, 200, "{r:?}");
+    assert_eq!(r.json()["privacy_profile"], "strict");
+    assert!(!r.body.contains("example.test"));
+}
+
+#[test]
 fn s307_a1_batch_and_reference_bounds() {
     let k = console(json!({}), &[]);
     let a = k.admin("ha307f", AdminRole::Admin);

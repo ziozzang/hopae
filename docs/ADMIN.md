@@ -1,6 +1,6 @@
 # Administration
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [Documentation](README.md) · [한국어](ko/ADMIN.md)
 
@@ -323,6 +323,9 @@ identifiers are the `u_`, `s_`, `e_` forms.
 | `POST /v1/subjects/lifecycle` | viewer | Subject creations and status changes after a durable cursor; see [subject directory](SUBJECT_DIRECTORY.md) |
 | `POST /v1/subjects/lifecycle/snapshot` | viewer | Every reserved subject with its status and the feed watermark; see [subject directory](SUBJECT_DIRECTORY.md) |
 | `POST /v1/explain/authentication` | viewer | What the authentication check would answer and why; see [authentication explain](AUTHENTICATION_EXPLAIN.md) |
+| `POST /v1/groups/search`, `/v1/groups/get`, `/v1/subjects/groups` | viewer | Groups, a group's members, a person's groups; see [groups](GROUPS.md) |
+| `POST /v1/groups/create`, `/update`, `/delete`, `/members/add`, `/members/remove` | admin | Local group writes with a reason and `expected_revision`; see [groups](GROUPS.md) |
+| `POST /v1/groups/projection/snapshot`, `/changes` | viewer | The signed membership projection for Pumgye; see [groups](GROUPS.md) |
 
 Error bodies are `{"error": "<code>"}` with the codes of the denial table.
 

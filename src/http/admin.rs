@@ -96,6 +96,31 @@ pub fn router(state: Arc<AdminState>) -> Router {
             "/v1/explain/authentication",
             post(crate::admin::explain::explain_api),
         )
+        .route(
+            "/v1/subjects/groups",
+            post(crate::admin::groups::subject_groups_api),
+        )
+        .route("/v1/groups/search", post(crate::admin::groups::search_api))
+        .route("/v1/groups/get", post(crate::admin::groups::get_api))
+        .route("/v1/groups/create", post(crate::admin::groups::create_api))
+        .route("/v1/groups/update", post(crate::admin::groups::update_api))
+        .route("/v1/groups/delete", post(crate::admin::groups::delete_api))
+        .route(
+            "/v1/groups/members/add",
+            post(crate::admin::groups::add_member_api),
+        )
+        .route(
+            "/v1/groups/members/remove",
+            post(crate::admin::groups::remove_member_api),
+        )
+        .route(
+            "/v1/groups/projection/snapshot",
+            post(crate::admin::groups::projection_snapshot_api),
+        )
+        .route(
+            "/v1/groups/projection/changes",
+            post(crate::admin::groups::projection_changes_api),
+        )
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(state.clone(), gate))
         .layer(middleware::from_fn_with_state(state.clone(), limit))

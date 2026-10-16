@@ -124,6 +124,7 @@ mod tests {
             picture: None,
             raw_claims: serde_json::json!({}),
             auth_time: None,
+            groups: None,
         }
     }
 

@@ -61,6 +61,7 @@ unicode-normalization = "0.1"
 url = "2"
 ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
 mlua = { version = "0.12.2", default-features = false, features = ["lua54", "vendored"] }
+regex = { version = "1.13", default-features = false, features = ["std", "perf", "unicode"] }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
 # WebAuthn relying party (ADR-0017). Ceremony state is persisted between the
 # two HTTP requests of a ceremony, hence the state-serialisation feature.

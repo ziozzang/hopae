@@ -117,6 +117,12 @@ impl Registry {
                                 material_key.map(|key| (key, row)),
                             )
                             .ok()
+                            .map(|(provider, fingerprint)| {
+                                (
+                                    provider.with_groups(super::ldap::ldap_groups_of(&row.config)),
+                                    fingerprint,
+                                )
+                            })
                         })
                 } else {
                     None
@@ -746,6 +752,7 @@ mod tests {
             enabled: true,
             client_id: "c".into(),
             ldap: None,
+            groups: None,
             client_secret_env: None,
             issuer: None,
             scope: String::new(),

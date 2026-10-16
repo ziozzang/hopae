@@ -153,6 +153,9 @@ impl ProviderRow {
                 if let Some(ldap) = &c.ldap {
                     config["ldap"] = serde_json::json!(ldap);
                 }
+                if let Some(groups) = &c.groups {
+                    config["groups"] = serde_json::json!(groups);
+                }
                 if !c.endpoint_hosts.is_empty() {
                     config["endpoint_hosts"] = serde_json::json!(c.endpoint_hosts);
                 }

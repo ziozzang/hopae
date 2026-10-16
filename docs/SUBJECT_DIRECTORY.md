@@ -1,6 +1,6 @@
 # Subject directory API
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/SUBJECT_DIRECTORY.md)
 
@@ -20,7 +20,12 @@ surface carries gateway traffic only and has no administrative mirror.
 ## Prerequisites and configuration
 
 - The management console is enabled (`admin.public_url`, `listen.admin`); see
-  [Administration](ADMIN.md). There is no further configuration key.
+  [Administration](ADMIN.md). The only further key is
+  `admin.directory_privacy` (`standard` by default, or `strict`): the least
+  private profile the subject directory and the explain API answer with. A
+  request's `privacy_profile` can only make an answer stricter; a request for
+  a profile below the floor is answered at the floor, and the answer's
+  `privacy_profile` names the profile actually applied.
 - Any granted role (`viewer` or `admin`) may call the four reads. A Hangang
   delegated console actor (`admin.hangang_delegation`) may call them with a
   signed assertion over the exact body.
@@ -195,8 +200,13 @@ not recorded. Refused requests are not reads and are not recorded as such.
 
 ## Limitations and compatibility
 
-- Groups, group lifecycle and the membership projection that Hangang ADR 0021
-  also assigns to Hopae are not implemented: Hopae has no groups.
+- Groups, their lifecycle and the signed membership projection are described
+  in [groups](GROUPS.md). With `include_groups: true` a resolution attaches up
+  to 20 groups to each person and the lifecycle feed also reports
+  `group_created`, `group_updated`, `group_deleted`, `member_added` and
+  `member_removed` changes (with `group_id`; a group's own change has
+  `user_id: null` and the group's state as `status`); without it both answers
+  are unchanged.
 - Service principals' lifecycle follows profile publication (the profile
   revision), not this feed.
 - The search cursor is bound to the process like every console listing

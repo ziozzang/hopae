@@ -56,9 +56,13 @@ pub struct StatusChange {
     pub position: i64,
     pub event_id: String,
     pub at: i64,
-    /// `disabled` or `enabled`.
+    /// `disabled` or `enabled`; with groups also `group_created`,
+    /// `group_updated`, `group_deleted`, `member_added`, `member_removed`.
     pub change: &'static str,
-    pub user_id: String,
+    /// Absent for a group's own lifecycle change.
+    pub user_id: Option<String>,
+    /// The group of a group change.
+    pub group_id: Option<String>,
 }
 
 /// A position in the outbox: the row and its event id, so a reused or
@@ -290,10 +294,23 @@ impl Store {
     /// Up to `limit` status changes after `after`, examining at most
     /// [`FEED_SCAN`] outbox rows. `Err(PositionLost)` when `after` names a
     /// row the outbox no longer holds with that id.
+    #[cfg(test)]
     pub(crate) async fn admin_status_changes(
         &self,
         after: OutboxPosition,
         limit: usize,
+        deadline: Deadline,
+    ) -> StoreResult<Result<StatusPage, PositionLost>> {
+        self.admin_feed_changes(after, limit, false, deadline).await
+    }
+
+    /// As [`Store::admin_status_changes`], also reporting the `group.*`
+    /// outbox events when `groups` is set (ADR-0019).
+    pub(crate) async fn admin_feed_changes(
+        &self,
+        after: OutboxPosition,
+        limit: usize,
+        groups: bool,
         deadline: Deadline,
     ) -> StoreResult<Result<StatusPage, PositionLost>> {
         let limit = limit.min(MAX_BATCH);
@@ -318,7 +335,7 @@ impl Store {
             let head: i64 =
                 c.query_row("SELECT COALESCE(MAX(rowid), 0) FROM events", [], |r| r.get(0))?;
             let mut st = c.prepare_cached(
-                "SELECT rowid, event_id, at, kind, user_id FROM events WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+                "SELECT rowid, event_id, at, kind, user_id, json_extract(attrs, '$.group_id') FROM events WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
             )?;
             let mut q = st.query(params![after.row, FEED_SCAN])?;
             let mut changes = Vec::new();
@@ -329,14 +346,42 @@ impl Store {
                 if examined.is_multiple_of(1024) {
                     check.now()?;
                 }
-                let (row, id, at, kind, user): (i64, String, f64, String, Option<String>) =
-                    (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?);
+                let (row, id, at, kind, user, group): (
+                    i64,
+                    String,
+                    f64,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                ) = (
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5).unwrap_or(None),
+                );
                 let change = match kind.as_str() {
                     "admin.user_disable" => Some("disabled"),
                     "admin.user_enable" => Some("enabled"),
+                    "group.created" if groups => Some("group_created"),
+                    "group.updated" if groups => Some("group_updated"),
+                    "group.deleted" if groups => Some("group_deleted"),
+                    "group.member_added" if groups => Some("member_added"),
+                    "group.member_removed" if groups => Some("member_removed"),
+                    "group.membership_stale" if groups => Some("member_suspended"),
+                    "group.membership_restored" if groups => Some("member_restored"),
                     _ => None,
                 };
-                if let (Some(change), Some(user)) = (change, user) {
+                let wanted = match change {
+                    Some("disabled" | "enabled") => user.is_some(),
+                    Some("member_added" | "member_removed" | "member_suspended" | "member_restored") => {
+                        user.is_some() && group.is_some()
+                    }
+                    Some(_) => group.is_some(),
+                    None => false,
+                };
+                if let (true, Some(change)) = (wanted, change) {
                     if changes.len() == limit {
                         break;
                     }
@@ -346,6 +391,7 @@ impl Store {
                         at: at.floor() as i64,
                         change,
                         user_id: user,
+                        group_id: group.filter(|_| change != "disabled" && change != "enabled"),
                     });
                 }
                 next = OutboxPosition {
