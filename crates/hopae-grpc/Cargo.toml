@@ -5,11 +5,15 @@ edition = "2024"
 license = "MIT"
 [features]
 default = []
-native-client = ["dep:hangang-runtime", "dep:tokio", "tonic/tls-ring"]
+native-client = ["dep:hangang-runtime", "dep:tokio", "tonic/tls-ring", "dep:rustls", "dep:tokio-rustls", "dep:hyper-util", "dep:tower-service"]
 
 [dependencies]
 hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "bf3ba2c0ccfb8603a34b14a30bc52d5112f0677a", optional = true }
-tokio = { version = "1", features = ["sync", "time"], optional = true }
+tokio = { version = "1", features = ["sync", "time", "net"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+tower-service = { version = "0.3", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
