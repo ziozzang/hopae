@@ -76,6 +76,22 @@ pub fn router(state: Arc<AdminState>) -> Router {
         .route("/v1/sessions/{id}/terminate", post(sessions::terminate_api))
         .route("/events", get(events::list_page))
         .route("/v1/events", get(events::list_api))
+        .route(
+            "/v1/subjects/resolve",
+            post(crate::admin::subjects::resolve_api),
+        )
+        .route(
+            "/v1/subjects/search",
+            post(crate::admin::subjects::search_api),
+        )
+        .route(
+            "/v1/subjects/lifecycle",
+            post(crate::admin::subjects::lifecycle_api),
+        )
+        .route(
+            "/v1/subjects/lifecycle/snapshot",
+            post(crate::admin::subjects::snapshot_api),
+        )
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(state.clone(), gate))
         .layer(middleware::from_fn_with_state(state.clone(), limit))

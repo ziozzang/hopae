@@ -57,4 +57,8 @@ mod scenarios {
     mod s305_admin_grants;
     #[path = "s306_delegation.rs"]
     mod s306_delegation;
+    #[path = "s307_subject_directory.rs"]
+    mod s307_subject_directory;
+    #[path = "s308_subject_lifecycle.rs"]
+    mod s308_subject_lifecycle;
 }
