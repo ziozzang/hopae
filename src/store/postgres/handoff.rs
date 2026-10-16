@@ -402,20 +402,7 @@ impl PgStore {
                 .await
                 .map_err(pg)?;
             }
-            tx.execute(
-                "INSERT INTO session_handles (handle_sha256, session_id, host, issued_aal, created_at, last_seen_at, absolute_expires_at, revoked_at, revoked_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,NULL)",
-                &[
-                    &h.handle_sha256.0.to_vec(),
-                    &h.session_id.as_str(),
-                    &h.host.as_str(),
-                    &(h.issued_aal.as_i64() as i32),
-                    &h.created_at.secs(),
-                    &h.last_seen_at.secs(),
-                    &h.absolute_expires_at.secs(),
-                ],
-            )
-            .await
-            .map_err(pg)?;
+            super::write::insert_handle(&tx, &h).await?;
             tx.execute(
                 "UPDATE sessions SET last_seen_at = GREATEST(last_seen_at, $2) WHERE session_id=$1",
                 &[&found.session_id.as_str(), &now],
@@ -602,25 +589,7 @@ impl HandoffStore for PgStore {
             if s.cred_gen != c.cred_gen {
                 return Err(StoreError::Conflict("stale credential generation"));
             }
-            tx.execute(
-                "INSERT INTO handoff_codes (code_sha256, session_id, host, return_target, return_path, client_ip, bind_sha256, issued_aal, cred_gen, recovery_depth, created_at, expires_at, consumed_at, consumed_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,NULL,NULL)",
-                &[
-                    &c.code_sha256.0.to_vec(),
-                    &c.session_id.as_str(),
-                    &c.host.as_str(),
-                    &c.return_target.as_str(),
-                    &c.return_target.path(),
-                    &c.client_ip.to_string(),
-                    &c.bind_sha256.0.to_vec(),
-                    &(c.issued_aal.as_i64() as i32),
-                    &super::i64_of(c.cred_gen),
-                    &(c.recovery_depth.min(i32::MAX as u32) as i32),
-                    &c.created_at.secs(),
-                    &c.expires_at.secs(),
-                ],
-            )
-            .await
-            .map_err(pg)?;
+            super::write::insert_code(&tx, &c).await?;
             self.insert_events(&tx, &events).await?;
             tx.commit().await.map_err(pg)
         })

@@ -82,6 +82,36 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - When: a nonce is admitted twice; the same nonce in another scope; malformed scopes and nonces; a full scope before and after expiry; sixteen concurrent admissions of one nonce.
 - Then: true then false; true; `Conflict` and nothing stored; refused while full and while the entry is live (expiry is exclusive), admitted at expiry; exactly one admission wins.
 
+### S600-12 TOTP lifecycle and native step-up agree (slice 2c)
+
+- Given: a user with a portal session on `auth.example.test`, a sealed enrollment envelope.
+- When: an actor whose generation changed prepares an enrollment; the actor prepares, a second pending enrollment is attempted, the enrollment is activated at counter 10; counters 10 (same), 11 with a stale revision, 11, and eight racing 20s are consumed; the configuration generation is bumped and a step-up transaction is bound, rebound by the same browser and by another; the elevation runs with a changed generation, a replayed counter, then a fresh one, then again on the consumed challenge; the factor is removed with the old view and with the elevated one.
+- Then: `factor authorization revoked`; one pending enrollment only; activation moves the revision to 2; only strictly greater counters on the current revision are accepted and exactly one racer wins; the rebinding is idempotent and the other browser is refused; `step-up configuration changed`, `factor proof unavailable`, then the session is at AAL 2 with a new generation, primary time kept and the old handle revoked; the replay is refused; the old view is revoked and the elevated one ends every session with `factor_revoked`.
+
+### S600-13 External factor registry agrees (slice 2c)
+
+- Given: a configuration generation and an empty registry.
+- When: two authorities are published; a stale expected revision, a duplicate id and a binding change without a new revision are published; one authority is dropped; four publishers race on one expected revision.
+- Then: revision 1; each refusal names its rule; the dropped authority becomes a tombstone and the revision moves once; exactly one racer wins.
+
+### S600-14 Passkeys and recovery codes agree (slice 2c)
+
+- Given: a user with a portal session.
+- When: the WebAuthn user handle is set twice; a passkey is registered, the ceremony replayed, a second passkey registered without a recent second factor; the portal is verified with the passkey and again with an unmoved counter; the only passkey is removed and renamed; an application step-up with the passkey runs and is replayed; ten recovery codes are minted, one is used twice; a clone signal arrives; the factors are reset.
+- Then: the first handle stays; registration consumes the ceremony once, the replay is `ceremony unavailable` and the second registration `recent verification required`; verification raises the session and rotates its credentials, the stale counter is `counter stale`; `last second factor`, rename succeeds; the step-up consumes ceremony, transaction and counter together and the replay is refused; the used code is gone, `recovery_required_at` is set and the second use is refused; the clone signal revokes the credential and ends the sessions it elevated (`counter_regression`); the reset reports what it revoked and ends the remaining session.
+
+### S600-15 Passwordless sign-in agrees (slice 2c)
+
+- Given: a user with a registered passkey and a login transaction from one address.
+- When: a sign-in ceremony is started, read, failed; thirty more are started and one beyond; a verified sign-in creates the passkey session and a second sign-in reuses the ceremony; passwordless sign-in is turned off.
+- Then: the failed ceremony is gone; the thirty-first is `passkey sign-in busy`; the session is at AAL 2 on `hopae.passkey` and the reuse is `ceremony unavailable`; exactly the passkey session ends.
+
+### S600-16 External factor step-up agrees (slice 2c)
+
+- Given: a published external authority and a step-up transaction of the portal session.
+- When: the challenge is bound with another authority, then with the published one; a proof for another session, a valid proof and the same proof again are presented; the authority's binding is rotated.
+- Then: `external factor disabled or changed`; the binding succeeds; `external proof context unavailable`; the session is at AAL 2 with an external factor; the replay is refused; the elevated session ends with `factor_revoked`.
+
 ### S600-5 PostgreSQL ledger, migrations and newer schema
 
 - Given: a PostgreSQL store.
@@ -98,9 +128,9 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 
 | Category | Case | Applies |
 | --- | --- | --- |
-| Replay | S600-5, S600-11 | yes: a reserved user ID is never reused, and a nonce is admitted once, whichever replica inserts |
+| Replay | S600-5, S600-11, S600-12, S600-14, S600-16 | yes: a reserved user ID, a nonce, an OTP counter, a ceremony, a recovery code and an external proof are each accepted once, whichever replica writes |
 | Tampering | S600-6 | yes: credentials only by environment reference; unknown keys refused |
-| Race / timing | S600-3, S600-10, S600-11 | yes: racing writers on two backends; the fence locks the actor's rows so a revocation orders before or after a mutation, never inside it |
+| Race / timing | S600-3, S600-10, S600-11, S600-12, S600-13 | yes: racing writers on two backends; the fence locks the actor's rows so a revocation orders before or after a mutation, never inside it |
 | Resource exhaustion | — | no: pool bounds and statement timeouts are configuration (validated in S600-6); load is slice 4 |
 | Confused deputy | S600-6, S600-10 | yes: no silent fallback from PostgreSQL to a local SQLite file; a revoked or out-of-policy administrator cannot mutate |
 | Spoofed or duplicated headers | — | no: no HTTP surface in this slice |
@@ -127,6 +157,11 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-10 | `s600_10_fenced_console_mutations_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-11 | `s600_11_replay_ledger_admits_each_nonce_once_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-11 | `s600_11_store_backed_delegation_nonces_match_the_file_window_across_replicas` | `src/admin/delegation.rs` | unit | passing |
+| S600-12 | `s600_12_totp_lifecycle_and_native_stepup_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-13 | `s600_13_external_factor_registry_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-14 | `s600_14_passkeys_and_recovery_codes_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-15 | `s600_15_passwordless_sign_in_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-16 | `s600_16_external_factor_stepup_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
 | S600-6 | `s600_6_serving_refuses_the_incomplete_postgres_backend` | `src/app.rs` | unit | passing |
@@ -139,8 +174,8 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 
 ## Open questions
 
-- Slice 2c–4 scope (ADR-0020). Hosted CI stays disabled; `make test-postgres` is the PostgreSQL run.
+- Slice 3–4 scope (ADR-0020). Hosted CI stays disabled; `make test-postgres` is the PostgreSQL run.
 
 ## 한국어 요약
 
-슬라이스 1 저장소 계약(사용자·신원·사용자 ID 원장, 제공자 부트스트랩, 세션·핸들, 아웃박스)이 SQLite와 PostgreSQL에서 동시 쓰기 상황을 포함해 똑같이 동작하는지 확인합니다. 예약된 사용자 ID는 어느 복제본에서도 재사용되지 않고, 더 새로운 스키마는 거부되며, 미완성 PostgreSQL 설정은 서비스되지 않고 SQLite로 대체되지도 않습니다. 슬라이스 2b는 관리자 권한 부여·회수, 행 잠금(`FOR SHARE`)으로 재평가하는 관리자 펜스와 그 아래의 사용자 상태 변경·세션 종료, 복제본 간에 공유되는 재사용 방지 논스 원장을 두 저장소에서 같은 결과로 검증합니다.
+슬라이스 1 저장소 계약(사용자·신원·사용자 ID 원장, 제공자 부트스트랩, 세션·핸들, 아웃박스)이 SQLite와 PostgreSQL에서 동시 쓰기 상황을 포함해 똑같이 동작하는지 확인합니다. 예약된 사용자 ID는 어느 복제본에서도 재사용되지 않고, 더 새로운 스키마는 거부되며, 미완성 PostgreSQL 설정은 서비스되지 않고 SQLite로 대체되지도 않습니다. 슬라이스 2b는 관리자 권한 부여·회수, 행 잠금(`FOR SHARE`)으로 재평가하는 관리자 펜스와 그 아래의 사용자 상태 변경·세션 종료, 복제본 간에 공유되는 재사용 방지 논스 원장을 두 저장소에서 같은 결과로 검증합니다. 슬라이스 2c는 TOTP 등록·카운터·단계 상승, 외부 인증 요소 레지스트리와 일회용 증명, 패스키 등록·검증·제거, 복구 코드, 비밀번호 없는 로그인, 요소 초기화를 같은 방식으로 검증합니다.

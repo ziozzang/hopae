@@ -6,7 +6,10 @@
 //! constraints, so several replicas behave like the single SQLite writer.
 //! Times come from the application clock, never from `now()`.
 mod admin;
+mod factors;
 mod handoff;
+mod passkeys;
+mod write;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,6 +40,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         3,
         "0003_slice2b_admin_nonces",
         include_str!("migrations/0003_slice2b_admin_nonces.sql"),
+    ),
+    (
+        4,
+        "0004_slice2c_factors",
+        include_str!("migrations/0004_slice2c_factors.sql"),
     ),
 ];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
@@ -675,45 +683,8 @@ impl PgStore {
                 return Err(StoreError::ProviderDisabled);
             }
         }
-        tx.execute(
-            "INSERT INTO sessions (session_id, user_id, provider_id, auth_time, factors, aal, authz_version, cred_gen, snapshot, bound_ip, bound_ua_sha256, created_at, last_seen_at, absolute_expires_at, terminated_at, terminated_reason, authz_version_at_auth, auth_time_source, bound_ua_prefix) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,NULL,NULL,$15,$16,$17)",
-            &[
-                &s.session_id.as_str(),
-                &s.user_id.as_str(),
-                &s.provider_id.as_str(),
-                &s.auth_time.secs(),
-                &serde_json::to_string(&s.factors).map_err(|_| corrupt("sessions.factors"))?,
-                &(s.aal.as_i64() as i32),
-                &i64_of(s.authz_version),
-                &i64_of(s.cred_gen),
-                &snapshot_json(&s.snapshot),
-                &s.bound_ip.to_string(),
-                &s.bound_ua_sha256.as_ref().map(|d| d.0.to_vec()),
-                &s.created_at.secs(),
-                &s.last_seen_at.secs(),
-                &s.absolute_expires_at.secs(),
-                &i64_of(s.authz_version_at_auth),
-                &s.auth_time_source.as_str(),
-                &s.bound_ua_prefix,
-            ],
-        )
-        .await
-        .map_err(pg)?;
-        let h = &req.portal_handle;
-        tx.execute(
-            "INSERT INTO session_handles (handle_sha256, session_id, host, issued_aal, created_at, last_seen_at, absolute_expires_at, revoked_at, revoked_reason) VALUES ($1,$2,$3,$4,$5,$6,$7,NULL,NULL)",
-            &[
-                &h.handle_sha256.0.to_vec(),
-                &h.session_id.as_str(),
-                &h.host.as_str(),
-                &(h.issued_aal.as_i64() as i32),
-                &h.created_at.secs(),
-                &h.last_seen_at.secs(),
-                &h.absolute_expires_at.secs(),
-            ],
-        )
-        .await
-        .map_err(pg)?;
+        write::insert_session(&tx, s).await?;
+        write::insert_handle(&tx, &req.portal_handle).await?;
         tx.execute(
             "UPDATE users SET last_login_at=$2 WHERE user_id=$1",
             &[&s.user_id.as_str(), &s.created_at.secs()],
@@ -1117,6 +1088,37 @@ impl CoreStore for PgStore {
             .iter()
             .map(|r| r.get(0))
             .collect())
+    }
+    async fn config_generation(&self) -> StoreResult<u64> {
+        let client = self.client().await?;
+        let v = client
+            .query_opt("SELECT value FROM meta WHERE key='config_generation'", &[])
+            .await
+            .map_err(pg)?
+            .map(|r| r.get::<_, String>(0));
+        match v {
+            None => Ok(0),
+            Some(s) => s.parse().map_err(|_| corrupt("meta.value")),
+        }
+    }
+
+    async fn bump_config_generation(&self) -> StoreResult<u64> {
+        retry(|| async {
+            let mut client = self.client().await?;
+            let tx = self.begin(&mut client).await?;
+            // The row lock orders a bump against writes that read the generation.
+            let n: String = tx
+                .query_one(
+                    "INSERT INTO meta (key, value) VALUES ('config_generation', '1') ON CONFLICT (key) DO UPDATE SET value = (meta.value::bigint + 1)::text RETURNING value",
+                    &[],
+                )
+                .await
+                .map_err(pg)?
+                .get(0);
+            tx.commit().await.map_err(pg)?;
+            n.parse().map_err(|_| corrupt("meta.value"))
+        })
+        .await
     }
 }
 

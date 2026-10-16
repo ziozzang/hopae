@@ -104,8 +104,13 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   rows locked `FOR SHARE`, deadline as `statement_timeout`), fenced status
   changes and session termination (`AdminStore`), and a replay ledger shared
   across replicas (`NonceStore`, PostgreSQL schema 3 `replay_nonces`); the
-  Hangang delegation nonce admission can use the store ledger. Factors and
-  passkeys move in slice 2c.
+  Hangang delegation nonce admission can use the store ledger.
+- PostgreSQL store slice 2c: the `Factors` and `Passkeys` store traits on
+  PostgreSQL (TOTP, external factors, WebAuthn passkeys, recovery codes,
+  portal and application elevation, passwordless sign-in, factor reset),
+  PostgreSQL schema 4, and the configuration generation in the slice
+  contract. Factor writes lock the subject user's row before re-checking the
+  acting session.
 
 ### Changed
 

@@ -133,6 +133,12 @@ impl CoreStore for Store {
         })
         .await
     }
+    async fn config_generation(&self) -> StoreResult<u64> {
+        Directory::config_generation(self).await
+    }
+    async fn bump_config_generation(&self) -> StoreResult<u64> {
+        Directory::bump_config_generation(self).await
+    }
 }
 
 #[async_trait]

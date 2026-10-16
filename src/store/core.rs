@@ -83,6 +83,11 @@ pub trait CoreStore: Send + Sync {
     async fn recent_events(&self, limit: usize) -> StoreResult<Vec<Event>>;
     /// Pending delivery rows of one event (outbox fan-out check).
     async fn pending_deliveries(&self, event: &str) -> StoreResult<Vec<String>>;
+
+    /// The configuration generation (0 before the first bump); step-up
+    /// bindings and factor provenance record it (slice 2c).
+    async fn config_generation(&self) -> StoreResult<u64>;
+    async fn bump_config_generation(&self) -> StoreResult<u64>;
 }
 
 /// Slice 2a of the store contract (ADR-0020): login transactions and the

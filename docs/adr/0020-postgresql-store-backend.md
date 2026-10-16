@@ -182,7 +182,7 @@ against both backends.
 | 1 | `CoreStore`, PostgreSQL schema v1 (users, identities, providers, the user-ID ledger, sessions, handles, login transactions, handoff codes, events, deliveries), the conformance harness, config `store.kind = postgres` validated at preflight and refused by `serve` as incomplete |
 | 2a | Login transactions (cap, eviction bound, binding, consume-once) and the ADR-0004 handoff redemption (`HandoffStore`; code and session rows locked `FOR UPDATE`; the transaction count/evict/insert serialized by an advisory lock) — implemented |
 | 2b | Administrator grants (`AdminStore`), the actor fence re-evaluated with the actor's session, handle, user and grant rows locked `FOR SHARE` and the deadline as `statement_timeout`, fenced status changes and session termination, and the shared replay ledger (`NonceStore`, table `replay_nonces`; the Hangang delegation nonce admission can use it instead of its per-process file), PostgreSQL schema 3 — implemented |
-| 2c | Factors and passkeys (TOTP, WebAuthn credentials and challenges, recovery codes, elevations) |
+| 2c | Factors and passkeys: the existing `Factors` and `Passkeys` traits on PostgreSQL (sealed TOTP enrollments and monotonic counters, the external factor registry and single-use proofs, WebAuthn credentials and ceremonies, recovery codes, portal and application elevation, passwordless sign-in, the factor reset); every factor write locks the subject user's row `FOR UPDATE` before re-checking the acting session (`FOR UPDATE`) and handle (`FOR SHARE`), registry and passwordless-cap changes take advisory locks; the configuration generation moves into `CoreStore`; PostgreSQL schema 4 — implemented |
 | 3 | Groups, subject directory and console listings (window queries rewritten without `INDEXED BY`), the event relay and pruning |
 | 4 | Authentication-gateway owners (publication, receipts, projections), the migration tool, `serve` enabled, two-replica qualification (ROADMAP M2 exit) |
 
@@ -211,7 +211,7 @@ against both backends.
   `store.postgres.{url_env, ca_file, pool_size, connect_timeout_ms,
   statement_timeout_ms}`.
 - Follow-up scenarios 601–604 (slices 2c–4, two-replica qualification).
-  Slices 2a and 2b extend scenario 600 (S600-7 to S600-11).
+  Slices 2a to 2c extend scenario 600 (S600-7 to S600-16).
 
 ## Alternatives considered
 

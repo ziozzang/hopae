@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::core::{AdminStore, CoreStore, HandoffStore, NonceStore};
+use super::passkeys::*;
 use super::types::*;
+use super::{Factors, Passkeys};
 use super::{StoreError, StoreResult};
 use crate::crypto::{Clock, Digest, SeededRng, TestClock, Timestamp, random_id, random_token};
 use crate::event::types::{Event, EventBuilder, EventKind, Outcome, reasons};
@@ -24,6 +26,8 @@ pub(crate) struct Backend {
     pub handoff: Arc<dyn HandoffStore>,
     pub admin: Arc<dyn AdminStore>,
     pub nonces: Arc<dyn NonceStore>,
+    pub factors: Arc<dyn Factors>,
+    pub passkeys: Arc<dyn Passkeys>,
     pub clock: Arc<TestClock>,
     pub rng: Arc<SeededRng>,
     _dir: Option<tempfile::TempDir>,
@@ -61,7 +65,9 @@ fn sqlite() -> Backend {
         store: store.clone(),
         handoff: store.clone(),
         admin: store.clone(),
-        nonces: store,
+        nonces: store.clone(),
+        factors: store.clone(),
+        passkeys: store,
         clock,
         rng,
         _dir: Some(dir),
@@ -98,6 +104,8 @@ pub(crate) async fn postgres() -> Option<Backend> {
         handoff: store.clone(),
         admin: store.clone(),
         nonces: store.clone(),
+        factors: store.clone(),
+        passkeys: store.clone(),
         store: store.clone(),
         clock,
         rng: Arc::new(SeededRng::new(42)),
@@ -1760,6 +1768,1031 @@ async fn s600_10_fenced_console_mutations_agree_on_both_backends() {
 async fn s600_11_replay_ledger_admits_each_nonce_once_on_both_backends() {
     for b in backends().await {
         replay_ledger(&b).await;
+        b.cleanup().await;
+    }
+}
+
+// ---- slice 2c: second factors and passkeys -------------------------------
+
+const PORTAL: &str = "auth.example.test";
+
+fn factor_actor(b: &Backend, view: &HandleView) -> FactorActor {
+    FactorActor {
+        request_id: "r_conformance".into(),
+        provider_configuration: (ProviderKind::Oidc, provider("mock", true).config),
+        client_ip: "192.0.2.10".parse().unwrap(),
+        view: view.clone(),
+        authorized_at: b.clock.now(),
+        session_idle: Duration::from_secs(86_400),
+        handle_idle: Duration::from_secs(86_400),
+    }
+}
+
+async fn view_of(b: &Backend, h: &HandleRow) -> HandleView {
+    b.store
+        .lookup_handle(&h.handle_sha256, &Host::parse(PORTAL).unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+fn envelope(b: &Backend, user: &User, id: &str) -> crate::factor::seed_cipher::Envelope {
+    let key = crate::factor::seed_cipher::Key::new("key-1".into(), [7; 32]).unwrap();
+    let seed = crate::factor::totp::Seed::from_bytes(&[5; 20]).unwrap();
+    key.seal(&seed, user.user_id.as_str(), id, b.rng.as_ref())
+        .unwrap()
+}
+
+/// A reissued portal handle at `aal` that does not outlive `view`'s.
+fn elevated_handle(b: &Backend, view: &HandleView, aal: Aal) -> HandleRow {
+    let mut h = handle(b, &view.session.session_id);
+    h.issued_aal = aal;
+    h.absolute_expires_at = view.handle.absolute_expires_at;
+    h
+}
+
+/// A step-up transaction of the portal session, matching `code`.
+async fn stepup_txn(b: &Backend, view: &HandleView, code: &HandoffCodeRow) -> Digest {
+    let (mut txn, d) = new_txn(b, "192.0.2.10");
+    txn.purpose = TxnPurpose::Stepup;
+    txn.portal_session_id = Some(view.session.session_id.clone());
+    txn.return_target = code.return_target.clone();
+    txn.bind_sha256 = Some(code.bind_sha256);
+    txn.recovery_depth = code.recovery_depth;
+    txn.pending_identity = None;
+    txn.reauth_max_age = None;
+    let since = Timestamp(b.clock.now().0 - 60_000);
+    b.handoff
+        .create_transaction_capped(txn, vec![], since, None, 10_000)
+        .await
+        .unwrap();
+    d
+}
+
+fn passkey(user: &User, id: u8, now: Timestamp) -> PasskeyRecord {
+    PasskeyRecord {
+        credential_id: vec![id; 32],
+        user_id: user.user_id.clone(),
+        label: format!("Key {id}"),
+        passkey: format!("{{\"cred\":{id}}}"),
+        aaguid: Some([id; 16]),
+        transports: vec!["internal".into()],
+        backup_eligible: true,
+        backup_state: true,
+        user_verified: true,
+        attestation_format: "none".into(),
+        attested: false,
+        assurance: Assurance::Aal2,
+        sign_count: 0,
+        created_at: now,
+        last_used_at: None,
+        revision: 1,
+    }
+}
+
+fn passkey_use(id: u8, count: u32) -> PasskeyUse {
+    PasskeyUse {
+        credential_id: vec![id; 32],
+        passkey: format!("{{\"cred\":{id},\"count\":{count}}}"),
+        sign_count: count,
+        backup_eligible: true,
+        backup_state: true,
+        assurance: Assurance::Aal2,
+    }
+}
+
+async fn ceremony(
+    b: &Backend,
+    view: &HandleView,
+    purpose: CeremonyPurpose,
+    txn: Option<Digest>,
+) -> StoreResult<Digest> {
+    let digest = random_token(b.rng.as_ref(), 32).digest();
+    b.passkeys
+        .begin_ceremony(NewCeremony {
+            actor: factor_actor(b, view),
+            purpose,
+            digest,
+            portal_binding: Digest([9; 32]),
+            transaction: txn,
+            state: "{\"opaque\":true}".into(),
+            expires_at: b.clock.now().add(Duration::from_secs(300)),
+        })
+        .await?;
+    Ok(digest)
+}
+
+fn refused<T: std::fmt::Debug>(r: StoreResult<T>, what: &str) -> bool {
+    matches!(r, Err(StoreError::Conflict(m)) if m == what)
+}
+
+async fn totp_lifecycle_and_stepup(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let u = user(b, 1).await;
+    let (_, h) = session(b, &u).await;
+    let view = view_of(b, &h).await;
+    // A stale actor (factors changed since it was issued) is refused.
+    let mut stale = view.clone();
+    stale.session.cred_gen += 1;
+    assert!(
+        refused(
+            b.factors
+                .create_totp_pending_authorized(
+                    "t-0".into(),
+                    factor_actor(b, &stale),
+                    envelope(b, &u, "t-0"),
+                    vec![]
+                )
+                .await,
+            "factor authorization revoked"
+        ),
+        "{name}"
+    );
+    b.factors
+        .create_totp_pending_authorized(
+            "t-1".into(),
+            factor_actor(b, &view),
+            envelope(b, &u, "t-1"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    // One pending enrollment per user.
+    assert!(conflict(
+        b.factors
+            .create_totp_pending(
+                "t-2".into(),
+                u.user_id.clone(),
+                envelope(b, &u, "t-2"),
+                vec![]
+            )
+            .await
+    ));
+    let e = b
+        .factors
+        .totp_enrollment("t-1", &u.user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (e.revision, e.active, e.last_counter),
+        (1, false, None),
+        "{name}"
+    );
+    assert!(!b.factors.has_active_totp(&u.user_id).await.unwrap());
+    assert!(
+        b.factors
+            .activate_totp_authorized("t-1", factor_actor(b, &view), 1, 10, vec![])
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    assert!(b.factors.has_active_totp(&u.user_id).await.unwrap());
+    // The counter only moves forward; a stale revision is no change.
+    assert!(
+        !b.factors
+            .consume_totp_counter("t-1", &u.user_id, 2, 10, vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.factors
+            .consume_totp_counter("t-1", &u.user_id, 1, 11, vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        b.factors
+            .consume_totp_counter("t-1", &u.user_id, 2, 11, vec![])
+            .await
+            .unwrap()
+    );
+    let mut racers = Vec::new();
+    for _ in 0..8 {
+        let f = b.factors.clone();
+        let id = u.user_id.clone();
+        racers.push(tokio::spawn(async move {
+            f.consume_totp_counter("t-1", &id, 2, 20, vec![]).await
+        }));
+    }
+    let mut won = 0;
+    for t in racers {
+        if t.await.unwrap().unwrap() {
+            won += 1;
+        }
+    }
+    assert_eq!(won, 1, "{name}: one code, one use");
+    // Native step-up: bind, then elevate with a fresh counter.
+    let generation = b.store.bump_config_generation().await.unwrap();
+    assert_eq!(b.store.config_generation().await.unwrap(), generation);
+    let (mut code, _) = code_row(b, &view.session, view.session.cred_gen + 1);
+    code.issued_aal = Aal::Two;
+    let txn = stepup_txn(b, &view, &code).await;
+    let bind = BindTotpStepUp {
+        actor: factor_actor(b, &view),
+        transaction: txn,
+        portal_binding: Digest([9; 32]),
+        config_generation: Some(generation),
+    };
+    let binding = b.factors.bind_totp_stepup(bind).await.unwrap();
+    assert_eq!(
+        (binding.enrollment(), binding.revision()),
+        ("t-1", 2),
+        "{name}"
+    );
+    // Rebinding the same browser is idempotent; another binding is refused.
+    let again = BindTotpStepUp {
+        actor: factor_actor(b, &view),
+        transaction: txn,
+        portal_binding: Digest([9; 32]),
+        config_generation: Some(generation),
+    };
+    b.factors.bind_totp_stepup(again).await.unwrap();
+    let other = BindTotpStepUp {
+        actor: factor_actor(b, &view),
+        transaction: txn,
+        portal_binding: Digest([10; 32]),
+        config_generation: Some(generation),
+    };
+    assert!(refused(
+        b.factors.bind_totp_stepup(other).await,
+        "step-up challenge unavailable"
+    ));
+    let new_handle = elevated_handle(b, &view, Aal::Two);
+    let elevate =
+        |counter: u64, generation: u64, code: HandoffCodeRow, handle: HandleRow| TotpElevation {
+            actor: factor_actor(b, &view),
+            enrollment: "t-1".into(),
+            revision: 2,
+            counter,
+            transaction: txn,
+            portal_binding: Digest([9; 32]),
+            config_generation: Some(generation),
+            portal_handle: handle,
+            handoff: code,
+            events: vec![],
+        };
+    // A changed configuration generation, then a replayed counter, are refused.
+    assert!(refused(
+        b.factors
+            .elevate_totp(elevate(
+                30,
+                generation + 1,
+                code.clone(),
+                new_handle.clone()
+            ))
+            .await,
+        "step-up configuration changed"
+    ));
+    assert!(refused(
+        b.factors
+            .elevate_totp(elevate(20, generation, code.clone(), new_handle.clone()))
+            .await,
+        "factor proof unavailable"
+    ));
+    b.factors
+        .elevate_totp(elevate(30, generation, code.clone(), new_handle.clone()))
+        .await
+        .unwrap();
+    let elevated = view_of(b, &new_handle).await;
+    assert_eq!(
+        (
+            elevated.session.aal,
+            elevated.session.cred_gen,
+            elevated.handle.issued_aal
+        ),
+        (Aal::Two, view.session.cred_gen + 1, Aal::Two),
+        "{name}"
+    );
+    assert_eq!(
+        elevated.session.factors.last().unwrap().kind,
+        FactorKind::Totp
+    );
+    assert_eq!(
+        elevated.session.auth_time, view.session.auth_time,
+        "{name}: primary time kept"
+    );
+    assert!(
+        b.store
+            .lookup_handle(&h.handle_sha256, &Host::parse(PORTAL).unwrap())
+            .await
+            .unwrap()
+            .is_none_or(|v| v.handle.revoked_at.is_some()),
+        "{name}: old handle revoked"
+    );
+    // The challenge is single use.
+    let mut code2 = code.clone();
+    code2.code_sha256 = Digest([0x42; 32]);
+    assert!(conflict(
+        b.factors
+            .elevate_totp(elevate(
+                31,
+                generation,
+                code2,
+                elevated_handle(b, &view, Aal::Two)
+            ))
+            .await
+    ));
+    // Revoking an active factor without a recent second factor is refused;
+    // with one, it ends the user's sessions.
+    let fresh = view_of(b, &new_handle).await;
+    assert!(refused(
+        b.factors
+            .revoke_totp_authorized("t-1", factor_actor(b, &view), 2, vec![])
+            .await,
+        "factor authorization revoked"
+    ));
+    assert!(
+        b.factors
+            .revoke_totp_authorized("t-1", factor_actor(b, &fresh), 2, vec![])
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    let s = b
+        .store
+        .session(&fresh.session.session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        s.terminated_reason.as_deref(),
+        Some(reasons::FACTOR_REVOKED.0),
+        "{name}"
+    );
+    assert!(!b.factors.has_active_totp(&u.user_id).await.unwrap());
+}
+
+async fn external_registry(b: &Backend) {
+    let name = b.store.backend();
+    let generation = b.store.bump_config_generation().await.unwrap();
+    assert_eq!(
+        b.factors.external_snapshot_revision().await.unwrap(),
+        0,
+        "{name}"
+    );
+    let authority =
+        |factor: &str, revision: u64, binding: u8| crate::factor::external_transport::Authority {
+            factor: factor.into(),
+            revision,
+            binding: [binding; 32],
+        };
+    let snapshot = |expected: u64, authorities| ExternalFactorSnapshot {
+        authorities,
+        config_generation: generation,
+        expected_revision: expected,
+    };
+    assert_eq!(
+        b.factors
+            .publish_external_snapshot(snapshot(
+                0,
+                vec![authority("otp:a", 1, 1), authority("otp:b", 1, 2)]
+            ))
+            .await
+            .unwrap(),
+        1,
+        "{name}"
+    );
+    // A stale expected revision, a duplicate id and a revision regression are refused.
+    assert!(refused(
+        b.factors
+            .publish_external_snapshot(snapshot(0, vec![]))
+            .await,
+        "external factor snapshot revision changed"
+    ));
+    assert!(refused(
+        b.factors
+            .publish_external_snapshot(snapshot(
+                1,
+                vec![authority("otp:a", 1, 1), authority("otp:a", 1, 1)]
+            ))
+            .await,
+        "duplicate external factor id"
+    ));
+    assert!(refused(
+        b.factors
+            .publish_external_snapshot(snapshot(1, vec![authority("otp:a", 1, 9)]))
+            .await,
+        "external factor revision changed"
+    ));
+    // Dropping `otp:b` leaves a disable tombstone; the revision moves once.
+    assert_eq!(
+        b.factors
+            .publish_external_snapshot(snapshot(1, vec![authority("otp:a", 1, 1)]))
+            .await
+            .unwrap(),
+        2
+    );
+    // Concurrent publishers on one expected revision: exactly one wins.
+    let mut racers = Vec::new();
+    for i in 0..4u8 {
+        let f = b.factors.clone();
+        racers.push(tokio::spawn(async move {
+            f.publish_external_snapshot(ExternalFactorSnapshot {
+                authorities: vec![crate::factor::external_transport::Authority {
+                    factor: "otp:a".into(),
+                    revision: 2 + u64::from(i),
+                    binding: [i; 32],
+                }],
+                config_generation: generation,
+                expected_revision: 2,
+            })
+            .await
+        }));
+    }
+    let mut won = 0;
+    for t in racers {
+        if t.await.unwrap().is_ok() {
+            won += 1;
+        }
+    }
+    assert_eq!(won, 1, "{name}");
+    assert_eq!(
+        b.factors.external_snapshot_revision().await.unwrap(),
+        3,
+        "{name}"
+    );
+}
+
+async fn passkeys_and_recovery(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let u = user(b, 1).await;
+    let (_, h) = session(b, &u).await;
+    let view = view_of(b, &h).await;
+    let handle_a = b
+        .passkeys
+        .passkey_user_handle(&u.user_id, [1; 16])
+        .await
+        .unwrap();
+    assert_eq!(handle_a, [1; 16]);
+    assert_eq!(
+        b.passkeys
+            .passkey_user_handle(&u.user_id, [2; 16])
+            .await
+            .unwrap(),
+        [1; 16],
+        "{name}: stable"
+    );
+    // Register: ceremony consumed once; a second registration of the id is refused.
+    let c = ceremony(b, &view, CeremonyPurpose::Register, None)
+        .await
+        .unwrap();
+    let rec = b.passkeys.ceremony(&c).await.unwrap().unwrap();
+    assert_eq!(
+        (rec.purpose, rec.session_id.clone()),
+        (CeremonyPurpose::Register, view.session.session_id.clone())
+    );
+    let register = |c: Digest, id: u8| RegisterPasskey {
+        actor: factor_actor(b, &view),
+        ceremony: c,
+        portal_binding: Digest([9; 32]),
+        record: passkey(&u, id, b.clock.now()),
+        events: vec![],
+    };
+    b.passkeys.register_passkey(register(c, 1)).await.unwrap();
+    assert!(refused(
+        b.passkeys.register_passkey(register(c, 2)).await,
+        refusal::CEREMONY_UNAVAILABLE
+    ));
+    // With a passkey present, adding another needs a recent second factor.
+    let c2 = ceremony(b, &view, CeremonyPurpose::Register, None)
+        .await
+        .unwrap();
+    assert!(
+        refused(
+            b.passkeys.register_passkey(register(c2, 2)).await,
+            refusal::VERIFICATION_REQUIRED
+        ),
+        "{name}"
+    );
+    let summary = b.passkeys.factor_summary(&u.user_id).await.unwrap();
+    assert_eq!(
+        (
+            summary.passkeys.len(),
+            summary.totp_active,
+            summary.recovery_unused
+        ),
+        (1, false, 0)
+    );
+    let (who, keys) = b.passkeys.passkey_account([1; 16]).await.unwrap().unwrap();
+    assert_eq!((who, keys.len()), (u.user_id.clone(), 1), "{name}");
+    // Portal verification with the passkey raises the session and rotates.
+    let c3 = ceremony(b, &view, CeremonyPurpose::Verify, None)
+        .await
+        .unwrap();
+    let verified = elevated_handle(b, &view, Aal::Two);
+    b.passkeys
+        .elevate_portal(PortalElevation {
+            actor: factor_actor(b, &view),
+            portal_binding: Digest([9; 32]),
+            proof: PortalProof::Passkey {
+                ceremony: c3,
+                used: passkey_use(1, 5),
+            },
+            portal_handle: verified.clone(),
+            events: vec![],
+        })
+        .await
+        .unwrap();
+    let v2 = view_of(b, &verified).await;
+    assert_eq!(
+        (v2.session.aal, v2.session.cred_gen),
+        (Aal::Two, view.session.cred_gen + 1),
+        "{name}"
+    );
+    // A counter that did not move is stale (out-of-order tabs).
+    let c4 = ceremony(b, &v2, CeremonyPurpose::Verify, None)
+        .await
+        .unwrap();
+    assert!(refused(
+        b.passkeys
+            .elevate_portal(PortalElevation {
+                actor: factor_actor(b, &v2),
+                portal_binding: Digest([9; 32]),
+                proof: PortalProof::Passkey {
+                    ceremony: c4,
+                    used: passkey_use(1, 5)
+                },
+                portal_handle: elevated_handle(b, &v2, Aal::Two),
+                events: vec![],
+            })
+            .await,
+        refusal::COUNTER_STALE
+    ));
+    // The only second factor cannot be removed; renaming works.
+    assert!(refused(
+        b.passkeys
+            .revoke_passkey(factor_actor(b, &v2), &[1; 32], vec![])
+            .await,
+        refusal::LAST_FACTOR
+    ));
+    assert!(
+        b.passkeys
+            .rename_passkey(factor_actor(b, &v2), &[1; 32], "Laptop".into(), vec![])
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.passkeys
+            .rename_passkey(factor_actor(b, &v2), &[7; 32], "Nope".into(), vec![])
+            .await
+            .unwrap()
+    );
+    // Application step-up with the passkey: ceremony, transaction and
+    // counter are consumed together and the session rotates again.
+    let generation = b.store.bump_config_generation().await.unwrap();
+    let (mut code, _) = code_row(b, &v2.session, v2.session.cred_gen + 1);
+    code.issued_aal = Aal::Two;
+    let txn = stepup_txn(b, &v2, &code).await;
+    let c6 = ceremony(b, &v2, CeremonyPurpose::StepUp, Some(txn))
+        .await
+        .unwrap();
+    let stepped = elevated_handle(b, &v2, Aal::Two);
+    let webauthn = |c: Digest, code: HandoffCodeRow, h: HandleRow, count: u32| WebauthnElevation {
+        actor: factor_actor(b, &v2),
+        ceremony: c,
+        portal_binding: Digest([9; 32]),
+        transaction: txn,
+        config_generation: generation,
+        used: passkey_use(1, count),
+        portal_handle: h,
+        handoff: code,
+        events: vec![],
+    };
+    b.passkeys
+        .elevate_webauthn(webauthn(c6, code.clone(), stepped.clone(), 6))
+        .await
+        .unwrap();
+    let mut replay = code.clone();
+    replay.code_sha256 = Digest([0x43; 32]);
+    assert!(
+        conflict(
+            b.passkeys
+                .elevate_webauthn(webauthn(c6, replay, elevated_handle(b, &v2, Aal::Two), 7))
+                .await
+        ),
+        "{name}: step-up replay"
+    );
+    let v2 = view_of(b, &stepped).await;
+    assert_eq!(
+        v2.session.factors.last().unwrap().kind,
+        FactorKind::Webauthn
+    );
+    // Recovery codes: minted after a possession factor, each used once.
+    let codes: Vec<(String, String)> = (0..10)
+        .map(|i| (format!("L{i:04}"), format!("$argon2id$h{i}")))
+        .collect();
+    b.passkeys
+        .replace_recovery_codes(
+            factor_actor(b, &v2),
+            "batch-1".into(),
+            codes.clone(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        b.passkeys
+            .recovery_code_hash(&u.user_id, "L0003")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("$argon2id$h3")
+    );
+    let recovered = elevated_handle(b, &v2, Aal::Two);
+    b.passkeys
+        .elevate_portal(PortalElevation {
+            actor: factor_actor(b, &v2),
+            portal_binding: Digest([9; 32]),
+            proof: PortalProof::Recovery {
+                lookup: "L0003".into(),
+            },
+            portal_handle: recovered.clone(),
+            events: vec![],
+        })
+        .await
+        .unwrap();
+    let v3 = view_of(b, &recovered).await;
+    assert!(
+        b.passkeys
+            .recovery_code_hash(&u.user_id, "L0003")
+            .await
+            .unwrap()
+            .is_none(),
+        "{name}"
+    );
+    let summary = b.passkeys.factor_summary(&u.user_id).await.unwrap();
+    assert_eq!(summary.recovery_unused, 9, "{name}");
+    assert!(summary.recovery_required_at.is_some(), "{name}");
+    assert!(refused(
+        b.passkeys
+            .elevate_portal(PortalElevation {
+                actor: factor_actor(b, &v3),
+                portal_binding: Digest([9; 32]),
+                proof: PortalProof::Recovery {
+                    lookup: "L0003".into()
+                },
+                portal_handle: elevated_handle(b, &v3, Aal::Two),
+                events: vec![],
+            })
+            .await,
+        "recovery code unavailable"
+    ));
+    // A clone signal revokes the credential and ends the sessions it elevated.
+    let c5 = ceremony(b, &v3, CeremonyPurpose::Verify, None)
+        .await
+        .unwrap();
+    b.passkeys
+        .passkey_clone_detected(&c5, &[1; 32], vec![])
+        .await
+        .unwrap();
+    let ended = b
+        .store
+        .session(&v3.session.session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        ended.terminated_reason.as_deref(),
+        Some(reasons::COUNTER_REGRESSION.0),
+        "{name}"
+    );
+    assert!(
+        b.passkeys
+            .factor_summary(&u.user_id)
+            .await
+            .unwrap()
+            .passkeys
+            .is_empty()
+    );
+    // The administrator reset clears what is left and ends every session.
+    let (_, h2) = session(b, &u).await;
+    let report = b
+        .passkeys
+        .reset_factors(&u.user_id, "r_reset", vec![])
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            report.passkeys,
+            report.totp,
+            report.recovery_codes,
+            report.sessions
+        ),
+        (0, 0, 9, 1),
+        "{name}"
+    );
+    assert!(
+        b.store
+            .lookup_handle(&h2.handle_sha256, &Host::parse(PORTAL).unwrap())
+            .await
+            .unwrap()
+            .is_none_or(|v| v.session.terminated_at.is_some())
+    );
+    assert!(refused(
+        b.passkeys
+            .reset_factors(&crate::identity::types::UserId::new("u_GHOST"), "r", vec![])
+            .await,
+        "user unavailable"
+    ));
+}
+
+async fn passwordless_sign_in(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let u = user(b, 1).await;
+    let (_, h) = session(b, &u).await;
+    let view = view_of(b, &h).await;
+    b.passkeys
+        .passkey_user_handle(&u.user_id, [3; 16])
+        .await
+        .unwrap();
+    let c = ceremony(b, &view, CeremonyPurpose::Register, None)
+        .await
+        .unwrap();
+    b.passkeys
+        .register_passkey(RegisterPasskey {
+            actor: factor_actor(b, &view),
+            ceremony: c,
+            portal_binding: Digest([9; 32]),
+            record: passkey(&u, 4, b.clock.now()),
+            events: vec![],
+        })
+        .await
+        .unwrap();
+    let (mut txn, d) = new_txn(b, "198.51.100.7");
+    txn.reauth_max_age = None;
+    let since = Timestamp(b.clock.now().0 - 60_000);
+    b.handoff
+        .create_transaction_capped(txn, vec![], since, None, 10_000)
+        .await
+        .unwrap();
+    let begin = |digest: Digest| NewLoginCeremony {
+        digest,
+        transaction: d,
+        portal_binding: Digest([11; 32]),
+        client_ip: "198.51.100.7".parse().unwrap(),
+        state: "{}".into(),
+        expires_at: b.clock.now().add(Duration::from_secs(300)),
+    };
+    let first = Digest([0x51; 32]);
+    b.passkeys.begin_login_ceremony(begin(first)).await.unwrap();
+    let rec = b.passkeys.login_ceremony(&first).await.unwrap().unwrap();
+    assert_eq!(
+        (rec.transaction, rec.portal_bind_sha256),
+        (d, Digest([11; 32])),
+        "{name}"
+    );
+    b.passkeys
+        .fail_login_ceremony(&first, vec![])
+        .await
+        .unwrap();
+    assert!(
+        b.passkeys.login_ceremony(&first).await.unwrap().is_none(),
+        "{name}"
+    );
+    // Per-address rate: thirty a minute (spent rows do not count), then busy.
+    for i in 0..LOGIN_CEREMONIES_PER_MINUTE {
+        b.passkeys
+            .begin_login_ceremony(begin(Digest([i as u8; 32])))
+            .await
+            .unwrap();
+    }
+    assert!(
+        refused(
+            b.passkeys
+                .begin_login_ceremony(begin(Digest([0xEE; 32])))
+                .await,
+            refusal::LOGIN_BUSY
+        ),
+        "{name}"
+    );
+    // A verified sign-in consumes the ceremony and the transaction once.
+    let now = b.clock.now();
+    let mut s = session_row(b, &u);
+    s.provider_id = ProviderId::new(crate::provider::types::PASSKEY_PROVIDER);
+    s.aal = Aal::Two;
+    s.cred_gen = 1;
+    s.factors = vec![FactorEntry {
+        kind: FactorKind::Webauthn,
+        provider: None,
+        at: now,
+    }];
+    let mut ph = handle(b, &s.session_id);
+    ph.issued_aal = Aal::Two;
+    let login = |s: SessionRow, ph: HandleRow| PasskeyLogin {
+        ceremony: Digest([0; 32]),
+        transaction: d,
+        portal_binding: Digest([11; 32]),
+        client_ip: "198.51.100.7".parse().unwrap(),
+        used: passkey_use(4, 1),
+        session: s,
+        portal_handle: ph,
+        events: vec![],
+    };
+    b.passkeys
+        .create_passkey_session(login(s.clone(), ph.clone()))
+        .await
+        .unwrap();
+    let made = b.store.session(&s.session_id).await.unwrap().unwrap();
+    assert_eq!(
+        (made.aal, made.provider_id.as_str()),
+        (Aal::Two, crate::provider::types::PASSKEY_PROVIDER),
+        "{name}"
+    );
+    let mut s2 = s.clone();
+    s2.session_id = SessionId::new(random_id(b.rng.as_ref(), "s_"));
+    let mut ph2 = handle(b, &s2.session_id);
+    ph2.issued_aal = Aal::Two;
+    assert!(
+        refused(
+            b.passkeys.create_passkey_session(login(s2, ph2)).await,
+            refusal::CEREMONY_UNAVAILABLE
+        ),
+        "{name}"
+    );
+    // Turning passwordless sign-in off ends those sessions only.
+    assert_eq!(
+        b.passkeys.end_passkey_sessions("r_off").await.unwrap(),
+        1,
+        "{name}"
+    );
+    assert!(
+        b.store
+            .session(&view.session.session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminated_at
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_12_totp_lifecycle_and_native_stepup_agree_on_both_backends() {
+    for b in backends().await {
+        totp_lifecycle_and_stepup(&b).await;
+        b.cleanup().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_13_external_factor_registry_agrees_on_both_backends() {
+    for b in backends().await {
+        external_registry(&b).await;
+        b.cleanup().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_14_passkeys_and_recovery_codes_agree_on_both_backends() {
+    for b in backends().await {
+        passkeys_and_recovery(&b).await;
+        b.cleanup().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_15_passwordless_sign_in_agrees_on_both_backends() {
+    for b in backends().await {
+        passwordless_sign_in(&b).await;
+        b.cleanup().await;
+    }
+}
+
+async fn external_stepup(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let u = user(b, 1).await;
+    let (_, h) = session(b, &u).await;
+    let view = view_of(b, &h).await;
+    let generation = b.store.bump_config_generation().await.unwrap();
+    let authority = |revision: u64, binding: u8| crate::factor::external_transport::Authority {
+        factor: "otp:a".into(),
+        revision,
+        binding: [binding; 32],
+    };
+    b.factors
+        .publish_external_snapshot(ExternalFactorSnapshot {
+            authorities: vec![authority(1, 1)],
+            config_generation: generation,
+            expected_revision: 0,
+        })
+        .await
+        .unwrap();
+    let (mut code, _) = code_row(b, &view.session, view.session.cred_gen + 1);
+    code.issued_aal = Aal::Two;
+    let txn = stepup_txn(b, &view, &code).await;
+    let bind = |a| BindExternalStepUp {
+        actor: factor_actor(b, &view),
+        transaction: txn,
+        portal_binding: Digest([9; 32]),
+        authority: a,
+        config_generation: generation,
+    };
+    // An authority that is not the published one is refused.
+    assert!(refused(
+        b.factors.bind_external_stepup(bind(authority(1, 2))).await,
+        "external factor disabled or changed"
+    ));
+    b.factors
+        .bind_external_stepup(bind(authority(1, 1)))
+        .await
+        .unwrap();
+    let now = b.clock.now();
+    let proof = |digest: u8| crate::factor::external_transport::VerifiedProof {
+        authority: authority(1, 1),
+        challenge: txn.to_hex(),
+        user: u.user_id.as_str().into(),
+        session: view.session.session_id.as_str().into(),
+        service: "app".into(),
+        credential_generation: view.session.cred_gen,
+        proof: Digest([digest; 32]),
+        verified_at: now,
+        expires_at: now.add(Duration::from_secs(5)),
+        deadline: std::time::Instant::now() + Duration::from_secs(5),
+    };
+    let new_handle = elevated_handle(b, &view, Aal::Two);
+    let elevation = |p, code: HandoffCodeRow, handle: HandleRow| ExternalElevation {
+        actor: factor_actor(b, &view),
+        proof: p,
+        transaction: txn,
+        portal_binding: Digest([9; 32]),
+        config_generation: generation,
+        portal_handle: handle,
+        handoff: code,
+        events: vec![],
+    };
+    // A proof for another session is refused before anything is consumed.
+    let mut foreign = proof(0x71);
+    foreign.session = "s_OTHER".into();
+    assert!(refused(
+        b.factors
+            .elevate_external(elevation(foreign, code.clone(), new_handle.clone()))
+            .await,
+        "external proof context unavailable"
+    ));
+    b.factors
+        .elevate_external(elevation(proof(0x72), code.clone(), new_handle.clone()))
+        .await
+        .unwrap();
+    let elevated = view_of(b, &new_handle).await;
+    assert_eq!(elevated.session.aal, Aal::Two, "{name}");
+    assert_eq!(
+        elevated.session.factors.last().unwrap().kind,
+        FactorKind::External
+    );
+    let mut again = code.clone();
+    again.code_sha256 = Digest([0x44; 32]);
+    assert!(conflict(
+        b.factors
+            .elevate_external(elevation(
+                proof(0x72),
+                again,
+                elevated_handle(b, &view, Aal::Two)
+            ))
+            .await
+    ));
+    // Rotating the authority's binding ends the sessions it elevated.
+    b.factors
+        .publish_external_snapshot(ExternalFactorSnapshot {
+            authorities: vec![authority(2, 3)],
+            config_generation: generation,
+            expected_revision: 1,
+        })
+        .await
+        .unwrap();
+    let s = b
+        .store
+        .session(&view.session.session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        s.terminated_reason.as_deref(),
+        Some(reasons::FACTOR_REVOKED.0),
+        "{name}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_16_external_factor_stepup_agrees_on_both_backends() {
+    for b in backends().await {
+        external_stepup(&b).await;
         b.cleanup().await;
     }
 }
