@@ -91,6 +91,13 @@ fn sqlite() -> Backend {
 
 #[cfg(feature = "postgres")]
 pub(crate) async fn postgres() -> Option<Backend> {
+    postgres_with(true).await
+}
+
+/// A PostgreSQL backend; `realm = false` leaves the store completely empty
+/// (a migration target).
+#[cfg(feature = "postgres")]
+pub(crate) async fn postgres_with(realm: bool) -> Option<Backend> {
     let url = std::env::var("HOPAE_TEST_POSTGRES_URL").ok()?;
     let clock = Arc::new(TestClock::new(Timestamp(T0)));
     let schema = format!(
@@ -112,7 +119,9 @@ pub(crate) async fn postgres() -> Option<Backend> {
     )
     .await
     .expect("connect to HOPAE_TEST_POSTGRES_URL");
-    store.ensure_realm().await.expect("store realm");
+    if realm {
+        store.ensure_realm().await.expect("store realm");
+    }
     let store = Arc::new(store);
     Some(Backend {
         handoff: store.clone(),
@@ -3946,4 +3955,296 @@ async fn owner_revision(c: &tokio_postgres::Client) -> i64 {
     .await
     .unwrap()
     .get(0)
+}
+
+// ---- slice 4b: the SQLite → PostgreSQL migration ------------------------
+
+/// A SQLite store with rows in most tables.
+#[cfg(feature = "postgres")]
+async fn populate(b: &Backend) -> (User, User, User) {
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let (actor, policy) = admin_actor(b, 100).await;
+    let (a, c, d) = (user(b, 101).await, user(b, 102).await, user(b, 103).await);
+    let (_, h) = session(b, &a).await;
+    let view = view_of(b, &h).await;
+    b.store.bump_config_generation().await.unwrap();
+    // A passkey, recovery codes and a TOTP enrollment.
+    let cer = ceremony(b, &view, CeremonyPurpose::Register, None)
+        .await
+        .unwrap();
+    b.passkeys
+        .register_passkey(RegisterPasskey {
+            actor: factor_actor(b, &view),
+            ceremony: cer,
+            portal_binding: Digest([9; 32]),
+            record: passkey(&a, 1, b.clock.now()),
+            events: vec![],
+        })
+        .await
+        .unwrap();
+    b.passkeys
+        .passkey_user_handle(&a.user_id, [5; 16])
+        .await
+        .unwrap();
+    b.factors
+        .create_totp_pending(
+            "t-m".into(),
+            c.user_id.clone(),
+            envelope(b, &c, "t-m"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    b.factors
+        .activate_totp("t-m", &c.user_id, 1, 7, vec![])
+        .await
+        .unwrap();
+    // A disabled user (with its feed event), a group with a member.
+    let mut disable = EventBuilder::new(
+        b.clock.as_ref(),
+        b.rng.as_ref(),
+        EventKind::AdminUserDisable,
+        Outcome::Success,
+        "req",
+    )
+    .build();
+    disable.user_id = Some(d.user_id.clone());
+    b.admin
+        .set_user_status(
+            &actor,
+            &policy,
+            &d.user_id,
+            UserStatus::Disabled,
+            deadline(),
+            disable,
+            &|_: &SessionRow| grant_event(b),
+        )
+        .await
+        .unwrap();
+    let gid = crate::groups::new_ref(b.rng.as_ref());
+    b.groups
+        .groups_admin_edit(
+            &actor,
+            &policy,
+            Edit::Create {
+                group_id: gid.clone(),
+                key: "m".into(),
+                name: "M".into(),
+                description: None,
+            },
+            GROUP_POLICY,
+            ev(b, EventKind::GroupCreated),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    b.groups
+        .groups_admin_edit(
+            &actor,
+            &policy,
+            Edit::AddMember {
+                group_id: gid,
+                expected: 1,
+                user_id: a.user_id.to_string(),
+                expires_at: None,
+                reason: "x".into(),
+            },
+            GROUP_POLICY,
+            ev(b, EventKind::GroupCreated),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    // A login transaction, a handoff code, a live nonce and outbox rows.
+    let (txn, _) = new_txn(b, "192.0.2.10");
+    b.handoff
+        .create_transaction_capped(txn, vec![], Timestamp(T0 - 60_000), None, 100)
+        .await
+        .unwrap();
+    let s = b
+        .store
+        .session(&view.session.session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let (code, _) = code_row(b, &s, s.cred_gen);
+    b.handoff.mint_handoff_code(code, vec![]).await.unwrap();
+    assert!(
+        b.nonces
+            .admit_nonce(
+                "delegation",
+                "n-live",
+                b.clock.now().add(Duration::from_secs(30)),
+                b.clock.now(),
+                10
+            )
+            .await
+            .unwrap()
+    );
+    b.events
+        .append_required(vec![required(b, Some(&a))])
+        .await
+        .unwrap();
+    (a, c, d)
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_24_sqlite_store_migrates_to_an_empty_postgres_store() {
+    let Some(target) = postgres_with(false).await else {
+        eprintln!("skip: HOPAE_TEST_POSTGRES_URL not set");
+        return;
+    };
+    let source = sqlite();
+    let (a, c, d) = populate(&source).await;
+    let path = source._dir.as_ref().unwrap().path().join("hopae.db");
+    let (pg, _) = target.pg.clone().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    let report = pg.import_sqlite(&path, "conformance").await.unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "the SQLite file is never written"
+    );
+    assert!(
+        report
+            .tables
+            .iter()
+            .any(|t| t.table == "users" && t.rows == 4)
+    );
+    assert_eq!(report.nonces, 1);
+    // What the source answers, the target answers.
+    assert_eq!(
+        target
+            .directory
+            .admin_human_realm(deadline())
+            .await
+            .unwrap(),
+        source
+            .directory
+            .admin_human_realm(deadline())
+            .await
+            .unwrap(),
+        "the realm is kept"
+    );
+    for u in [&a, &c, &d] {
+        assert_eq!(
+            format!("{:?}", target.store.user(&u.user_id).await.unwrap()),
+            format!("{:?}", source.store.user(&u.user_id).await.unwrap())
+        );
+    }
+    let (sp, tp) = (
+        source.passkeys.factor_summary(&a.user_id).await.unwrap(),
+        target.passkeys.factor_summary(&a.user_id).await.unwrap(),
+    );
+    assert_eq!(format!("{:?}", tp.passkeys), format!("{:?}", sp.passkeys));
+    assert!(target.factors.has_active_totp(&c.user_id).await.unwrap());
+    assert_eq!(
+        target.store.config_generation().await.unwrap(),
+        source.store.config_generation().await.unwrap()
+    );
+    let (g, _) = target
+        .groups
+        .groups_list(None, None, None, true, None, 10, deadline())
+        .await
+        .unwrap();
+    assert_eq!(g.len(), 1);
+    assert_eq!(
+        target
+            .store
+            .user(&a.user_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .groups
+            .len(),
+        1
+    );
+    // The migrated replay entry still refuses its nonce; the ledger still refuses reuse.
+    assert!(
+        !target
+            .nonces
+            .admit_nonce(
+                "delegation",
+                "n-live",
+                target.clock.now().add(Duration::from_secs(30)),
+                target.clock.now(),
+                10
+            )
+            .await
+            .unwrap()
+    );
+    let feed = target
+        .directory
+        .admin_feed_changes(
+            OutboxPosition {
+                row: 0,
+                event_id: None,
+            },
+            50,
+            true,
+            deadline(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(feed.changes.iter().any(|ch| ch.change == "disabled"));
+    let audit = target
+        .events
+        .query(EventQuery {
+            kind: Some(EventKind::StoreMigrated),
+            session_id: None,
+            user_id: None,
+            client_ip: None,
+            since: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(
+        audit[0].attrs["digest"].as_str(),
+        Some(report.summary_digest().as_str())
+    );
+    assert_eq!(
+        target
+            .store
+            .pending_deliveries(audit[0].event_id.as_str())
+            .await
+            .unwrap(),
+        vec!["log"]
+    );
+    // A second run meets a non-empty target and writes nothing.
+    let again = pg.import_sqlite(&path, "conformance").await;
+    assert!(
+        matches!(&again, Err(StoreError::Unavailable(m)) if m.contains("not empty")),
+        "{again:?}"
+    );
+    // A table the migration does not know, holding rows, is refused.
+    let other = postgres_with(false).await.unwrap();
+    {
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute_batch("CREATE TABLE stray (x INTEGER); INSERT INTO stray VALUES (1);")
+            .unwrap();
+    }
+    let (pg2, _) = other.pg.clone().unwrap();
+    let out = pg2.import_sqlite(&path, "conformance").await;
+    assert!(
+        matches!(&out, Err(StoreError::Unavailable(m)) if m.contains("stray")),
+        "{out:?}"
+    );
+    assert_eq!(
+        other
+            .store
+            .user(&a.user_id)
+            .await
+            .unwrap()
+            .map(|u| u.user_id),
+        None
+    );
+    other.cleanup().await;
+    target.cleanup().await;
 }

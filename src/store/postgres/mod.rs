@@ -11,6 +11,7 @@ mod events;
 mod factors;
 mod groups;
 mod handoff;
+pub mod import;
 mod passkeys;
 mod write;
 
@@ -58,6 +59,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         6,
         "0006_slice4_owners",
         include_str!("migrations/0006_slice4_owners.sql"),
+    ),
+    (
+        7,
+        "0007_slice4_apps",
+        include_str!("migrations/0007_slice4_apps.sql"),
     ),
 ];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;

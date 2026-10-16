@@ -19,6 +19,8 @@
 pub mod backup;
 pub mod drift;
 pub mod lock;
+#[cfg(feature = "postgres")]
+pub mod pg;
 pub mod preflight;
 pub mod state;
 
@@ -1673,7 +1675,7 @@ fn cli_event(
 fn refuse_incomplete_backend(cfg: &Config) -> anyhow::Result<()> {
     if cfg.store.kind == crate::config::StoreKind::Postgres {
         anyhow::bail!(
-            "store.kind = \"postgres\": ADR-0020 slice 1 provides the store contract and its conformance tests only; serving and store commands on PostgreSQL arrive with slice 4"
+            "store.kind = \"postgres\": serving on PostgreSQL is not enabled yet (ADR-0020 slice 5: the native receipt, publication and Human owners and the remaining session and directory operations still need SQLite); `hopae store migrate-to-postgres` prepares the PostgreSQL store"
         );
     }
     Ok(())
@@ -3146,6 +3148,6 @@ mod postgres_backend_tests {
         let e = super::refuse_incomplete_backend(&cfg)
             .unwrap_err()
             .to_string();
-        assert!(e.contains("slice 1") && e.contains("slice 4"), "{e}");
+        assert!(e.contains("slice 5") && e.contains("migrate-to-postgres"), "{e}");
     }
 }

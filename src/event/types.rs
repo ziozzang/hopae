@@ -114,6 +114,7 @@ pub enum EventKind {
     ConfigLoaded, // required (outbox)
     /// `hopae providers import --force` (required, `admin.*`).
     AdminProvidersImport,
+    StoreMigrated,
     VerifyDenied,
     ProviderError,
     TxnEvicted,
@@ -148,7 +149,7 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 51] = [
+    pub const ALL: [EventKind; 52] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -178,6 +179,7 @@ impl EventKind {
         EventKind::CsrfRejected,
         EventKind::ConfigLoaded,
         EventKind::AdminProvidersImport,
+        EventKind::StoreMigrated,
         EventKind::VerifyDenied,
         EventKind::ProviderError,
         EventKind::TxnEvicted,
@@ -248,6 +250,7 @@ impl EventKind {
             EventKind::CsrfRejected => "csrf.rejected",
             EventKind::ConfigLoaded => "config.loaded",
             EventKind::AdminProvidersImport => "admin.providers_import",
+            EventKind::StoreMigrated => "store.migrated",
             EventKind::VerifyDenied => "verify.denied",
             EventKind::ProviderError => "provider.error",
             EventKind::TxnEvicted => "txn.evicted",
@@ -488,6 +491,7 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "config_digest",
     "count",
     "depth",
+    "digest",
     "dropped",
     "dropped_by_kind",
     "endpoint",
@@ -521,11 +525,14 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "revision",
     "role",
     "route_id",
+    "rows",
     "sampled_count",
+    "schema",
     "sink",
     "source",
     "sso",
     "status",
+    "tables",
     "to_user_id",
     "truncated",
     "unauthenticated_caller",
@@ -683,14 +690,14 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 45);
+        assert_eq!(required, 46);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 51);
+        assert_eq!(EventKind::ALL.len(), 52);
         for (kind, name) in [
             (
                 EventKind::FactorExternalConsumed,
