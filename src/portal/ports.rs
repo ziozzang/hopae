@@ -92,6 +92,9 @@ pub struct PasskeyOffer {
     pub ceremony: Secret,
     /// `navigator.credentials.get` options JSON.
     pub options: String,
+    /// Origin of the transaction's return target: a successful sign-in
+    /// redirects there, and browsers apply `form-action` to that redirect.
+    pub form_origin: Origin,
 }
 
 /// Result of `GET /login?txn=`.

@@ -1,6 +1,6 @@
 # WebAuthn passkeys
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/WEBAUTHN.md)
 
@@ -175,9 +175,17 @@ Store, relying-party and process-level tests use `webauthn-authenticator-rs`
 software authenticators (a software passkey and an attesting software token):
 registration, assertion, wrong origin and RP ID, replay and expiry, browser
 binding, counter regression, last-factor refusal, recovery-code single use,
-AAL derivation and the default-off configuration. Scenarios 480–486 map the
-cases; they are `draft` until the design review (G2) and remain below
-`verified-live` until a run with real browsers and authenticators (G8).
+AAL derivation and the default-off configuration. Scenarios 480–487 map the
+cases.
+
+`tools/browser-qual/run.sh` qualifies the pages in a real Chrome over the
+DevTools protocol with its WebAuthn virtual authenticator, against a local
+stack (mock provider, the script as TLS terminator and verify-driven gateway):
+registration, duplicate and refused prompts, step-up, rename and removal,
+recovery codes, passwordless sign-in with conditional mediation, Korean pages at
+390 px, and the absence of script errors. It downloads nothing; it needs Docker
+with an image containing Chrome, Node.js and an existing `playwright-core`.
+A live Hangang gateway and hardware authenticators remain the open part of G8.
 
 ## Related pages
 

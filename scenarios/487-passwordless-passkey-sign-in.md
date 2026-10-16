@@ -96,7 +96,7 @@ With passwordless sign-in configured, a user with a discoverable passkey signs i
 
 | Date | Hopae version | Gateway version | Provider | Environment label | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Browser qualification follows (G8). |
+| 2026-10-16 | 0.0.10 (branch `feat/webauthn-passkeys`) | emulated by `tools/browser-qual` (verify-driven forward auth, TLS terminator) | mock OIDC | local loopback; headless Chrome 152 with the CDP WebAuthn virtual authenticator (internal and USB); 1280 px EN and 390 px KO | pass (25 checks) | Conditional (autofill) mediation answered by the virtual authenticator, passwordless session at AAL 2 with `hopae.passkey`, no-passkey message in Korean. Found and fixed: the chooser's `form-action` lacked the application origin, so Chrome blocked the redirect after sign-in. |
 
 ## Open questions
 

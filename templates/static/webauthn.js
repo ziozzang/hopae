@@ -128,6 +128,9 @@
     // (conditional mediation) until the button asks for the modal prompt.
     var autofill = null;
     function submitWith(json) {
+      // One submission per page, whichever prompt answered first.
+      busy = true;
+      button.disabled = true;
       field.value = JSON.stringify(json);
       say(status, "verifying");
       form.submit();

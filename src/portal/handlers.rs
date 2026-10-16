@@ -383,6 +383,10 @@ pub(crate) async fn login_get(State(st): State<PortalState>, req: Request) -> Re
                 Purpose::PasskeyLogin,
             );
             let error = settings_handlers::login_error(query(&parts).as_ref());
+            let mut form_origins = form_origins;
+            if let Some(p) = &passkey {
+                form_origins.push(p.form_origin.clone());
+            }
             let page = render_page_status(
                 &rq,
                 StatusCode::OK,

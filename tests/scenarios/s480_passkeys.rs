@@ -1171,6 +1171,9 @@ fn s487_1_passwordless_sign_in_creates_an_aal2_passkey_session() {
     assert!(page.body.contains("autocomplete=\"username webauthn\""));
     let csp = page.header("content-security-policy").unwrap();
     assert!(csp.contains("script-src 'self'"), "{csp}");
+    // The sign-in redirects to the application: form-action must allow it
+    // (found in the browser qualification; the harness does not enforce CSP).
+    assert!(csp.contains("https://app.example.test"), "{csp}");
     let done = p.post_in(&b, "/login/passkey", &form);
     assert_eq!(done.status, 302, "{done:?}");
     assert!(
@@ -1320,4 +1323,43 @@ fn s487_a5_removing_the_passkey_ends_its_passwordless_sessions() {
         .unwrap()
     }]);
     assert_eq!(p.sql("SELECT COUNT(*) FROM sessions WHERE provider_id='hopae.passkey' AND terminated_at IS NULL"), 0);
+}
+
+/// Real-browser qualification support (G8, run by hand): start the mock
+/// provider and Hopae with passkeys, passwordless sign-in and an `/admin`
+/// AAL 2 rule, write the addresses and the gateway key to `$G8_STACK_FILE`
+/// and keep the stack up until `$G8_STACK_FILE.stop` exists. The browser
+/// driver plays TLS terminator and gateway in front of it.
+#[test]
+#[ignore = "manual: held open for the headless-browser qualification"]
+fn g8_hold_passkey_stack() {
+    let Some(file) = std::env::var_os("G8_STACK_FILE") else {
+        return;
+    };
+    let file = std::path::PathBuf::from(file);
+    let p = Pk::start(passwordless());
+    let wall = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    p.h.set_clock_ms(wall);
+    let info = json!({
+        "portal": p.h.portal.to_string(),
+        "gateway": p.h.gateway.to_string(),
+        "gateway_key": p.h.key_value(&crate::support::KeySlot::Current),
+        "cookie": p.base,
+        "db": p.h.state_dir.path().join("state").join("hopae.db"),
+    });
+    std::fs::write(&file, info.to_string()).unwrap();
+    let stop = file.with_extension("stop");
+    let deadline = std::time::Instant::now() + Duration::from_secs(1800);
+    while !stop.exists() && std::time::Instant::now() < deadline {
+        // The test-hook clock is frozen at spawn; a browser run needs wall time.
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        p.h.set_clock_ms(wall);
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }

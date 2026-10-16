@@ -54,7 +54,7 @@ A signature-verified assertion whose counter does not exceed the stored one revo
 
 | Date | Hopae version | Gateway version | Provider | Environment label | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Not yet run (G8 pending). The software authenticator is the ceiling of evidence until a browser run. |
+| 2026-10-16 | 0.0.10 (branch `feat/webauthn-passkeys`) | emulated by `tools/browser-qual` (verify-driven forward auth, TLS terminator) | mock OIDC | local loopback; headless Chrome 152 with the CDP WebAuthn virtual authenticator (internal and USB); 1280 px EN and 390 px KO | not run (browser) | Not exercised in the browser (needs a cloned authenticator); covered by process-level tests. |
 
 ## Open questions
 

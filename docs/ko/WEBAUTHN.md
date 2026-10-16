@@ -1,6 +1,6 @@
 # WebAuthn 패스키
 
-<!-- translation-status: source=../WEBAUTHN.md source-rev=4 status=current -->
+<!-- translation-status: source=../WEBAUTHN.md source-rev=5 status=current -->
 
 [문서 목차](README.md) · [English](../WEBAUTHN.md)
 
@@ -172,8 +172,15 @@ hopae admin factors reset <user-id-or-email>
 소프트웨어 인증기(소프트웨어 패스키와 증명하는 소프트웨어 토큰)를 사용합니다:
 등록, 어설션, 잘못된 origin과 RP ID, 재사용과 만료, 브라우저 바인딩, 카운터 역행,
 마지막 요소 거부, 복구 코드 1회 사용, AAL 도출, 기본값이 꺼진 설정. 시나리오
-480–486이 사례를 매핑합니다. 설계 검토(G2) 전까지 `draft`이며, 실제 브라우저와
-인증기로 실행(G8)하기 전까지 `verified-live` 아래에 머뭅니다.
+480–487이 사례를 매핑합니다.
+
+`tools/browser-qual/run.sh`는 실제 Chrome에서 DevTools 프로토콜과 WebAuthn 가상
+인증기로 로컬 스택(모의 제공자, TLS 종단과 verify 기반 게이트웨이 역할을 하는
+스크립트)에 대해 페이지를 검증합니다: 등록, 중복·거부된 요청, 단계 상승, 이름
+변경과 삭제, 복구 코드, 조건부 중개를 쓰는 비밀번호 없는 로그인, 390 px 한국어
+페이지, 스크립트 오류 없음. 아무것도 내려받지 않으며 Chrome이 든 이미지가 있는
+Docker, Node.js, 기존 `playwright-core`가 필요합니다. 실제 Hangang 게이트웨이와
+하드웨어 인증기는 G8의 남은 부분입니다.
 
 ## 관련 페이지
 

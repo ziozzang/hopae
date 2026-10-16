@@ -70,7 +70,7 @@ Without `webauthn` every route is absent; with it, the only portal script is sta
 
 | Date | Hopae version | Gateway version | Provider | Environment label | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Not yet run (G8 pending). The software authenticator is the ceiling of evidence until a browser run. |
+| 2026-10-16 | 0.0.10 (branch `feat/webauthn-passkeys`) | emulated by `tools/browser-qual` (verify-driven forward auth, TLS terminator) | mock OIDC | local loopback; headless Chrome 152 with the CDP WebAuthn virtual authenticator (internal and USB); 1280 px EN and 390 px KO | pass (25 checks) | Ceremony CSP, Trusted Types and SRI accepted by Chrome; no script errors on any page; every security page fits 390 px in Korean. |
 
 ## Open questions
 

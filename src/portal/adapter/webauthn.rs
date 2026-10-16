@@ -45,7 +45,8 @@ impl Adapter {
         if !ctx.https {
             return None;
         }
-        self.svc
+        let row = self
+            .svc
             .passkey_login_txn(&Self::sctx(ctx), txn)
             .await
             .ok()?;
@@ -67,6 +68,7 @@ impl Adapter {
             Ok(()) => Some(PasskeyOffer {
                 ceremony: bearer,
                 options,
+                form_origin: row.return_target.origin(),
             }),
             Err(e) => {
                 tracing::info!(request_id = %ctx.request_id, error = %e, "passkey sign-in not offered");
