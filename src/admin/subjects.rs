@@ -103,6 +103,12 @@ pub struct Item {
     pub service_id: Option<String>,
     pub realm: Option<String>,
     pub expires_at: Option<i64>,
+    /// With `include_groups`: up to 20 of a person's groups (else absent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups: Option<Vec<serde_json::Value>>,
+    /// With `include_groups`: whether the person has more groups than listed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub groups_truncated: Option<bool>,
 }
 
 impl Item {
@@ -123,6 +129,8 @@ impl Item {
             service_id: None,
             realm: None,
             expires_at: None,
+            groups: None,
+            groups_truncated: None,
         }
     }
 
@@ -365,7 +373,7 @@ impl Sources {
         })
     }
 
-    fn subject_of(&self, user: &str) -> Option<String> {
+    pub(crate) fn subject_of(&self, user: &str) -> Option<String> {
         dir::human_subject(self.issuer.as_deref()?, self.realm.as_deref()?, user)
     }
 }
@@ -480,6 +488,9 @@ struct ResolveRequest {
     ids: Vec<String>,
     #[serde(default)]
     privacy_profile: Privacy,
+    /// Attach up to 20 groups to each person (ADR-0018).
+    #[serde(default)]
+    include_groups: bool,
 }
 
 pub async fn resolve_api(
@@ -503,9 +514,33 @@ pub async fn resolve_api(
         let src = Sources::of(st)
             .await
             .map_err(|e| store_failure(c, "subjects", &e))?;
-        let (items, complete) = resolve(&src, &req.ids, req.privacy_profile)
+        let (mut items, complete) = resolve(&src, &req.ids, req.privacy_profile)
             .await
             .map_err(|e| store_failure(c, "subjects", &e))?;
+        if req.include_groups {
+            let users: Vec<String> = items
+                .iter()
+                .filter(|i| i.status == "active" || i.status == "disabled")
+                .filter_map(|i| i.user_id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let mut groups = super::groups::brief_groups(st, users)
+                .await
+                .map_err(|e| store_failure(c, "subjects", &e))?;
+            for item in &mut items {
+                if let Some(u) = &item.user_id
+                    && let Some((g, more)) = groups.get(u).cloned().or_else(|| {
+                        (item.status == "active" || item.status == "disabled")
+                            .then(|| (Vec::new(), false))
+                    })
+                {
+                    item.groups = Some(g);
+                    item.groups_truncated = Some(more);
+                }
+            }
+            groups.clear();
+        }
         let (resolved, unknown) = tally(&items);
         reads::audit(st, c, Op::Resolve, bytes, |b| {
             b.attr("requested", req.ids.len())
@@ -754,7 +789,11 @@ impl FeedCursor {
 #[derive(Serialize)]
 struct Change {
     change: &'static str,
-    user_id: String,
+    /// Absent (`null`) only for a group's own lifecycle change.
+    user_id: Option<String>,
+    /// The group of a group change (only with `include_groups`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group_id: Option<String>,
     human_subject: Option<String>,
     /// The subject's status when this page was read (consumers apply it,
     /// which makes replays and reordering harmless).
@@ -778,6 +817,10 @@ struct FeedRequest {
     cursor: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+    /// Lifecycle feed only: also report group lifecycle and membership
+    /// changes (ADR-0018).
+    #[serde(default)]
+    include_groups: bool,
 }
 
 fn feed_limit(v: Option<usize>, default: usize) -> Result<usize, Fail> {
@@ -836,7 +879,8 @@ pub async fn lifecycle_api(
             changes.push(Change {
                 change: "created",
                 human_subject: src.subject_of(&row.user_id),
-                user_id: row.user_id.clone(),
+                user_id: Some(row.user_id.clone()),
+                group_id: None,
                 status: current_status(row.status.as_deref()),
                 at: row.created_at,
             });
@@ -847,12 +891,39 @@ pub async fn lifecycle_api(
         if room > 0 {
             let page = src
                 .store
-                .admin_status_changes(from.outbox.clone(), room, api::deadline(st))
+                .admin_feed_changes(
+                    from.outbox.clone(),
+                    room,
+                    req.include_groups,
+                    api::deadline(st),
+                )
                 .await
                 .map_err(fail)?
                 .map_err(|_| expired())?;
             outbox_head = page.head;
-            let ids: Vec<String> = page.changes.iter().map(|ch| ch.user_id.clone()).collect();
+            let mut ids: Vec<String> = page
+                .changes
+                .iter()
+                .filter_map(|ch| ch.user_id.clone())
+                .collect();
+            ids.sort();
+            ids.dedup();
+            let mut group_state: HashMap<String, &'static str> = HashMap::new();
+            for gid in page.changes.iter().filter_map(|ch| ch.group_id.clone()) {
+                if group_state.contains_key(&gid) {
+                    continue;
+                }
+                let state = match src
+                    .store
+                    .group_get(gid.clone(), api::deadline(st))
+                    .await
+                    .map_err(fail)?
+                {
+                    Some(g) if g.state == "active" => "active",
+                    _ => "deleted",
+                };
+                group_state.insert(gid, state);
+            }
             let rows = if ids.is_empty() {
                 BTreeMap::new()
             } else {
@@ -862,16 +933,26 @@ pub async fn lifecycle_api(
                     .map_err(fail)?
             };
             for ch in page.changes {
-                let status = rows
-                    .get(&ch.user_id)
-                    .and_then(|r| r.user.as_ref())
-                    .map(|u| u.status.as_str());
+                let status = match &ch.user_id {
+                    Some(u) => current_status(
+                        rows.get(u)
+                            .and_then(|r| r.user.as_ref())
+                            .map(|u| u.status.as_str()),
+                    ),
+                    // A group's own change carries the group's state.
+                    None => ch
+                        .group_id
+                        .as_ref()
+                        .and_then(|g| group_state.get(g).copied())
+                        .unwrap_or("deleted"),
+                };
                 changes.push(Change {
                     change: ch.change,
-                    human_subject: src.subject_of(&ch.user_id),
-                    status: current_status(status),
+                    human_subject: ch.user_id.as_deref().and_then(|u| src.subject_of(u)),
+                    status,
                     at: Some(ch.at),
                     user_id: ch.user_id,
+                    group_id: ch.group_id,
                 });
             }
             next.outbox = page.next;

@@ -350,7 +350,18 @@ pub async fn middleware(
             | "/v1/subjects/search"
             | "/v1/subjects/lifecycle"
             | "/v1/subjects/lifecycle/snapshot"
-            | "/v1/explain/authentication",
+            | "/v1/explain/authentication"
+            | "/v1/subjects/groups"
+            | "/v1/groups/search"
+            | "/v1/groups/get"
+            | "/v1/groups/projection/snapshot"
+            | "/v1/groups/projection/changes"
+            // Group writes: the signed body is the write (reason, revision).
+            | "/v1/groups/create"
+            | "/v1/groups/update"
+            | "/v1/groups/delete"
+            | "/v1/groups/members/add"
+            | "/v1/groups/members/remove",
         ) => {
             read_body = true;
             original_path.clone()

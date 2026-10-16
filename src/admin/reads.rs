@@ -30,6 +30,12 @@ pub enum Op {
     Search,
     Lifecycle,
     Explain,
+    /// Group listings, group detail and a person's groups (ADR-0018).
+    Groups,
+    /// Administrator writes of local groups and memberships.
+    GroupWrite,
+    /// The signed membership projection (snapshot and changes).
+    Projection,
 }
 
 impl Op {
@@ -40,6 +46,9 @@ impl Op {
             Op::Search => "subjects.search",
             Op::Lifecycle => "subjects.lifecycle",
             Op::Explain => "explain.authentication",
+            Op::Groups => "groups.read",
+            Op::GroupWrite => "groups.write",
+            Op::Projection => "groups.projection",
         }
     }
 
@@ -50,6 +59,9 @@ impl Op {
             Op::Search => (60.0, 1.0),
             Op::Lifecycle => (120.0, 2.0),
             Op::Explain => (30.0, 0.5),
+            Op::Groups => (60.0, 1.0),
+            Op::GroupWrite => (30.0, 0.5),
+            Op::Projection => (120.0, 2.0),
         }
     }
 }

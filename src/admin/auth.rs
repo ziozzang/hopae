@@ -85,6 +85,16 @@ pub fn pattern_of(path: &str) -> &'static str {
         ["subjects", "lifecycle"] if api => "/v1/subjects/lifecycle",
         ["subjects", "lifecycle", "snapshot"] if api => "/v1/subjects/lifecycle/snapshot",
         ["explain", "authentication"] if api => "/v1/explain/authentication",
+        ["subjects", "groups"] if api => "/v1/subjects/groups",
+        ["groups", "search"] if api => "/v1/groups/search",
+        ["groups", "get"] if api => "/v1/groups/get",
+        ["groups", "create"] if api => "/v1/groups/create",
+        ["groups", "update"] if api => "/v1/groups/update",
+        ["groups", "delete"] if api => "/v1/groups/delete",
+        ["groups", "members", "add"] if api => "/v1/groups/members/add",
+        ["groups", "members", "remove"] if api => "/v1/groups/members/remove",
+        ["groups", "projection", "snapshot"] if api => "/v1/groups/projection/snapshot",
+        ["groups", "projection", "changes"] if api => "/v1/groups/projection/changes",
         ["users"] => p!("/users", "/v1/users"),
         ["users", _] => p!("/users/{id}", "/v1/users/{id}"),
         ["users", _, "disable"] => p!("/users/{id}/disable", "/v1/users/{id}/disable"),
@@ -123,6 +133,11 @@ pub fn is_mutation(method: &Method, pattern: &str) -> bool {
                     | "/v1/users/{id}/enable"
                     | "/v1/users/{id}/sessions/terminate"
                     | "/v1/sessions/{id}/terminate"
+                    | "/v1/groups/create"
+                    | "/v1/groups/update"
+                    | "/v1/groups/delete"
+                    | "/v1/groups/members/add"
+                    | "/v1/groups/members/remove"
             )
 }
 
