@@ -1,7 +1,7 @@
 {
   "id": "hopae",
   "name": "Hopae",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "api_version": 1,
   "entry": "index.js",
   "assets": {
@@ -98,6 +98,46 @@
       "path": "explain/authentication",
       "method": "POST",
       "mutation": false
+    },
+    {
+      "path": "groups/search",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "groups/get",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "subjects/groups",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "groups/create",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "groups/update",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "groups/delete",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "groups/members/add",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "groups/members/remove",
+      "method": "POST",
+      "mutation": true
     }
   ]
 }

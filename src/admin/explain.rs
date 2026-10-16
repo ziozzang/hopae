@@ -1139,7 +1139,8 @@ pub async fn explain_api(
         Err(r) => return r,
     };
     let run = async {
-        let req: Request = serde_json::from_slice(&bytes).map_err(|_| reads::invalid())?;
+        let mut req: Request = serde_json::from_slice(&bytes).map_err(|_| reads::invalid())?;
+        req.privacy_profile = req.privacy_profile.at_least(st.cfg.privacy_floor);
         let session = req.session_id.clone();
         let answer = explain(&st, &c, req).await?;
         let user = answer["subject"]["item"]["user_id"]

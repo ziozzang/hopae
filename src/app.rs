@@ -224,6 +224,8 @@ pub struct Services {
     pub store_hooks: Option<Arc<StoreHooks>>,
     /// The configured providers, built from the store's rows.
     pub registry: Arc<Registry>,
+    /// Groups, their sync and the membership projection (ADR-0018).
+    pub groups: Arc<crate::groups::sync::GroupService>,
     /// When the process started (the status page's `build.started_at`).
     pub started_at: Timestamp,
     /// The bound listener addresses, set once every listener is bound.
@@ -288,7 +290,8 @@ impl Services {
             providers: self.registry.clone(),
             config,
         })
-        .with_native_primary(self.store.clone(), self.registry.clone()))
+        .with_native_primary(self.store.clone(), self.registry.clone())
+        .with_groups(self.groups.clone()))
     }
 }
 
@@ -317,6 +320,7 @@ impl Services {
             snapshot: self.snapshot.clone(),
             verify: self.verify_context(),
             registry: self.registry.clone(),
+            groups: self.groups.clone(),
             key,
             started_at: self.started_at,
             config_digest: config_digest(&self.config),
@@ -874,7 +878,30 @@ async fn bind_environment(
             .map_err(|_| anyhow::anyhow!("Human source unavailable"))
         })
         .transpose()?;
+    let groups_cfg = cfg.groups.clone().unwrap_or_default();
+    let projection_signer = groups_cfg
+        .projection
+        .as_ref()
+        .map(|p| {
+            crate::groups::projection::ProjectionSigner::load(
+                p,
+                &|name| std::env::var(name).ok(),
+                cfg.receipt_issuer.as_ref().map(|r| r.public_key.as_str()),
+            )
+            .map(Arc::new)
+        })
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let groups = Arc::new(crate::groups::sync::GroupService::new(
+        store.clone(),
+        groups_cfg,
+        projection_signer,
+        env.clock.clone(),
+        env.rng.clone(),
+        Some(emitter.clone()),
+    ));
     let services = Services {
+        groups,
         human_owner,
         human_receipt_source,
         projection_clock: Arc::default(),
@@ -1141,6 +1168,11 @@ impl Bound {
                 .run(bg_rx.clone()),
         ));
         workers.push(tokio::spawn(pruner.run(bg_rx.clone())));
+        workers.push(tokio::spawn(self.services.groups.clone().run(
+            self.services.directory(),
+            self.services.registry.clone(),
+            bg_rx.clone(),
+        )));
         workers.push(tokio::spawn(
             Sweeper::new(
                 self.services.sessions(),

@@ -30,6 +30,38 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   `subjects/search`, `subjects/lifecycle`, `subjects/lifecycle/snapshot` and
   `explain/authentication` as `POST`, `mutation: false` routes so the Hangang
   broker forwards them; operators re-pin the new manifest SHA-256.
+- Console package 0.1.9: the manifest also declares the group reads
+  (`groups/search`, `groups/get`, `subjects/groups`) and the local group
+  writes (`groups/create|update|delete|members/add|members/remove`, mutations);
+  operators re-pin the new manifest SHA-256.
+- `admin.directory_privacy` (`standard` default, `strict`): an operator floor
+  for the privacy profile of subject directory and explain answers; a request
+  may only ask for a stricter profile.
+- Groups owned by Hopae (Hangang ADR 0021, ADR-0018): local groups managed in
+  the console API with a required reason and compare-and-swap on the group
+  revision; LDAP groups (`memberOf` or a group search) and OIDC groups (a
+  configurable claim path) synced at sign-in and, for LDAP, by a bounded
+  periodic refresh, with include/exclude/rewrite rules, per-provider and
+  per-person limits that refuse an oversized assertion whole, and a removal
+  grace; provider groups are read-only in the console. New endpoints
+  `/v1/groups/search|get|create|update|delete|members/add|members/remove`,
+  `/v1/subjects/groups`, and `include_groups` on `/v1/subjects/resolve` and
+  `/v1/subjects/lifecycle`.
+- Signed membership projection for Pumgye:
+  `/v1/groups/projection/snapshot` and `/changes`, restricted to a requested
+  vocabulary of GroupRefs, each page an Ed25519-signed envelope
+  (`groups.projection` key, own domain separation) binding audience, store,
+  vocabulary digest, issue time and the AAL capability; reference verifier
+  `hopae::groups::projection::verify`.
+- `groups.gateway_header` (off by default) mirrors group references into
+  `x-forwarded-groups`.
+- `groups.max_staleness_secs` (default 7 days): provider memberships that no
+  successful assertion confirmed for that long are suspended (kept, excluded
+  from the projection and the gateway mirror; `group.membership_stale` /
+  `group.membership_restored`, gauge `hopae_group_memberships_stale`).
+  Deleting a local group with members requires `force: true`. GroupRefs are
+  canonical in lower case. The owned OpenLDAP fixture enables `memberof` and
+  checks group sync against a real directory.
 
 ### Security
 
@@ -38,6 +70,16 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   (actor, purpose, query digest, counts; never the references) before the
   answer; a read whose record cannot be written is refused with `503
   audit_unavailable`. Threat model TM-60, TM-61.
+- Every group change writes a required `group.*` event in its transaction;
+  the projection key must differ from the receipt issuer's. Threat model
+  TM-62, TM-63, TM-64.
+
+### Migration
+
+- Schema version 14 (`0014_groups`) adds `directory_groups`, `group_members`,
+  `group_changes` and `group_sync_state`. Versions 11–13 are reserved by the
+  passkey work, which must be merged and released first; back up the store
+  before upgrading, as for every migration.
 
 ## 0.0.8 — 2026-10-15
 

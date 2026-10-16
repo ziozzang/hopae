@@ -70,6 +70,30 @@ const PROVIDER: Node = Obj(&[
     ("authoritative_domains", Leaf),
     ("auto_link", Leaf),
     ("trust_email", Leaf),
+    (
+        "groups",
+        Obj(&[
+            ("claim", Leaf),
+            (
+                "ldap",
+                Obj(&[
+                    ("mode", Leaf),
+                    ("member_of_attribute", Leaf),
+                    ("search_base_dn", Leaf),
+                    ("object_class", Leaf),
+                    ("member_attribute", Leaf),
+                    ("name_attribute", Leaf),
+                ]),
+            ),
+            ("include", Leaf),
+            ("exclude", Leaf),
+            ("rewrite", Obj(&[("pattern", Leaf), ("replacement", Leaf)])),
+            ("max_groups", Leaf),
+            ("removal_grace_secs", Leaf),
+            ("sync_interval_secs", Leaf),
+            ("sync_batch", Leaf),
+        ]),
+    ),
 ]);
 
 const ADMIN_USER: Node = Obj(&[
@@ -104,6 +128,7 @@ const ADMIN: Node = Obj(&[
     ("require_aal", Leaf),
     ("untrusted_peers", Leaf),
     ("query_budget_ms", Leaf),
+    ("directory_privacy", Leaf),
     ("users", Arr(&ADMIN_USER)),
 ]);
 
@@ -400,6 +425,27 @@ pub(super) const ROOT: Node = Obj(&[
     ),
     ("sessions", Obj(&[("retention_days", Leaf)])),
     ("admin", ADMIN),
+    (
+        "groups",
+        Obj(&[
+            ("max_groups_per_user", Leaf),
+            ("change_retention_days", Leaf),
+            ("maintenance_interval_secs", Leaf),
+            ("stale_group_days", Leaf),
+            ("max_staleness_secs", Leaf),
+            ("gateway_header", Leaf),
+            (
+                "projection",
+                Obj(&[
+                    ("issuer_ref", Leaf),
+                    ("key_epoch", Leaf),
+                    ("public_key", Leaf),
+                    ("seed_env", Leaf),
+                    ("audience", Leaf),
+                ]),
+            ),
+        ]),
+    ),
 ]);
 
 /// Collect one message per unknown key, in document order.

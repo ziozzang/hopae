@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 14 -->
+<!-- doc-rev: 15 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -233,7 +233,7 @@ value are omitted rather than sent empty.
 | `x-forwarded-user` | Hopae user id, stable for the user's lifetime (`u_` + 26 base32 chars) | 64 B |
 | `x-forwarded-email` | Primary email; omitted when none | 254 B |
 | `x-forwarded-preferred-username` | Username or display name | 256 B |
-| `x-forwarded-groups` | Comma-separated group names (M2); omitted when none | 4 KiB |
+| `x-forwarded-groups` | Comma-separated group references (`grp1:…`, at most 32) when `groups.gateway_header` is on ([groups](GROUPS.md)); omitted when none, and always omitted by default | 4 KiB |
 | `x-hopae-session` | Session id (`s_` + 26 chars), not the cookie handle | 64 B |
 | `x-hopae-provider` | Provider id of the first factor (`google`) | 64 B |
 | `x-hopae-auth-time` | Unix seconds of the first-factor authentication | 20 B |

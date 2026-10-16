@@ -29,6 +29,7 @@ pub mod delegation_wire;
 pub mod events;
 pub mod explain;
 mod explain_messages;
+pub mod groups;
 pub mod me;
 pub mod pages;
 pub mod profiles;
@@ -75,6 +76,9 @@ pub struct AdminConfig {
     pub untrusted_peers: UntrustedPeers,
     /// `admin.query_budget_ms`: the deadline of every store operation.
     pub query_budget: Duration,
+    /// `admin.directory_privacy`: the least private profile a directory
+    /// read answers with; a request can only make it stricter.
+    pub privacy_floor: reads::Privacy,
     /// `trusted_proxies`.
     pub trusted: Vec<IpNet>,
     /// `cookie.secure`.
@@ -102,6 +106,10 @@ impl AdminConfig {
             policy: cfg.admin_policy()?,
             untrusted_peers: limits.untrusted_peers,
             query_budget: limits.query_budget,
+            privacy_floor: match limits.directory_privacy {
+                crate::config::DirectoryPrivacy::Standard => reads::Privacy::Standard,
+                crate::config::DirectoryPrivacy::Strict => reads::Privacy::Strict,
+            },
             trusted: cfg.trusted_proxy_nets(),
             secure: cfg.cookie.secure,
             cookie_names: cfg.cookie_names(),
@@ -134,6 +142,8 @@ pub struct AdminState {
     pub verify: VerifyContext,
     /// The configured providers' cached state (health) — never contacted.
     pub registry: Arc<Registry>,
+    /// Groups and the membership projection (ADR-0018).
+    pub groups: Arc<crate::groups::sync::GroupService>,
     /// Process-wide MAC key for form tokens and cursors (random per process).
     pub key: [u8; 32],
     pub started_at: Timestamp,

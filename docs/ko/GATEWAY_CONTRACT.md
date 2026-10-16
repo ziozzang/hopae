@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=14 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=15 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -227,7 +227,7 @@ Hopae 내부의 결정 순서는 다음과 같습니다. 호출자 키 → 계�
 | `x-forwarded-user` | 사용자의 수명 동안 안정적인 Hopae 사용자 ID(`u_` + base32 26자) | 64 B |
 | `x-forwarded-email` | 기본 이메일. 없으면 생략 | 254 B |
 | `x-forwarded-preferred-username` | 사용자 이름 또는 표시 이름 | 256 B |
-| `x-forwarded-groups` | 쉼표로 구분한 그룹 이름(M2). 없으면 생략 | 4 KiB |
+| `x-forwarded-groups` | `groups.gateway_header`가 켜져 있을 때 쉼표로 구분한 그룹 참조(`grp1:…`, 최대 32개)([그룹](GROUPS.md)). 없으면 생략하며 기본값에서는 항상 생략 | 4 KiB |
 | `x-hopae-session` | 세션 ID(`s_` + 26자). 쿠키 핸들이 아닙니다 | 64 B |
 | `x-hopae-provider` | 첫 번째 요소의 제공자 ID(`google`) | 64 B |
 | `x-hopae-auth-time` | 첫 번째 요소 인증 시각의 Unix 초 | 20 B |

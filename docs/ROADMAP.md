@@ -1,6 +1,6 @@
 # Roadmap
 
-<!-- doc-rev: 9 -->
+<!-- doc-rev: 10 -->
 
 [Documentation](README.md) · [한국어](ko/ROADMAP.md)
 
@@ -290,7 +290,12 @@ any milestone checks this range for an existing scenario before adding one.
 
 Not scheduled; recorded so they are not re-discussed from scratch:
 
-- OIDC provider mode for third-party applications; SAML; SCIM provisioning.
+- OIDC provider mode for third-party applications; SAML.
+- **P2 — SCIM provisioning of users and groups** (inbound SCIM 2.0 `/Users`
+  and `/Groups`): refreshes provider memberships of people who no longer sign
+  in, which today only the periodic LDAP sync does; until then such OIDC
+  memberships are suspended after `groups.max_staleness_secs`
+  ([groups](GROUPS.md), [ADR-0018](adr/0018-groups-and-membership-projection.md)).
 - Generic forward-auth adapter profiles (nginx `auth_request`, Traefik, Caddy, Envoy `ext_authz`) behind the ADR-0013 boundary.
 - Device authorization flow; passkey-first sign-in.
 - `Domain=` cookie mode for sibling subdomains (rejected in M1 because of cookie tossing).

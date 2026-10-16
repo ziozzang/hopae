@@ -1,6 +1,6 @@
 # Documentation
 
-<!-- doc-rev: 12 -->
+<!-- doc-rev: 13 -->
 
 [한국어 목차](ko/README.md)
 
@@ -26,6 +26,7 @@ translations of their English sources and are updated in the same change. The
 - [Operations](OPERATIONS.md) — running, state directory, instance lock, backups, key rotation, logs, health, counters, failure behavior
 - [Administration](ADMIN.md) — the management console and `/v1` API (M4-min, specified): console host and route, grants and roles, pages, endpoints, audit events, limits
 - [Subject directory](SUBJECT_DIRECTORY.md) — subject resolution, search, lifecycle feed and reconcile snapshot for the console and policy authorities
+- [Groups](GROUPS.md) — local, LDAP and OIDC groups, provider sync rules, the groups API and the signed membership projection for Pumgye
 - [Authentication explain](AUTHENTICATION_EXPLAIN.md) — what the authentication check would answer for a URL and a subject, and why, without side effects
 - [Deployment template](../deploy/README.md) — hardened Docker Compose service and gateway route examples
 

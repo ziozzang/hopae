@@ -1,6 +1,6 @@
 # Native Hangang verification and delegated console
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [한국어](ko/HANGANG_NATIVE.md) · [Documentation](README.md)
 
@@ -61,7 +61,12 @@ declares the audited reads `subjects/resolve`, `subjects/search`,
 (`POST`, `mutation: false`; see [subject directory](SUBJECT_DIRECTORY.md) and
 [authentication explain](AUTHENTICATION_EXPLAIN.md)), so the Hangang broker
 forwards them with their signed JSON body; `events/query` serves the unified
-audit view. Native theme tokens and host authentication
+audit view. Package 0.1.9 adds the [groups](GROUPS.md) routes: the reads
+`groups/search`, `groups/get` and `subjects/groups` (`mutation: false`) and
+the local group writes `groups/create`, `groups/update`, `groups/delete`,
+`groups/members/add` and `groups/members/remove` (`mutation: true`, the body
+carries `reason` and `expected_revision`). The membership projection is not
+in the package: it is for Pumgye, not the console. Native theme tokens and host authentication
 are used; package code receives no backend key or raw Hangang credential.
 
 Enable `admin.hangang_delegation` explicitly:

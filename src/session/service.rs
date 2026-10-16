@@ -322,6 +322,7 @@ pub struct Service {
     pub(crate) identity: IdentityService,
     pub(crate) cfg: ServiceConfig,
     native_primary: Option<(crate::store::Store, Arc<crate::provider::Registry>)>,
+    groups: Option<Arc<crate::groups::sync::GroupService>>,
 }
 
 pub(crate) enum HandleState {
@@ -356,6 +357,7 @@ impl Service {
             identity,
             cfg: deps.config,
             native_primary: None,
+            groups: None,
         }
     }
 
@@ -365,6 +367,12 @@ impl Service {
         registry: Arc<crate::provider::Registry>,
     ) -> Self {
         self.native_primary = Some((store, registry));
+        self
+    }
+
+    /// Apply provider group assertions at sign-in (ADR-0018).
+    pub(crate) fn with_groups(mut self, groups: Arc<crate::groups::sync::GroupService>) -> Self {
+        self.groups = Some(groups);
         self
     }
 
@@ -1523,6 +1531,7 @@ impl Service {
             picture: verified.identity().picture.clone(),
             raw_claims: serde_json::json!({}),
             auth_time: None,
+            groups: verified.identity().groups.clone(),
         };
         self.finish_provider_identity(
             ctx,
@@ -1795,6 +1804,20 @@ impl Service {
             }
         };
         let user = resolved.user;
+        // The provider's group assertion, after the identity is resolved and
+        // before the session exists. Never blocks the sign-in: a refused or
+        // failed sync keeps the previous memberships (ADR-0018).
+        if let Some(groups) = &self.groups {
+            groups
+                .apply(
+                    &row,
+                    &user.user_id,
+                    ident.groups.as_deref(),
+                    &ctx.request_id,
+                    "login",
+                )
+                .await;
+        }
 
         // A callback that completes while the browser already holds a valid
         // portal handle for the same user reuses that session; there is no
@@ -2449,6 +2472,7 @@ mod tests {
             picture: None,
             raw_claims: serde_json::json!({}),
             auth_time: claim,
+            groups: None,
         }
     }
 
