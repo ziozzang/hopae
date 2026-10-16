@@ -714,10 +714,22 @@ impl Passkeys for Store {
             }
             apply_use(&tx, user.as_str(), &request.used, now)?;
             let mut events = request.events;
-            rotate(&tx, &shared, actor, Aal::Two, FactorEntry { kind: FactorKind::Webauthn, provider: None, at: now }, &mut events)?;
+            let generation = rotate(&tx, &shared, actor, Aal::Two, FactorEntry { kind: FactorKind::Webauthn, provider: None, at: now }, &mut events)?;
             tx.execute(
                 "INSERT INTO session_webauthn_elevations(session_id,credential_id,at) VALUES(?1,?2,?3) ON CONFLICT(session_id,credential_id) DO UPDATE SET at=excluded.at",
                 params![sid.as_str(), request.used.credential_id, now.secs()],
+            )?;
+            // Native Human owner provenance (ADR-0017 phase 2).
+            super::webauthn_owner::record(
+                &tx,
+                sid.as_str(),
+                user.as_str(),
+                generation,
+                &request.used.credential_id,
+                request.used.assurance.as_str(),
+                i64::try_from(view.session.factors.len()).map_err(|_| conflict("factor provenance exhausted"))?,
+                now.0,
+                Some(i64::try_from(request.config_generation).map_err(|_| conflict("invalid configuration generation"))?),
             )?;
             super::sessions::insert_handle(&tx, &request.portal_handle)?;
             super::sessions::insert_handoff_code(&tx, code)?;
@@ -826,12 +838,31 @@ impl Passkeys for Store {
                 }
             };
             check_portal_handle(actor, &request.portal_handle, aal, now)?;
-            rotate(&tx, &shared, actor, aal, FactorEntry { kind, provider: None, at: now }, &mut events)?;
-            if let PortalProof::Passkey { used, .. } = &request.proof {
-                tx.execute(
-                    "INSERT INTO session_webauthn_elevations(session_id,credential_id,at) VALUES(?1,?2,?3) ON CONFLICT(session_id,credential_id) DO UPDATE SET at=excluded.at",
-                    params![sid.as_str(), used.credential_id, now.secs()],
-                )?;
+            let generation = rotate(&tx, &shared, actor, aal, FactorEntry { kind, provider: None, at: now }, &mut events)?;
+            let index = i64::try_from(view.session.factors.len()).map_err(|_| conflict("factor provenance exhausted"))?;
+            let config_generation = super::webauthn_owner::config_generation(&tx)?;
+            match &request.proof {
+                PortalProof::Passkey { used, .. } => {
+                    tx.execute(
+                        "INSERT INTO session_webauthn_elevations(session_id,credential_id,at) VALUES(?1,?2,?3) ON CONFLICT(session_id,credential_id) DO UPDATE SET at=excluded.at",
+                        params![sid.as_str(), used.credential_id, now.secs()],
+                    )?;
+                    super::webauthn_owner::record(&tx, sid.as_str(), user.as_str(), generation, &used.credential_id, used.assurance.as_str(), index, now.0, config_generation)?;
+                }
+                PortalProof::Totp { enrollment, revision, .. } => {
+                    // The same establishing record a native TOTP step-up writes.
+                    let revision = i64::try_from(*revision).map_err(|_| conflict("invalid enrollment revision"))?;
+                    let linked = tx.execute(
+                        "INSERT INTO session_totp_provenance(session_id,user_id,credential_generation,enrollment_id,enrollment_revision,factor_index,verified_at_ms,config_generation) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) \
+                         ON CONFLICT(session_id) DO UPDATE SET user_id=excluded.user_id,credential_generation=excluded.credential_generation,enrollment_id=excluded.enrollment_id,enrollment_revision=excluded.enrollment_revision,factor_index=excluded.factor_index,verified_at_ms=excluded.verified_at_ms,config_generation=excluded.config_generation \
+                         WHERE excluded.user_id=session_totp_provenance.user_id AND excluded.credential_generation>session_totp_provenance.credential_generation",
+                        params![sid.as_str(), user.as_str(), generation, enrollment, revision, index, now.0, config_generation],
+                    )?;
+                    if linked != 1 {
+                        return Err(conflict("TOTP provenance generation unavailable"));
+                    }
+                }
+                PortalProof::Recovery { .. } => {}
             }
             super::sessions::insert_handle(&tx, &request.portal_handle)?;
             insert_events(&tx, &shared, &events)?;

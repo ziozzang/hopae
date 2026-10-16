@@ -153,7 +153,7 @@ fn refused(r: StoreResult<impl std::fmt::Debug>, what: &str) {
 #[tokio::test]
 async fn webauthn_schema_is_v11_and_foundation_detects_tampering() {
     let f = fx();
-    assert_eq!(f.store.schema_version().unwrap(), 11);
+    assert_eq!(f.store.schema_version().unwrap(), 12);
     crate::store::sqlite::webauthn::validate_foundation(&f.store.conn()).unwrap();
     f.store
         .conn()
@@ -325,6 +325,8 @@ async fn second_passkey_requires_recent_verification_and_duplicates_are_refused(
     let elevated = f.verify_portal(&p, &p.view, 1, 0).await.unwrap();
     assert_eq!(elevated.session.aal, Aal::Two);
     assert_eq!(elevated.handle.issued_aal, Aal::Two);
+    // The portal confirmation records the native establishing passkey (phase 2).
+    assert_eq!(f.count("SELECT COUNT(*) FROM session_webauthn_provenance WHERE credential_generation=2 AND factor_index=1 AND assurance='aal2' AND config_generation IS NULL"), 1);
     f.register(&p, &elevated, 2).await.unwrap();
     refused(
         f.register(&p, &elevated, 2).await,
@@ -556,6 +558,7 @@ async fn an_active_totp_counts_as_the_other_factor() {
         .unwrap()
         .unwrap();
     assert_eq!(v.session.factors.last().unwrap().kind, FactorKind::Totp);
+    assert_eq!(f.count("SELECT COUNT(*) FROM session_totp_provenance WHERE enrollment_id='t1' AND enrollment_revision=2 AND factor_index=1"), 1);
     f.register(&p, &v, 1).await.unwrap();
     // With TOTP present the passkey is not the last factor.
     assert!(
@@ -775,6 +778,7 @@ async fn webauthn_stepup_rotates_handles_consumes_txn_and_ceremony_and_hands_off
         f.count("SELECT COUNT(*) FROM session_webauthn_elevations"),
         1
     );
+    assert_eq!(f.count("SELECT COUNT(*) FROM session_webauthn_provenance WHERE credential_generation=2 AND config_generation=4"), 1);
     assert_eq!(
         f.count("SELECT COUNT(*) FROM events WHERE kind='factor.webauthn_used'"),
         1

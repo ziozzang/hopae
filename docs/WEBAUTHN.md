@@ -1,6 +1,6 @@
 # WebAuthn passkeys
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 3 -->
 
 [Documentation](README.md) · [한국어](ko/WEBAUTHN.md)
 
@@ -109,6 +109,17 @@ the other methods.
 AAL 3 is not emitted in this release; the [ADR](adr/0017-webauthn-passkeys.md#aal-3-wire-analysis)
 lists every reader that would have to change first. `x-hopae-aal` stays `1` or `2`.
 A recovery entry never satisfies an AAL 2 step-up rule.
+
+## Native Human owner path
+
+A passkey elevation records its establishing credential in
+`session_webauthn_provenance` (migration 12), the counterpart of the
+[native TOTP provenance](HUMAN_TOTP_PROVENANCE.md). The native Human owner and its
+signed receipts accept such an AAL 2 handle while the record is current: same
+session generation and factor entry, the passkey still active, the configuration
+generation unchanged. Receipts still carry AAL 2 and no factor kind; Hangang and
+Pumgye need no change. Sessions elevated before the migration stay refused on
+this path only.
 
 ## Data
 

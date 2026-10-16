@@ -33,6 +33,8 @@
 13. **Events (ADR-0009).** Required, in the transaction of the change: `factor.webauthn_registered`, `factor.webauthn_used` (attrs `factor_id`, `kind`, `aal`, `assurance`), `factor.webauthn_renamed`, `factor.webauthn_revoked`, `factor.webauthn_clone_suspected`, `factor.recovery_codes_generated` (`count`), `factor.recovery_code_used` (`count` remaining), `admin.factor_reset`. A failed ceremony records `factor.webauthn_failed` with a reason, never the client data or signature. Credential IDs appear in events only as `factor_id` = `pk_` plus the first 16 hex digits of SHA-256 over the ID.
 14. **Dependency.** `webauthn-rs` 0.5.5 (MPL-2.0, MSRV 1.88; the 0.6 line is `-dev` only). Its core links OpenSSL; Hopae enables `openssl/vendored` so release binaries stay static and do not use a system OpenSSL. Tests use `webauthn-authenticator-rs` 0.5.5 software authenticators (development dependency only).
 
+15. **Native Human owner provenance (phase 2).** Migration 12 adds `session_webauthn_provenance`, the counterpart of `session_totp_provenance` ([native TOTP provenance](../HUMAN_TOTP_PROVENANCE.md)): one row per session, written only in the elevation transaction of an application passkey step-up or a portal passkey confirmation, naming the user, the new credential generation, the credential id, the recorded class, the factor index and time, and the configuration generation (the step-up's, or the one in force for a portal confirmation). A portal confirmation with an authenticator code records the TOTP row the same way. The native Human owner accepts an AAL 2 handle only when exactly the row of the current credential generation exists (TOTP or WebAuthn), its factor entry is unchanged, the passkey is still active for the same user, and the configuration generation is current; freshness rules use that factor's time. Another use of the same passkey does not retire the owner; revocation does. Receipts are unchanged: they seal AAL 2 as before and carry no factor kind, so no peer changes.
+
 ### AAL 3 wire analysis
 
 | Reader | Today | Effect of emitting 3 |
@@ -59,7 +61,7 @@ Emission therefore needs, in order: a schema migration that rebuilds the three t
 
 - The portal gains script on four pages, which widens the XSS impact on those pages (mitigated by a static same-origin file with SRI, Trusted Types, no `connect-src`, and server-side CSRF and Origin checks on the submitted form).
 - `webauthn-rs` brings OpenSSL (vendored) into a Rust-crypto binary: larger build, a C toolchain and Perl at build time, OpenSSL advisories to track in `cargo audit`.
-- WebAuthn-elevated AAL 2 sessions are refused by the native Human owner path, which only accepts TOTP provenance today (fail closed; legacy verify works). Native owner provenance for WebAuthn is a follow-up.
+- Phase 2 (decision 15) lets WebAuthn-elevated AAL 2 sessions on the native Human owner path through an exact provenance record; sessions elevated before migration 12 have none and stay refused there (fail closed, legacy verify unaffected).
 - Factor management requires a primary sign-in at most 5 minutes old for users without a factor; the portal can only offer "sign out and sign in again" for that case.
 
 ### Neutral

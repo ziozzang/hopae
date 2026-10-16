@@ -1,6 +1,6 @@
 # WebAuthn 패스키
 
-<!-- translation-status: source=../WEBAUTHN.md source-rev=2 status=current -->
+<!-- translation-status: source=../WEBAUTHN.md source-rev=3 status=current -->
 
 [문서 목차](README.md) · [English](../WEBAUTHN.md)
 
@@ -107,6 +107,15 @@ AAL 3 분류(기록만).
 [ADR](../adr/0017-webauthn-passkeys.md#aal-3-wire-analysis)에 먼저 바뀌어야 할 모든
 판독자가 나열되어 있습니다. `x-hopae-aal`은 `1` 또는 `2`로 유지됩니다. 복구 항목은
 AAL 2 단계 상승 규칙을 결코 충족하지 않습니다.
+
+## 네이티브 Human 소유자 경로
+
+패스키 상승은 확립 자격 증명을 `session_webauthn_provenance`(마이그레이션 12)에
+기록합니다. [네이티브 TOTP 출처](HUMAN_TOTP_PROVENANCE.md)에 대응합니다. 네이티브
+Human 소유자와 서명된 영수증은 기록이 현재인 동안 그런 AAL 2 핸들을 받습니다: 같은
+세션 세대와 요소 항목, 여전히 활성인 패스키, 바뀌지 않은 설정 세대. 영수증은 여전히
+AAL 2만 담고 요소 종류는 담지 않으므로 Hangang과 Pumgye는 바꿀 필요가 없습니다.
+마이그레이션 전에 상승한 세션은 이 경로에서만 계속 거부됩니다.
 
 ## 데이터
 

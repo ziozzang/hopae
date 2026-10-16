@@ -72,6 +72,7 @@ fn open_applies_migration_and_sets_pragmas() {
             "session_primary_provenance",
             "session_totp_provenance",
             "session_webauthn_elevations",
+            "session_webauthn_provenance",
             "sessions",
             "totp_enrollments",
             "txn_admissions",

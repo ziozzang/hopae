@@ -1,6 +1,6 @@
 # Threat model
 
-<!-- doc-rev: 14 -->
+<!-- doc-rev: 15 -->
 
 [Documentation](README.md) · [한국어](ko/THREAT_MODEL.md)
 
@@ -152,7 +152,7 @@ cosmetic). "Scenario" names the scenario that exercises the threat.
 - Until Hopae has its own second factor a console session is single-factor (TM-43): a phished or replayed provider login is an administrator login. The documented mitigations are a second factor enforced by the provider for administrator accounts, the freshness rule after `admin.max_auth_age` (a provider-verified reauthentication with a `max_age` provider; **Hopae login age only** with an `unsupported` provider such as Google, where the provider may complete the new sign-in silently from its own session), the implicit application's short lifetimes and strict binding, and revocation through the CLI or the file. A session that authenticated recently on another host enters the console by single sign-on without a new challenge; the bound, not the entry, triggers the challenge. TOTP for administrators is proposed as the milestone after M4-min.
 - The admin listener cannot authenticate the gateway (no static upstream header exists and a local process shares the loopback address); `admin.untrusted_peers = refuse` makes an unexpected peer fail loudly but cannot tell a local process on the gateway's own address from the gateway, so a local process that already holds a stolen console handle can choose the client address it reports (TM-42). Without the handle a direct connection gets `403` and nothing else; the deployment keeps the listener on loopback or inside the gateway's network namespace.
 - A grant created from a verified, non-authoritative email rests on the operator's confirmation of the displayed user (TM-46): Hopae cannot establish that the mailbox's current holder is the account's original person.
-- WebAuthn-elevated AAL 2 sessions are refused by the native Human owner path, which accepts only TOTP provenance today (fail closed). AAL 3 is recorded, not emitted (TM-53). Removing a passkey keeps the acting session alive even if that passkey elevated it; the acting session has just proven a second factor. Users without a factor whose primary sign-in is older than five minutes must sign out and in again to enroll (ADR-0017 decision 10).
+- WebAuthn-elevated AAL 2 sessions reach the native Human owner path only through the exact provenance record of their elevation (ADR-0017 decision 15); sessions elevated before migration 12 are refused there. AAL 3 is recorded, not emitted (TM-53). Removing a passkey keeps the acting session alive even if that passkey elevated it; the acting session has just proven a second factor. Users without a factor whose primary sign-in is older than five minutes must sign out and in again to enroll (ADR-0017 decision 10).
 - Console reads are not audited and a read-only administrator sees the same personal data as an administrator (TM-45); read audit and a reduced-data role are backlog items.
 
 ## Related pages
