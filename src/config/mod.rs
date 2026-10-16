@@ -419,6 +419,10 @@ pub struct AppEntry {
     pub logout_confirm: Option<bool>,
     #[serde(default)]
     pub step_up: Vec<StepUpEntry>,
+    /// Highest assurance level presented to this application (ADR-0018):
+    /// `2` (default) or `3`. `3` needs `webauthn.high_assurance`.
+    #[serde(default)]
+    pub max_emitted_aal: Option<u8>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1196,6 +1200,14 @@ impl Config {
                     a.app_id
                 ));
             }
+            match a.max_emitted_aal {
+                None | Some(2) => {}
+                Some(3) if self.webauthn.as_ref().is_some_and(|w| w.high_assurance.is_some()) => {}
+                Some(3) => errs.push(format!(
+                    "{at}.max_emitted_aal 3 needs webauthn.high_assurance (only an attested, allowlisted security key yields AAL 3)"
+                )),
+                Some(_) => errs.push(format!("{at}.max_emitted_aal must be 2 or 3")),
+            }
             let is_default = a.app_id == "default";
             if is_default && !a.hosts.is_empty() {
                 errs.push(format!("{at}.hosts: the default application carries policy defaults only and must not list hosts"));
@@ -1624,6 +1636,8 @@ impl Config {
                 Vec::new()
             },
             max_auth_age: Some(limits.max_auth_age),
+            // The console never presents AAL 3 (ADR-0018).
+            max_emitted_aal: Aal::Two,
         })
     }
 
@@ -1873,6 +1887,11 @@ fn resolve_app(entry: Option<&AppEntry>, base: &AppPolicy, cfg: &Config, id: &st
             })
             .collect(),
         max_auth_age: None,
+        max_emitted_aal: match a.max_emitted_aal {
+            Some(3) => Aal::Three,
+            Some(_) => Aal::Two,
+            None => base.max_emitted_aal,
+        },
     }
 }
 

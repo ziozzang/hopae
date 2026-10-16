@@ -37,6 +37,7 @@ const APP: Node = Obj(&[
     ("on_authz_change", Leaf),
     ("verify_cache_seconds", Leaf),
     ("logout_confirm", Leaf),
+    ("max_emitted_aal", Leaf),
     ("step_up", Arr(&STEP_UP)),
 ]);
 

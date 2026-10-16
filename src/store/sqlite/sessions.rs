@@ -865,6 +865,21 @@ impl Sessions for Store {
         .await
     }
 
+    async fn session_aal3_evidence(&self, session: &SessionId, cred_gen: u64) -> StoreResult<bool> {
+        let (session, generation) = (session.clone(), i64::try_from(cred_gen).unwrap_or(-1));
+        self.read("session_aal3_evidence", move |c| {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_webauthn_provenance p JOIN sessions s ON s.session_id=p.session_id AND s.cred_gen=p.credential_generation \
+                 JOIN webauthn_credentials w ON w.credential_id=p.credential_id AND w.user_id=p.user_id \
+                 WHERE p.session_id=?1 AND s.cred_gen=?2 AND s.terminated_at IS NULL AND s.aal=2 AND p.assurance='aal3' \
+                 AND w.assurance='aal3' AND w.state='active' AND w.backup_eligible=0 AND w.backup_state=0)",
+                params![session.as_str(), generation],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+    }
+
     async fn sweep(&self, now: Timestamp, retention: Duration) -> StoreResult<SweepReport> {
         self.write("sweep", move |env| {
             let shared = env.shared.clone();

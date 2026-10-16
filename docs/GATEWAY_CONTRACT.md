@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 15 -->
+<!-- doc-rev: 16 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -238,7 +238,7 @@ value are omitted rather than sent empty.
 | `x-hopae-provider` | Provider id of the first factor (`google`); `hopae.passkey` for a passwordless passkey session ([WebAuthn passkeys](WEBAUTHN.md#passwordless-sign-in)), a reserved value no configured provider can take | 64 B |
 | `x-hopae-auth-time` | Unix seconds of the first-factor authentication | 20 B |
 | `x-hopae-expires` | Unix seconds of the earlier of idle and absolute expiry | 20 B |
-| `x-hopae-aal` | `1` or `2`: the level the presented handle was issued at ([ADR-0008](adr/0008-second-factor-extension-point.md)); elevation reissues handles | 1 B |
+| `x-hopae-aal` | `1` or `2`: the level the presented handle was issued at ([ADR-0008](adr/0008-second-factor-extension-point.md)); elevation reissues handles. `3` only for an application with `apps[].max_emitted_aal = 3` while the session's current elevation is a high-assurance passkey ([ADR-0018](adr/0018-aal3-emission.md)); compare it as a number | 1 B |
 | `x-hopae-factors` | Comma list of satisfied factors `kind[:provider]`, e.g. `oidc:google,totp` | 256 B |
 
 Total identity header bytes ≤ 8 KiB (the gateway rejects more than 16 KiB).

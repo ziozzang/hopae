@@ -393,6 +393,11 @@ impl Store {
 }
 
 impl Current {
+    /// The current establishing factor is a high-assurance passkey (ADR-0018).
+    pub(crate) fn establishing_aal3(&self) -> bool {
+        matches!(&self.factor, Some(Establishing::Webauthn(f)) if f.assurance == "aal3")
+    }
+
     /// Stable account coordinate only; never a receipt or authentication grant.
     pub(crate) fn subject_for_witness(
         &self,

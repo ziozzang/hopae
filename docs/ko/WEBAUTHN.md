@@ -1,6 +1,6 @@
 # WebAuthn 패스키
 
-<!-- translation-status: source=../WEBAUTHN.md source-rev=5 status=current -->
+<!-- translation-status: source=../WEBAUTHN.md source-rev=6 status=current -->
 
 [문서 목차](README.md) · [English](../WEBAUTHN.md)
 
@@ -105,9 +105,9 @@ AAL 3 내보내기는 아래에 설명합니다.
 | 고보증 자격 증명(설정된 CA로 증명, 허용 목록 AAGUID, 백업 불가)을 사용자 확인과 함께, 백업되지 않은 상태로 어설션 | `aal` 2, 요소 `webauthn` | `aal3`(기록만) |
 | 복구 코드 | `aal` 변경 없음(1), 요소 `recovery`, 재등록 필요 | — |
 
-이 릴리스는 AAL 3을 내보내지 않습니다.
-[ADR](../adr/0017-webauthn-passkeys.md#aal-3-wire-analysis)에 먼저 바뀌어야 할 모든
-판독자가 나열되어 있습니다. `x-hopae-aal`은 `1` 또는 `2`로 유지됩니다. 복구 항목은
+AAL 3은 `apps[].max_emitted_aal = 3`인 애플리케이션에만, 세션의 현재 상승이 고보증
+패스키인 동안 제시합니다. 다른 모든 애플리케이션과 저장된 수준은 2입니다
+([ADR-0018](../adr/0018-aal3-emission.md)과 그 문서의 피어 변경 목록). 복구 항목은
 AAL 2 단계 상승 규칙을 결코 충족하지 않습니다.
 
 ## 비밀번호 없는 로그인

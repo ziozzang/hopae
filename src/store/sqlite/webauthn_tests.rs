@@ -885,3 +885,86 @@ async fn sweep_removes_spent_ceremony_rows() {
         .unwrap();
     assert_eq!(f.count("SELECT COUNT(*) FROM webauthn_challenges"), 1);
 }
+
+#[tokio::test]
+async fn aal3_evidence_follows_the_current_high_assurance_elevation() {
+    use crate::store::Sessions;
+    let f = fx();
+    let p = px(&f).await;
+    // A high-assurance credential (attested, not backup-eligible).
+    let c = f
+        .ceremony(&p, &p.view, CeremonyPurpose::Register, None)
+        .await;
+    let mut record = f.record(&p.user, 1);
+    record.assurance = Assurance::Aal3;
+    record.attested = true;
+    record.backup_eligible = false;
+    record.backup_state = false;
+    f.store
+        .register_passkey(RegisterPasskey {
+            actor: f.actor(&p.view),
+            ceremony: c,
+            portal_binding: p.bind,
+            record,
+            events: vec![],
+        })
+        .await
+        .unwrap();
+    let sid = p.view.session.session_id.clone();
+    assert!(
+        !f.store
+            .session_aal3_evidence(&sid, p.view.session.cred_gen)
+            .await
+            .unwrap()
+    );
+    // A portal confirmation with an AAL 3 assertion.
+    let c = f.ceremony(&p, &p.view, CeremonyPurpose::Verify, None).await;
+    let mut used = f.used(1, 1);
+    used.assurance = Assurance::Aal3;
+    used.backup_eligible = false;
+    used.backup_state = false;
+    let mut handle = f.handle_row(&sid, PORTAL_HOST, &handle_value(&f.rng));
+    handle.issued_aal = Aal::Two;
+    handle.absolute_expires_at = p.view.handle.absolute_expires_at;
+    f.store
+        .elevate_portal(PortalElevation {
+            actor: f.actor(&p.view),
+            portal_binding: p.bind,
+            proof: PortalProof::Passkey { ceremony: c, used },
+            portal_handle: handle.clone(),
+            events: vec![],
+        })
+        .await
+        .unwrap();
+    let v = f
+        .store
+        .lookup_handle(&handle.handle_sha256, &host(PORTAL_HOST))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        f.store
+            .session_aal3_evidence(&sid, v.session.cred_gen)
+            .await
+            .unwrap()
+    );
+    // A stale generation never qualifies.
+    assert!(
+        !f.store
+            .session_aal3_evidence(&sid, p.view.session.cred_gen)
+            .await
+            .unwrap()
+    );
+    // A later AAL 2 use (the key reported backup flags) replaces the evidence.
+    let v2 = f.verify_portal(&p, &v, 1, 2).await.unwrap();
+    assert!(
+        !f.store
+            .session_aal3_evidence(&sid, v2.session.cred_gen)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM session_webauthn_provenance WHERE assurance='aal2'"),
+        1
+    );
+}

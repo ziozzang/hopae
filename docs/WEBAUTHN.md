@@ -1,6 +1,6 @@
 # WebAuthn passkeys
 
-<!-- doc-rev: 5 -->
+<!-- doc-rev: 6 -->
 
 [Documentation](README.md) · [한국어](ko/WEBAUTHN.md)
 
@@ -107,8 +107,10 @@ the other methods.
 | High-assurance credential (attested to a configured CA, allowlisted AAGUID, not backup-eligible) asserted with user verification and not backed up | `aal` 2, factor `webauthn` | `aal3` (recorded only) |
 | Recovery code | `aal` unchanged (1), factor `recovery`; re-enrollment required | — |
 
-AAL 3 is not emitted in this release; the [ADR](adr/0017-webauthn-passkeys.md#aal-3-wire-analysis)
-lists every reader that would have to change first. `x-hopae-aal` stays `1` or `2`.
+AAL 3 is presented only to applications that set `apps[].max_emitted_aal = 3`,
+while the session's current elevation is a high-assurance passkey; every other
+application, and the stored level, stay at 2 ([ADR-0018](adr/0018-aal3-emission.md),
+with the peer changes it lists).
 A recovery entry never satisfies an AAL 2 step-up rule.
 
 ## Passwordless sign-in

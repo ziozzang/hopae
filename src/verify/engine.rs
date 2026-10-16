@@ -365,7 +365,21 @@ async fn flow(
                 ),
                 None => None,
             };
-            Ok((allow(cx, app, *authed), witness))
+            // ADR-0018: an opted-in application sees AAL 3 while the
+            // session's current elevation is a qualifying high-assurance
+            // passkey. A failed read presents the stored level, never more.
+            let aal3 = app.max_emitted_aal == crate::session::Aal::Three
+                && authed.view.handle.issued_aal == crate::session::Aal::Two
+                && cx
+                    .ctx
+                    .sessions
+                    .session_aal3_evidence(
+                        &authed.view.session.session_id,
+                        authed.view.session.cred_gen,
+                    )
+                    .await
+                    .unwrap_or(false);
+            Ok((allow(cx, app, *authed, aal3), witness))
         }
     }
 }
@@ -592,7 +606,7 @@ async fn authenticate(cx: &Cx<'_>, app: &AppPolicy) -> Result<Authn, Decision> {
 }
 
 /// The `200`: touch the handle, then identity and cacheability.
-fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed) -> Decision {
+fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed, aal3: bool) -> Decision {
     let Authed {
         view,
         snapshot,
@@ -615,7 +629,11 @@ fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed) -> Decision {
         provider_id: view.session.provider_id.clone(),
         auth_time: view.session.auth_time,
         expires_at,
-        aal: view.handle.issued_aal,
+        aal: if aal3 {
+            crate::session::Aal::Three
+        } else {
+            view.handle.issued_aal
+        },
         factors: view.session.factors.clone(),
         generations: Generations {
             session: view.session.cred_gen,

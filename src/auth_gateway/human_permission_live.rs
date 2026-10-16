@@ -56,7 +56,7 @@ impl Request {
         };
         let context = self.inner.native().context.as_ref().ok_or(Refused)?;
         let identity = context.identity.as_ref().ok_or(Refused)?;
-        if identity.kind != 1 || !matches!(identity.aal, 1 | 2) {
+        if identity.kind != 1 || !(1..=3).contains(&identity.aal) {
             return Err(Refused);
         }
         Ok(Context {
@@ -89,7 +89,7 @@ impl Request {
         };
         let p = self.inner.permit().context.as_ref().ok_or(Refused)?;
         let i = p.identity.as_ref().ok_or(Refused)?;
-        if i.kind != 1 || !matches!(i.aal, 1 | 2) {
+        if i.kind != 1 || !(1..=3).contains(&i.aal) {
             return Err(Refused);
         }
         Ok(Context {

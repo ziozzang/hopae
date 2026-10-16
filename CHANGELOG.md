@@ -29,6 +29,12 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   `recovery_codes`, `session_webauthn_elevations`, two nullable `users`
   columns). Roll back by restoring the pre-migration backup.
 
+- `apps[].max_emitted_aal = 3` presents AAL 3 (`x-hopae-aal`, receipts) to an
+  opted-in application while the session's current elevation is a
+  high-assurance passkey (ADR-0018); the stored level stays 2. Hopae's Human
+  gRPC server, Human permission parser and the `hopae-grpc` Human observed
+  client accept AAL 3.
+
 ### Changed
 
 - A recovery factor entry no longer counts as AAL 2 evidence in step-up

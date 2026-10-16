@@ -1229,6 +1229,19 @@ impl Passkeys for Store {
                 "INSERT INTO session_webauthn_elevations(session_id,credential_id,at) VALUES(?1,?2,?3)",
                 params![s.session_id.as_str(), login.used.credential_id, now.secs()],
             )?;
+            // The establishing passkey, as for an elevation (ADR-0018 emission).
+            let config_generation = super::webauthn_owner::config_generation(&tx)?;
+            super::webauthn_owner::record(
+                &tx,
+                s.session_id.as_str(),
+                s.user_id.as_str(),
+                1,
+                &login.used.credential_id,
+                login.used.assurance.as_str(),
+                0,
+                s.factors[0].at.0,
+                config_generation,
+            )?;
             insert_events(&tx, &shared, &login.events)?;
             commit(tx, &shared, Some("login_commit"))
         })

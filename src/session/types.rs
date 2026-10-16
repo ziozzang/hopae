@@ -19,6 +19,11 @@ string_newtype!(
 pub enum Aal {
     One = 1,
     Two = 2,
+    /// Emission only (ADR-0018): never stored and never parsed from the
+    /// store. An AAL 2 handle is presented as 3 to an application that opted
+    /// in (`apps[].max_emitted_aal = 3`) while the session's current
+    /// elevation is a high-assurance passkey.
+    Three = 3,
 }
 
 impl Aal {

@@ -1363,3 +1363,133 @@ fn g8_hold_passkey_stack() {
         std::thread::sleep(Duration::from_millis(200));
     }
 }
+
+// ---- 488: AAL 3 emission (ADR-0018) ------------------------------------------
+
+/// A stack whose `app` presents up to `max` and accepts the software token's
+/// attestation for high-assurance registration; returns it, the token and
+/// the directory holding the CA.
+fn aal3_stack(
+    max: u8,
+) -> (
+    Pk,
+    WebauthnAuthenticator<webauthn_authenticator_rs::softtoken::SoftToken>,
+    tempfile::TempDir,
+) {
+    let (token, ca) = webauthn_authenticator_rs::softtoken::SoftToken::new(true).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let pem = dir.path().join("ca.pem");
+    std::fs::write(&pem, ca.to_pem().unwrap()).unwrap();
+    let p = Pk::start(json!({
+        "webauthn": {"high_assurance": {
+            "attestation_ca_files": [pem.to_str().unwrap()],
+            "aaguids": [webauthn_authenticator_rs::softtoken::AAGUID.to_string()]
+        }},
+        "apps": [{"app_id": "app", "max_emitted_aal": max,
+                  "step_up": [{"path_prefix": "/admin", "require": {"aal": 2, "max_age": 900}}]}]
+    }));
+    (p, WebauthnAuthenticator::new(token), dir)
+}
+
+fn aal3_register_and_step_up(
+    p: &Pk,
+    key: &mut WebauthnAuthenticator<webauthn_authenticator_rs::softtoken::SoftToken>,
+) -> Response {
+    let page = p.portal.get("/security/passkeys/new?kind=high_assurance");
+    assert_eq!(page.status, 200, "{page:?}");
+    let opts: CreationChallengeResponse = serde_json::from_str(&options(&page.body)).unwrap();
+    let cred = key
+        .do_registration(Url::parse(PORTAL).unwrap(), opts)
+        .unwrap();
+    let r = p.post(
+        "/security/passkeys/new",
+        &[
+            ("csrf", &field(&page.body, "/security/passkeys/new", "csrf")),
+            (
+                "ceremony",
+                &field(&page.body, "/security/passkeys/new", "ceremony"),
+            ),
+            ("kind", "high_assurance"),
+            ("credential", &browser_json(&cred)),
+        ],
+    );
+    assert_eq!(r.status, 303, "{r:?} {}", r.body);
+    assert_eq!(p.sql("SELECT COUNT(*) FROM webauthn_credentials WHERE assurance='aal3' AND attested=1 AND backup_eligible=0"), 1);
+    let r = p.verify(ADMIN);
+    let page = p.portal.get(&path_of(r.location().unwrap()));
+    let opts: RequestChallengeResponse = serde_json::from_str(&options(&page.body)).unwrap();
+    let cred = key
+        .do_authentication(Url::parse(PORTAL).unwrap(), opts)
+        .unwrap();
+    let done = p.post(
+        "/stepup/webauthn",
+        &[
+            ("csrf", &field(&page.body, "/stepup/webauthn", "csrf")),
+            ("txn", &field(&page.body, "/stepup/webauthn", "txn")),
+            (
+                "ceremony",
+                &field(&page.body, "/stepup/webauthn", "ceremony"),
+            ),
+            ("credential", &browser_json(&cred)),
+        ],
+    );
+    assert_eq!(done.status, 302, "{done:?}");
+    let redeem = p.verify(done.location().unwrap());
+    p.verify(redeem.location().unwrap_or(ADMIN))
+}
+
+#[test]
+fn s488_1_an_opted_in_application_sees_aal3_for_a_high_assurance_key() {
+    let (mut p, mut key, _ca) = aal3_stack(3);
+    let clean = aal3_register_and_step_up(&p, &mut key);
+    assert_eq!(clean.status, 200, "{clean:?}");
+    assert_eq!(clean.header("x-hopae-aal"), Some("3"));
+    let _ = &mut p;
+}
+
+#[test]
+fn s488_2_without_opt_in_the_same_key_stays_aal2() {
+    let (p, mut key, _ca) = aal3_stack(2);
+    let clean = aal3_register_and_step_up(&p, &mut key);
+    assert_eq!(clean.status, 200, "{clean:?}");
+    assert_eq!(
+        clean.header("x-hopae-aal"),
+        Some("2"),
+        "old consumers keep receiving at most 2"
+    );
+}
+
+#[test]
+fn s488_a1_a_synced_passkey_never_yields_aal3() {
+    let (mut p, _token, _ca) = aal3_stack(3);
+    assert_eq!(p.register("Phone").status, 303);
+    let (_, done, _) = p.stepup(PORTAL);
+    assert_eq!(done.status, 302);
+    let redeem = p.verify(done.location().unwrap());
+    let clean = p.verify(redeem.location().unwrap_or(ADMIN));
+    assert_eq!(clean.header("x-hopae-aal"), Some("2"));
+}
+
+#[test]
+fn s488_a2_aal3_needs_high_assurance_configuration() {
+    let idp = MockIdp::start("default");
+    let dir = tempfile::tempdir().unwrap();
+    for over in [
+        json!({"webauthn": {}, "apps": [{"app_id": "app", "max_emitted_aal": 3}]}),
+        json!({"apps": [{"app_id": "app", "max_emitted_aal": 3}]}),
+        json!({"webauthn": {}, "apps": [{"app_id": "app", "max_emitted_aal": 4}]}),
+    ] {
+        let cfg = Fixture::with("m1-basic", over).render(dir.path(), &idp);
+        let path = crate::support::write_config(dir.path(), &cfg.to_string());
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_hopae"))
+            .args(["--check", "--config"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+}

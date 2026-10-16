@@ -461,7 +461,7 @@ async fn authenticated_owner_success_refresh_and_hostile_replies() {
             5 => c.identity.as_mut().unwrap().revision = 0,
             6 => c.identity.as_mut().unwrap().credential_generation = 0,
             7 => c.identity.as_mut().unwrap().kind = 3,
-            _ => c.identity.as_mut().unwrap().aal = 3,
+            _ => c.identity.as_mut().unwrap().aal = 4,
         }
         assert!(
             observer.prepare_observation(c, &raw, digest).is_err(),
