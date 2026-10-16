@@ -1287,7 +1287,7 @@ impl Bound {
             match (self.admin, routers.admin) {
                 (Some((l, _)), Some(router)) => {
                     if let Some(tls) = self.admin_tls {
-                        hangang_runtime::serve_https(l, tls, router, wait(stop_rx.clone())).await
+                        http::admin_tls::serve(l, tls, router, wait(stop_rx.clone())).await
                     } else {
                         axum::serve(
                             l,
@@ -1554,6 +1554,259 @@ pub enum AdminCommand {
     FactorsReset {
         target: String,
     },
+    /// `hopae admin service-credentials …`.
+    ServiceCredential(ServiceCredentialCommand),
+}
+
+/// `hopae admin service-credentials` actions.
+#[derive(Clone, Debug)]
+pub enum ServiceCredentialCommand {
+    Create {
+        id: String,
+        routes: Vec<String>,
+        /// `pumgye-v2`: the four projection/lifecycle read routes.
+        preset: Option<String>,
+        audiences: Vec<String>,
+        client_spki_sha256: Option<String>,
+        client_san: Option<String>,
+        expires_in_days: u32,
+        rate_per_minute: u32,
+        burst: u32,
+        note: Option<String>,
+    },
+    /// Issue a next secret (current and next are both accepted).
+    Rotate {
+        id: String,
+    },
+    /// Make the next secret current; the old current stops working.
+    Promote {
+        id: String,
+    },
+    Revoke {
+        id: String,
+    },
+    List,
+}
+
+/// `hopae admin service-credentials …`: the secret is printed once and only
+/// its digest is stored; every change commits with `admin.service_credential`.
+async fn service_credential_cli(
+    cfg: &Config,
+    cmd: ServiceCredentialCommand,
+    mut out: AdminCliOutput,
+) -> anyhow::Result<AdminCliOutput> {
+    use crate::admin::service_credentials as sc;
+    use crate::store::sqlite::service_credentials::{Change, ServiceCredentialRow};
+    let id_of = |c: &ServiceCredentialCommand| match c {
+        ServiceCredentialCommand::Create { id, .. }
+        | ServiceCredentialCommand::Rotate { id }
+        | ServiceCredentialCommand::Promote { id }
+        | ServiceCredentialCommand::Revoke { id } => Some(id.clone()),
+        ServiceCredentialCommand::List => None,
+    };
+    if let Some(id) = id_of(&cmd)
+        && !sc::valid_id(&id)
+    {
+        return Ok(out.refuse("credential id: 3-48 lowercase letters, digits and inner '-'"));
+    }
+    let env = env();
+    let audience_default = cfg
+        .admin
+        .service_audience
+        .clone()
+        .or_else(|| cfg.admin_origin().map(|o| o.ascii_serialization()));
+    let mut validated = None;
+    if let ServiceCredentialCommand::Create {
+        id,
+        routes,
+        preset,
+        audiences,
+        client_spki_sha256,
+        client_san,
+        expires_in_days,
+        rate_per_minute,
+        burst,
+        note,
+    } = &cmd
+    {
+        let mut routes = routes.clone();
+        match preset.as_deref() {
+            None => {}
+            Some("pumgye-v2") => routes.extend(sc::PUMGYE_V2_ROUTES.iter().map(|s| s.to_string())),
+            Some(_) => return Ok(out.refuse("--preset: only pumgye-v2 is defined")),
+        }
+        routes.sort();
+        routes.dedup();
+        if routes.is_empty() || routes.len() > sc::MAX_ROUTES {
+            return Ok(out.refuse("--route: 1-32 routes (\"METHOD /path\") or --preset"));
+        }
+        if let Some(bad) = routes.iter().find(|r| !sc::grantable(r)) {
+            return Ok(out.refuse(format!(
+                "--route {bad:?}: not a read route a service credential may hold (mutations are never grantable)"
+            )));
+        }
+        let mut audiences = if audiences.is_empty() {
+            audience_default.clone().into_iter().collect::<Vec<_>>()
+        } else {
+            audiences.clone()
+        };
+        audiences.sort();
+        audiences.dedup();
+        if audiences.is_empty()
+            || audiences.len() > sc::MAX_AUDIENCES
+            || audiences
+                .iter()
+                .any(|a| a.is_empty() || a.len() > 256 || !a.bytes().all(|b| b.is_ascii_graphic()))
+        {
+            return Ok(out.refuse(
+                "--audience: 1-8 audiences of visible ASCII (default the console origin)",
+            ));
+        }
+        let spki = client_spki_sha256.as_ref().map(|s| s.to_ascii_lowercase());
+        if spki
+            .as_ref()
+            .is_some_and(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Ok(out.refuse("--client-spki-sha256: 64 hex digits"));
+        }
+        if client_san.as_ref().is_some_and(|s| !sc::valid_san(s)) {
+            return Ok(out.refuse("--client-san: 1-512 visible ASCII characters"));
+        }
+        if spki.is_none() && client_san.is_none() {
+            return Ok(
+                out.refuse("an mTLS binding is required: --client-spki-sha256 and/or --client-san")
+            );
+        }
+        let lifetime = i64::from(*expires_in_days) * 86_400;
+        if !(1..=sc::MAX_LIFETIME_SECS).contains(&lifetime) {
+            return Ok(out.refuse("--expires-in-days: 1-400"));
+        }
+        if !(1..=6000).contains(rate_per_minute) || !(1..=1000).contains(burst) {
+            return Ok(out.refuse("--rate-per-minute 1-6000, --burst 1-1000"));
+        }
+        if note.as_ref().is_some_and(|n| n.chars().count() > 256) {
+            return Ok(out.refuse("--note: at most 256 characters"));
+        }
+        if cfg.listen.admin_tls.is_none() {
+            out.warn("listen.admin_tls is not configured: service credentials are refused until the admin listener uses mutual TLS");
+        }
+        let now = env.clock.now().secs();
+        let (token, digest) = crate::admin::service_credentials::mint(env.rng.as_ref(), id);
+        validated = Some((
+            ServiceCredentialRow {
+                credential_id: id.clone(),
+                routes,
+                audiences,
+                client_spki_sha256: spki,
+                client_san: client_san.clone(),
+                current_sha256: digest,
+                current_since: now,
+                next_sha256: None,
+                next_since: None,
+                expires_at: now + lifetime,
+                rate_per_minute: *rate_per_minute,
+                burst: *burst,
+                note: note.clone(),
+                created_at: now,
+                revoked_at: None,
+                revision: 1,
+            },
+            token,
+        ));
+    }
+    let store = open_cli_store(cfg, &env).await?;
+    let event = |change: &'static str, id: &str| {
+        crate::event::types::EventBuilder::new(
+            &*env.clock,
+            &*env.rng,
+            EventKind::AdminServiceCredential,
+            Outcome::Success,
+            "admin-cli",
+        )
+        .attr("actor", "cli")
+        .attr("change", change)
+        .attr("credential_id", id)
+        .build()
+    };
+    let iso = |t: i64| preflight::iso_datetime(t);
+    let result: crate::store::StoreResult<()> = async {
+        match cmd {
+            ServiceCredentialCommand::Create { id, .. } => {
+                let (row, token) = validated.take().expect("validated");
+                let expires = row.expires_at;
+                store
+                    .service_credential_create(row, vec![event("created", &id)])
+                    .await?;
+                out.out(token.expose());
+                out.stderr.push_str(&format!(
+                    "created service credential {id} (expires {}); the token above is shown once and only its digest is stored\n",
+                    iso(expires)
+                ));
+            }
+            ServiceCredentialCommand::Rotate { id } => {
+                let (token, digest) = crate::admin::service_credentials::mint(env.rng.as_ref(), &id);
+                store
+                    .service_credential_change(id.clone(), Change::Rotate, Some(digest), vec![event("rotated", &id)])
+                    .await?;
+                out.out(token.expose());
+                out.stderr.push_str(&format!(
+                    "issued the next secret of {id}: current and next are both accepted until `promote`\n"
+                ));
+            }
+            ServiceCredentialCommand::Promote { id } => {
+                store
+                    .service_credential_change(id.clone(), Change::Promote, None, vec![event("promoted", &id)])
+                    .await?;
+                out.out(format!("promoted the next secret of {id}; the previous secret no longer works"));
+            }
+            ServiceCredentialCommand::Revoke { id } => {
+                store
+                    .service_credential_change(id.clone(), Change::Revoke, None, vec![event("revoked", &id)])
+                    .await?;
+                out.out(format!("revoked service credential {id}"));
+            }
+            ServiceCredentialCommand::List => {
+                out.out("ID  STATE  ROUTES  AUDIENCES  BINDING  EXPIRES_AT  ROTATION  RATE");
+                let now = env.clock.now().secs();
+                for r in store.service_credential_list().await? {
+                    let state = if r.revoked_at.is_some() {
+                        "revoked"
+                    } else if r.expires_at <= now {
+                        "expired"
+                    } else {
+                        "active"
+                    };
+                    let binding = [
+                        r.client_spki_sha256.as_ref().map(|s| format!("spki:{}", &s[..16])),
+                        r.client_san.as_ref().map(|s| format!("san:{s}")),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("+");
+                    out.out(format!(
+                        "{}  {}  {}  {}  {}  {}  {}  {}/min burst {}",
+                        r.credential_id,
+                        state,
+                        r.routes.join(","),
+                        r.audiences.join(","),
+                        binding,
+                        iso(r.expires_at),
+                        if r.next_sha256.is_some() { "pending" } else { "-" },
+                        r.rate_per_minute,
+                        r.burst
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => Ok(out),
+        Err(crate::store::StoreError::Conflict(why)) => Ok(out.refuse(why)),
+        Err(e) => store_failure(&e, out),
+    }
 }
 
 /// Operator-facing text for a store failure; a database error is never echoed.
@@ -1698,6 +1951,9 @@ pub async fn admin_cli_with(
         live,
         ..AdminCliOutput::default()
     };
+    if let AdminCommand::ServiceCredential(c) = cmd {
+        return service_credential_cli(cfg, c, out).await;
+    }
     // Validation first.
     let parsed_target = match &cmd {
         AdminCommand::Grant { target, .. }
@@ -1738,6 +1994,7 @@ pub async fn admin_cli_with(
     let dl = || Deadline::after(Duration::from_secs(30));
     let result: crate::store::StoreResult<()> = async {
         match cmd {
+            AdminCommand::ServiceCredential(_) => unreachable!("handled above"),
             AdminCommand::Grant {
                 role,
                 note,

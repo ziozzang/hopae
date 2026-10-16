@@ -259,6 +259,12 @@ pub mod common {
         let event = plain_event(st, c, kind, outcome)
             .attr("actor", c.principal.user_id.as_str())
             .attr("actor_session", c.principal.session_id.as_str());
+        let event = match &c.service {
+            Some(s) => event
+                .attr("credential_id", s.credential_id.as_str())
+                .attr("credential_slot", s.slot),
+            None => event,
+        };
         if let Some(actor) = &c.delegated_actor {
             event
                 .attr("delegated_issuer", "hangang")

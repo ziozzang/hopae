@@ -23,6 +23,10 @@ hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 libc = "0.2"
 tower = { version = "0.5", features = ["util"] }
+# Admin mTLS server that exposes the verified client certificate to the
+# service-credential binding (same versions hangang-runtime already pulls in).
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 anyhow = "1"
 askama = "0.14"
 arc-swap = "1"

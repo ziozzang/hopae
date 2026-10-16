@@ -117,6 +117,14 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   then offers only high-assurance keys and tells users without one; the console's
   write fence re-checks the evidence. The authentication explain API reports
   `aal3_evidence` and `presented_aal`.
+- Route-scoped, read-only service credentials for machine callers of the
+  admin listener ([service credentials](docs/SERVICE_CREDENTIALS.md)): mTLS
+  client-certificate binding (SPKI pin and/or SAN) plus a bearer whose
+  digest only is stored (current and next for rotation), exact read-route
+  allowlist (mutations never grantable), audience, expiry, per-credential
+  rate limit, `admin.read` with `credential_id`; `hopae admin
+  service-credentials create|rotate|promote|revoke|list` (preset
+  `pumgye-v2`); `admin.service_audience`. Threat model TM-75 to TM-77.
 
 ### Changed
 
@@ -152,6 +160,8 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   TM-62, TM-63, TM-64.
 
 ### Migration
+
+- Schema version 15 (`0015_service_credentials`) adds `service_credentials`.
 
 - Schema version 14 (`0014_groups`) adds `directory_groups`, `group_members`,
   `group_changes` and `group_sync_state`. Versions 11–13 are reserved by the

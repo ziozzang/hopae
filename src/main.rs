@@ -96,6 +96,63 @@ enum AdminAction {
         #[command(subcommand)]
         action: FactorsAction,
     },
+    /// Route-scoped, read-only service credentials for machine callers of
+    /// the admin listener (mTLS + bearer).
+    #[command(name = "service-credentials")]
+    ServiceCredentials {
+        #[command(subcommand)]
+        action: ServiceCredentialAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceCredentialAction {
+    /// Create a credential and print its token once.
+    Create {
+        /// 3-48 lowercase letters, digits and inner '-'.
+        #[arg(value_name = "ID")]
+        id: String,
+        /// An allowed route, "METHOD /path" (repeatable); only read routes.
+        #[arg(long = "route", value_name = "ROUTE")]
+        routes: Vec<String>,
+        /// `pumgye-v2`: the membership projection and subject lifecycle reads.
+        #[arg(long)]
+        preset: Option<String>,
+        /// An allowed audience (repeatable; default the console origin).
+        #[arg(long = "audience", value_name = "AUDIENCE")]
+        audiences: Vec<String>,
+        /// SHA-256 (hex) of the client certificate's SubjectPublicKeyInfo.
+        #[arg(long)]
+        client_spki_sha256: Option<String>,
+        /// An exact subject alternative name of the client certificate.
+        #[arg(long)]
+        client_san: Option<String>,
+        #[arg(long, default_value_t = 90)]
+        expires_in_days: u32,
+        #[arg(long, default_value_t = 120)]
+        rate_per_minute: u32,
+        #[arg(long, default_value_t = 30)]
+        burst: u32,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Issue the next secret and print it once (current and next both work).
+    Rotate {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Make the next secret current; the previous one stops working.
+    Promote {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// Revoke a credential; the row stays as a tombstone.
+    Revoke {
+        #[arg(value_name = "ID")]
+        id: String,
+    },
+    /// List credentials without secrets or digests.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -311,6 +368,38 @@ fn admin(cfg: &Config, action: AdminAction) -> ExitCode {
         AdminAction::Factors {
             action: FactorsAction::Reset { target },
         } => app::AdminCommand::FactorsReset { target },
+        AdminAction::ServiceCredentials { action } => {
+            use app::ServiceCredentialCommand as C;
+            app::AdminCommand::ServiceCredential(match action {
+                ServiceCredentialAction::Create {
+                    id,
+                    routes,
+                    preset,
+                    audiences,
+                    client_spki_sha256,
+                    client_san,
+                    expires_in_days,
+                    rate_per_minute,
+                    burst,
+                    note,
+                } => C::Create {
+                    id,
+                    routes,
+                    preset,
+                    audiences,
+                    client_spki_sha256,
+                    client_san,
+                    expires_in_days,
+                    rate_per_minute,
+                    burst,
+                    note,
+                },
+                ServiceCredentialAction::Rotate { id } => C::Rotate { id },
+                ServiceCredentialAction::Promote { id } => C::Promote { id },
+                ServiceCredentialAction::Revoke { id } => C::Revoke { id },
+                ServiceCredentialAction::List => C::List,
+            })
+        }
     };
     let result = runtime()
         .map_err(anyhow::Error::from)

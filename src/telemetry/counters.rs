@@ -57,6 +57,9 @@ pub const CONFIG_LOADED_TIMESTAMP: &str = "hopae_config_loaded_timestamp";
 pub const GROUP_MEMBERSHIPS_STALE: &str = "hopae_group_memberships_stale";
 /// Counter: provider group memberships suspended for staleness.
 pub const GROUP_MEMBERSHIPS_SUSPENDED_TOTAL: &str = "hopae_group_memberships_suspended_total";
+/// Admin-listener service credential authentications, by result (`accepted`,
+/// `accepted_next` or the refusal code).
+pub const ADMIN_SERVICE_CREDENTIALS_TOTAL: &str = "hopae_admin_service_credentials_total";
 
 fn table() -> &'static Mutex<BTreeMap<String, i64>> {
     static T: OnceLock<Mutex<BTreeMap<String, i64>>> = OnceLock::new();

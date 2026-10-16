@@ -3,6 +3,7 @@
 //! the portal, in the portal modules.
 
 pub mod admin;
+pub mod admin_tls;
 pub mod gateway;
 
 pub mod csrf;
