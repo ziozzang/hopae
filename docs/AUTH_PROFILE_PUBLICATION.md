@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 10 -->
+<!-- doc-rev: 11 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
@@ -160,3 +160,42 @@ rollback. This floor is process-local, not a persistent restart watermark. Remov
 and subsequently recreated connectors and process replacement still need durable
 circuit/quarantine lifecycle work. These changes are source-qualified; the currently
 deployed internal binary predates this continuity fix.
+
+
+## Configuration-authoritative mode
+
+`authentication.source` decides who owns the authentication profiles
+(`authentication_gateway`) and the credential projection plan
+(`credential_projection`):
+
+| `authentication.source` | Owner | Start | Console and API edits |
+| --- | --- | --- | --- |
+| `store` (default) | The store | The file bootstraps an empty store only; a stored document (or tombstone) wins over a changed file | Allowed (`PUT /v1/authentication/profiles`, `/projections`) |
+| `config` | The file | Every start reconciles the store to the file | Refused: `409 config_authoritative` |
+
+In `config` mode a start first validates and compiles the file's profiles with
+the same checks as a publication. An invalid file stops the start with a clear
+error and leaves the store untouched. When the stored document differs from the
+file, the start publishes the file through the CAS publication: next revision,
+an audit row with actor `config`, a disabled tombstone when the file has none,
+and the required event `authentication.reconciled` (`attrs.kind` =
+`profiles` or `projections`, `previous_revision`, `revision`, `actor`). An
+equal document keeps its revision and writes nothing. For the projection
+plan, the plans are compared and the file's plans are published at the
+store's next revision (the file's own `revision` is ignored in this mode).
+`GET /v1/authentication/profiles` reports `source`.
+
+This is the declarative mode a Kubernetes package needs: Helm values change the
+file, the rollout restarts the pods, and the store follows.
+
+Migration:
+
+- **store → config:** copy the current document (`GET
+  /v1/authentication/profiles`, and `/projections`) into the file, set
+  `authentication.source = "config"`, and restart. An equal document keeps
+  its revision; any difference is published at the next revision and
+  recorded.
+- **config → store:** set `authentication.source = "store"` (or remove it)
+  and restart. The store keeps the last reconciled document, and console
+  edits work again. Later file changes no longer apply: the file only
+  bootstraps an empty store.
