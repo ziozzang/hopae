@@ -559,4 +559,15 @@ impl SubjectDirectoryStore for Store {
     async fn admin_totp_active(&self, user: String, deadline: Deadline) -> StoreResult<bool> {
         Store::admin_totp_active(self, user, deadline).await
     }
+    async fn admin_human_realm(&self, deadline: Deadline) -> StoreResult<Option<String>> {
+        Store::admin_human_realm(self, deadline).await
+    }
+    async fn admin_human_subjects(
+        &self,
+        issuer: String,
+        users: Vec<String>,
+        deadline: Deadline,
+    ) -> StoreResult<std::collections::BTreeMap<String, String>> {
+        Store::admin_human_subjects(self, issuer, users, deadline).await
+    }
 }

@@ -326,4 +326,61 @@ impl SubjectDirectoryStore for PgStore {
         .await;
         out.map_err(deadline_err)
     }
+
+    async fn admin_human_realm(&self, deadline: Deadline) -> StoreResult<Option<String>> {
+        let out = async {
+            let mut client = self.client().await?;
+            let tx = self.read_within(&mut client, deadline).await?;
+            let realm = tx
+                .query_opt(
+                    "SELECT realm FROM human_authority_realm WHERE singleton = 1",
+                    &[],
+                )
+                .await
+                .map_err(pg)?
+                .map(|r| r.get::<_, String>(0));
+            tx.commit().await.map_err(pg)?;
+            Ok(realm)
+        }
+        .await;
+        out.map_err(deadline_err)
+    }
+
+    async fn admin_human_subjects(
+        &self,
+        issuer: String,
+        users: Vec<String>,
+        deadline: Deadline,
+    ) -> StoreResult<BTreeMap<String, String>> {
+        if users.len() > MAX_BATCH {
+            return Err(StoreError::Conflict("too many Human metadata subjects"));
+        }
+        let users: Vec<String> = users
+            .into_iter()
+            .filter(|u| !u.is_empty() && u.len() <= 256 && !u.chars().any(char::is_control))
+            .collect();
+        let out = async {
+            let mut client = self.client().await?;
+            let tx = self.read_within(&mut client, deadline).await?;
+            let rows = tx
+                .query(
+                    "SELECT u.user_id, a.realm FROM users u JOIN human_user_ids i ON i.user_id = u.user_id \
+                     JOIN human_authority_realm a ON a.singleton = 1 WHERE u.user_id = ANY($1)",
+                    &[&users],
+                )
+                .await
+                .map_err(pg)?;
+            tx.commit().await.map_err(pg)?;
+            let mut out = BTreeMap::new();
+            for r in rows {
+                let (user, realm): (String, String) = (r.get(0), r.get(1));
+                let subject = crate::store::sqlite::subject_directory::human_subject(&issuer, &realm, &user)
+                    .ok_or(StoreError::Conflict("invalid Human subject coordinate"))?;
+                out.insert(user, subject);
+            }
+            Ok(out)
+        }
+        .await;
+        out.map_err(deadline_err)
+    }
 }

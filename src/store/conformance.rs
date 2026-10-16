@@ -112,6 +112,7 @@ pub(crate) async fn postgres() -> Option<Backend> {
     )
     .await
     .expect("connect to HOPAE_TEST_POSTGRES_URL");
+    store.ensure_realm().await.expect("store realm");
     let store = Arc::new(store);
     Some(Backend {
         handoff: store.clone(),
@@ -3784,4 +3785,165 @@ async fn s600_21_subject_directory_feeds_agree_on_both_backends() {
         subject_directory(&b).await;
         b.cleanup().await;
     }
+}
+
+// ---- slice 4a: the Human owner foundation ---------------------------------
+
+async fn human_realm(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let u = user(b, 1).await;
+    let realm = b
+        .directory
+        .admin_human_realm(deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        realm.len() == 64
+            && realm
+                .bytes()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "{name}"
+    );
+    assert_eq!(
+        b.directory.admin_human_realm(deadline()).await.unwrap(),
+        Some(realm.clone()),
+        "{name}: stable"
+    );
+    let subjects = b
+        .directory
+        .admin_human_subjects(
+            "issuer.example".into(),
+            vec![u.user_id.to_string(), "u_UNKNOWN".into(), "bad\n".into()],
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(subjects.len(), 1, "{name}");
+    let expected = crate::store::sqlite::subject_directory::human_subject(
+        "issuer.example",
+        &realm,
+        u.user_id.as_str(),
+    )
+    .unwrap();
+    assert_eq!(subjects[u.user_id.as_str()], expected, "{name}");
+    assert!(conflict(
+        b.directory
+            .admin_human_subjects("i".into(), vec!["u".into(); 201], deadline())
+            .await
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_22_human_realm_and_subjects_agree_on_both_backends() {
+    for b in backends().await {
+        human_realm(&b).await;
+        b.cleanup().await;
+    }
+}
+
+/// PostgreSQL only: the owner triggers ported from SQLite schema 7 and 10.
+#[cfg(feature = "postgres")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_23_postgres_owner_triggers_match_sqlite() {
+    let Some(b) = postgres().await else {
+        eprintln!("skip: HOPAE_TEST_POSTGRES_URL not set");
+        return;
+    };
+    let (pg, _) = b.pg.clone().unwrap();
+    let client = pg.raw().await;
+    // The realm is immutable once set; a second seed keeps it.
+    let realm = pg.ensure_realm().await.unwrap();
+    assert_eq!(pg.ensure_realm().await.unwrap(), realm);
+    assert!(
+        client
+            .execute(
+                "UPDATE human_authority_realm SET realm = repeat('1', 64)",
+                &[]
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        client
+            .execute("DELETE FROM human_authority_realm", &[])
+            .await
+            .is_err()
+    );
+    // Provider owner revisions follow material changes only.
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    assert_eq!(owner_revision(&client).await, 1);
+    client
+        .execute(
+            "UPDATE providers SET updated_at = updated_at + 1 WHERE provider_id = 'mock'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        owner_revision(&client).await,
+        1,
+        "a timestamp is not material"
+    );
+    client
+        .execute(
+            "UPDATE providers SET enabled = FALSE WHERE provider_id = 'mock'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(owner_revision(&client).await, 2);
+    assert!(
+        client
+            .execute(
+                "UPDATE providers SET provider_id = 'other' WHERE provider_id = 'mock'",
+                &[]
+            )
+            .await
+            .is_err()
+    );
+    // Material owners begin at one, move by one with the fingerprint, never vanish.
+    assert!(
+        client
+            .execute(
+                "INSERT INTO human_provider_material_owners VALUES ('mock', 2, NULL)",
+                &[]
+            )
+            .await
+            .is_err()
+    );
+    client
+        .execute(
+            "INSERT INTO human_provider_material_owners VALUES ('mock', 1, NULL)",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(client.execute("UPDATE human_provider_material_owners SET revision = 3, fingerprint = '\\x0101010101010101010101010101010101010101010101010101010101010101'", &[]).await.is_err());
+    client.execute("UPDATE human_provider_material_owners SET revision = 2, fingerprint = '\\x0101010101010101010101010101010101010101010101010101010101010101'", &[]).await.unwrap();
+    assert!(
+        client
+            .execute("DELETE FROM human_provider_material_owners", &[])
+            .await
+            .is_err()
+    );
+    b.cleanup().await;
+}
+
+#[cfg(feature = "postgres")]
+async fn owner_revision(c: &tokio_postgres::Client) -> i64 {
+    c.query_one(
+        "SELECT revision FROM human_provider_owners WHERE provider_id = 'mock'",
+        &[],
+    )
+    .await
+    .unwrap()
+    .get(0)
 }

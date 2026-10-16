@@ -396,4 +396,13 @@ pub trait SubjectDirectoryStore: Send + Sync {
         deadline: Deadline,
     ) -> StoreResult<Option<HandleRow>>;
     async fn admin_totp_active(&self, user: String, deadline: Deadline) -> StoreResult<bool>;
+    /// The store's Human realm (64 lowercase hex), absent before it is set.
+    async fn admin_human_realm(&self, deadline: Deadline) -> StoreResult<Option<String>>;
+    /// The canonical Human subjects under `issuer` of existing, reserved users.
+    async fn admin_human_subjects(
+        &self,
+        issuer: String,
+        users: Vec<String>,
+        deadline: Deadline,
+    ) -> StoreResult<std::collections::BTreeMap<String, String>>;
 }

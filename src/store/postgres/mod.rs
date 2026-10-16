@@ -54,6 +54,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0005_slice3_groups_feeds",
         include_str!("migrations/0005_slice3_groups_feeds.sql"),
     ),
+    (
+        6,
+        "0006_slice4_owners",
+        include_str!("migrations/0006_slice4_owners.sql"),
+    ),
 ];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 /// `pg_advisory_xact_lock` key of the migration runner ("hopae-mi").
@@ -221,6 +226,31 @@ impl PgStore {
         }
         store.migrate().await?;
         Ok(store)
+    }
+
+    /// Set the store's Human realm (its public identity namespace) when it
+    /// has none: 32 bytes from the store's RNG, once, immutable afterwards.
+    /// A store migrated from SQLite keeps the SQLite realm.
+    pub async fn ensure_realm(&self) -> StoreResult<String> {
+        let mut bytes = [0u8; 32];
+        self.rng.fill(&mut bytes);
+        let candidate = data_encoding::HEXLOWER.encode(&bytes);
+        let client = self.client().await?;
+        client
+            .execute(
+                "INSERT INTO human_authority_realm (singleton, realm) VALUES (1, $1) ON CONFLICT (singleton) DO NOTHING",
+                &[&candidate],
+            )
+            .await
+            .map_err(pg)?;
+        Ok(client
+            .query_one(
+                "SELECT realm FROM human_authority_realm WHERE singleton = 1",
+                &[],
+            )
+            .await
+            .map_err(pg)?
+            .get(0))
     }
 
     /// Apply missing migrations in one transaction under an advisory lock.
