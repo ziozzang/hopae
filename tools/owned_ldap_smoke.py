@@ -17,7 +17,7 @@ def main():
         openssl('x509','-req','-in','server.csr','-CA','ca.pem','-CAkey','ca.key','-CAcreateserial','-days','1','-extfile','server.ext','-out','server.pem')
         bind,user=secrets.token_hex(32),secrets.token_hex(32)
         (root/'bind-password').write_text(bind)
-        (root/'slapd.conf').write_text('include /etc/ldap/schema/core.schema\ninclude /etc/ldap/schema/cosine.schema\ninclude /etc/ldap/schema/inetorgperson.schema\npidfile /owned/slapd.pid\nargsfile /owned/slapd.args\nmodulepath /usr/lib/ldap\nmoduleload back_mdb\nTLSCACertificateFile /owned/ca.pem\nTLSCertificateFile /owned/server.pem\nTLSCertificateKeyFile /owned/server.key\ndatabase mdb\nmaxsize 16777216\nsuffix "dc=example,dc=test"\nrootdn "cn=reader,dc=example,dc=test"\nrootpw '+bind+'\ndirectory /owned/db\naccess to * by dn.exact="cn=reader,dc=example,dc=test" manage by self read by anonymous auth\n')
+        (root/'slapd.conf').write_text('include /etc/ldap/schema/core.schema\ninclude /etc/ldap/schema/cosine.schema\ninclude /etc/ldap/schema/inetorgperson.schema\npidfile /owned/slapd.pid\nargsfile /owned/slapd.args\nmodulepath /usr/lib/ldap\nmoduleload back_mdb\nmoduleload memberof\nTLSCACertificateFile /owned/ca.pem\nTLSCertificateFile /owned/server.pem\nTLSCertificateKeyFile /owned/server.key\ndatabase mdb\nmaxsize 16777216\nsuffix "dc=example,dc=test"\nrootdn "cn=reader,dc=example,dc=test"\nrootpw '+bind+'\ndirectory /owned/db\naccess to * by dn.exact="cn=reader,dc=example,dc=test" manage by self read by anonymous auth\noverlay memberof\n')
         ldif='dn: dc=example,dc=test\nobjectClass: dcObject\nobjectClass: organization\ndc: example\no: Owned fixture\n\ndn: uid=alice,dc=example,dc=test\nobjectClass: inetOrgPerson\nuid: alice\ncn: Alice\nsn: Owned\njpegPhoto:: AAH/\nuserPassword: '+user+'\n'
         for label in ['One','Two']:
             ldif+='\ndn: cn=Duplicate'+label+',dc=example,dc=test\nobjectClass: inetOrgPerson\nuid: duplicated\ncn: Duplicate'+label+'\nsn: Owned\nuserPassword: '+user+'\n'
@@ -61,12 +61,17 @@ def main():
                     diagnostic=(result.stdout+result.stderr).decode(errors='replace').replace(bind,'[REDACTED]').replace(user,'[REDACTED]')
                     Path('/tmp/hopae-owned-ldap-test-failure.log').write_text(diagnostic)
                     raise RuntimeError('owned LDAP credential test failed; sanitized diagnostic in /tmp/hopae-owned-ldap-test-failure.log')
+                groups=subprocess.run(['cargo','test','--locked','--lib','owned_ldap_groups_sync_by_member_of_and_group_search','--','--ignored'],env=env,capture_output=True)
+                if groups.returncode:
+                    diagnostic=(groups.stdout+groups.stderr).decode(errors='replace').replace(bind,'[REDACTED]').replace(user,'[REDACTED]')
+                    Path('/tmp/hopae-owned-ldap-groups-failure.log').write_text(diagnostic)
+                    raise RuntimeError('owned LDAP group sync failed; sanitized diagnostic in /tmp/hopae-owned-ldap-groups-failure.log')
                 browser=subprocess.run(['cargo','test','--locked','--test','scenarios','owned_ldap_runtime_browser_form_issues_bound_session_and_handoff','--','--ignored','--test-threads=1'],env=env,capture_output=True)
                 if browser.returncode:
                     diagnostic=(browser.stdout+browser.stderr).decode(errors='replace').replace(bind,'[REDACTED]').replace(user,'[REDACTED]')
                     Path('/tmp/hopae-owned-ldap-browser-failure.log').write_text(diagnostic)
                     raise RuntimeError('owned LDAP runtime browser failed; diagnostic stored privately')
             Path('/tmp/hopae-owned-ldap-browser-failure.log').unlink(missing_ok=True)
-            print('PASS: real owned OpenLDAP over LDAPS and mandatory StartTLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection, oversized/deep/semantic-malformed and wrong-operation TLS response rejection and backend-circuit classification. Owned HTTP runtime chooser/password/session/handoff and LDAP reauthentication, directory password withdrawal and local user-disable qualification passed; existing-session directory revocation, real browser and fleet lifecycle remain separate.')
+            print('PASS: real owned OpenLDAP over LDAPS and mandatory StartTLS; stable immutable identity, repeated independent user binds, invalid/missing/duplicate/injected credentials, wrong CA rejection, oversized/deep/semantic-malformed and wrong-operation TLS response rejection and backend-circuit classification; memberOf and group-search group sync and the periodic subject lookup. Owned HTTP runtime chooser/password/session/handoff and LDAP reauthentication, directory password withdrawal and local user-disable qualification passed; existing-session directory revocation, real browser and fleet lifecycle remain separate.')
         finally:subprocess.run(['docker','rm','-f',name],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
 if __name__=='__main__':main()
