@@ -23,7 +23,7 @@ define rust
 endef
 endif
 
-.PHONY: test-postgres check check-boundary test audit check-docs scenario-coverage gates e2e coverage static release-assets tools-test
+.PHONY: test-postgres qualify-postgres check check-boundary test audit check-docs scenario-coverage gates e2e coverage static release-assets tools-test
 
 check: check-boundary
 	$(call rust,check,cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings)
@@ -39,6 +39,11 @@ test:
 # container (tmpfs data, removed on exit). Needs Docker and the image.
 test-postgres:
 	tools/test_postgres.sh
+
+# ADR-0020 slice 4: SQLite migration and two store replicas (one killed
+# mid-traffic) against one ephemeral PostgreSQL container.
+qualify-postgres:
+	tools/qualify_postgres.sh
 
 audit:
 	$(call rust,audit,cargo audit)

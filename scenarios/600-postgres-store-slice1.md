@@ -142,6 +142,24 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - When: the ledger and directory rows are read; three people are disabled and a group created; the lifecycle feed is read without and with group changes, resumed, and read from a forged and a negative position; the explain reads run.
 - Then: the ledger lists every person in increasing position with the head last; the feed reports the three disables in order (and the group creation when asked) and its next position is the head; resuming yields nothing; both bad positions are lost; the live handle and TOTP state are reported; a batch over 200 is refused.
 
+### S600-22 Human realm and subjects agree (slice 4)
+
+- Given: a store with one user.
+- When: the realm is read twice; Human subjects are asked for the user, an unknown ID and a malformed one; more than 200 are asked.
+- Then: 64 lowercase hex, stable; one subject, the canonical derivation over the store realm; `Conflict`.
+
+### S600-23 PostgreSQL owner triggers match SQLite (slice 4)
+
+- Given: a PostgreSQL store.
+- When: the realm is seeded twice, updated and deleted; a provider row's timestamp, then its `enabled`, then its id change; material owners are inserted at 2 and at 1, moved by two, moved by one, deleted.
+- Then: the first realm stays and both changes are refused; the owner revision moves only for the material change and the id change is refused; only the start at one and the move by one succeed and the delete is refused.
+
+### S600-24 A SQLite store migrates to an empty PostgreSQL store (slice 4)
+
+- Given: a SQLite store with users, a disabled user, sessions, a passkey, an active TOTP enrollment, a group with a member, a login transaction, a handoff code, a live replay nonce and outbox events; an empty PostgreSQL store.
+- When: the store is migrated; the migration runs again; a SQLite table the migration does not know gets a row and the migration runs into another empty store.
+- Then: the SQLite file is byte for byte unchanged; users, passkeys, TOTP, the configuration generation, groups and the mirror, the realm and the lifecycle feed read the same on PostgreSQL; the migrated nonce is still refused; one `store.migrated` event carries the report digest and has its delivery row; the second run is refused (not empty); the unknown table is refused by name and nothing is written.
+
 ### S600-5 PostgreSQL ledger, migrations and newer schema
 
 - Given: a PostgreSQL store.
@@ -197,6 +215,9 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-19 | `s600_19_local_groups_and_projection_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-20 | `s600_20_provider_groups_and_journal_order_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-21 | `s600_21_subject_directory_feeds_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-22 | `s600_22_human_realm_and_subjects_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-23 | `s600_23_postgres_owner_triggers_match_sqlite` | `src/store/conformance.rs` | unit | passing |
+| S600-24 | `s600_24_sqlite_store_migrates_to_an_empty_postgres_store` | `src/store/conformance.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
 | S600-6 | `s600_6_serving_refuses_the_incomplete_postgres_backend` | `src/app.rs` | unit | passing |
@@ -206,11 +227,12 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | Date | Hopae version | Gateway version | Provider | Environment label | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-10-17 | 0.0.10 | — | — | local-postgres-17-alpine | pass | Conformance against an ephemeral container (tmpfs data, removed afterwards). |
+| 2026-10-17 | 0.0.10 | — | — | local-postgres-17-alpine | pass | `make qualify-postgres`: CLI migration (second run refused, SQLite file unchanged); replicas a and b on 1,500 shared transactions and codes, 400 shared sign-ups, 1,500 nonces, 80 sessions and 40 users under fenced administrator writes and 2,000 relay deliveries; b killed with SIGKILL after 1,991 logged effects and replaced by c; every check passed (one transaction committed by b before its log line was lost was still consumed exactly once). |
 
 ## Open questions
 
-- Slice 4 scope (ADR-0020): authentication-gateway owners, the migration tool, serving. Hosted CI stays disabled; `make test-postgres` is the PostgreSQL run.
+- Slice 5 (ADR-0020): serving on PostgreSQL (native owners and the remaining session and directory operations) and the HTTP two-replica qualification. Hosted CI stays disabled; `make test-postgres` is the PostgreSQL run.
 
 ## 한국어 요약
 
-슬라이스 1 저장소 계약(사용자·신원·사용자 ID 원장, 제공자 부트스트랩, 세션·핸들, 아웃박스)이 SQLite와 PostgreSQL에서 동시 쓰기 상황을 포함해 똑같이 동작하는지 확인합니다. 예약된 사용자 ID는 어느 복제본에서도 재사용되지 않고, 더 새로운 스키마는 거부되며, 미완성 PostgreSQL 설정은 서비스되지 않고 SQLite로 대체되지도 않습니다. 슬라이스 2b는 관리자 권한 부여·회수, 행 잠금(`FOR SHARE`)으로 재평가하는 관리자 펜스와 그 아래의 사용자 상태 변경·세션 종료, 복제본 간에 공유되는 재사용 방지 논스 원장을 두 저장소에서 같은 결과로 검증합니다. 슬라이스 2c는 TOTP 등록·카운터·단계 상승, 외부 인증 요소 레지스트리와 일회용 증명, 패스키 등록·검증·제거, 복구 코드, 비밀번호 없는 로그인, 요소 초기화를 같은 방식으로 검증합니다. 슬라이스 3은 이벤트 전달(동시 claim, 임대, 재시도, 정리), 콘솔 목록, 그룹과 프로젝션 저널, 주체 디렉터리 피드를 검증하며, 저널과 피드의 위치가 커밋 순서대로 보이는지(소비자가 건너뛰지 않는지)를 확인합니다.
+슬라이스 1 저장소 계약(사용자·신원·사용자 ID 원장, 제공자 부트스트랩, 세션·핸들, 아웃박스)이 SQLite와 PostgreSQL에서 동시 쓰기 상황을 포함해 똑같이 동작하는지 확인합니다. 예약된 사용자 ID는 어느 복제본에서도 재사용되지 않고, 더 새로운 스키마는 거부되며, 미완성 PostgreSQL 설정은 서비스되지 않고 SQLite로 대체되지도 않습니다. 슬라이스 2b는 관리자 권한 부여·회수, 행 잠금(`FOR SHARE`)으로 재평가하는 관리자 펜스와 그 아래의 사용자 상태 변경·세션 종료, 복제본 간에 공유되는 재사용 방지 논스 원장을 두 저장소에서 같은 결과로 검증합니다. 슬라이스 2c는 TOTP 등록·카운터·단계 상승, 외부 인증 요소 레지스트리와 일회용 증명, 패스키 등록·검증·제거, 복구 코드, 비밀번호 없는 로그인, 요소 초기화를 같은 방식으로 검증합니다. 슬라이스 3은 이벤트 전달(동시 claim, 임대, 재시도, 정리), 콘솔 목록, 그룹과 프로젝션 저널, 주체 디렉터리 피드를 검증하며, 저널과 피드의 위치가 커밋 순서대로 보이는지(소비자가 건너뛰지 않는지)를 확인합니다. 슬라이스 4는 realm과 Human 소유자 기반, SQLite에서 빈 PostgreSQL로의 단방향 이전(행 수·다이제스트 비교, 감사 이벤트, SQLite 파일 보존)을 검증하고, `make qualify-postgres`로 두 프로세스 중 하나를 작업 중에 강제 종료해도 효과가 중복되지 않음을 확인합니다.

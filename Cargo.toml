@@ -114,3 +114,7 @@ ldap3 = { path = "vendor/ldap3" }
 [workspace]
 members = ["crates/hopae-grpc"]
 resolver = "2"
+
+[[example]]
+name = "qualify_postgres_replicas"
+required-features = ["postgres"]

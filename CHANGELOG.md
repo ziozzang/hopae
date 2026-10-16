@@ -117,6 +117,15 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   journal (`GroupStore`; gapless revisions in commit order) and the subject
   directory feeds (`SubjectDirectoryStore`; ledger and lifecycle-feed
   positions in commit order), PostgreSQL schema 5.
+- PostgreSQL store slice 4: the Human owner foundation (realm,
+  `admin_human_realm`, owner revisions by trigger, primary provenance) and
+  the application mirror (schemas 6 and 7); `hopae store
+  migrate-to-postgres` (one way into an empty store, per-table counts and
+  SHA-256 digests compared before commit, a `store.migrated` audit event,
+  the SQLite file opened read-only and kept as the rollback artefact); and
+  `make qualify-postgres`, a local two-replica store qualification with one
+  replica killed mid-traffic. Serving on PostgreSQL remains refused until
+  slice 5.
 
 ### Changed
 

@@ -135,8 +135,9 @@ against both backends.
      exist: rollback is restore from backup or PITR, with the rollout tool's
      sealing rules.
 5. **Migration tooling and dual-backend tests.**
-   - `hopae store migrate-to-postgres --from <sqlite> --to-env <URL_ENV>`
-     (slice 4) runs against a stopped instance holding its lock. It copies
+   - `hopae store migrate-to-postgres [--from <sqlite>]` (slice 4; the
+     target is `store.postgres` of the configuration) runs against a stopped
+     instance holding its lock. It copies
      table by table in ledger and foreign-key order inside one PostgreSQL
      transaction and verifies row counts and digests per table. It refuses a
      non-empty target. It writes an audited `store.migrated` event and leaves
@@ -184,7 +185,8 @@ against both backends.
 | 2b | Administrator grants (`AdminStore`), the actor fence re-evaluated with the actor's session, handle, user and grant rows locked `FOR SHARE` and the deadline as `statement_timeout`, fenced status changes and session termination, and the shared replay ledger (`NonceStore`, table `replay_nonces`; the Hangang delegation nonce admission can use it instead of its per-process file), PostgreSQL schema 3 — implemented |
 | 2c | Factors and passkeys: the existing `Factors` and `Passkeys` traits on PostgreSQL (sealed TOTP enrollments and monotonic counters, the external factor registry and single-use proofs, WebAuthn credentials and ceremonies, recovery codes, portal and application elevation, passwordless sign-in, the factor reset); every factor write locks the subject user's row `FOR UPDATE` before re-checking the acting session (`FOR UPDATE`) and handle (`FOR SHARE`), registry and passwordless-cap changes take advisory locks; the configuration generation moves into `CoreStore`; PostgreSQL schema 4 — implemented |
 | 3 | Console listings (`ConsoleStore`; the ADR-0016 candidate window evaluated as a CTE on one `REPEATABLE READ` snapshot instead of `INDEXED BY` temp tables), the event relay (`Events`; claims with `FOR UPDATE SKIP LOCKED` and a 60-second lease, prune behind an advisory lock), groups and the projection journal (`GroupStore`; one advisory lock per group write, gapless journal revisions committed in order), the subject directory and its feeds (`SubjectDirectoryStore`; ledger and lifecycle-feed positions numbered under advisory locks so they become visible in commit order), PostgreSQL schema 5 — implemented. Differences that remain: no inline prune at commit (the relay's periodic prune bounds the outbox), diagnostics are written synchronously behind a bounded semaphore instead of SQLite's batch queue, and the Human realm read (`admin_human_realm`) moves with the slice-4 owner tables |
-| 4 | Authentication-gateway owners (publication, receipts, projections), the migration tool, `serve` enabled, two-replica qualification (ROADMAP M2 exit) |
+| 4 | Implemented: the Human owner foundation (realm with `admin_human_realm`/`admin_human_subjects`, provider and material owner revisions by trigger, primary provenance; schema 6) and the application mirror (schema 7); `hopae store migrate-to-postgres` (one way, empty target only, per-table counts and digests compared before commit, `store.migrated` audit, SQLite opened read-only and kept); `make qualify-postgres`: the migration through the CLI and a two-process store qualification (two replicas on shared keys, one killed with SIGKILL mid-traffic and replaced, then verification that no transaction, code, sign-up, nonce, termination or status change took effect twice, that relay first claims are unique and that the user-ID ledger is unique) |
+| 5 | `serve` on PostgreSQL (ROADMAP M2 exit). The application still holds the concrete SQLite `Store`: the remaining trait methods (`Directory`: `user_within`, `providers`, `import_providers`, `resolve_grant_target`, `import_grants`; `Sessions`: `lookup_handle_within`, `mint_handle`, `consume_logout_ticket`, `admin_terminate_user_sessions`, `reauthenticate_session`, `refresh_snapshot`, `create_transaction`, `bind_switch_transaction`, `bind_logout_transaction`, `record_retry_bind`, `consume_transaction_for_provider`, `evict_transactions`, `session_aal3_evidence`, `sweep`), about forty inherent `Store` methods (provider and material owner preparation, primary sessions, the Human snapshot and ledger, application mirror), and the raw-connection owners that run on a `rusqlite::Connection` (`receipt_authority`, `receipt_replay`, `receipt_issuer`, `receipt_key_store`, `publication`, `authority`, `projection_authority`, `projection_admission`, `projection_observed`, `permission_live`, `app::state`, the Human ledger bridge) must move behind backend-neutral contracts, then `Services.store` becomes backend-polymorphic and the HTTP two-replica qualification reuses `tools/qualify_postgres.sh` |
 
 ## Consequences
 
@@ -202,8 +204,8 @@ against both backends.
 - `READ COMMITTED` plus explicit locks puts a burden on reviewers: each new
   write must name the rows it locks. The conformance suite catches lost
   updates only where a test races them.
-- Until slice 4, `store.kind = postgres` is a library and test capability, not
-  a deployable mode.
+- Until slice 5, `store.kind = postgres` is a library, migration and
+  qualification capability, not a deployable mode: `serve` refuses it.
 
 ### Neutral
 
@@ -211,7 +213,7 @@ against both backends.
   `store.postgres.{url_env, ca_file, pool_size, connect_timeout_ms,
   statement_timeout_ms}`.
 - Follow-up scenarios 601–604 (slices 2c–4, two-replica qualification).
-  Slices 2a to 3 extend scenario 600 (S600-7 to S600-21).
+  Slices 2a to 4 extend scenario 600 (S600-7 to S600-24).
 
 ## Alternatives considered
 
