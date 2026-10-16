@@ -455,6 +455,8 @@ mod gateway_layer {
             path_prefix: Some("/admin".into()),
             aal: hopae::session::Aal::Two,
             max_age: None,
+            factor: None,
+            enrollment_grace: false,
         };
         assert!(hopae::policy::step_up::rule_matches(&rule, canon.as_str()));
         assert!(matches!(

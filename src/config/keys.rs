@@ -195,6 +195,18 @@ pub(super) const ROOT: Node = Obj(&[
     ),
     ("reload", Obj(&[("tls_interval_secs", Leaf)])),
     (
+        "console_operators",
+        Obj(&[
+            ("app_id", Leaf),
+            ("require_aal", Leaf),
+            ("require_factor", Leaf),
+            ("step_up_path", Leaf),
+            ("step_up_max_age_secs", Leaf),
+            ("enrollment_grace_until", Leaf),
+            ("assertion_key_env", Leaf),
+        ]),
+    ),
+    (
         "authentication_gateway",
         Obj(&[
             ("authority_id", Leaf),

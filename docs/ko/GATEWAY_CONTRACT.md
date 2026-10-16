@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=17 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=18 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -234,6 +234,7 @@ Hopae 내부의 결정 순서는 다음과 같습니다. 호출자 키 → 계�
 | `x-hopae-expires` | 유휴 만료와 절대 만료 중 이른 쪽의 Unix 초 | 20 B |
 | `x-hopae-aal` | `1` 또는 `2`: 제시된 핸들이 발급될 때의 수준([ADR-0008](../adr/0008-second-factor-extension-point.md)). 단계 상승은 핸들을 다시 발급합니다. `apps[].max_emitted_aal = 3`인 애플리케이션에 한해, 세션의 현재 상승이 고보증 패스키이면 `3`([ADR-0018](../adr/0018-aal3-emission.md)). 숫자로 비교하십시오 | 1 B |
 | `x-hopae-factors` | 충족한 요소의 쉼표 목록 `kind[:provider]`, 예: `oidc:google,totp` | 256 B |
+| `x-hopae-operator-assertion` | `console_operators` 애플리케이션에만: 콘솔이 검증하는 서명된 운영자 단언([ADR-0021](../adr/0021-console-operator-assurance.md)). 게이트웨이가 전달할 신원 헤더가 아님 | 2 KiB |
 
 신원 헤더의 총 바이트는 8 KiB 이하입니다(게이트웨이는 16 KiB를 넘으면
 거부합니다). 이 집합이 계약 v1의 전부입니다. 헤더 추가는 마이너 변경, 이름 변경이나

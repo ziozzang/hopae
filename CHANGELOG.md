@@ -10,6 +10,15 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- Console operator assurance ([ADR-0021](docs/adr/0021-console-operator-assurance.md),
+  scenario 490): `console_operators` requires a passkey (or AAL 3) on the
+  console's application, fresh on its step-up path, with an optional
+  enrollment grace; step-up rules can require a factor kind (`webauthn`), for
+  which the portal offers only passkeys and sends users without one to add
+  it; allowed console verifies carry the HMAC-signed
+  `x-hopae-operator-assertion`; `operator.console_admitted` records
+  admissions.
+
 - Live reload without a restart (scenario 320,
   [operations](docs/OPERATIONS.md#tls-certificate-renewal)):
   - TLS: the administrator listener, the native and gRPC gateways and the

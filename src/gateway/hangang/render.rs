@@ -323,6 +323,10 @@ fn identity_headers(id: &Identity) -> Option<Vec<(&'static str, String)>> {
     if !factors.is_empty() {
         h.push(("x-hopae-factors", bounded(factors, MAX_FACTORS)?));
     }
+    // ADR-0021: the signed console operator assertion (console app only).
+    if let Some(a) = &id.operator_assertion {
+        h.push(("x-hopae-operator-assertion", bounded(a.clone(), 2048)?));
+    }
     Some(h)
 }
 

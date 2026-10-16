@@ -142,6 +142,12 @@ pub struct StepUpRule {
     pub path_prefix: Option<String>,
     pub aal: Aal,
     pub max_age: Option<Duration>,
+    /// Only this factor kind meets (and refreshes) the rule; `None`: any
+    /// second factor (ADR-0021: `webauthn` for console operators).
+    pub factor: Option<crate::session::types::FactorKind>,
+    /// Waived for a user without a passkey while the console operator
+    /// enrollment grace lasts (ADR-0021). Only the console policy sets it.
+    pub enrollment_grace: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -398,6 +404,8 @@ mod retained_heap_tests {
             path_prefix: Some(prefix),
             aal: Aal::Two,
             max_age: None,
+            factor: None,
+            enrollment_grace: false,
         });
         app.step_up = rules;
         assert_eq!(app.owned_heap_bytes().unwrap(), before + delta);

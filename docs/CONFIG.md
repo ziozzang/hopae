@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 43 -->
+<!-- doc-rev: 44 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -344,6 +344,28 @@ With no keyring, these routes return 404. Enrollment alone does not raise AAL. A
 The deployment must expose the portal through its existing trusted HTTPS ingress.
 
 AAL 1 primary-freshness rules use provider reauthentication even without a keyring.
+
+## Console operators
+
+Optional `console_operators` makes a management console's operators sign in
+with a passkey ([ADR-0021](adr/0021-console-operator-assurance.md)):
+
+```json
+{"console_operators":{"app_id":"console","require_aal":2,"require_factor":"webauthn","step_up_path":"/ui/step-up","step_up_max_age_secs":300,"enrollment_grace_until":1793750400,"assertion_key_env":"HOPAE_CONSOLE_ASSERTION_KEY"}}
+```
+
+| Key | Default | Constraint |
+| --- | --- | --- |
+| `console_operators.app_id` | required | A configured application (not `default`): the console's host |
+| `console_operators.require_aal` | `2` | `2` or `3` (needs `webauthn.high_assurance`) |
+| `console_operators.require_factor` | `webauthn` | `webauthn` (needs `webauthn`) or `any` |
+| `console_operators.step_up_path` | `/ui/step-up` | Starts with `/`; requires the factor used within `step_up_max_age_secs` |
+| `console_operators.step_up_max_age_secs` | `300` | 30 to 3600 |
+| `console_operators.enrollment_grace_until` | none | Unix seconds; until then an operator without any passkey is admitted without the factor (never on the step-up path) |
+| `console_operators.assertion_key_env` | required | Variable holding the 32 to 4096 byte HMAC key of `x-hopae-operator-assertion`; the console holds the same key |
+
+The policy adds two step-up rules to the application; `apps[].step_up[]` of the
+same application still apply.
 
 ## WebAuthn passkeys
 

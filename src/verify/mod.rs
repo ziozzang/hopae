@@ -7,6 +7,7 @@ mod engine;
 pub mod handoff;
 pub(crate) mod human;
 pub mod lifetimes;
+pub mod operator;
 pub mod types;
 
 pub use types::*;

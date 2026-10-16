@@ -86,8 +86,12 @@ struct Pk {
 
 impl Pk {
     fn start(over: Value) -> Pk {
+        Pk::start_with_env(over, &[])
+    }
+
+    fn start_with_env(over: Value, env: &[(&str, &str)]) -> Pk {
         let idp = MockIdp::start("default");
-        let h = Hopae::spawn(Fixture::with("m1-basic", over), &idp, &[]);
+        let h = Hopae::spawn(Fixture::with("m1-basic", over), &idp, env);
         let base = h.config()["cookie"]["name"].as_str().unwrap().to_string();
         let portal = h.portal_with(Jar::new()).with_ip(IP);
         let pk = Pk {
@@ -1733,5 +1737,168 @@ fn s489_a1_aal3_requirements_need_high_assurance_configuration() {
         let (ok, out) = check(over);
         assert!(!ok, "{out}");
         assert!(out.contains("require.aal"), "{out}");
+    }
+}
+
+// ---- 490: console operators (ADR-0021) ---------------------------------------
+
+const OPERATOR_KEY: &str = "console-operator-assertion-key-0123456789";
+
+/// `app` is the console operators' application: a passkey on the whole host,
+/// a fresh one (300 s) on `/ui/step-up`; `grace` sets an enrollment grace.
+fn operator_stack(grace: bool) -> Pk {
+    let mut ops = json!({
+        "app_id": "app",
+        "require_factor": "webauthn",
+        "assertion_key_env": "HOPAE_TEST_OPERATOR_KEY"
+    });
+    if grace {
+        ops["enrollment_grace_until"] = json!(4_102_444_800i64);
+    }
+    Pk::start_with_env(
+        passkey_config(json!({"console_operators": ops})),
+        &[("HOPAE_TEST_OPERATOR_KEY", OPERATOR_KEY)],
+    )
+}
+
+fn operator_claims(r: &Response, now: i64) -> hopae::verify::operator::Claims {
+    let token = r
+        .header("x-hopae-operator-assertion")
+        .unwrap_or_else(|| panic!("no operator assertion: {r:?}"));
+    hopae::verify::operator::verify(OPERATOR_KEY.as_bytes(), token, now).expect("valid assertion")
+}
+
+fn now_s(p: &Pk) -> i64 {
+    p.h.hooks.now_ms() / 1000
+}
+
+/// Step up at `url` with the registered passkey; the application's answer after.
+fn operator_step_up(p: &mut Pk, url: &str) -> Response {
+    let r = p.verify(url);
+    assert_eq!(r.status, 302, "step-up redirect: {r:?}");
+    let page = p.portal.get(&path_of(r.location().unwrap()));
+    assert_eq!(page.status, 200, "{page:?} {}", page.body);
+    assert!(
+        !page.body.contains("factor=totp"),
+        "only a passkey is offered"
+    );
+    let opts: RequestChallengeResponse = serde_json::from_str(&options(&page.body)).unwrap();
+    let cred = p
+        .key
+        .do_authentication(Url::parse(PORTAL).unwrap(), opts)
+        .unwrap();
+    let done = p.post(
+        "/stepup/webauthn",
+        &[
+            ("csrf", &field(&page.body, "/stepup/webauthn", "csrf")),
+            ("txn", &field(&page.body, "/stepup/webauthn", "txn")),
+            (
+                "ceremony",
+                &field(&page.body, "/stepup/webauthn", "ceremony"),
+            ),
+            ("credential", &browser_json(&cred)),
+        ],
+    );
+    assert_eq!(done.status, 302, "{done:?}");
+    let redeem = p.verify(done.location().unwrap());
+    p.verify(redeem.location().unwrap_or(url))
+}
+
+#[test]
+fn s490_1_an_operator_needs_a_passkey_and_gets_a_signed_assertion() {
+    let mut p = operator_stack(false);
+    // No passkey yet: the console sends the operator to add one.
+    let r = p.verify(HOME);
+    assert_eq!(r.status, 302, "{r:?}");
+    let page = p.portal.get(&path_of(r.location().unwrap()));
+    assert_eq!(page.status, 403, "{page:?}");
+    assert!(
+        page.body.contains("/security/passkeys/new"),
+        "{}",
+        page.body
+    );
+    // A non-document request (the console's own check) is refused.
+    let jar = p.app_jar.for_host("app.example.test");
+    let mut api = VerifyRequest::other(HOME).ip(IP);
+    if let Some(v) = jar.value(&p.base) {
+        api = api.cookie(&p.base, &v);
+    }
+    assert_eq!(p.h.verify(api).status, 401);
+    // With a passkey and a step-up: admitted, the assertion says so.
+    assert_eq!(p.register("Operator key").status, 303);
+    let ok = operator_step_up(&mut p, HOME);
+    assert_eq!(ok.status, 200, "{ok:?}");
+    let c = operator_claims(&ok, now_s(&p));
+    assert_eq!(
+        (c.aal, c.factor.as_deref(), c.satisfied, c.grace),
+        (2, Some("webauthn"), true, false)
+    );
+    assert_eq!(c.require_factor, "webauthn");
+    assert!(c.factor_at.is_some());
+    assert!(c.sub.starts_with("u_") && c.sid.starts_with("s_"));
+    assert_eq!(
+        p.sql("SELECT COUNT(*) FROM events WHERE kind='operator.console_admitted'"),
+        1
+    );
+    // Admitted again: still one record for the session.
+    assert_eq!(p.verify(HOME).status, 200);
+    assert_eq!(
+        p.sql("SELECT COUNT(*) FROM events WHERE kind='operator.console_admitted'"),
+        1
+    );
+    // The step-up path needs a fresh passkey use.
+    assert_eq!(p.verify("https://app.example.test/ui/step-up").status, 200);
+    p.h.advance(Duration::from_secs(301));
+    let stale = p.verify("https://app.example.test/ui/step-up?return=%2Fui%2F");
+    assert_eq!(
+        stale.status, 302,
+        "a stale factor is stepped up again: {stale:?}"
+    );
+}
+
+#[test]
+fn s490_2_the_enrollment_grace_admits_without_the_factor_but_not_for_sensitive_actions() {
+    let p = operator_stack(true);
+    let ok = p.verify(HOME);
+    assert_eq!(ok.status, 200, "{ok:?}");
+    let c = operator_claims(&ok, now_s(&p));
+    assert_eq!(
+        (c.satisfied, c.grace, c.factor.as_deref()),
+        (false, true, None)
+    );
+    let r = p.verify("https://app.example.test/ui/step-up");
+    assert_eq!(r.status, 302, "the step-up path is never waived: {r:?}");
+    let page = p.portal.get(&path_of(r.location().unwrap()));
+    assert_eq!(page.status, 403);
+    assert!(page.body.contains("/security/passkeys/new"));
+    assert_eq!(
+        p.sql("SELECT COUNT(*) FROM events WHERE kind='operator.console_admitted' AND json_extract(attrs,'$.cause')='enrollment_grace'"),
+        1
+    );
+}
+
+#[test]
+fn s490_a1_operator_policy_configuration_is_checked() {
+    let idp = MockIdp::start("default");
+    let dir = tempfile::tempdir().unwrap();
+    for over in [
+        json!({"console_operators": {"app_id": "app", "assertion_key_env": "K"}}),
+        json!({"webauthn": {}, "console_operators": {"app_id": "nope", "assertion_key_env": "K"}}),
+        json!({"webauthn": {}, "console_operators": {"app_id": "app", "require_aal": 3, "assertion_key_env": "K"}}),
+        json!({"webauthn": {}, "console_operators": {"app_id": "app", "step_up_max_age_secs": 5, "assertion_key_env": "K"}}),
+    ] {
+        let cfg = Fixture::with("m1-basic", over.clone()).render(dir.path(), &idp);
+        let path = crate::support::write_config(dir.path(), &cfg.to_string());
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_hopae"))
+            .args(["--check", "--config"])
+            .arg(&path)
+            .env("K", "short")
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "{over}: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
     }
 }

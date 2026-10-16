@@ -314,8 +314,9 @@ impl PortalServices for Adapter {
             .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
             .await
             .map_err(Self::factor_session_error)?;
-        // An AAL 3 rule (ADR-0018): only a high-assurance passkey satisfies it.
-        if self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three {
+        // An AAL 3 rule (ADR-0018) or a passkey rule (ADR-0021): only a
+        // passkey satisfies it.
+        if self.svc.stepup_passkey_only(&row) {
             return Err(Failure {
                 kind: FailKind::Forbidden,
                 reason: reasons::HIGH_ASSURANCE_REQUIRED,
@@ -345,8 +346,9 @@ impl PortalServices for Adapter {
             .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
             .await
             .map_err(Self::factor_session_error)?;
-        // An AAL 3 rule (ADR-0018): only a high-assurance passkey satisfies it.
-        if self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three {
+        // An AAL 3 rule (ADR-0018) or a passkey rule (ADR-0021): only a
+        // passkey satisfies it.
+        if self.svc.stepup_passkey_only(&row) {
             return Err(Failure {
                 kind: FailKind::Forbidden,
                 reason: reasons::HIGH_ASSURANCE_REQUIRED,
@@ -386,8 +388,9 @@ impl PortalServices for Adapter {
             .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
             .await
             .map_err(Self::factor_session_error)?;
-        // An AAL 3 rule (ADR-0018): only a high-assurance passkey satisfies it.
-        if self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three {
+        // An AAL 3 rule (ADR-0018) or a passkey rule (ADR-0021): only a
+        // passkey satisfies it.
+        if self.svc.stepup_passkey_only(&row) {
             return Err(Failure {
                 kind: FailKind::Forbidden,
                 reason: reasons::HIGH_ASSURANCE_REQUIRED,
@@ -463,8 +466,9 @@ impl PortalServices for Adapter {
             .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
             .await
             .map_err(Self::factor_session_error)?;
-        // An AAL 3 rule (ADR-0018): only a high-assurance passkey satisfies it.
-        if self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three {
+        // An AAL 3 rule (ADR-0018) or a passkey rule (ADR-0021): only a
+        // passkey satisfies it.
+        if self.svc.stepup_passkey_only(&row) {
             return Err(Failure {
                 kind: FailKind::Forbidden,
                 reason: reasons::HIGH_ASSURANCE_REQUIRED,
@@ -512,8 +516,9 @@ impl PortalServices for Adapter {
             .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
             .await
             .map_err(Self::factor_session_error)?;
-        // An AAL 3 rule (ADR-0018): only a high-assurance passkey satisfies it.
-        if self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three {
+        // An AAL 3 rule (ADR-0018) or a passkey rule (ADR-0021): only a
+        // passkey satisfies it.
+        if self.svc.stepup_passkey_only(&row) {
             return Err(Failure {
                 kind: FailKind::Forbidden,
                 reason: reasons::HIGH_ASSURANCE_REQUIRED,

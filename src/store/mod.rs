@@ -424,6 +424,12 @@ pub trait Sessions: Send + Sync {
     ) -> StoreResult<bool> {
         Ok(false)
     }
+    /// Whether the user holds an active passkey (ADR-0021: the console
+    /// operator enrollment grace applies only without one). The default
+    /// says yes, so a store without passkeys never grants the grace.
+    async fn user_has_passkey(&self, _user: &crate::identity::types::UserId) -> StoreResult<bool> {
+        Ok(true)
+    }
     /// Expired txns/codes, terminated sessions older than retention.
     async fn sweep(
         &self,

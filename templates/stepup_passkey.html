@@ -3,7 +3,7 @@
 {% block head %}{% include "_ceremony_head.html" %}{% endblock %}
 {% block content %}
 <h1>{{ t.get("stepup.title") }}</h1>
-{% if high_assurance %}<p>{{ t.get("stepup.high_assurance_intro") }}</p>{% else %}<p>{{ t.get("stepup.passkey_intro") }}</p>{% endif %}
+{% if high_assurance %}<p>{{ t.get("stepup.high_assurance_intro") }}</p>{% else if passkey_only %}<p>{{ t.get("stepup.passkey_required_intro") }}</p>{% else %}<p>{{ t.get("stepup.passkey_intro") }}</p>{% endif %}
 {% include "_messages.html" %}
 <form method="post" action="/stepup/webauthn">
 <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -13,7 +13,7 @@
 <button type="button" hidden disabled data-webauthn="get" data-status="webauthn-status" data-options="{{ options }}">{{ t.get("stepup.passkey_button") }}</button>
 </form>
 {% include "_ceremony_status.html" %}
-{% if !high_assurance %}
+{% if !passkey_only %}
 <h2>{{ t.get("stepup.other") }}</h2>
 <ul class="links">
 {% if totp %}<li><a href="/stepup?txn={{ transaction }}&amp;factor=totp">{{ t.get("stepup.totp_link") }}</a></li>{% endif %}

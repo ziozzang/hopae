@@ -516,6 +516,8 @@ async fn service_api_credential_http_native_parity_and_no_human_assurance() {
             path_prefix: Some("/mfa".into()),
             aal: hopae::session::Aal::Two,
             max_age: None,
+            factor: None,
+            enrollment_grace: false,
         });
     fx.snapshot.store(Arc::new(changed));
     for (id, path, expected) in [

@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=43 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=44 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -337,6 +337,28 @@ route는 404입니다. 등록만으로 AAL이 올라가지는 않습니다. 인�
 통해 portal을 노출해야 합니다.
 
 AAL 1의 1차 인증 신선도 규칙은 keyring 없이도 제공자 재인증으로 처리합니다.
+
+## 콘솔 운영자
+
+선택 설정 `console_operators`는 관리 콘솔 운영자가 패스키로 로그인하게
+합니다([ADR-0021](../adr/0021-console-operator-assurance.md)).
+
+```json
+{"console_operators":{"app_id":"console","require_aal":2,"require_factor":"webauthn","step_up_path":"/ui/step-up","step_up_max_age_secs":300,"enrollment_grace_until":1793750400,"assertion_key_env":"HOPAE_CONSOLE_ASSERTION_KEY"}}
+```
+
+| 키 | 기본값 | 제약 |
+| --- | --- | --- |
+| `console_operators.app_id` | 필수 | 설정된 애플리케이션(`default` 제외). 콘솔의 호스트 |
+| `console_operators.require_aal` | `2` | `2` 또는 `3`(`webauthn.high_assurance` 필요) |
+| `console_operators.require_factor` | `webauthn` | `webauthn`(`webauthn` 필요) 또는 `any` |
+| `console_operators.step_up_path` | `/ui/step-up` | `/`로 시작. `step_up_max_age_secs` 안에 사용한 요소를 요구 |
+| `console_operators.step_up_max_age_secs` | `300` | 30–3600 |
+| `console_operators.enrollment_grace_until` | 없음 | 유닉스 초. 그때까지 패스키가 전혀 없는 운영자는 요소 없이 들어올 수 있음(step-up 경로는 제외) |
+| `console_operators.assertion_key_env` | 필수 | `x-hopae-operator-assertion`의 HMAC 키(32–4096바이트)를 담은 변수. 콘솔도 같은 키를 가짐 |
+
+정책은 애플리케이션에 단계 상승 규칙 두 개를 더하며, 같은 애플리케이션의
+`apps[].step_up[]`도 그대로 적용됩니다.
 
 ## WebAuthn 패스키
 

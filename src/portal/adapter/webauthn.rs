@@ -961,12 +961,13 @@ impl SecurityServices for Adapter {
             .await
             .map_err(|e| Refusal::Failure(Self::factor_session_error(e)))?;
         let high_assurance = self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three;
+        let passkey_only = high_assurance || self.svc.stepup_passkey_only(&row);
         let summary = deps
             .store
             .factor_summary(actor.user())
             .await
             .map_err(|_| unavailable())?;
-        let totp = !high_assurance && deps.keys.is_some() && summary.totp_active;
+        let totp = !passkey_only && deps.keys.is_some() && summary.totp_active;
         let form_origin = row.return_target.origin();
         // An AAL 3 rule: only the user's high-assurance, device-bound keys.
         let offered: Vec<_> = summary
@@ -983,6 +984,7 @@ impl SecurityServices for Adapter {
                 form_origin,
                 totp,
                 high_assurance,
+                passkey_only,
             });
         }
         let stored: Vec<_> = offered
@@ -1011,6 +1013,7 @@ impl SecurityServices for Adapter {
             form_origin,
             totp,
             high_assurance,
+            passkey_only,
         })
     }
 

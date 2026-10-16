@@ -484,6 +484,8 @@ async fn native_human_engine_legacy_and_newer_unsupported_factor_cannot_supply_p
         path_prefix: None,
         aal: Aal::Two,
         max_age: Some(Duration::from_secs(1)),
+        factor: None,
+        enrollment_grace: false,
     }];
     // Reprepare the real registry for this exact native app publisher.
     let apps = Arc::new(arc_swap::ArcSwap::from_pointee(snapshot));
