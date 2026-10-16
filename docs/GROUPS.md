@@ -216,8 +216,11 @@ projection 120 burst and 2/s.
 
 `groups` is the relevant vocabulary: 1 to 1,024 GroupRefs that the current
 Pumgye document references (larger vocabularies are split into shards). The
-answer only ever contains memberships of those groups. Without a configured
-key both answer `503 projection_unavailable`.
+answer only ever contains memberships of those groups. Snapshot `limit` is
+1–500 people (default 200) and a page also ends at 50,000 group references;
+feed `limit` is 1–500 changes (default 200), examining at most 20,000
+journal rows per page. Without a configured key both answer
+`503 projection_unavailable`.
 
 ### Envelope and signature
 

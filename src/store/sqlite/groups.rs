@@ -30,6 +30,9 @@ pub const MAX_LOCAL_MEMBERS: i64 = 50_000;
 pub const MAX_PAGE: usize = 500;
 /// Most journal rows one projection feed page examines.
 pub const JOURNAL_SCAN: i64 = 20_000;
+/// Most group references one projection snapshot page carries (a bound on
+/// the signed payload: about 1.6 MiB of references).
+pub const MAX_PAGE_REFS: usize = 50_000;
 /// Most rows one maintenance step touches.
 const MAINTENANCE_BATCH: i64 = 1_000;
 
@@ -1090,7 +1093,7 @@ impl Store {
                     match out.last_mut() {
                         Some(last) if last.user_id == user => last.groups.push(group),
                         _ => {
-                            if out.len() == limit {
+                            if out.len() == limit || n > MAX_PAGE_REFS {
                                 more = true;
                                 break;
                             }
