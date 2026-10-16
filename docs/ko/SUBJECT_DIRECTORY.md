@@ -1,6 +1,6 @@
 # 주체 디렉터리 API
 
-<!-- translation-status: source=../SUBJECT_DIRECTORY.md source-rev=2 status=current -->
+<!-- translation-status: source=../SUBJECT_DIRECTORY.md source-rev=3 status=current -->
 
 [문서 목차](README.md) · [English](../SUBJECT_DIRECTORY.md)
 
@@ -33,6 +33,9 @@ gRPC 표면은 게이트웨이 트래픽만 다루며 관리용 대응이 없습
   `api_keys[]` 주체가 대상입니다. 인증 시점에 원격 검증기가 만드는 주체(API 릴레이,
   Kubernetes TokenReview)는 열거할 수 없으므로 `not_enumerable`과 함께 `unknown`으로
   답합니다.
+- Kubernetes 워크로드 주체(`wk2:<64 hex>`)와 SPIFFE ID도 인증 시점에 만들어지므로
+  `not_enumerable`, `kind: workload`와 함께 `unknown`으로 답합니다. 그 생명주기는
+  `include_workloads`를 준 피드에 있습니다([Kubernetes 워크로드](KUBERNETES_WORKLOAD.md)).
 
 ## 동작
 
@@ -160,7 +163,7 @@ Hopae에는 사용자 삭제나 계정 병합 작업이 없습니다. 다른 방
 | --- | --- | --- |
 | `POST /v1/subjects/resolve` | `ids`, `privacy_profile` | `items`, `resolved`, `unknown`, `complete`, `privacy_profile` |
 | `POST /v1/subjects/search` | `q`, `kind`, `status`, `limit`, `cursor`, `privacy_profile` | `items`, `next_cursor`, `privacy_profile` |
-| `POST /v1/subjects/lifecycle` | `cursor`, `limit`(1~200, 기본값 100) | `changes`, `next_cursor`, `more` |
+| `POST /v1/subjects/lifecycle` | `cursor`, `limit`(1~200, 기본값 100), `include_groups`, `include_workloads` | `changes`, `next_cursor`, `more` |
 | `POST /v1/subjects/lifecycle/snapshot` | `cursor`, `limit`(1~200, 기본값 200) | `items`, `next_cursor`, `watermark` |
 
 오류: `400 invalid_request`(모양, 범위, 알 수 없는 필드), `400 invalid_cursor`, 콘솔
@@ -186,6 +189,16 @@ Hopae에는 사용자 삭제나 계정 병합 작업이 없습니다. 다른 방
   `group_created`, `group_updated`, `group_deleted`, `member_added`, `member_removed`
   변경도 알립니다(`group_id` 포함. 그룹 자체의 변경은 `user_id: null`이며 `status`는
   그룹의 상태). 이것이 없으면 두 응답 모두 바뀌지 않습니다.
+- `include_workloads: true`이면 생명주기 피드는 Kubernetes 워크로드 주체 변경도
+  알립니다. `workload_observed`(인스턴스의 첫 인증), `workload_retired`(ServiceAccount
+  삭제 또는 재생성, `cause`와 `replacement` 주체 포함), `workload_legacy_mapped`(이전
+  기간에 사용 중단된 Pod 기반 주체가 주체로 관찰됨)입니다. 이 변경은 `user_id: null`,
+  `status` `active` 또는 `retired`, 그리고 `principal`(`wk2:`), `subject_ref`(`s_`),
+  `spiffe_id`, `cluster`, `namespace`, `service_account`, `service_account_uid`,
+  `service`와 해당하면 `cause`, `replacement`, `legacy_subject_ref`를 담은 `workload`
+  객체를 가집니다. 이것이 없으면 응답은 바뀌지 않습니다. 워크로드 주체는 스냅숏에
+  없으므로 소비자는 피드로 조정하고 retired 주체의 binding을 고아로 처리합니다
+  (한강 ADR 0021).
 - 서비스 주체의 생명주기는 이 피드가 아니라 프로필 게시(프로필 리비전)를 따릅니다.
 - 검색 커서는 다른 콘솔 목록 커서처럼 프로세스에 묶여 있습니다. 생명주기와 스냅숏
   커서는 지속됩니다.

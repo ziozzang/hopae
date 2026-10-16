@@ -1,4 +1,4 @@
-//! Scenario 500: Kubernetes workload identity (Hangang ADR 0022, P0).
+//! Scenario 900: Kubernetes workload identity (Hangang ADR 0022, P0).
 //!
 //! Drives the real binary with an offline `kubernetes_workload` profile whose
 //! issuer keys are an owned, in-process generated ECDSA JWKS supplied by
@@ -102,10 +102,10 @@ fn live(k: &Console, token: &str, ip: &str) -> Response {
     )
 }
 
-/// S500-1/S500-2: an offline-verified projected token authenticates the
+/// S900-1: an offline-verified projected token authenticates the
 /// ServiceAccount; a rollout keeps the principal; Pod facts stay off the wire.
 #[test]
-fn s500_1_offline_workload_principal_survives_rollout() {
+fn s900_1_offline_workload_principal_survives_rollout() {
     let key = key("k1");
     let k = instance(&key);
     let now = k.now_s();
@@ -133,10 +133,10 @@ fn s500_1_offline_workload_principal_survives_rollout() {
     assert_eq!(rolled.header("x-hopae-principal"), Some(principal.as_str()));
 }
 
-/// S500-3: wrong audience/issuer, the API-server audience, another key and
+/// S900-2: wrong audience/issuer, the API-server audience, another key and
 /// another namespace are refused without backend identity.
 #[test]
-fn s500_3_refusals_carry_no_identity() {
+fn s900_2_refusals_carry_no_identity() {
     let key = key("k1");
     let other = key_other();
     let k = instance(&key);
@@ -174,10 +174,10 @@ fn key_other() -> Key {
     k
 }
 
-/// S500-9: the lifecycle feed reports the observed principal to consumers
+/// S900-8: the lifecycle feed reports the observed principal to consumers
 /// that ask for workloads; explain answers like the live path.
 #[test]
-fn s500_9_lifecycle_feed_and_explain() {
+fn s900_8_lifecycle_feed_and_explain() {
     let key = key("k1");
     let k = instance(&key);
     let a = k.admin("ha500", AdminRole::Viewer);

@@ -18,7 +18,8 @@ Add to the existing `receipt_issuer` object:
 ```
 
 Scopes must be a unique subset of the issuer's existing declared scopes, match
-configured applications and have native Kubernetes TokenReview profiles for
+configured applications and have native Kubernetes workload profiles
+(`kubernetes_workload`, or the deprecated `kubernetes_tokenreview`) for
 that service. Activation requires an authenticated mTLS gRPC listener and a
 supported suspend-inclusive native clock (Linux BOOTTIME); unsupported platforms
 refuse this optional activation, while ordinary defaults remain unchanged.
@@ -31,10 +32,12 @@ Absent `workload_receipts` leaves the new RPC service unregistered.
 `WorkloadAuthenticationReceipts.IssueObserved` invokes the existing actual
 caller/parse/gateway/profile authentication pipeline. A private request extension
 carries an original source attempt; no external header can construct it.
-Only an actual `kubernetes-tokenreview` native Workload result can become
-`CapturedWorkload`. Local Service keys, service compositions, API relays, Lua,
+Only an actual `kubernetes-workload` (offline-verified) or
+`kubernetes-tokenreview` native Workload result can become `CapturedWorkload`. Local Service keys, service compositions, API relays, Lua,
 client identity/AAL claims and Human sessions cannot issue through this boundary.
-The existing stable subject hash and wire kind3/AAL0 are preserved.
+The stable subject encoding and wire kind3/AAL0 are preserved; since Hangang
+ADR 0022 the encoded subject is the ServiceAccount principal, not the Pod
+([Kubernetes workloads](KUBERNETES_WORKLOAD.md#workload-identity-model)).
 
 ## Original source age and current owners
 

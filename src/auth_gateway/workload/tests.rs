@@ -1,5 +1,5 @@
 //! Offline workload verification against owned in-process fixtures
-//! (scenario 500, `scenarios/500-kubernetes-workload-identity.md`).
+//! (scenario 900, `scenarios/900-kubernetes-workload-identity.md`).
 use super::fixture::{self, AUDIENCE, Server, SigningKey};
 use super::signals::{self, Signal};
 use super::verify::{Connector, Profile};
@@ -83,10 +83,10 @@ fn token(f: &Fixture, edit: impl FnOnce(&mut Value)) -> String {
     fixture::mint(&f.rsa, &c)
 }
 
-/// S500-1, S500-2: offline verification, ServiceAccount principal stable
+/// S900-1: offline verification, ServiceAccount principal stable
 /// across a rollout, no API request on the hot path, positive cache.
 #[tokio::test]
-async fn s500_1_offline_verification_publishes_service_account_principal() {
+async fn s900_1_offline_verification_publishes_service_account_principal() {
     let f = fixture().await;
     let c = compile(&profile(&f.server, json!({})), &f.pki.ca_pem);
     let (sink, mut rx) = signals::channel();
@@ -145,9 +145,9 @@ async fn s500_1_offline_verification_publishes_service_account_principal() {
     assert!(rx.try_recv().is_err());
 }
 
-/// S500-3: every claim rule refuses without contacting anything else.
+/// S900-2: every claim rule refuses without contacting anything else.
 #[tokio::test]
-async fn s500_3_claims_signature_and_binding_rules_refuse() {
+async fn s900_2_claims_signature_and_binding_rules_refuse() {
     let f = fixture().await;
     let c = compile(
         &profile(&f.server, json!({"service_accounts": ["blue/worker"]})),
@@ -309,10 +309,10 @@ async fn s500_3_claims_signature_and_binding_rules_refuse() {
     assert_eq!(f.server.count("/api/"), 0);
 }
 
-/// S500-4: key rotation is picked up on a `kid` miss; forged `kid` floods
+/// S900-3: key rotation is picked up on a `kid` miss; forged `kid` floods
 /// are rate-limited; ECDSA keys work.
 #[tokio::test]
-async fn s500_4_rotation_kid_miss_refetch_is_rate_limited() {
+async fn s900_3_rotation_kid_miss_refetch_is_rate_limited() {
     let f = fixture().await;
     let c = compile(&profile(&f.server, json!({})), &f.pki.ca_pem);
     c.authenticate(&token(&f, |_| {}), now_ms()).await.unwrap();
@@ -362,10 +362,10 @@ async fn s500_4_rotation_kid_miss_refetch_is_rate_limited() {
     );
 }
 
-/// S500-5: pinned issuer and CA, allowed JWKS origins, last-known-good and
+/// S900-4: pinned issuer and CA, allowed JWKS origins, last-known-good and
 /// fail-closed beyond the staleness bound.
 #[tokio::test]
-async fn s500_5_pinned_issuer_ca_and_bounded_staleness() {
+async fn s900_4_pinned_issuer_ca_and_bounded_staleness() {
     let f = fixture().await;
     // Discovery naming another issuer is refused (keys unavailable → 503).
     f.server.state.lock().unwrap().issuer = "https://evil.example.test".into();
@@ -446,10 +446,10 @@ async fn s500_5_pinned_issuer_ca_and_bounded_staleness() {
     assert!(source.keys().await.is_ok(), "recovers");
 }
 
-/// S500-6: watch-backed revocation: Pod deletion and ServiceAccount
+/// S900-5: watch-backed revocation: Pod deletion and ServiceAccount
 /// re-creation refuse within the bound; a stale index fails closed.
 #[tokio::test]
-async fn s500_6_watch_revocation_with_bounded_staleness() {
+async fn s900_5_watch_revocation_with_bounded_staleness() {
     let f = fixture().await;
     {
         let mut s = f.server.state.lock().unwrap();
@@ -578,10 +578,10 @@ async fn s500_6_watch_revocation_with_bounded_staleness() {
     assert!(stale, "stale revocation index fails closed");
 }
 
-/// S500-7: migration — legacy Pod subject only inside an expiring window,
+/// S900-6: migration — legacy Pod subject only inside an expiring window,
 /// mapping signals for Pumgye reconciliation.
 #[tokio::test]
-async fn s500_7_legacy_pod_subject_window_and_mapping_signals() {
+async fn s900_6_legacy_pod_subject_window_and_mapping_signals() {
     let f = fixture().await;
     let until = now_ms() + 60_000;
     let c = compile(
@@ -639,7 +639,7 @@ async fn s500_7_legacy_pod_subject_window_and_mapping_signals() {
 }
 
 #[test]
-fn s500_a1_configuration_refuses_unsafe_profiles() {
+fn s900_a1_configuration_refuses_unsafe_profiles() {
     let base = json!({
         "issuer": "https://issuer.example.test/cluster",
         "cluster_id": "example-cluster",
@@ -706,7 +706,7 @@ fn s500_a1_configuration_refuses_unsafe_profiles() {
 
 /// Static JWKS (no network at all) for out-of-cluster deployments.
 #[tokio::test]
-async fn s500_8_static_jwks_needs_no_network() {
+async fn s900_7_static_jwks_needs_no_network() {
     let key = fixture::ec_key("static-1");
     let jwks = fixture::jwks(&[&key]);
     let p: Profile = serde_json::from_value(json!({
@@ -774,10 +774,10 @@ fn runtime_config(
     })
 }
 
-/// S500-10: profile routing, network gate, status and explain through the
+/// S900-9: profile routing, network gate, status and explain through the
 /// compiled runtime.
 #[tokio::test]
-async fn s500_10_runtime_routing_status_and_explain() {
+async fn s900_9_runtime_routing_status_and_explain() {
     use crate::auth_gateway::runtime::{Runtime, WorkloadVerdict};
     let key = fixture::ec_key("static-1");
     let jwks = fixture::jwks(&[&key]);

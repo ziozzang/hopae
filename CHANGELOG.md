@@ -88,8 +88,27 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   canonical in lower case. The owned OpenLDAP fixture enables `memberof` and
   checks group sync against a real directory.
 
+- Offline Kubernetes workload identity (Hangang ADR 0022 P0,
+  [Kubernetes workloads](docs/KUBERNETES_WORKLOAD.md)): the
+  `kubernetes_workload` connector verifies projected ServiceAccount tokens
+  against the issuer's discovery/JWKS (pinned issuer and CA, bounded key
+  cache with rotation and rate-limited `kid`-miss refetch, dedicated
+  exclusive audience, `exp`/`nbf`/`iat` with skew, bound-object claims,
+  short positive cache) with no API-server request on the request path; an
+  optional watch-backed revocation index with bounded staleness; the
+  ServiceAccount principal `wk2:` and SPIFFE ID in `x-hopae-principal` and
+  `x-hopae-workload-spiffe-id`; `workload.*` lifecycle events and
+  `include_workloads` on the subject lifecycle feed; workload subjects in
+  the authentication explain API; `hopae_workload_*` counters.
+
 ### Changed
 
+- Kubernetes workload callers authenticate as their ServiceAccount
+  principal (issuer, cluster, namespace, ServiceAccount name and UID) for
+  both connectors; the Pod name/UID is an audit attribute. The previous
+  Pod-bound subject is published only with `subject: "legacy_pod"` and a
+  mandatory `legacy_until_ms`. `kubernetes_tokenreview` is deprecated and
+  gains an optional positive cache (`cache_ttl_ms`, at most 10 s).
 - A recovery factor entry no longer counts as AAL 2 evidence in step-up
   evaluation (no such entry existed before).
 - With a passkey enrolled, adding an authenticator app needs a second factor
@@ -123,6 +142,13 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Migration
 
+- Kubernetes workloads: the published subject of existing
+  `kubernetes_tokenreview` profiles changes from the Pod-bound to the
+  ServiceAccount principal; Pod-bound grants stop matching (fail closed).
+  Use `legacy_mapping_until_ms` to report legacy-to-principal mappings and,
+  if needed, `subject: "legacy_pod"` with `legacy_until_ms` as a bounded
+  compatibility window ([migration](docs/KUBERNETES_WORKLOAD.md#migration-from-pod-bound-subjects)).
+  Threat model TM-70 to TM-74.
 - Schema version 14 (`0014_groups`) adds `directory_groups`, `group_members`,
   `group_changes` and `group_sync_state`. Versions 11–13 are reserved by the
   passkey work, which must be merged and released first; back up the store

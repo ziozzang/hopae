@@ -1,6 +1,6 @@
 # 인증 설명 API
 
-<!-- translation-status: source=../AUTHENTICATION_EXPLAIN.md source-rev=2 status=current -->
+<!-- translation-status: source=../AUTHENTICATION_EXPLAIN.md source-rev=3 status=current -->
 
 [문서 목차](README.md) · [English](../AUTHENTICATION_EXPLAIN.md)
 
@@ -45,7 +45,7 @@ Hangang ADR 0020 콘솔에서 Hopae가 맡는 부분입니다(그 문서에서�
 | `url` | 게이트웨이가 알릴 원래 URL(필수, 최대 2,048바이트) |
 | `navigation` | `document`(기본값) 또는 `other`(fetch나 API 호출) |
 | `session_id` | 이 살아 있는 세션을, URL 호스트의 핸들이 평가되는 방식 그대로 평가합니다 |
-| `subject` | 세션 대신 사용자 ID, `human1:` 주체, `s_` 서비스 주체([주체 디렉터리](SUBJECT_DIRECTORY.md)와 같은 방식으로 해석) |
+| `subject` | 세션 대신 사용자 ID, `human1:` 주체, `s_` 서비스 주체([주체 디렉터리](SUBJECT_DIRECTORY.md)와 같은 방식으로 해석), 또는 SPIFFE ID(`spiffe://<td>/ns/<ns>/sa/<sa>`)나 `system:serviceaccount:<ns>:<sa>`로 지정한 Kubernetes 워크로드 |
 | `client_ip`, `user_agent` | 요청 클라이언트. `client_ip`가 없으면 세션 바인딩과 프로필 네트워크는 평가하지 않았다고 알립니다 |
 | `at` | 평가 시각(유닉스 초), 지금부터 최대 30일(기본값은 지금) |
 | `hypothetical` | 로그인이 만들 세션: `aal`(1 또는 2, 기본값 1), `factors`(`totp`, `webauthn`, `external` 같은 인증 수단 종류), `auth_age_seconds`, `provider_id`(기본값은 주체의 첫 연결 제공자, 없으면 첫 활성 제공자), `auth_time_source`(기본값 `hopae_completion`, `provider_claim`) |
@@ -70,7 +70,15 @@ Hangang ADR 0020 콘솔에서 Hopae가 맡는 부분입니다(그 문서에서�
    `indeterminate`), AAL 0인 서비스·워크로드 주체가 만족할 수 없는 단계 상향
    규칙(`machine_step_up`), 세션 대체가 없는 프로필의 브라우저 세션
    거부(`service_credential_required`), 프로필이 없는 호스트의 서비스
-   주체(`service_profile_absent`)
+   주체(`service_profile_absent`). Kubernetes 워크로드 주체이면 워크로드 커넥터의
+   판정을 실제 순서대로 평가합니다. 주체 형식과 신뢰 도메인(`workload_subject_invalid`),
+   네트워크(`network_denied`), namespace와 ServiceAccount 허용 목록
+   (`workload_namespace_not_allowed`, `workload_service_account_not_allowed`), 레거시
+   기간(`workload_legacy_window_expired`), 키 최신성(`workload_keys_unavailable`),
+   폐기 인덱스(`workload_revocation_stale`, `workload_service_account_absent`, 감시가
+   없으면 `workload_revocation_not_evaluated`)입니다. 토큰 검사 자체는 실제 토큰이
+   필요하며(`workload_token_not_simulated`) 추적은 SPIFFE ID와, 폐기 인덱스가
+   ServiceAccount UID를 알면 `wk2:` 주체와 전송 주체를 보고합니다
 5. 세션이면: 종료 여부, 호스트에서의 살아 있는 핸들(`handle_absent`), 수명 상태
    기계(`idle`, `absolute`, `clock_skew`), 바인딩 정책(`binding_ip`, `binding_ua`,
    또는 `binding_not_evaluated`), 사용자 상태와 권한 버전(`user_disabled`,
@@ -151,6 +159,15 @@ Hangang ADR 0020 콘솔에서 Hopae가 맡는 부분입니다(그 문서에서�
 | `remote_verifier` | 자격 증명을 요청 시점에 원격 커넥터가 검증하므로 결과를 모의할 수 없습니다. |
 | `machine_step_up` | 서비스와 워크로드 주체는 AAL 0이어서 단계 상향 규칙을 만족할 수 없습니다. |
 | `authority_unavailable` | 서비스 인증을 다시 게시하는 중이어서 요청이 일시 불가로 응답됩니다. |
+| `workload_subject_invalid` | 워크로드가 이 신뢰 도메인의 SPIFFE ID나 system:serviceaccount 이름이 아닙니다. |
+| `workload_namespace_not_allowed` | 워크로드의 네임스페이스가 서비스 프로필에서 허용되지 않습니다. |
+| `workload_service_account_not_allowed` | ServiceAccount가 프로필의 ServiceAccount 허용 목록에 없습니다. |
+| `workload_service_account_absent` | 현재 폐기 인덱스에 ServiceAccount가 없습니다. |
+| `workload_keys_unavailable` | 발급자 서명 키를 사용할 수 없거나 허용된 경과 시간을 넘었습니다. |
+| `workload_revocation_stale` | 폐기 인덱스가 허용된 지연 범위 안에서 최신 상태가 아닙니다. |
+| `workload_legacy_window_expired` | 레거시 Pod 기반 주체 호환 기간이 끝났습니다. |
+| `workload_revocation_not_evaluated` | 폐기 감시가 구성되지 않아 삭제된 ServiceAccount는 토큰 만료 시에만 거부됩니다. |
+| `workload_token_not_simulated` | 토큰 검사(서명, 대상, 수명, 바인딩 객체)는 실제 토큰이 필요하여 모의 평가하지 않습니다. |
 
 ## 관리 API, 콘솔, 관측
 

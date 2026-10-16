@@ -186,10 +186,10 @@ mod tests {
         assert!(!expired.headers().contains_key("x-forwarded-user"));
         assert!(!expired.headers().contains_key("x-hopae-evidence-ttl-ms"));
     }
-    /// S500-11: workload responses carry the ServiceAccount principal, its
+    /// S900-10: workload responses carry the ServiceAccount principal, its
     /// SPIFFE ID and the unchanged canonical wire subject.
     #[tokio::test]
-    async fn workload_response_carries_principal_and_spiffe_id() {
+    async fn s900_10_workload_response_carries_principal_and_spiffe_id() {
         use crate::auth_gateway::workload::fixture;
         let key = fixture::ec_key("static-1");
         let jwks = fixture::jwks(&[&key]);

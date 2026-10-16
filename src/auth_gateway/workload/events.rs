@@ -152,10 +152,10 @@ mod tests {
         }
     }
 
-    /// S500-9: lifecycle signals become outbox events and the subject
+    /// S900-8: lifecycle signals become outbox events and the subject
     /// lifecycle feed reports them only with `include_workloads`.
     #[tokio::test]
-    async fn s500_9_signals_become_lifecycle_feed_changes() {
+    async fn s900_8_signals_become_lifecycle_feed_changes() {
         let dir = tempfile::tempdir().unwrap();
         let clock = Arc::new(TestClock::new(Timestamp(1_700_000_000_000)));
         let store = Store::open(
