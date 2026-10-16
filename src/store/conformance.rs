@@ -7,7 +7,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::core::CoreStore;
+use super::core::{CoreStore, HandoffStore};
 use super::types::*;
 use super::{StoreError, StoreResult};
 use crate::crypto::{Clock, Digest, SeededRng, TestClock, Timestamp, random_id, random_token};
@@ -21,6 +21,7 @@ const T0: i64 = 1_700_000_000_000;
 
 pub(crate) struct Backend {
     pub store: Arc<dyn CoreStore>,
+    pub handoff: Arc<dyn HandoffStore>,
     pub clock: Arc<TestClock>,
     pub rng: Arc<SeededRng>,
     _dir: Option<tempfile::TempDir>,
@@ -53,8 +54,10 @@ fn sqlite() -> Backend {
     .unwrap();
     let rng = Arc::new(SeededRng::new(42));
     store.set_rng(Arc::new(SeededRng::new(99)));
+    let store = Arc::new(store);
     Backend {
-        store: Arc::new(store),
+        store: store.clone(),
+        handoff: store,
         clock,
         rng,
         _dir: Some(dir),
@@ -88,6 +91,7 @@ pub(crate) async fn postgres() -> Option<Backend> {
     .expect("connect to HOPAE_TEST_POSTGRES_URL");
     let store = Arc::new(store);
     Some(Backend {
+        handoff: store.clone(),
         store: store.clone(),
         clock,
         rng: Arc::new(SeededRng::new(42)),
@@ -711,6 +715,305 @@ async fn s600_3_concurrent_writers_keep_invariants_on_both_backends() {
 async fn s600_4_outbox_rules_agree_on_both_backends() {
     for b in backends().await {
         outbox_rules(&b).await;
+        b.cleanup().await;
+    }
+}
+
+fn new_txn(b: &Backend, ip: &str) -> (NewTransaction, Digest) {
+    let now = b.clock.now();
+    let d = random_token(b.rng.as_ref(), 32).digest();
+    (
+        NewTransaction {
+            txn_sha256: d,
+            created_at: now,
+            expires_at: now.add(Duration::from_secs(600)),
+            app_id: crate::policy::types::AppId::new("app"),
+            return_target: url::Url::parse("https://app.example.test/admin/x").unwrap(),
+            bind_sha256: Some(Digest([3; 32])),
+            portal_bind_sha256: None,
+            retry_bind_sha256: None,
+            client_ip: ip.parse().unwrap(),
+            ua_sha256: None,
+            provider_id: None,
+            state_sha256: None,
+            nonce: None,
+            pkce_verifier: None,
+            portal_session_id: None,
+            purpose: TxnPurpose::Login,
+            conflicting_handle_sha256: None,
+            pending_identity: Some(serde_json::json!({"sub": "x"})),
+            recovery_depth: 1,
+            reauth_max_age: Some(600),
+        },
+        d,
+    )
+}
+
+async fn transactions(b: &Backend) {
+    let name = b.store.backend();
+    let since = Timestamp(T0 - 60_000);
+    let h = &b.handoff;
+    let (t1, d1) = new_txn(b, "192.0.2.1");
+    assert!(matches!(
+        h.create_transaction_capped(t1, vec![], since, Some(2), 100)
+            .await
+            .unwrap(),
+        Admission::Admitted { evicted: 0 }
+    ));
+    let (t2, _) = new_txn(b, "192.0.2.1");
+    h.create_transaction_capped(t2, vec![], since, Some(2), 100)
+        .await
+        .unwrap();
+    let (t3, d3) = new_txn(b, "192.0.2.1");
+    assert!(
+        matches!(
+            h.create_transaction_capped(t3, vec![], since, Some(2), 100)
+                .await
+                .unwrap(),
+            Admission::OverCap
+        ),
+        "{name}: per-address cap"
+    );
+    assert!(
+        h.transaction(&d3).await.unwrap().is_none(),
+        "{name}: nothing written"
+    );
+    assert_eq!(
+        h.count_transactions_since("192.0.2.1".parse().unwrap(), since)
+            .await
+            .unwrap(),
+        2
+    );
+    let row = h.transaction(&d1).await.unwrap().unwrap();
+    assert_eq!(row.purpose, TxnPurpose::Login);
+    assert_eq!(row.pending_identity, Some(serde_json::json!({"sub": "x"})));
+    assert_eq!((row.recovery_depth, row.reauth_max_age), (1, Some(600)));
+    // The row bound: other addresses fill the table to max_rows.
+    for i in 0..4 {
+        let (t, _) = new_txn(b, &format!("198.51.100.{i}"));
+        h.create_transaction_capped(t, vec![], since, None, 3)
+            .await
+            .unwrap();
+    }
+    assert!(
+        h.transaction(&d1).await.unwrap().is_none(),
+        "{name}: oldest evicted"
+    );
+    // Bind once, then find by state; consume once; retry once.
+    let (t, d) = new_txn(b, "203.0.113.9");
+    h.create_transaction_capped(t, vec![], since, None, 100)
+        .await
+        .unwrap();
+    let binding = TransactionBinding {
+        provider_id: ProviderId::new("mock"),
+        state_sha256: Digest([5; 32]),
+        nonce: Some("n".into()),
+        pkce_verifier: Some(crate::crypto::Secret::new("verifier".into())),
+        portal_bind_sha256: Digest([6; 32]),
+    };
+    h.bind_transaction(&d, binding.clone()).await.unwrap();
+    assert!(
+        conflict(h.bind_transaction(&d, binding).await),
+        "{name}: bound once"
+    );
+    let by_state = h
+        .transaction_by_state(&Digest([5; 32]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_state.txn_sha256, d);
+    assert_eq!(by_state.pkce_verifier.unwrap().expose(), "verifier");
+    assert!(h.use_retry(&d, b.clock.now()).await.unwrap());
+    assert!(!h.use_retry(&d, b.clock.now()).await.unwrap());
+    // Racing consumers: one wins.
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let (h, e) = (b.handoff.clone(), ev(b, EventKind::LoginSucceeded));
+        tasks.push(tokio::spawn(async move {
+            h.consume_transaction(&d, reasons::OK, Timestamp(T0), vec![e])
+                .await
+        }));
+    }
+    let mut won = 0;
+    for t in tasks {
+        if t.await.unwrap().unwrap() {
+            won += 1;
+        }
+    }
+    assert_eq!(won, 1, "{name}: consume once");
+}
+
+fn code_row(
+    b: &Backend,
+    session: &SessionRow,
+    cred_gen: u64,
+) -> (HandoffCodeRow, crate::crypto::Secret) {
+    let now = b.clock.now();
+    let secret = random_token(b.rng.as_ref(), 32);
+    (
+        HandoffCodeRow {
+            code_sha256: secret.digest(),
+            session_id: session.session_id.clone(),
+            host: Host::parse("app.example.test").unwrap(),
+            return_target: url::Url::parse("https://app.example.test/admin/x").unwrap(),
+            client_ip: "192.0.2.10".parse().unwrap(),
+            bind_sha256: Digest([8; 32]),
+            issued_aal: Aal::One,
+            cred_gen,
+            recovery_depth: 0,
+            created_at: now,
+            expires_at: now.add(Duration::from_secs(60)),
+            consumed_at: None,
+            consumed_reason: None,
+        },
+        secret,
+    )
+}
+
+fn redeem_req(b: &Backend, c: &HandoffCodeRow, presented: Option<HandleView>) -> RedeemRequest {
+    let mut new_handle = handle(b, &c.session_id);
+    new_handle.host = Host::parse("app.example.test").unwrap();
+    RedeemRequest {
+        code_sha256: c.code_sha256,
+        host: Host::parse("app.example.test").unwrap(),
+        path: "/admin/x".into(),
+        client_ip: "192.0.2.10".parse().unwrap(),
+        presented_bind_sha256: Some(Digest([8; 32])),
+        presented_handle: presented,
+        new_handle,
+        now: b.clock.now(),
+        max_recoveries: 3,
+        session_policy: Default::default(),
+        app_lifetimes: Default::default(),
+        expiry_events: vec![],
+    }
+}
+
+fn rejected(b: &Backend) -> Vec<Event> {
+    vec![
+        EventBuilder::new(
+            b.clock.as_ref(),
+            b.rng.as_ref(),
+            EventKind::HandoffRejected,
+            Outcome::Failure,
+            "req",
+        )
+        .ip("192.0.2.10".parse().unwrap())
+        .build(),
+    ]
+}
+
+async fn handoff_redemption(b: &Backend) {
+    let name = b.store.backend();
+    let h = &b.handoff;
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let u = user(b, 1).await;
+    let (row, _) = session(b, &u).await;
+    let (stale, _) = code_row(b, &row, 5);
+    assert!(
+        conflict(h.mint_handoff_code(stale, vec![]).await),
+        "{name}: stale generation"
+    );
+    let (c, _) = code_row(b, &row, 1);
+    h.mint_handoff_code(c.clone(), vec![]).await.unwrap();
+    let req = redeem_req(b, &c, None);
+    let new_handle = req.new_handle.clone();
+    let ok = vec![ev(b, EventKind::SessionHandoff)];
+    match h.redeem_handoff_code(req, ok, rejected(b)).await.unwrap() {
+        RedeemOutcome::Minted {
+            session,
+            issued_aal,
+        } => {
+            assert_eq!(session.session_id, row.session_id, "{name}");
+            assert_eq!(issued_aal, Aal::One);
+        }
+        _ => panic!("{name}: expected Minted"),
+    }
+    let view = b
+        .store
+        .lookup_handle(&new_handle.handle_sha256, &new_handle.host)
+        .await
+        .unwrap()
+        .unwrap();
+    // A replay from the same browser is idempotent; from anyone else it is consumed.
+    let again = h
+        .redeem_handoff_code(redeem_req(b, &c, Some(view)), vec![], rejected(b))
+        .await
+        .unwrap();
+    assert!(matches!(again, RedeemOutcome::AlreadyRedeemed), "{name}");
+    let replay = h
+        .redeem_handoff_code(redeem_req(b, &c, None), vec![], rejected(b))
+        .await
+        .unwrap();
+    assert!(
+        matches!(replay, RedeemOutcome::Rejected { reason, code: Some(_) } if reason == reasons::CODE_CONSUMED),
+        "{name}"
+    );
+    // A mismatch is classified and burns the code.
+    let (c2, _) = code_row(b, &row, 1);
+    h.mint_handoff_code(c2.clone(), vec![]).await.unwrap();
+    let mut wrong = redeem_req(b, &c2, None);
+    wrong.host = Host::parse("other.example.test").unwrap();
+    wrong.new_handle.host = wrong.host.clone();
+    let out = h
+        .redeem_handoff_code(wrong, vec![], rejected(b))
+        .await
+        .unwrap();
+    assert!(
+        matches!(out, RedeemOutcome::Rejected { reason, code: Some(ref burned) } if reason == reasons::CODE_HOST_MISMATCH && burned.consumed_at.is_some()),
+        "{name}"
+    );
+    let unknown = RedeemRequest {
+        code_sha256: Digest([0xee; 32]),
+        ..redeem_req(b, &c2, None)
+    };
+    assert!(matches!(
+        h.redeem_handoff_code(unknown, vec![], rejected(b)).await.unwrap(),
+        RedeemOutcome::Rejected { reason, code: None } if reason == reasons::CODE_UNKNOWN
+    ));
+    assert!(
+        h.count_handoff_failures_since("192.0.2.10".parse().unwrap(), Timestamp(T0 - 1000))
+            .await
+            .unwrap()
+            >= 3,
+        "{name}: failures counted per address"
+    );
+    // Racing redemptions of one code: exactly one mints.
+    let (c3, _) = code_row(b, &row, 1);
+    h.mint_handoff_code(c3.clone(), vec![]).await.unwrap();
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let (h, req, fail) = (b.handoff.clone(), redeem_req(b, &c3, None), rejected(b));
+        tasks.push(tokio::spawn(async move {
+            h.redeem_handoff_code(req, vec![], fail).await
+        }));
+    }
+    let mut minted = 0;
+    for t in tasks {
+        match t.await.unwrap().unwrap() {
+            RedeemOutcome::Minted { .. } => minted += 1,
+            RedeemOutcome::Rejected { reason, .. } => assert_eq!(reason, reasons::CODE_CONSUMED),
+            _ => panic!("{name}: unexpected outcome"),
+        }
+    }
+    assert_eq!(minted, 1, "{name}: one redemption mints");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_7_login_transactions_agree_on_both_backends() {
+    for b in backends().await {
+        transactions(&b).await;
+        b.cleanup().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_8_handoff_redemption_agrees_on_both_backends() {
+    for b in backends().await {
+        handoff_redemption(&b).await;
         b.cleanup().await;
     }
 }

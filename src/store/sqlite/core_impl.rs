@@ -10,7 +10,7 @@ use crate::identity::types::{NormalizedEmail, UserId};
 use crate::policy::types::Host;
 use crate::provider::types::ProviderId;
 use crate::session::types::SessionId;
-use crate::store::core::CoreStore;
+use crate::store::core::{CoreStore, HandoffStore};
 use crate::store::types::*;
 use crate::store::{Directory, Events, Sessions, StoreResult};
 
@@ -132,5 +132,65 @@ impl CoreStore for Store {
             Ok(rows)
         })
         .await
+    }
+}
+
+#[async_trait]
+impl HandoffStore for Store {
+    async fn create_transaction_capped(
+        &self,
+        txn: NewTransaction,
+        events: Vec<Event>,
+        since: Timestamp,
+        cap: Option<u32>,
+        max_rows: u32,
+    ) -> StoreResult<Admission> {
+        Sessions::create_transaction_capped(self, txn, events, since, cap, max_rows).await
+    }
+    async fn transaction(&self, d: &Digest) -> StoreResult<Option<TransactionRow>> {
+        Sessions::transaction(self, d).await
+    }
+    async fn transaction_by_state(&self, d: &Digest) -> StoreResult<Option<TransactionRow>> {
+        Sessions::transaction_by_state(self, d).await
+    }
+    async fn bind_transaction(&self, d: &Digest, b: TransactionBinding) -> StoreResult<()> {
+        Sessions::bind_transaction(self, d, b).await
+    }
+    async fn use_retry(&self, d: &Digest, at: Timestamp) -> StoreResult<bool> {
+        Sessions::use_retry(self, d, at).await
+    }
+    async fn consume_transaction(
+        &self,
+        d: &Digest,
+        reason: Reason,
+        at: Timestamp,
+        events: Vec<Event>,
+    ) -> StoreResult<bool> {
+        Sessions::consume_transaction(self, d, reason, at, events).await
+    }
+    async fn mint_handoff_code(&self, code: HandoffCodeRow, events: Vec<Event>) -> StoreResult<()> {
+        Sessions::mint_handoff_code(self, code, events).await
+    }
+    async fn redeem_handoff_code(
+        &self,
+        req: RedeemRequest,
+        ok: Vec<Event>,
+        fail: Vec<Event>,
+    ) -> StoreResult<RedeemOutcome> {
+        Sessions::redeem_handoff_code(self, req, ok, fail).await
+    }
+    async fn count_transactions_since(
+        &self,
+        ip: std::net::IpAddr,
+        since: Timestamp,
+    ) -> StoreResult<u32> {
+        Sessions::count_transactions_since(self, ip, since).await
+    }
+    async fn count_handoff_failures_since(
+        &self,
+        ip: std::net::IpAddr,
+        since: Timestamp,
+    ) -> StoreResult<u32> {
+        Sessions::count_handoff_failures_since(self, ip, since).await
     }
 }

@@ -144,7 +144,9 @@ against both backends.
    - Every slice's conformance suite (`store::conformance`) runs against
      SQLite always and against PostgreSQL when `HOPAE_TEST_POSTGRES_URL` is
      set. Each PostgreSQL run uses a fresh schema dropped at the end.
-     Continuous integration runs an ephemeral `postgres:17-alpine` service.
+     `make test-postgres` (`tools/test_postgres.sh`) runs it locally against an
+     ephemeral `postgres:17-alpine` container on tmpfs that is removed on
+     exit; hosted CI stays disabled while the project's handoff is paused.
 6. **Connection pooling and failover.**
    - `deadpool-postgres` sizes the pool by `store.postgres.pool_size`
      (default 16, at most 128) with a connect timeout and recycling checks.
@@ -178,7 +180,8 @@ against both backends.
 | Slice | Scope |
 | --- | --- |
 | 1 | `CoreStore`, PostgreSQL schema v1 (users, identities, providers, the user-ID ledger, sessions, handles, login transactions, handoff codes, events, deliveries), the conformance harness, config `store.kind = postgres` validated at preflight and refused by `serve` as incomplete |
-| 2 | Handoff and transactions, administrator fences and grants, factors and passkeys, the delegation and replay nonces moved into the store |
+| 2a | Login transactions (cap, eviction bound, binding, consume-once) and the ADR-0004 handoff redemption (`HandoffStore`; code and session rows locked `FOR UPDATE`; the transaction count/evict/insert serialized by an advisory lock) — implemented |
+| 2b | Administrator fences and grants, factors and passkeys, the delegation and replay nonces moved into the store |
 | 3 | Groups, subject directory and console listings (window queries rewritten without `INDEXED BY`), the event relay and pruning |
 | 4 | Authentication-gateway owners (publication, receipts, projections), the migration tool, `serve` enabled, two-replica qualification (ROADMAP M2 exit) |
 

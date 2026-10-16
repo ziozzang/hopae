@@ -5,6 +5,8 @@
 //! uniqueness (user-ID ledger, identities, handles, events) is enforced by
 //! constraints, so several replicas behave like the single SQLite writer.
 //! Times come from the application clock, never from `now()`.
+mod handoff;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,8 +25,14 @@ use crate::store::types::*;
 use crate::store::{StoreError, StoreResult};
 
 /// Embedded PostgreSQL migrations (independent numbering from SQLite).
-const MIGRATIONS: &[(i32, &str, &str)] =
-    &[(1, "0001_slice1", include_str!("migrations/0001_slice1.sql"))];
+const MIGRATIONS: &[(i32, &str, &str)] = &[
+    (1, "0001_slice1", include_str!("migrations/0001_slice1.sql")),
+    (
+        2,
+        "0002_slice2_handoff",
+        include_str!("migrations/0002_slice2_handoff.sql"),
+    ),
+];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 /// `pg_advisory_xact_lock` key of the migration runner ("hopae-mi").
 const MIGRATION_LOCK: i64 = 0x686f_7061_652d_6d69;

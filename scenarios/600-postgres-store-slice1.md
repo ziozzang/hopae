@@ -19,9 +19,9 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 ## Preconditions and fixtures
 
 - SQLite: a temporary store per case. PostgreSQL: built with `--features
-  postgres` and `HOPAE_TEST_POSTGRES_URL` set (an ephemeral local
-  `postgres:17-alpine` with tmpfs data in development and CI); each case runs
-  in a fresh schema dropped afterwards.
+  postgres` and `HOPAE_TEST_POSTGRES_URL` set; `make test-postgres` starts an
+  ephemeral local `postgres:17-alpine` with tmpfs data, runs the suite and
+  removes the container; each case runs in a fresh schema dropped afterwards.
 - Test clock at `1_700_000_000_000` ms, seeded RNG; sinks `["log"]`.
 
 ## Main flow
@@ -51,6 +51,18 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - Given: the outbox.
 - When: a diagnostic kind is appended as required; a required event with address, user-agent digest and attributes is appended and read back; the same event is appended again.
 - Then: `Conflict`; an identical round trip (`to_json`) with one pending delivery; the duplicate is `Conflict`.
+
+### S600-7 Login transactions agree (slice 2a)
+
+- Given: the per-address cap 2 and a table bound of 3 rows.
+- When: three transactions from one address; four from others with the bound; a transaction is bound twice, read by state, retried twice; eight consumers race.
+- Then: the third is `OverCap` with nothing written; the oldest row is evicted; the second binding is `Conflict`; the state lookup returns the PKCE verifier; `use_retry` answers true then false; exactly one consumer wins.
+
+### S600-8 Handoff redemption agrees (slice 2a)
+
+- Given: a session and its codes.
+- When: a code with a stale generation is minted; a valid code is redeemed, then replayed with and without the minted handle; a code is redeemed on the wrong host; an unknown code is redeemed; eight redemptions of one code race.
+- Then: `Conflict`; `Minted` with a lookup-able handle; `AlreadyRedeemed` and `Rejected(code_consumed)`; `Rejected(code_host_mismatch)` with the code burned; `Rejected(code_unknown)`; failures counted per address; exactly one redemption mints, the others see `code_consumed`.
 
 ### S600-5 PostgreSQL ledger, migrations and newer schema
 
@@ -91,6 +103,8 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-2 | `s600_2_sessions_handles_and_termination_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-3 | `s600_3_concurrent_writers_keep_invariants_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-4 | `s600_4_outbox_rules_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-7 | `s600_7_login_transactions_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-8 | `s600_8_handoff_redemption_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
 | S600-6 | `s600_6_serving_refuses_the_incomplete_postgres_backend` | `src/app.rs` | unit | passing |

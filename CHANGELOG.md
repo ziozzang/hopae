@@ -97,6 +97,9 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   `store.kind`/`store.backend = "postgres"` with `store.postgres` is
   validated; serving on it is refused until slice 4. SQLite stays the
   default and unchanged.
+- PostgreSQL store slice 2a: login transactions and the handoff-code
+  redemption (`HandoffStore`) on both backends, PostgreSQL schema 2, and
+  `make test-postgres` (ephemeral tmpfs container, removed on exit).
 
 ### Changed
 

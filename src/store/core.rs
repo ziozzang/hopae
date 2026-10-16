@@ -83,3 +83,53 @@ pub trait CoreStore: Send + Sync {
     /// Pending delivery rows of one event (outbox fan-out check).
     async fn pending_deliveries(&self, event: &str) -> StoreResult<Vec<String>>;
 }
+
+/// Slice 2a of the store contract (ADR-0020): login transactions and the
+/// handoff-code redemption of ADR-0004, the remainder of the login hot path.
+#[async_trait]
+pub trait HandoffStore: Send + Sync {
+    /// Count, evict down to `max_rows - 1` and insert in one write.
+    async fn create_transaction_capped(
+        &self,
+        txn: NewTransaction,
+        events: Vec<Event>,
+        since: Timestamp,
+        cap: Option<u32>,
+        max_rows: u32,
+    ) -> StoreResult<Admission>;
+    async fn transaction(&self, txn_sha256: &Digest) -> StoreResult<Option<TransactionRow>>;
+    async fn transaction_by_state(
+        &self,
+        state_sha256: &Digest,
+    ) -> StoreResult<Option<TransactionRow>>;
+    async fn bind_transaction(
+        &self,
+        txn_sha256: &Digest,
+        binding: TransactionBinding,
+    ) -> StoreResult<()>;
+    async fn use_retry(&self, txn_sha256: &Digest, at: Timestamp) -> StoreResult<bool>;
+    async fn consume_transaction(
+        &self,
+        txn_sha256: &Digest,
+        reason: Reason,
+        at: Timestamp,
+        events: Vec<Event>,
+    ) -> StoreResult<bool>;
+    async fn mint_handoff_code(&self, code: HandoffCodeRow, events: Vec<Event>) -> StoreResult<()>;
+    async fn redeem_handoff_code(
+        &self,
+        req: RedeemRequest,
+        events_on_success: Vec<Event>,
+        events_on_failure: Vec<Event>,
+    ) -> StoreResult<RedeemOutcome>;
+    async fn count_transactions_since(
+        &self,
+        ip: std::net::IpAddr,
+        since: Timestamp,
+    ) -> StoreResult<u32>;
+    async fn count_handoff_failures_since(
+        &self,
+        ip: std::net::IpAddr,
+        since: Timestamp,
+    ) -> StoreResult<u32>;
+}
