@@ -7,6 +7,7 @@
 //! `pending` row per configured sink in the same transaction.
 
 pub mod hooks;
+pub mod passkeys;
 pub mod sqlite;
 pub mod types;
 
@@ -22,6 +23,7 @@ use crate::provider::types::ProviderId;
 use crate::session::types::SessionId;
 
 pub use hooks::StoreHooks;
+pub use passkeys::Passkeys;
 pub use sqlite::{
     LATEST_SCHEMA_VERSION, Shape as WindowShape, Store, earliest_present, precheck,
     validate_foundation,
@@ -413,6 +415,15 @@ pub trait Sessions: Send + Sync {
     /// one (with `client_ip`) to every failed redemption, unknown codes included.
     async fn count_handoff_failures_since(&self, ip: IpAddr, since: Timestamp) -> StoreResult<u32>;
     async fn evict_transactions(&self, max_rows: u32, now: Timestamp) -> StoreResult<u32>;
+    /// Whether the session's current elevation (its credential generation)
+    /// is a high-assurance passkey that still qualifies (ADR-0018).
+    async fn session_aal3_evidence(
+        &self,
+        _session: &SessionId,
+        _cred_gen: u64,
+    ) -> StoreResult<bool> {
+        Ok(false)
+    }
     /// Expired txns/codes, terminated sessions older than retention.
     async fn sweep(
         &self,

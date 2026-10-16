@@ -754,6 +754,7 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
                 picture: None,
                 raw_claims: serde_json::json!({}),
                 auth_time: None,
+                groups: None,
             })
         }
     }
@@ -2402,7 +2403,7 @@ async fn kubernetes_workload_http_native_parity_and_profile_revocation() {
             "OWNED_LOCAL_KEY" => Some("owned-local-service-key-at-least-thirty-two".into()),
             _ => None,
         };
-        let config:hopae::auth_gateway::runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"example-cluster","api_keys":[{"token_env":"OWNED_LOCAL_KEY","subject":"worker"}],"kubernetes_tokenreview":{"connection":{"api_origin":format!("https://127.0.0.1:{port}"),"issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":1000},"ca_pem_env":"OWNED_KUBE_CA","reviewer_token_env":"OWNED_KUBE_REVIEWER","token_prefix":"k8s:"},"networks":["203.0.113.0/24"]}]})).unwrap();
+        let config:hopae::auth_gateway::runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"app","host":"app.example.test","ports":[443],"realm":"example-cluster","api_keys":[{"token_env":"OWNED_LOCAL_KEY","subject":"worker"}],"kubernetes_tokenreview":{"connection":{"api_origin":format!("https://127.0.0.1:{port}"),"issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":1000},"ca_pem_env":"OWNED_KUBE_CA","reviewer_token_env":"OWNED_KUBE_REVIEWER","token_prefix":"k8s:","subject":"service_account"},"networks":["203.0.113.0/24"]}]})).unwrap();
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
             .unwrap();
@@ -2665,12 +2666,21 @@ async fn grpc_mtls_session_revocation_and_http_parity() {
     ));
     let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let tls = hangang_runtime::configuration(
-        &root.join("server.pem"),
-        &root.join("server.key"),
-        &root.join("ca.pem"),
-    )
-    .unwrap();
+    // The live-reloading TLS the binary uses (Hopae terminates TLS, tonic
+    // serves the decrypted streams).
+    let tls = grpc_gateway::GrpcTls::Reloading(
+        hopae::reload::ServerTls::load(
+            "grpc_gateway",
+            &hopae::config::NativeGatewayTls {
+                certificate: root.join("server.pem"),
+                key: root.join("server.key"),
+                client_ca: root.join("ca.pem"),
+            },
+            &[b"h2"],
+            Arc::default(),
+        )
+        .unwrap(),
+    );
     let (tx, rx) = watch::channel(false);
     let task = tokio::spawn(grpc_gateway::serve(listener, tls, router.clone(), keys, rx));
     let endpoint = Endpoint::from_shared(format!("https://127.0.0.1:{}", address.port()))

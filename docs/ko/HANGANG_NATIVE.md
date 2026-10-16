@@ -1,6 +1,6 @@
 # Hangang 네이티브 검증과 콘솔 위임
 
-<!-- translation-status: source=../HANGANG_NATIVE.md source-rev=6 status=current -->
+<!-- translation-status: source=../HANGANG_NATIVE.md source-rev=8 status=current -->
 
 [English](../HANGANG_NATIVE.md) · [문서](README.md)
 
@@ -42,6 +42,16 @@ fallback이나 불확실한 요청의 재시도를 하지 않습니다. 세션 �
 `python3 tools/build_console_plugin.py`로 생성한 `plugins/hopae`를 검토한 manifest 해시,
 고정 관리자 origin, `delegate_actor:true`, 전용 `token_env`와 함께 설치합니다.
 상태·페이지별 사용자/세션/이벤트·사용자 활성/비활성·전체/개별 세션 회수를 제공합니다.
+패키지 0.1.8부터 manifest는 감사되는 읽기 `subjects/resolve`, `subjects/search`,
+`subjects/lifecycle`, `subjects/lifecycle/snapshot`, `explain/authentication`도
+선언합니다(`POST`, `mutation: false`. [주체 디렉터리](SUBJECT_DIRECTORY.md)와
+[인증 설명](AUTHENTICATION_EXPLAIN.md) 참조). 따라서 Hangang 중개자가 서명된 JSON 본문과
+함께 전달하며, `events/query`는 통합 감사 화면에 쓰입니다. 패키지 0.1.9는
+[그룹](GROUPS.md) 경로를 더합니다. 읽기 `groups/search`, `groups/get`,
+`subjects/groups`(`mutation: false`)와 로컬 그룹 쓰기 `groups/create`, `groups/update`,
+`groups/delete`, `groups/members/add`, `groups/members/remove`(`mutation: true`, 본문에
+`reason`과 `expected_revision`)입니다. 멤버십 투영은 콘솔이 아니라 Pumgye를 위한
+것이므로 패키지에 넣지 않습니다.
 native 테마와 host 인증을 사용하며 패키지에 백엔드 키나 Hangang credential을 주지 않습니다.
 
 `admin.hangang_delegation:{key_env:"HOPAE_CONSOLE_DELEGATION_KEY"}`를 명시적으로 설정합니다.

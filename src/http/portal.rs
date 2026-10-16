@@ -14,6 +14,7 @@ use axum::routing::{get, post};
 use crate::crypto::random_id;
 use crate::http::security;
 use crate::portal::PortalState;
+use crate::portal::handlers::settings_handlers as settings;
 use crate::portal::handlers::{self, RequestId};
 use crate::portal::pages::ErrorPage;
 
@@ -33,6 +34,31 @@ pub fn router(state: PortalState) -> Router {
         .route("/security/totp/prepare", post(handlers::totp_prepare_post))
         .route("/security/totp/confirm", post(handlers::totp_confirm_post))
         .route("/assets/portal.css", get(handlers::stylesheet))
+        .route("/assets/webauthn.js", get(settings::script))
+        .route("/security", get(settings::overview))
+        .route("/security/passkeys", get(settings::passkeys))
+        .route(
+            "/security/passkeys/new",
+            get(settings::new_passkey_get).post(settings::new_passkey_post),
+        )
+        .route("/security/passkeys/rename", post(settings::rename_post))
+        .route("/security/passkeys/remove", post(settings::remove_post))
+        .route("/security/verify", get(settings::verify_get))
+        .route(
+            "/security/verify/passkey",
+            post(settings::verify_passkey_post),
+        )
+        .route("/security/verify/totp", post(settings::verify_totp_post))
+        .route(
+            "/security/verify/recovery",
+            post(settings::verify_recovery_post),
+        )
+        .route(
+            "/security/recovery-codes",
+            get(settings::recovery_get).post(settings::recovery_post),
+        )
+        .route("/stepup/webauthn", post(settings::stepup_post))
+        .route("/login/passkey", post(settings::login_post))
         .route("/login", get(handlers::login_get))
         .route("/login/retry", post(handlers::retry_post))
         .route("/login/continue", post(handlers::continue_post))
@@ -74,12 +100,18 @@ async fn outer(State(st): State<PortalState>, mut req: Request, next: Next) -> R
     }
     let mut resp = next.run(req).await;
     security::apply(resp.headers_mut());
-    if let Some(origins) = resp
+    let origins = resp
         .extensions()
         .get::<security::FormActionOrigins>()
-        .cloned()
+        .map(|o| o.0.clone());
+    if resp
+        .extensions()
+        .get::<security::CeremonyScript>()
+        .is_some()
     {
-        security::with_form_action(resp.headers_mut(), &origins.0);
+        security::with_ceremony_script(resp.headers_mut(), origins.as_deref().unwrap_or(&[]));
+    } else if let Some(origins) = origins {
+        security::with_form_action(resp.headers_mut(), &origins);
     }
     if let Ok(v) = HeaderValue::from_str(&rid) {
         resp.headers_mut().insert(handlers::request_id_header(), v);

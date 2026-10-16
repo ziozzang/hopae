@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 14 -->
+<!-- doc-rev: 17 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -233,12 +233,12 @@ value are omitted rather than sent empty.
 | `x-forwarded-user` | Hopae user id, stable for the user's lifetime (`u_` + 26 base32 chars) | 64 B |
 | `x-forwarded-email` | Primary email; omitted when none | 254 B |
 | `x-forwarded-preferred-username` | Username or display name | 256 B |
-| `x-forwarded-groups` | Comma-separated group names (M2); omitted when none | 4 KiB |
+| `x-forwarded-groups` | Comma-separated group references (`grp1:…`, at most 32) when `groups.gateway_header` is on ([groups](GROUPS.md)); omitted when none, and always omitted by default | 4 KiB |
 | `x-hopae-session` | Session id (`s_` + 26 chars), not the cookie handle | 64 B |
-| `x-hopae-provider` | Provider id of the first factor (`google`) | 64 B |
+| `x-hopae-provider` | Provider id of the first factor (`google`); `hopae.passkey` for a passwordless passkey session ([WebAuthn passkeys](WEBAUTHN.md#passwordless-sign-in)), a reserved value no configured provider can take | 64 B |
 | `x-hopae-auth-time` | Unix seconds of the first-factor authentication | 20 B |
 | `x-hopae-expires` | Unix seconds of the earlier of idle and absolute expiry | 20 B |
-| `x-hopae-aal` | `1` or `2`: the level the presented handle was issued at ([ADR-0008](adr/0008-second-factor-extension-point.md)); elevation reissues handles | 1 B |
+| `x-hopae-aal` | `1` or `2`: the level the presented handle was issued at ([ADR-0008](adr/0008-second-factor-extension-point.md)); elevation reissues handles. `3` only for an application with `apps[].max_emitted_aal = 3` while the session's current elevation is a high-assurance passkey ([ADR-0018](adr/0018-aal3-emission.md)); compare it as a number | 1 B |
 | `x-hopae-factors` | Comma list of satisfied factors `kind[:provider]`, e.g. `oidc:google,totp` | 256 B |
 
 Total identity header bytes ≤ 8 KiB (the gateway rejects more than 16 KiB).

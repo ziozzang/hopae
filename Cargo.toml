@@ -23,6 +23,12 @@ hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 libc = "0.2"
 tower = { version = "0.5", features = ["util"] }
+# Admin mTLS server that exposes the verified client certificate to the
+# service-credential binding, and the reloading TLS acceptors (same versions
+# hangang-runtime already pulls in).
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 anyhow = "1"
 askama = "0.14"
 arc-swap = "1"
@@ -49,6 +55,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_path_to_error = "0.1"
 sha1 = "0.10"
 sha2 = "0.10"
 zeroize = "1"
@@ -61,7 +68,17 @@ unicode-normalization = "0.1"
 url = "2"
 ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-ring"] }
 mlua = { version = "0.12.2", default-features = false, features = ["lua54", "vendored"] }
+regex = { version = "1.13", default-features = false, features = ["std", "perf", "unicode"] }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
+# WebAuthn relying party (ADR-0017). Ceremony state is persisted between the
+# two HTTP requests of a ceremony, hence the state-serialisation feature.
+webauthn-rs = { version = "=0.5.5", features = ["danger-allow-state-serialisation", "danger-credential-internals", "attestation", "conditional-ui"] }
+# webauthn-rs-core links OpenSSL; vendored keeps release binaries static.
+openssl = { version = "0.10", features = ["vendored"] }
+# Recovery-code hashes (ADR-0017); RustCrypto, MIT/Apache-2.0.
+argon2 = "0.5"
+# Reads the AAGUID from attestation objects (already a webauthn-rs dependency).
+serde_cbor_2 = "0.13"
 
 [features]
 # Loopback-only test control surface (clock, stall, commit gate, crash points,
@@ -79,6 +96,7 @@ hopae-grpc = { path = "crates/hopae-grpc", features = ["native-client"] }
 tokio = { version = "1", features = ["process", "io-util"] }
 rsa = { version = "0.9", features = ["pem"] }
 tempfile = "3"
+webauthn-authenticator-rs = { version = "=0.5.5", default-features = false, features = ["softpasskey", "softtoken"] }
 
 [profile.release]
 lto = "thin"

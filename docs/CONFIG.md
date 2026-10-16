@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 35 -->
+<!-- doc-rev: 43 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -31,6 +31,8 @@ main tables in the change that implements it.
 | `hopae admin revoke <user_id or email> --config <path>` | Revoke the grant; the row stays as a tombstone. Records `admin.revoke`. |
 | `hopae admin list [--all] --config <path>` | Print the live grants; `--all` adds revoked rows. |
 | `hopae admin import [--force <user_id or email>] --config <path>` | Apply `admin.users[]` of the file to the store (the same import runs at start) and print what was inserted, updated, revoked, unchanged, forced and skipped. |
+| `hopae admin factors list <user_id or email> --config <path>` | Print a user's second factors: authenticator app state, unused recovery codes (and whether a used code requires re-enrollment), and every active passkey with its hashed id (`pk_…`), label, kind (synced or device-bound), recorded class (`aal2` or `aal3`), creation and last use. Never prints key material ([WebAuthn passkeys](WEBAUTHN.md#administration)). |
+| `hopae admin factors reset <user_id or email> --config <path>` | Revoke every passkey, authenticator app and recovery code of the user, end every session of the user and record `admin.factor_reset`. The user enrolls again after a fresh sign-in. |
 | `hopae --version` | Print the version and exit `0`; needs no configuration. |
 
 Exit status: `0` success; `2` an invalid or unsafe configuration (including a
@@ -127,7 +129,8 @@ for. A host not listed is denied (`unknown_app`).
 | `apps[].on_authz_change` | `refresh`, `terminate` | `refresh` | What happens to live sessions when authorization data changes. |
 | `apps[].verify_cache_seconds` | integer | `0` | Staleness bound the gateway may cache an allow for; at most `30`. `hopae --check` prints the value per application and **warns when it is `false`**: `sec-fetch-site: same-origin` proves only that a document of the application's own origin started the navigation, so a navigation gadget in the application (a page that assigns a URL from its own query to `location`, such as `/continue?next=/_hopae/logout`) can end a user's session without a click. Keep `true` unless that is accepted. |
 | `apps[].logout_confirm` | boolean | `true` (inherited from the `default` application when it sets it) | `true`: `/_hopae/logout` on the application host redirects to the portal's confirmation page. `false`: a document navigation with `sec-fetch-site: same-origin` that presents a valid handle ends the session at once and is redirected to the portal's signed-out page; every other request still goes through the confirmation. After either, the portal shows a "Sign in again" link instead of redirecting to the protected target ([ADR-0015](adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md), [gateway contract](GATEWAY_CONTRACT.md#application-host-entry-points)). Reported by `--check`. |
-| `apps[].step_up[]` | array of `{path_prefix, require: {aal, max_age}}` | none | Enforced session assurance rules (`aal` is 1 or 2, `path_prefix` starts with `/`, `max_age` is positive seconds). AAL 2 requires actual second-factor evidence; freshness uses its satisfaction time. Rules force `no-store`. An AAL 0 service credential cannot satisfy a matching rule. With a configured TOTP keyring, document requests start native OTP step-up; without one they fail closed. |
+| `apps[].max_emitted_aal` | integer | `2` (never inherited from the `default` application) | Highest level presented in `x-hopae-aal` and sealed into receipts for this application: `2` or `3`. `3` needs `webauthn.high_assurance` and is presented only while the session's current elevation is a high-assurance passkey ([ADR-0018](adr/0018-aal3-emission.md)); every other application sees `2` for the same session. Opt in only when the application and its peers accept `3`. |
+| `apps[].step_up[]` | array of `{path_prefix, require: {aal, max_age}}` | none | Enforced session assurance rules (`aal` is 1, 2 or 3, `path_prefix` starts with `/`, `max_age` is positive seconds). AAL 2 requires actual second-factor evidence; freshness uses its satisfaction time. AAL 3 needs `webauthn.high_assurance` and is met only while the session's current elevation is a high-assurance passkey (attested, allowlisted, device-bound, still active); its freshness is that passkey use, and the step-up offers only such keys ([ADR-0018](adr/0018-aal3-emission.md#aal-3-requirements)). Rules force `no-store`. An AAL 0 service credential cannot satisfy a matching rule. With a configured TOTP keyring, document requests start native OTP step-up; without one they fail closed. |
 
 #### Providers
 
@@ -186,9 +189,10 @@ background is in [administration](ADMIN.md).
 | `admin.binding.ua` | `strict`, `off` | `off` | User-agent binding. |
 | `admin.binding.on_mismatch` | `terminate_session`, `drop_handle` | `terminate_session` | What a binding mismatch does. |
 | `admin.max_auth_age` | duration | `12h` | Freshness bound of a console session, at least `30m`: a smaller value is a configuration error (`admin.max_auth_age must be at least 30m`), because the bound keeps a 600 s headroom between a reauthentication callback and the console verify that follows. One predicate at every console verify: `auth_time ≤ now + 60 s` and `now − auth_time < N`. With a provider whose `reauth` capability is `max_age` the session must carry a provider-verified `auth_time` and a stale one is sent to a reauthentication that the session's own provider performs; with an `unsupported` provider (the `google` preset) the bound is Hopae login age only ([ADR-0016](adr/0016-management-console-minimum.md) decision 15, [administration](ADMIN.md#freshness-and-reauthentication)). |
-| `admin.require_aal` | `1`, `2` | `1` | Minimum assurance level of the console handle. `2` also sets the implicit application's step-up rule for the whole host. Without a TOTP keyring, `--check` warns that console requests will be refused. |
+| `admin.require_aal` | `1`, `2`, `3` | `1` | Minimum assurance level of the console handle. `2` or `3` also sets the implicit application's step-up rule for the whole host. `3` needs `webauthn.high_assurance`: every console request, and the write fence of every console change, then requires a live high-assurance passkey elevation; the console itself is still presented AAL 2. Without a TOTP keyring, `--check` warns that console requests will be refused. |
 | `admin.untrusted_peers` | `refuse`, `as_client` | `refuse` | What the admin listener does with a TCP peer outside `trusted_proxies`: `refuse` answers `403 untrusted_peer` before reading a cookie (counted, a rate-limited warning); `as_client` treats the peer as the client, as the portal does. |
 | `admin.query_budget_ms` | integer, 100 to 30000 | `2000` | Deadline of one console store operation (listing, search or mutation). The deadline is handed to the store job, which interrupts the statement inside SQLite, rolls back and answers `503`. |
+| `admin.directory_privacy` | `standard`, `strict` | `standard` | Operator floor for the privacy profile of the audited directory reads ([subject directory](SUBJECT_DIRECTORY.md), [authentication explain](AUTHENTICATION_EXPLAIN.md)). A request's `privacy_profile` may only be stricter: with `strict` no read returns an e-mail address in any form, whatever the request asks for. |
 | `admin.users[]` | array of `{user_id?, email?, role?, note?}` | `[]` | Administrator grants seeded from the file at start and by `hopae admin import`. Each entry needs at least one of `user_id` (`u_` followed by letters, digits, `_` or `-`, at most 64 characters) and `email` (a valid address); `role` is `admin` (default) or `viewer`; `note` at most 256 characters; unknown keys are rejected. An entry given by email alone applies only when exactly one user holds that verified address and it is authoritative. A defective entry is a warning at start (skipped, never a start failure) and an error under `--check --strict`. Imported under the provider rule with `managed_by` and tombstones ([administration](ADMIN.md#grants-in-the-configuration-file)). |
 
 #### Events
@@ -200,6 +204,36 @@ background is in [administration](ADMIN.md).
 | `events.prune_every` | integer, at least 1 | `1000` | Inserted rows between prune passes (a pass also runs at least every 60 s). |
 | `events.max_pending_per_sink` | integer, at least 1 | `10000` | Undelivered rows kept per sink; beyond it the oldest pending rows become `failed` with `backlog_overflow`. |
 | `events.delivery_terminal_retention_days` | integer, at least 1 | `7` | How long delivered or failed delivery rows are kept. |
+
+#### Groups
+
+Groups, provider group sync and the signed membership projection ([groups](GROUPS.md), [ADR-0019](adr/0019-groups-and-membership-projection.md)). Every key is optional.
+
+| Key | Type | Default | Constraints and meaning |
+| --- | --- | --- | --- |
+| `groups.max_groups_per_user` | integer, 1 to 1024 | `256` | Most groups (all sources) one person may belong to; a sync or a write that would exceed it is refused and changes nothing. |
+| `groups.change_retention_days` | integer, 1 to 3650 | `30` | Age after which projection journal rows are pruned (the newest is kept); an older projection cursor is `410 cursor_expired`. |
+| `groups.maintenance_interval_secs` | integer, 10 to 86400 | `300` | Interval of the maintenance pass: local expiry, removal grace, deleted providers, stale provider groups, journal retention, periodic LDAP sync. |
+| `groups.stale_group_days` | integer, 1 to 3650 | `30` | A provider group with no member and no sync report for this long is deleted (tombstone). |
+| `groups.max_staleness_secs` | integer, 3600 to 31536000 | `604800` | A provider membership no successful assertion confirmed for this long is suspended: kept, but left out of the projection and the gateway mirror until asserted again. Must exceed every provider's `sync_interval_secs`. |
+| `groups.gateway_header` | boolean | `false` | Mirror up to 32 group references into `users.groups`, so `x-forwarded-groups` carries them; a change bumps `authz_version`. |
+| `groups.projection.issuer_ref` | string, 1 to 128 of `[A-Za-z0-9_.:-]` | none | Key identity in every projection envelope and payload. The projection endpoints answer `503 projection_unavailable` without `groups.projection`. |
+| `groups.projection.key_epoch` | integer, at least 1 | none | Key epoch; raise it when the key changes. |
+| `groups.projection.public_key` | base64 Ed25519 public key | none | Must match the seed and must differ from `receipt_issuer.public_key`, or the start fails. |
+| `groups.projection.seed_env` | environment variable name | none | Variable holding the base64 32-byte Ed25519 seed (never the seed itself). |
+| `groups.projection.audience` | string, 1 to 128 of `[A-Za-z0-9_.:-]` | none | The consumer the projection is bound to (Pumgye's identifier). |
+| `providers[].groups` | object | absent | The provider syncs groups. Absent: it syncs none. |
+| `providers[].groups.claim` | dotted path, at most 4 segments | `groups` | OIDC only: the claim holding an array of strings (ID token, else user-info). |
+| `providers[].groups.ldap.mode` | `member_of`, `search` | `member_of` | LDAP only: read the entry's `memberOf`, or search group entries whose member attribute holds the person's DN. |
+| `providers[].groups.ldap.member_of_attribute` | LDAP attribute | `memberOf` | `member_of` mode attribute. |
+| `providers[].groups.ldap.search_base_dn` | DN | the provider's `base_dn` | `search` mode base. |
+| `providers[].groups.ldap.object_class`, `member_attribute`, `name_attribute` | LDAP attributes | `groupOfNames`, `member`, `cn` | `search` mode filter `(&(objectClass=…)(member=<escaped DN>))` and the group's name. |
+| `providers[].groups.include`, `exclude` | regular expression, at most 512 bytes | none | Keep only source keys (claim values, group DNs) matching `include`, then drop those matching `exclude`. Linear-time matching. |
+| `providers[].groups.rewrite` | `{pattern, replacement}` | none | Rewrites the display name (`$1` groups); the key never changes. |
+| `providers[].groups.max_groups` | integer, 1 to 1024 | `100` | Most groups per person from this provider after filtering; more refuses the assertion. |
+| `providers[].groups.removal_grace_secs` | integer, 0 to 604800 | `0` | How long a membership the provider stopped asserting stays before removal. |
+| `providers[].groups.sync_interval_secs` | integer, 300 to 604800 | absent | LDAP only: refresh linked people periodically; a full cycle starts at most this often. Absent: sign-in only. |
+| `providers[].groups.sync_batch` | integer, 1 to 1000 | `200` | LDAP only: people refreshed per maintenance pass. |
 
 ### Keys decided and scheduled
 
@@ -311,6 +345,29 @@ The deployment must expose the portal through its existing trusted HTTPS ingress
 
 AAL 1 primary-freshness rules use provider reauthentication even without a keyring.
 
+## WebAuthn passkeys
+
+Optional `webauthn` enables passkeys ([ADR-0017](adr/0017-webauthn-passkeys.md),
+[WebAuthn passkeys](WEBAUTHN.md)). Absent (the default), every passkey and
+security-settings route answers `404` and nothing changes. Example:
+
+```json
+{"webauthn":{"rp_id":"auth.example.test","rp_name":"Example sign-in","high_assurance":{"attestation_ca_files":["/etc/hopae/webauthn/vendor-root.pem"],"aaguids":["cb69481e-8ff7-4039-93ec-0a2729a154a8"]}}}
+```
+
+| Key | Default | Constraint |
+| --- | --- | --- |
+| `webauthn.rp_id` | the host of `portal.public_url` | The portal host or a parent domain of it on a label boundary; not an IP literal or a single label. Changing it makes every registered passkey unusable. |
+| `webauthn.rp_name` | `Hopae` | 1–64 printable characters. |
+| `webauthn.passwordless` | `false` | Offer passwordless passkey sign-in on the sign-in page ([WebAuthn passkeys](WEBAUTHN.md#passwordless-sign-in)). Sessions use the reserved provider id `hopae.passkey`. |
+| `webauthn.high_assurance.attestation_ca_files` | — | 1–64 readable PEM files; required with `aaguids`. Read at start and by `hopae --check`. |
+| `webauthn.high_assurance.aaguids` | — | 1–64 non-zero UUIDs; required with `attestation_ca_files`. |
+
+The allowed origin is exactly the portal origin and cannot be configured.
+`webauthn` requires an `https` portal, `cookie.secure = true` and authenticated
+gateway callers. It also enables the browser step-up flow (`/stepup`) for
+applications with `step_up` rules, as `totp_keyring` does.
+
 ## External verifier startup configuration
 
 Optional `external_verifiers` is an array, default `[]`, of at most 64 unique
@@ -359,7 +416,15 @@ remain implementation work.
 
 ## Service authentication Lua eligibility (unreleased)
 
-`authentication_gateway` in the startup JSON bootstraps an empty authority only.
+`authentication.source` (`store` default, `config`) selects who owns the
+authentication profiles and the credential projection plan; in `config` mode
+every start reconciles the store to the file and console edits are refused
+([configuration-authoritative mode](AUTH_PROFILE_PUBLICATION.md#configuration-authoritative-mode)).
+`authentication.reload_interval_ms` (default `1000`; `0` off; otherwise 200 to
+60000) is how often a running Hopae polls the file in `config` mode and
+reconciles a changed profile or projection plan without a restart
+([live reconciliation](AUTH_PROFILE_PUBLICATION.md#live-reconciliation)).
+In the default `store` mode, `authentication_gateway` in the startup JSON bootstraps an empty authority only.
 Once the DB contains an authentication-profile document (including a disable
 tombstone), the DB/PAP document takes precedence. Editing startup JSON and
 restarting does not replace it. Publish changes through the authenticated owner
@@ -457,6 +522,15 @@ The Hangang module UI and gateway projection transport still need integration.
 ### gRPC verification listener
 
 `listen.grpc_gateway` is an optional literal socket address. It requires `listen.native_gateway_tls` and authenticated gateway callers, even on loopback. HOP1 may be disabled. See [gRPC verification](GRPC.md).
+
+### TLS material reload
+
+`reload.tls_interval_secs` (default `10`; `0` off; at most 3600) is how often
+Hopae re-reads the certificate, key and CA files of `listen.admin_tls`,
+`listen.native_gateway_tls` (native and gRPC gateways) and
+`projection_receiver.authority` (outbound mTLS). A renewed, valid set is used
+for every new handshake without a restart; an invalid one keeps the current
+material ([operations](OPERATIONS.md#tls-certificate-renewal)).
 
 ### Administrator listener mTLS
 

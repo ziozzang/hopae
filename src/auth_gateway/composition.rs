@@ -72,6 +72,7 @@ impl Config {
             !p.api_keys.is_empty()
                 && p.api_relay.is_some()
                 && p.kubernetes_tokenreview.is_none()
+                && p.kubernetes_workload.is_none()
                 && !p.session_fallback
                 && p.relay_token_prefix.is_none(),
             "composition requires isolated service API key and relay slots"
@@ -306,6 +307,7 @@ impl Compiled {
             subject: composed.subject().clone(),
             service: Some(self.service.clone()),
             connector: format!("composition:{factors}"),
+            workload: None,
             expires_at,
         })
     }

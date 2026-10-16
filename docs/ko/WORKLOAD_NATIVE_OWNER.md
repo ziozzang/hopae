@@ -15,7 +15,8 @@ Workload나 Service로 변환하지 않습니다. 기존 Service API·기본 동
 ```
 
 scope는 기존 issuer 선언의 중복 없는 부분집합이어야 하고, 해당 애플리케이션과
-실제 Kubernetes TokenReview profile이 필요합니다. 인증된 mTLS gRPC와 Linux
+실제 Kubernetes 워크로드 profile(`kubernetes_workload` 또는 사용 중단된
+`kubernetes_tokenreview`)이 필요합니다. 인증된 mTLS gRPC와 Linux
 BOOTTIME이 필요하며 지원하지 않는 플랫폼은 이 선택 기능을 거절합니다. 기본
 동작은 영향을 받지 않습니다. Workload 사용 시 논리적 identity_authority_epoch는
 40 ASCII바이트 이하입니다. 이는 TokenReview issuer URL/cluster realm과 다릅니다.
@@ -23,9 +24,11 @@ BOOTTIME이 필요하며 지원하지 않는 플랫폼은 이 선택 기능을 �
 
 새 IssueObserved는 실제 caller·parse·gateway·profile 인증 경로를 호출합니다.
 비공개 request extension을 통해 원래 source attempt를 전달하고 실제
-kubernetes-tokenreview Workload만 CapturedWorkload로 만들 수 있습니다.
+`kubernetes-workload`(오프라인 검증) 또는 `kubernetes-tokenreview` Workload만
+CapturedWorkload로 만들 수 있습니다.
 클라이언트 헤더·Service 키/조합·relay·Lua·Human 세션으로 만들 수 없습니다.
-기존 subject 해시 및 wire kind3/AAL0를 유지합니다.
+안정 subject 인코딩과 wire kind3/AAL0를 유지합니다. 한강 ADR 0022 이후 인코딩되는
+subject는 Pod가 아니라 ServiceAccount 주체입니다([Kubernetes 워크로드](KUBERNETES_WORKLOAD.md#워크로드-신원-모델)).
 
 provider 이전 BOOTTIME 시작점에 최대1000ms를 고정하고 원래 네이티브
 토큰/provider UTC 만료는 이를 줄이기만 합니다. 원래 wall 표본과 양자화1ms

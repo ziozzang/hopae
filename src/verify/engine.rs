@@ -286,10 +286,31 @@ async fn flow(
     match authenticate(cx, app).await? {
         Authn::Refused(cause) => login(cx, app, &target, cause, 0).await.map(|d| (d, None)),
         Authn::Allowed(authed) => {
+            // ADR-0018: AAL 3 evidence — the session's current elevation is a
+            // qualifying high-assurance passkey — read once, only when a
+            // matching rule requires AAL 3 or the application is presented
+            // AAL 3. A failed read is no evidence (never more than stored).
+            let handle_aal = authed.view.handle.issued_aal.min(authed.view.session.aal);
+            let path = cx.input.canonical_path.as_str();
+            let wants_aal3 = handle_aal == crate::session::Aal::Two
+                && (app.max_emitted_aal == crate::session::Aal::Three
+                    || step_up::required_level(&app.step_up, path)
+                        == Some(crate::session::Aal::Three));
+            let aal3_evidence = wants_aal3
+                && cx
+                    .ctx
+                    .sessions
+                    .session_aal3_evidence(
+                        &authed.view.session.session_id,
+                        authed.view.session.cred_gen,
+                    )
+                    .await
+                    .unwrap_or(false);
             if let step_up::StepUpVerdict::Required { aal, max_age } = step_up::evaluate(
                 &app.step_up,
-                cx.input.canonical_path.as_str(),
-                authed.view.handle.issued_aal.min(authed.view.session.aal),
+                path,
+                handle_aal,
+                aal3_evidence,
                 authed.view.session.auth_time,
                 &authed.view.session.factors,
                 cx.now,
@@ -365,7 +386,13 @@ async fn flow(
                 ),
                 None => None,
             };
-            Ok((allow(cx, app, *authed), witness))
+            // ADR-0018: an opted-in application sees AAL 3 while the
+            // session's current elevation is a qualifying high-assurance
+            // passkey. A failed read presents the stored level, never more.
+            let aal3 = app.max_emitted_aal == crate::session::Aal::Three
+                && authed.view.handle.issued_aal == crate::session::Aal::Two
+                && aal3_evidence;
+            Ok((allow(cx, app, *authed, aal3), witness))
         }
     }
 }
@@ -592,7 +619,7 @@ async fn authenticate(cx: &Cx<'_>, app: &AppPolicy) -> Result<Authn, Decision> {
 }
 
 /// The `200`: touch the handle, then identity and cacheability.
-fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed) -> Decision {
+fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed, aal3: bool) -> Decision {
     let Authed {
         view,
         snapshot,
@@ -604,7 +631,8 @@ fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed) -> Decision {
 
     touch(cx, app, &view);
 
-    let cache = cacheability(cx, app, expires_at, path_dependent);
+    // AAL 3 depends on live evidence outside the generation stamp: never cached (review F10).
+    let cache = cacheability(cx, app, expires_at, path_dependent || aal3);
     let mut identity = Identity {
         receipt_seal: None,
         user_id: view.session.user_id.clone(),
@@ -615,7 +643,11 @@ fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed) -> Decision {
         provider_id: view.session.provider_id.clone(),
         auth_time: view.session.auth_time,
         expires_at,
-        aal: view.handle.issued_aal,
+        aal: if aal3 {
+            crate::session::Aal::Three
+        } else {
+            view.handle.issued_aal
+        },
         factors: view.session.factors.clone(),
         generations: Generations {
             session: view.session.cred_gen,

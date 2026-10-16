@@ -11,3 +11,28 @@ dt { font-size: 0.85rem; opacity: 0.7; }
 dd { margin: 0 0 0.6rem; font-weight: 600; }
 .muted { opacity: 0.65; }
 .rid { margin-top: 2rem; font-size: 0.75rem; opacity: 0.55; }
+[hidden] { display: none !important; }
+h2 { font-size: 1.05rem; margin: 1.5rem 0 0.4rem; }
+section { border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent); margin-top: 1rem; }
+label { display: block; font-size: 0.9rem; margin: 0.6rem 0 0.2rem; }
+input[type=text] { display: block; width: 100%; box-sizing: border-box; padding: 0.6rem 0.7rem; font: inherit; border-radius: 0.4rem; border: 1px solid color-mix(in srgb, currentColor 45%, transparent); background: Canvas; color: inherit; }
+input[type=text]:focus, button:focus-visible, a:focus-visible, summary:focus-visible { outline: 2px solid Highlight; outline-offset: 2px; }
+a.button { display: block; text-align: center; padding: 0.7rem 1rem; border-radius: 0.5rem; border: 1px solid currentColor; color: inherit; text-decoration: none; }
+button.secondary, button.danger { width: auto; display: inline-block; padding: 0.45rem 0.9rem; }
+button.danger { color: #b3261e; }
+button:disabled { opacity: 0.5; cursor: default; }
+.notice, .error, .banner, .status { padding: 0.6rem 0.8rem; border-radius: 0.5rem; border: 1px solid currentColor; }
+.notice { border-color: color-mix(in srgb, #1e7e34 60%, transparent); }
+.error, .banner { border-color: color-mix(in srgb, #b3261e 70%, transparent); }
+.hint { font-size: 0.85rem; opacity: 0.75; margin: 0.25rem 0; }
+.items { list-style: none; padding: 0; margin: 1rem 0; }
+.item { border: 1px solid color-mix(in srgb, currentColor 20%, transparent); border-radius: 0.6rem; padding: 0.4rem 0.9rem 0.6rem; margin: 0 0 0.8rem; }
+.badge { display: inline-block; font-size: 0.8rem; padding: 0.1rem 0.5rem; border-radius: 1rem; border: 1px solid color-mix(in srgb, currentColor 35%, transparent); margin: 0.4rem 0; }
+.state.on { font-weight: 600; }
+.codes { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 1.05rem; line-height: 1.9; padding-left: 1.6rem; }
+.links { padding-left: 1.2rem; line-height: 1.8; }
+details { margin: 1rem 0; }
+summary { cursor: pointer; }
+.divider { display: flex; align-items: center; gap: 0.6rem; margin: 1.2rem 0 0.4rem; font-size: 0.85rem; opacity: 0.7; }
+.divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid currentColor; opacity: 0.4; }
+.passkey-login h2 { margin-top: 0.5rem; }

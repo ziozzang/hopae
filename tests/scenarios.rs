@@ -57,4 +57,24 @@ mod scenarios {
     mod s305_admin_grants;
     #[path = "s306_delegation.rs"]
     mod s306_delegation;
+    #[path = "s307_subject_directory.rs"]
+    mod s307_subject_directory;
+    #[path = "s308_subject_lifecycle.rs"]
+    mod s308_subject_lifecycle;
+    #[path = "s309_authentication_explain.rs"]
+    mod s309_authentication_explain;
+    #[path = "s310_groups.rs"]
+    mod s310_groups;
+    #[path = "s314_admin_api_gaps.rs"]
+    mod s314_admin_api_gaps;
+    #[path = "s318_service_credentials.rs"]
+    mod s318_service_credentials;
+    #[path = "s319_config_authoritative_profiles.rs"]
+    mod s319_config_authoritative_profiles;
+    #[path = "s320_live_reload.rs"]
+    mod s320_live_reload;
+    #[path = "s480_passkeys.rs"]
+    mod s480_passkeys;
+    #[path = "s900_kubernetes_workload.rs"]
+    mod s900_kubernetes_workload;
 }

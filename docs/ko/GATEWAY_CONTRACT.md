@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=14 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=17 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -227,12 +227,12 @@ Hopae 내부의 결정 순서는 다음과 같습니다. 호출자 키 → 계�
 | `x-forwarded-user` | 사용자의 수명 동안 안정적인 Hopae 사용자 ID(`u_` + base32 26자) | 64 B |
 | `x-forwarded-email` | 기본 이메일. 없으면 생략 | 254 B |
 | `x-forwarded-preferred-username` | 사용자 이름 또는 표시 이름 | 256 B |
-| `x-forwarded-groups` | 쉼표로 구분한 그룹 이름(M2). 없으면 생략 | 4 KiB |
+| `x-forwarded-groups` | `groups.gateway_header`가 켜져 있을 때 쉼표로 구분한 그룹 참조(`grp1:…`, 최대 32개)([그룹](GROUPS.md)). 없으면 생략하며 기본값에서는 항상 생략 | 4 KiB |
 | `x-hopae-session` | 세션 ID(`s_` + 26자). 쿠키 핸들이 아닙니다 | 64 B |
-| `x-hopae-provider` | 첫 번째 요소의 제공자 ID(`google`) | 64 B |
+| `x-hopae-provider` | 첫 번째 요소의 제공자 ID(`google`). 비밀번호 없는 패스키 세션은 `hopae.passkey`([WebAuthn 패스키](WEBAUTHN.md#비밀번호-없는-로그인)). 설정된 제공자가 가질 수 없는 예약 값입니다 | 64 B |
 | `x-hopae-auth-time` | 첫 번째 요소 인증 시각의 Unix 초 | 20 B |
 | `x-hopae-expires` | 유휴 만료와 절대 만료 중 이른 쪽의 Unix 초 | 20 B |
-| `x-hopae-aal` | `1` 또는 `2`: 제시된 핸들이 발급될 때의 수준([ADR-0008](../adr/0008-second-factor-extension-point.md)). 단계 상승은 핸들을 다시 발급합니다 | 1 B |
+| `x-hopae-aal` | `1` 또는 `2`: 제시된 핸들이 발급될 때의 수준([ADR-0008](../adr/0008-second-factor-extension-point.md)). 단계 상승은 핸들을 다시 발급합니다. `apps[].max_emitted_aal = 3`인 애플리케이션에 한해, 세션의 현재 상승이 고보증 패스키이면 `3`([ADR-0018](../adr/0018-aal3-emission.md)). 숫자로 비교하십시오 | 1 B |
 | `x-hopae-factors` | 충족한 요소의 쉼표 목록 `kind[:provider]`, 예: `oidc:google,totp` | 256 B |
 
 신원 헤더의 총 바이트는 8 KiB 이하입니다(게이트웨이는 16 KiB를 넘으면

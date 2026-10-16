@@ -27,13 +27,20 @@ pub mod cursor;
 pub mod delegation;
 pub mod delegation_wire;
 pub mod events;
+pub mod explain;
+mod explain_messages;
+pub mod factors;
+pub mod groups;
 pub mod me;
 pub mod pages;
 pub mod profiles;
 pub mod projections;
+pub mod reads;
 pub mod seed;
+pub mod service_credentials;
 pub mod sessions;
 pub mod status;
+pub mod subjects;
 pub mod users;
 
 use std::collections::HashMap;
@@ -71,6 +78,9 @@ pub struct AdminConfig {
     pub untrusted_peers: UntrustedPeers,
     /// `admin.query_budget_ms`: the deadline of every store operation.
     pub query_budget: Duration,
+    /// `admin.directory_privacy`: the least private profile a directory
+    /// read answers with; a request can only make it stricter.
+    pub privacy_floor: reads::Privacy,
     /// `trusted_proxies`.
     pub trusted: Vec<IpNet>,
     /// `cookie.secure`.
@@ -83,6 +93,9 @@ pub struct AdminConfig {
     pub insecure_mode: bool,
     /// `gateway.allow_unauthenticated_caller`.
     pub unauthenticated_caller: bool,
+    /// The audience service credentials must name (`admin.service_audience`,
+    /// default the console origin).
+    pub service_audience: String,
 }
 
 impl AdminConfig {
@@ -98,12 +111,21 @@ impl AdminConfig {
             policy: cfg.admin_policy()?,
             untrusted_peers: limits.untrusted_peers,
             query_budget: limits.query_budget,
+            privacy_floor: match limits.directory_privacy {
+                crate::config::DirectoryPrivacy::Standard => reads::Privacy::Standard,
+                crate::config::DirectoryPrivacy::Strict => reads::Privacy::Strict,
+            },
             trusted: cfg.trusted_proxy_nets(),
             secure: cfg.cookie.secure,
             cookie_names: cfg.cookie_names(),
             session: cfg.session_policy(),
             insecure_mode: cfg.insecure_mode(),
             unauthenticated_caller: cfg.gateway.allow_unauthenticated_caller,
+            service_audience: cfg.admin.service_audience.clone().unwrap_or_else(|| {
+                cfg.admin_origin()
+                    .map(|o| o.ascii_serialization())
+                    .unwrap_or_default()
+            }),
         })
     }
 }
@@ -130,6 +152,8 @@ pub struct AdminState {
     pub verify: VerifyContext,
     /// The configured providers' cached state (health) — never contacted.
     pub registry: Arc<Registry>,
+    /// Groups and the membership projection (ADR-0019).
+    pub groups: Arc<crate::groups::sync::GroupService>,
     /// Process-wide MAC key for form tokens and cursors (random per process).
     pub key: [u8; 32],
     pub started_at: Timestamp,
@@ -140,6 +164,8 @@ pub struct AdminState {
     /// When each untrusted peer was last warned about (one line per minute).
     pub peer_warned: Mutex<HashMap<IpAddr, Timestamp>>,
     pub delegation: Option<delegation::Config>,
+    /// What live reloading of TLS material and configuration last did.
+    pub reload: Arc<crate::reload::Status>,
     pub delegation_replay: delegation::Replay,
 }
 
@@ -223,6 +249,8 @@ pub struct ReqInfo {
 #[derive(Clone, Debug)]
 pub struct Ctx {
     pub delegated_actor: Option<delegation::Actor>,
+    /// Set when a route-scoped service credential authenticated the request.
+    pub service: Option<service_credentials::ServiceCaller>,
     pub principal: Principal,
     pub req: ReqInfo,
 }

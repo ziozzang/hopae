@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=35 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=43 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -30,6 +30,8 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `hopae admin revoke <user_id 또는 email> --config <path>` | 부여를 철회합니다. 행은 묘비로 남습니다. `admin.revoke`를 기록합니다. |
 | `hopae admin list [--all] --config <path>` | 유효한 부여를 출력합니다. `--all`은 철회된 행도 더합니다. |
 | `hopae admin import [--force <user_id 또는 email>] --config <path>` | 파일의 `admin.users[]`를 저장소에 적용하고(시작할 때도 같은 가져오기가 실행됩니다) 삽입, 갱신, 철회, 변경 없음, 강제, 건너뛴 항목을 출력합니다. |
+| `hopae admin factors list <user_id 또는 email> --config <path>` | 사용자의 2차 인증 요소를 출력합니다: 인증 앱 상태, 사용하지 않은 복구 코드(사용한 코드 때문에 재등록이 필요한지 포함), 그리고 모든 활성 패스키의 해시 ID(`pk_…`), 이름, 종류(동기화 또는 기기 귀속), 기록 등급(`aal2` 또는 `aal3`), 생성·마지막 사용 시각. 키 자료는 출력하지 않습니다([WebAuthn 패스키](WEBAUTHN.md#관리)). |
+| `hopae admin factors reset <user_id 또는 email> --config <path>` | 사용자의 모든 패스키, 인증 앱, 복구 코드를 폐기하고 사용자의 모든 세션을 종료하며 `admin.factor_reset`을 기록합니다. 사용자는 새로 로그인한 뒤 다시 등록합니다. |
 | `hopae --version` | 버전을 출력하고 `0`으로 종료합니다. 설정이 필요 없습니다. |
 
 종료 상태: `0` 성공. `2` 유효하지 않거나 안전하지 않은 설정(호출자 키 변수가 없거나
@@ -124,7 +126,8 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `apps[].on_authz_change` | `refresh`, `terminate` | `refresh` | 인가 데이터가 바뀔 때 살아 있는 세션에 일어나는 일. |
 | `apps[].verify_cache_seconds` | 정수 | `0` | 게이트웨이가 허용을 캐시할 수 있는 최대 시간. 최대 `30`. `hopae --check`는 애플리케이션마다 값을 출력하고 **`false`이면 경고합니다**: `sec-fetch-site: same-origin`은 애플리케이션 자신의 출처 문서가 탐색을 시작했음을 증명할 뿐이므로, 애플리케이션 안의 탐색 가젯(자신의 쿼리에서 가져온 URL을 `location`에 대입하는 페이지, 예: `/continue?next=/_hopae/logout`)이 클릭 없이 사용자의 세션을 끝낼 수 있습니다. 이를 받아들이는 경우가 아니면 `true`를 유지하십시오. |
 | `apps[].logout_confirm` | 불리언 | `true`(`default` 애플리케이션이 설정했다면 그 값을 상속) | `true`: 애플리케이션 호스트의 `/_hopae/logout`은 포털의 확인 페이지로 리디렉션합니다. `false`: 유효한 핸들을 제시한 `sec-fetch-site: same-origin` 문서 탐색은 즉시 세션을 끝내고 포털의 로그아웃 완료 페이지로 리디렉션되며, 그 밖의 모든 요청은 여전히 확인을 거칩니다. 어느 쪽이든 포털은 보호된 대상으로 리디렉션하는 대신 "다시 로그인" 링크를 표시합니다([ADR-0015](../adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md), [게이트웨이 계약](GATEWAY_CONTRACT.md#애플리케이션-호스트-진입점)). `--check`가 보고합니다. |
-| `apps[].step_up[]` | `{path_prefix, require: {aal, max_age}}` 배열 | 없음 | 실제 적용되는 세션 인증등급 규칙입니다(`aal`은 1 또는 2, `path_prefix`는 `/`로 시작, `max_age`는 양의 초). AAL 2는 실제 2차 인증 근거가 필요하며 근거 확인 시각으로 신선도를 검사합니다. `no-store`를 강제합니다. AAL 0 서비스 자격은 일치하는 규칙을 충족할 수 없습니다. TOTP keyring이 설정되면 문서 요청이 네이티브 OTP 단계 상승을 시작하고, 없으면 거절합니다. |
+| `apps[].max_emitted_aal` | 정수 | `2`(`default` 애플리케이션 값을 상속하지 않음) | 이 애플리케이션에 `x-hopae-aal`로 제시하고 영수증에 봉인하는 최고 수준: `2` 또는 `3`. `3`에는 `webauthn.high_assurance`가 필요하며 세션의 현재 상승이 고보증 패스키일 때만 제시합니다([ADR-0018](../adr/0018-aal3-emission.md)). 같은 세션이라도 다른 애플리케이션은 `2`를 봅니다. 애플리케이션과 피어가 `3`을 받을 때만 켜십시오. |
+| `apps[].step_up[]` | `{path_prefix, require: {aal, max_age}}` 배열 | 없음 | 실제 적용되는 세션 인증등급 규칙입니다(`aal`은 1, 2 또는 3, `path_prefix`는 `/`로 시작, `max_age`는 양의 초). AAL 2는 실제 2차 인증 근거가 필요하며 근거 확인 시각으로 신선도를 검사합니다. AAL 3은 `webauthn.high_assurance`가 필요하고, 세션의 현재 상향이 고보증 패스키(증명되고 허용 목록에 있으며 기기에 묶이고 여전히 활성)일 때만 충족됩니다. 신선도는 그 패스키 사용 시각이며 단계 상승은 그런 키만 제시합니다([ADR-0018](../adr/0018-aal3-emission.md#aal-3-requirements)). `no-store`를 강제합니다. AAL 0 서비스 자격은 일치하는 규칙을 충족할 수 없습니다. TOTP keyring이 설정되면 문서 요청이 네이티브 OTP 단계 상승을 시작하고, 없으면 거절합니다. |
 
 #### 제공자
 
@@ -179,9 +182,10 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `admin.binding.ua` | `strict`, `off` | `off` | User-Agent 바인딩. |
 | `admin.binding.on_mismatch` | `terminate_session`, `drop_handle` | `terminate_session` | 바인딩 불일치 시 동작. |
 | `admin.max_auth_age` | 기간 | `12h` | 콘솔 세션의 신선도 한도. `30m` 이상: 더 작은 값은 설정 오류(`admin.max_auth_age must be at least 30m`)이며, 한도가 재인증 콜백과 뒤따르는 콘솔 verify 사이에 600초의 여유를 지키기 때문입니다. 콘솔의 모든 verify에서 하나의 술어로 평가: `auth_time ≤ now + 60초` 그리고 `now − auth_time < N`. `reauth` 능력이 `max_age`인 제공자에서는 세션이 제공자가 검증한 `auth_time`을 가져야 하고 오래되면 세션 자신의 제공자가 수행하는 재인증으로 보내며, `unsupported` 제공자(`google` 프리셋)에서는 한도가 Hopae 로그인 경과 시간뿐임([ADR-0016](../adr/0016-management-console-minimum.md) 결정 15, [관리](ADMIN.md#신선도와-재인증)). |
-| `admin.require_aal` | `1`, `2` | `1` | 콘솔 핸들의 최소 보증 수준. `2`는 호스트 전체의 암묵적 애플리케이션에 단계 상승 규칙도 설정합니다. TOTP keyring이 없으면 콘솔 요청이 거부된다고 `--check`가 경고합니다. |
+| `admin.require_aal` | `1`, `2`, `3` | `1` | 콘솔 핸들의 최소 보증 수준. `2`나 `3`은 호스트 전체의 암묵적 애플리케이션에 단계 상승 규칙도 설정합니다. `3`은 `webauthn.high_assurance`가 필요하며, 이때 모든 콘솔 요청과 모든 콘솔 변경의 쓰기 펜스가 살아 있는 고보증 패스키 상향을 요구합니다. 콘솔 자체에는 여전히 AAL 2가 제시됩니다. TOTP keyring이 없으면 콘솔 요청이 거부된다고 `--check`가 경고합니다. |
 | `admin.untrusted_peers` | `refuse`, `as_client` | `refuse` | `trusted_proxies` 밖의 TCP 피어를 관리 리스너가 어떻게 다루는지: `refuse`는 쿠키를 읽기 전에 `403 untrusted_peer`로 답함(집계, 속도 제한된 경고). `as_client`는 포털처럼 피어를 클라이언트로 취급. |
 | `admin.query_budget_ms` | 정수, 100부터 30000 | `2000` | 콘솔 저장소 작업 하나(목록, 검색, 변경)의 마감. 마감은 저장소 작업에 전달되어 SQLite 안에서 문장을 중단하고 롤백한 뒤 `503`으로 답함. |
+| `admin.directory_privacy` | `standard`, `strict` | `standard` | 감사되는 디렉터리 읽기([주체 디렉터리](SUBJECT_DIRECTORY.md), [인증 explain](AUTHENTICATION_EXPLAIN.md))의 개인정보 프로필에 대한 운영자 하한. 요청의 `privacy_profile`은 더 엄격하게만 할 수 있음. `strict`이면 요청과 무관하게 어떤 읽기도 이메일 주소를 어떤 형태로도 돌려주지 않음. |
 | `admin.users[]` | `{user_id?, email?, role?, note?}` 배열 | `[]` | 시작 시와 `hopae admin import`로 파일에서 심는 관리자 부여. 각 항목은 `user_id`(`u_` 다음에 문자, 숫자, `_`, `-`, 최대 64자)와 `email`(유효한 주소) 중 적어도 하나가 필요하고, `role`은 `admin`(기본) 또는 `viewer`, `note`는 최대 256자이며 알 수 없는 키는 거부됨. 이메일만 있는 항목은 검증된 주소를 정확히 한 사용자가 가지고 권위적일 때만 적용됨. 결함 있는 항목은 시작할 때 경고(건너뜀, 시작 실패 아님)이고 `--check --strict`에서는 오류. `managed_by`와 묘비를 가진 제공자 규칙으로 가져옴([관리](ADMIN.md#설정-파일의-부여)). |
 
 #### 이벤트
@@ -193,6 +197,36 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `events.prune_every` | 정수, 1 이상 | `1000` | 정리 패스 사이에 삽입되는 행 수(패스는 최소 60초마다도 실행됩니다). |
 | `events.max_pending_per_sink` | 정수, 1 이상 | `10000` | 싱크마다 보관하는 미전달 행 수. 넘으면 가장 오래된 대기 행이 `backlog_overflow`로 `failed`가 됩니다. |
 | `events.delivery_terminal_retention_days` | 정수, 1 이상 | `7` | 전달 완료 또는 실패한 전달 행을 보관하는 기간. |
+
+#### 그룹
+
+그룹, 제공자 그룹 동기화, 서명된 멤버십 투영([그룹](GROUPS.md), [ADR-0019](../adr/0019-groups-and-membership-projection.md)). 모든 키는 선택입니다.
+
+| 키 | 타입 | 기본값 | 제약과 의미 |
+| --- | --- | --- | --- |
+| `groups.max_groups_per_user` | 정수, 1부터 1024 | `256` | 한 사람이 속할 수 있는 최대 그룹 수(모든 원천 합). 넘게 되는 동기화나 쓰기는 거부되며 아무것도 바꾸지 않음. |
+| `groups.change_retention_days` | 정수, 1부터 3650 | `30` | 투영 저널 행을 정리하는 기간(가장 새 행은 남김). 더 오래된 투영 커서는 `410 cursor_expired`. |
+| `groups.maintenance_interval_secs` | 정수, 10부터 86400 | `300` | 유지 관리 단계 간격: 로컬 만료, 제거 유예, 삭제된 제공자, 오래된 제공자 그룹, 저널 보존, 주기 LDAP 동기화. |
+| `groups.stale_group_days` | 정수, 1부터 3650 | `30` | 구성원이 없고 이 기간 동안 동기화 보고가 없는 제공자 그룹은 삭제(묘비). |
+| `groups.max_staleness_secs` | 정수, 3600부터 31536000 | `604800` | 성공한 단언이 이 기간 동안 확인하지 않은 제공자 멤버십은 정지됨. 남아 있지만 다시 단언될 때까지 투영과 게이트웨이 반영에서 빠짐. 모든 제공자의 `sync_interval_secs`보다 커야 함. |
+| `groups.gateway_header` | 불리언 | `false` | 그룹 참조를 최대 32개까지 `users.groups`에 반영해 `x-forwarded-groups`가 싣게 함. 변경은 `authz_version`을 올림. |
+| `groups.projection.issuer_ref` | 문자열, `[A-Za-z0-9_.:-]` 1–128자 | 없음 | 모든 투영 봉투와 페이로드의 키 정체. `groups.projection`이 없으면 투영 엔드포인트는 `503 projection_unavailable`. |
+| `groups.projection.key_epoch` | 정수, 1 이상 | 없음 | 키 에포크. 키를 바꾸면 올림. |
+| `groups.projection.public_key` | base64 Ed25519 공개 키 | 없음 | 시드와 맞아야 하고 `receipt_issuer.public_key`와 달라야 하며, 아니면 시작 실패. |
+| `groups.projection.seed_env` | 환경 변수 이름 | 없음 | base64 32바이트 Ed25519 시드를 담은 변수(시드 자체가 아님). |
+| `groups.projection.audience` | 문자열, `[A-Za-z0-9_.:-]` 1–128자 | 없음 | 투영이 묶이는 소비자(Pumgye 식별자). |
+| `providers[].groups` | 객체 | 없음 | 제공자가 그룹을 동기화함. 없으면 동기화하지 않음. |
+| `providers[].groups.claim` | 점 경로, 최대 4단계 | `groups` | OIDC 전용: 문자열 배열을 담은 클레임(ID 토큰, 없으면 사용자 정보). |
+| `providers[].groups.ldap.mode` | `member_of`, `search` | `member_of` | LDAP 전용: 항목의 `memberOf`를 읽거나, 구성원 속성에 그 사람의 DN이 있는 그룹 항목을 검색. |
+| `providers[].groups.ldap.member_of_attribute` | LDAP 속성 | `memberOf` | `member_of` 방식의 속성. |
+| `providers[].groups.ldap.search_base_dn` | DN | 제공자의 `base_dn` | `search` 방식의 기준. |
+| `providers[].groups.ldap.object_class`, `member_attribute`, `name_attribute` | LDAP 속성 | `groupOfNames`, `member`, `cn` | `search` 방식 필터 `(&(objectClass=…)(member=<이스케이프된 DN>))`와 그룹 이름. |
+| `providers[].groups.include`, `exclude` | 정규식, 512바이트 이하 | 없음 | `include`와 일치하는 원천 키(클레임 값, 그룹 DN)만 남기고 `exclude`와 일치하는 것을 버림. 선형 시간 매칭. |
+| `providers[].groups.rewrite` | `{pattern, replacement}` | 없음 | 표시 이름을 바꿈(`$1` 그룹). 키는 바뀌지 않음. |
+| `providers[].groups.max_groups` | 정수, 1부터 1024 | `100` | 거른 뒤 이 제공자에서 받는 사람당 최대 그룹 수. 넘으면 단언을 거부. |
+| `providers[].groups.removal_grace_secs` | 정수, 0부터 604800 | `0` | 제공자가 더 이상 단언하지 않는 멤버십을 지우기 전까지 남겨 두는 시간. |
+| `providers[].groups.sync_interval_secs` | 정수, 300부터 604800 | 없음 | LDAP 전용: 연결된 사람을 주기적으로 갱신. 한 바퀴는 이 간격당 최대 한 번 시작. 없으면 로그인 시에만. |
+| `providers[].groups.sync_batch` | 정수, 1부터 1000 | `200` | LDAP 전용: 유지 관리 단계당 갱신하는 사람 수. |
 
 ### 결정되어 예정된 키
 
@@ -304,6 +338,29 @@ route는 404입니다. 등록만으로 AAL이 올라가지는 않습니다. 인�
 
 AAL 1의 1차 인증 신선도 규칙은 keyring 없이도 제공자 재인증으로 처리합니다.
 
+## WebAuthn 패스키
+
+선택 `webauthn`은 패스키를 켭니다([ADR-0017](../adr/0017-webauthn-passkeys.md),
+[WebAuthn 패스키](WEBAUTHN.md)). 없으면(기본값) 모든 패스키·보안 설정 경로가
+`404`로 응답하고 아무것도 바뀌지 않습니다. 예:
+
+```json
+{"webauthn":{"rp_id":"auth.example.test","rp_name":"Example sign-in","high_assurance":{"attestation_ca_files":["/etc/hopae/webauthn/vendor-root.pem"],"aaguids":["cb69481e-8ff7-4039-93ec-0a2729a154a8"]}}}
+```
+
+| 키 | 기본값 | 제약 |
+| --- | --- | --- |
+| `webauthn.rp_id` | `portal.public_url`의 호스트 | 포털 호스트이거나 레이블 경계에서 그 상위 도메인. IP 리터럴이나 단일 레이블은 안 됩니다. 바꾸면 등록된 모든 패스키를 쓸 수 없게 됩니다. |
+| `webauthn.rp_name` | `Hopae` | 출력 가능한 1–64자. |
+| `webauthn.passwordless` | `false` | 로그인 페이지에서 비밀번호 없는 패스키 로그인을 제시합니다([WebAuthn 패스키](WEBAUTHN.md#비밀번호-없는-로그인)). 세션은 예약 제공자 ID `hopae.passkey`를 씁니다. |
+| `webauthn.high_assurance.attestation_ca_files` | — | 읽을 수 있는 PEM 파일 1–64개. `aaguids`와 함께 필수. 시작할 때와 `hopae --check`에서 읽습니다. |
+| `webauthn.high_assurance.aaguids` | — | 0이 아닌 UUID 1–64개. `attestation_ca_files`와 함께 필수. |
+
+허용 origin은 정확히 포털 origin이며 설정할 수 없습니다. `webauthn`에는 `https`
+포털, `cookie.secure = true`, 인증된 게이트웨이 호출자가 필요합니다. 또한
+`totp_keyring`처럼 `step_up` 규칙이 있는 애플리케이션에 대해 브라우저 단계 상승
+흐름(`/stepup`)을 켭니다.
+
 ## 외부 verifier 시작 설정
 
 선택적인 `external_verifiers`는 기본 `[]` 배열이며 운영자가 승인한 독립 2차 verifier를
@@ -344,7 +401,13 @@ true도 인증된 HTTPS proof 검증과 네이티브 소유자의 원자적 완�
 
 ## 서비스 인증 Lua 사용 조건 (미릴리스)
 
-시작 JSON의 `authentication_gateway`는 비어 있는 authority만 초기화합니다. DB에
+`authentication.source`(`store` 기본값, `config`)가 인증 프로필과 자격 증명 투영
+계획의 소유자를 정합니다. `config` 모드에서는 시작할 때마다 저장소를 파일에 맞추고
+콘솔 편집을 거부합니다([설정 권위 모드](AUTH_PROFILE_PUBLICATION.md#설정-권위-모드)).
+`authentication.reload_interval_ms`(기본 `1000`, `0`은 끔, 그 밖에는 200–60000)는
+`config` 모드에서 실행 중인 Hopae가 파일을 확인하는 주기이며, 바뀐 프로필이나 투영 계획을
+재시작 없이 반영합니다([실행 중 맞춤](AUTH_PROFILE_PUBLICATION.md#실행-중-맞춤)).
+기본 `store` 모드에서는 시작 JSON의 `authentication_gateway`는 비어 있는 authority만 초기화합니다. DB에
 인증 profile 문서(비활성 tombstone 포함)가 있으면 DB·PAP 문서가 우선하며 시작 JSON을
 고치고 재시작해도 덮어쓰지 않습니다. 인증된 소유자 API로 변경을 게시하세요. 오프라인
 검증은 독립 `profile-publication-candidate.db`에 네이티브 소유자 transaction을
@@ -429,6 +492,14 @@ no-store를 제공합니다. `PUT /v1/authentication/projections`는 기존 관�
 ### gRPC 인증 확인 리스너
 
 선택 설정 `listen.grpc_gateway`는 리터럴 소켓 주소이며 루프백에서도 `listen.native_gateway_tls`와 게이트웨이 인증 자격이 필수다. HOP1은 비활성화할 수 있다. [gRPC 인증](GRPC.md) 참조.
+
+### TLS 자료 다시 읽기
+
+`reload.tls_interval_secs`(기본 `10`, `0`은 끔, 최대 3600)는 Hopae가
+`listen.admin_tls`, `listen.native_gateway_tls`(네이티브와 gRPC 게이트웨이),
+`projection_receiver.authority`(나가는 mTLS)의 인증서·키·CA 파일을 다시 읽는 주기입니다.
+갱신된 유효한 자료는 재시작 없이 새 핸드셰이크부터 쓰이고, 잘못된 자료는 현재 자료를
+유지합니다([운영](OPERATIONS.md#tls-인증서-갱신)).
 
 ### 관리자 리스너 mTLS
 

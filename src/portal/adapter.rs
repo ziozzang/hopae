@@ -33,7 +33,10 @@ struct ExternalDeps {
     clock: Arc<dyn crate::crypto::Clock>,
     rng: Arc<dyn crate::crypto::Rng>,
 }
+mod webauthn;
+
 pub struct Adapter {
+    webauthn: Option<webauthn::WebauthnDeps>,
     external: Option<ExternalDeps>,
     totp: Option<TotpDeps>,
     svc: Service,
@@ -181,6 +184,7 @@ impl Adapter {
         readiness: Readiness,
     ) -> Adapter {
         Adapter {
+            webauthn: None,
             external: None,
             totp: None,
             svc,
@@ -310,6 +314,13 @@ impl PortalServices for Adapter {
             .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
             .await
             .map_err(Self::factor_session_error)?;
+        // An AAL 3 rule (ADR-0018): only a high-assurance passkey satisfies it.
+        if self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three {
+            return Err(Failure {
+                kind: FailKind::Forbidden,
+                reason: reasons::HIGH_ASSURANCE_REQUIRED,
+            });
+        }
         Ok(StepUpEntry {
             enrolled: false,
             form_origin: row.return_target.origin(),
@@ -334,6 +345,13 @@ impl PortalServices for Adapter {
             .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
             .await
             .map_err(Self::factor_session_error)?;
+        // An AAL 3 rule (ADR-0018): only a high-assurance passkey satisfies it.
+        if self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three {
+            return Err(Failure {
+                kind: FailKind::Forbidden,
+                reason: reasons::HIGH_ASSURANCE_REQUIRED,
+            });
+        }
         deps.store
             .bind_external_stepup(crate::store::BindExternalStepUp {
                 actor,
@@ -368,6 +386,13 @@ impl PortalServices for Adapter {
             .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
             .await
             .map_err(Self::factor_session_error)?;
+        // An AAL 3 rule (ADR-0018): only a high-assurance passkey satisfies it.
+        if self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three {
+            return Err(Failure {
+                kind: FailKind::Forbidden,
+                reason: reasons::HIGH_ASSURANCE_REQUIRED,
+            });
+        }
         let proof = crate::factor::external_service::verify_authorized(
             deps.store.as_ref(),
             connector,
@@ -438,6 +463,13 @@ impl PortalServices for Adapter {
             .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
             .await
             .map_err(Self::factor_session_error)?;
+        // An AAL 3 rule (ADR-0018): only a high-assurance passkey satisfies it.
+        if self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three {
+            return Err(Failure {
+                kind: FailKind::Forbidden,
+                reason: reasons::HIGH_ASSURANCE_REQUIRED,
+            });
+        }
         if !deps
             .store
             .has_active_totp(actor.user())
@@ -480,6 +512,13 @@ impl PortalServices for Adapter {
             .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
             .await
             .map_err(Self::factor_session_error)?;
+        // An AAL 3 rule (ADR-0018): only a high-assurance passkey satisfies it.
+        if self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three {
+            return Err(Failure {
+                kind: FailKind::Forbidden,
+                reason: reasons::HIGH_ASSURANCE_REQUIRED,
+            });
+        }
         let enrollment = row
             .pending_identity
             .as_ref()
@@ -647,9 +686,11 @@ impl PortalServices for Adapter {
                 // Exactly one provider, and it works: no chooser, straight
                 // to the provider (the portal cookie is planted on this
                 // response by the handler).
+                let passkey = self.passkey_offer(ctx, txn, cookies).await;
                 if let [only] = choices.as_slice()
                     && only.available
                     && self.registry.credential(&only.id).is_none()
+                    && passkey.is_none()
                 {
                     return match self
                         .svc
@@ -663,6 +704,7 @@ impl PortalServices for Adapter {
                 LoginVisit::Chooser {
                     providers: choices,
                     form_origins: self.provider_origins(),
+                    passkey,
                 }
             }
             Err(e) => LoginVisit::Failed(failure(&e)),

@@ -148,7 +148,7 @@ impl Fixture {
         let bound = crate::app::bind(&config).await.unwrap();
         let mut services = bound.services().clone();
         services.caller_keys = Arc::new(CallerKeys::from_env(&config, |_| Some(CALLER.into())));
-        let runtime:runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"orders.example.test","ports":[443],"realm":"example-cluster","api_keys":[{"token_env":"OWNED_LOCAL_KEY","subject":"worker"}],"kubernetes_tokenreview":{"connection":{"api_origin":format!("https://127.0.0.1:{port}"),"issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":1000},"ca_pem_env":"OWNED_KUBE_CA","reviewer_token_env":"OWNED_KUBE_REVIEWER","token_prefix":"k8s:"},"networks":["203.0.113.0/24"]}]})).unwrap();
+        let runtime:runtime::Config=serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"orders.example.test","ports":[443],"realm":"example-cluster","api_keys":[{"token_env":"OWNED_LOCAL_KEY","subject":"worker"}],"kubernetes_tokenreview":{"connection":{"api_origin":format!("https://127.0.0.1:{port}"),"issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":1000},"ca_pem_env":"OWNED_KUBE_CA","reviewer_token_env":"OWNED_KUBE_REVIEWER","token_prefix":"k8s:","subject":"service_account"},"networks":["203.0.113.0/24"]}]})).unwrap();
         let env = |name: &str| match name {
             "OWNED_KUBE_CA" => Some(ca.clone()),
             "OWNED_KUBE_REVIEWER" => Some("owned-kubernetes-reviewer-at-least-thirty-two".into()),
@@ -325,7 +325,7 @@ async fn native_workload_receipt_and_observation_keep_class_original_age_and_own
     assert_eq!(c.identity.as_ref().unwrap().aal, 0);
     assert_eq!(
         c.identity.as_ref().unwrap().subject_ref,
-        "s_529be5b595ab327853eabe2d1adf52256e262af036510607"
+        service_account_subject()
     );
     assert_eq!(
         hopae_grpc::workload_epoch::decode(&c.identity_authority_epoch)
@@ -629,7 +629,7 @@ async fn public_sdk_actual_native_issue_independent_observe_refresh_and_local_re
     assert_eq!(observation.context().identity.as_ref().unwrap().aal, 0);
     assert_eq!(
         observation.context().identity.as_ref().unwrap().subject_ref,
-        "s_529be5b595ab327853eabe2d1adf52256e262af036510607"
+        service_account_subject()
     );
     let expected_hash =
         hopae_grpc::request_binding::digest(&hopae_grpc::request_binding::Request {
@@ -898,4 +898,23 @@ async fn native_human_source_mapping_cannot_mint_actual_service_receipt() {
         !fixture.root.path().join("calls").exists(),
         "API-key proof must not switch to TokenReview"
     );
+}
+
+/// ADR 0022: the published workload subject is the ServiceAccount principal
+/// (`wk2:` over issuer, cluster, namespace, ServiceAccount name and UID), not
+/// the Pod-bound subject `s_529be5…` it used to be.
+fn service_account_subject() -> String {
+    use crate::auth_gateway::workload::identity;
+    let principal = identity::principal_ref(
+        "https://issuer.example.test",
+        "example-cluster",
+        "blue",
+        "worker",
+        "sa-1",
+    );
+    crate::auth_gateway::stable_subject(&identity::principal_subject(
+        "https://issuer.example.test",
+        "example-cluster",
+        &principal,
+    ))
 }

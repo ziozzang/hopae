@@ -37,6 +37,7 @@ const APP: Node = Obj(&[
     ("on_authz_change", Leaf),
     ("verify_cache_seconds", Leaf),
     ("logout_confirm", Leaf),
+    ("max_emitted_aal", Leaf),
     ("step_up", Arr(&STEP_UP)),
 ]);
 
@@ -70,6 +71,30 @@ const PROVIDER: Node = Obj(&[
     ("authoritative_domains", Leaf),
     ("auto_link", Leaf),
     ("trust_email", Leaf),
+    (
+        "groups",
+        Obj(&[
+            ("claim", Leaf),
+            (
+                "ldap",
+                Obj(&[
+                    ("mode", Leaf),
+                    ("member_of_attribute", Leaf),
+                    ("search_base_dn", Leaf),
+                    ("object_class", Leaf),
+                    ("member_attribute", Leaf),
+                    ("name_attribute", Leaf),
+                ]),
+            ),
+            ("include", Leaf),
+            ("exclude", Leaf),
+            ("rewrite", Obj(&[("pattern", Leaf), ("replacement", Leaf)])),
+            ("max_groups", Leaf),
+            ("removal_grace_secs", Leaf),
+            ("sync_interval_secs", Leaf),
+            ("sync_batch", Leaf),
+        ]),
+    ),
 ]);
 
 const ADMIN_USER: Node = Obj(&[
@@ -104,7 +129,9 @@ const ADMIN: Node = Obj(&[
     ("require_aal", Leaf),
     ("untrusted_peers", Leaf),
     ("query_budget_ms", Leaf),
+    ("directory_privacy", Leaf),
     ("users", Arr(&ADMIN_USER)),
+    ("service_audience", Leaf),
 ]);
 
 pub(super) const ROOT: Node = Obj(&[
@@ -147,6 +174,26 @@ pub(super) const ROOT: Node = Obj(&[
             ("keys", Arr(&Obj(&[("id", Leaf), ("key_env", Leaf)]))),
         ]),
     ),
+    (
+        "webauthn",
+        Obj(&[
+            ("rp_id", Leaf),
+            ("rp_name", Leaf),
+            ("passwordless", Leaf),
+            (
+                "high_assurance",
+                Obj(&[
+                    ("attestation_ca_files", Arr(&Leaf)),
+                    ("aaguids", Arr(&Leaf)),
+                ]),
+            ),
+        ]),
+    ),
+    (
+        "authentication",
+        Obj(&[("source", Leaf), ("reload_interval_ms", Leaf)]),
+    ),
+    ("reload", Obj(&[("tls_interval_secs", Leaf)])),
     (
         "authentication_gateway",
         Obj(&[
@@ -193,6 +240,61 @@ pub(super) const ROOT: Node = Obj(&[
                             ),
                             ("ca_pem_env", Leaf),
                             ("reviewer_token_env", Leaf),
+                            ("token_prefix", Leaf),
+                            ("trust_domain", Leaf),
+                            ("subject", Leaf),
+                            ("legacy_until_ms", Leaf),
+                            ("legacy_mapping_until_ms", Leaf),
+                            ("cache_ttl_ms", Leaf),
+                        ]),
+                    ),
+                    (
+                        "kubernetes_workload",
+                        Obj(&[
+                            ("issuer", Leaf),
+                            ("cluster_id", Leaf),
+                            ("trust_domain", Leaf),
+                            ("audience", Leaf),
+                            ("exclusive_audience", Leaf),
+                            ("namespaces", Arr(&Leaf)),
+                            ("service_accounts", Arr(&Leaf)),
+                            ("bound_objects", Arr(&Leaf)),
+                            (
+                                "keys",
+                                Obj(&[
+                                    ("source", Leaf),
+                                    ("discovery_url", Leaf),
+                                    ("jwks_url", Leaf),
+                                    ("jwks_origins", Arr(&Leaf)),
+                                    ("jwks_env", Leaf),
+                                    ("ca_pem_env", Leaf),
+                                    ("token_env", Leaf),
+                                    ("token_file", Leaf),
+                                    ("refresh_seconds", Leaf),
+                                    ("max_stale_seconds", Leaf),
+                                    ("kid_miss_min_interval_ms", Leaf),
+                                    ("timeout_ms", Leaf),
+                                ]),
+                            ),
+                            ("clock_skew_seconds", Leaf),
+                            ("max_token_lifetime_seconds", Leaf),
+                            ("cache", Obj(&[("ttl_ms", Leaf), ("max_entries", Leaf)])),
+                            (
+                                "revocation",
+                                Obj(&[
+                                    ("mode", Leaf),
+                                    ("api_origin", Leaf),
+                                    ("ca_pem_env", Leaf),
+                                    ("token_env", Leaf),
+                                    ("token_file", Leaf),
+                                    ("resources", Arr(&Leaf)),
+                                    ("max_staleness_seconds", Leaf),
+                                    ("max_objects", Leaf),
+                                ]),
+                            ),
+                            ("subject", Leaf),
+                            ("legacy_until_ms", Leaf),
+                            ("legacy_mapping_until_ms", Leaf),
                             ("token_prefix", Leaf),
                         ]),
                     ),
@@ -400,6 +502,27 @@ pub(super) const ROOT: Node = Obj(&[
     ),
     ("sessions", Obj(&[("retention_days", Leaf)])),
     ("admin", ADMIN),
+    (
+        "groups",
+        Obj(&[
+            ("max_groups_per_user", Leaf),
+            ("change_retention_days", Leaf),
+            ("maintenance_interval_secs", Leaf),
+            ("stale_group_days", Leaf),
+            ("max_staleness_secs", Leaf),
+            ("gateway_header", Leaf),
+            (
+                "projection",
+                Obj(&[
+                    ("issuer_ref", Leaf),
+                    ("key_epoch", Leaf),
+                    ("public_key", Leaf),
+                    ("seed_env", Leaf),
+                    ("audience", Leaf),
+                ]),
+            ),
+        ]),
+    ),
 ]);
 
 /// Collect one message per unknown key, in document order.

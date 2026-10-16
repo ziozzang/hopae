@@ -145,9 +145,18 @@ fn immutable_subject(
         }
     }
 }
+/// The LDAP group spec of a stored provider configuration: `groups.ldap`, or
+/// the default (`memberOf`) when `groups` is present without it.
+pub(crate) fn ldap_groups_of(
+    configuration: &serde_json::Value,
+) -> Option<crate::groups::LdapGroups> {
+    crate::groups::ProviderGroups::of_row(configuration).map(|g| g.ldap.unwrap_or_default())
+}
 pub struct LdapProvider {
     id: ProviderId,
     config: Config,
+    /// `providers[].groups.ldap` of the row, when the provider syncs groups.
+    groups: Option<crate::groups::LdapGroups>,
     bind_password: Secret,
     tls: Arc<rustls::ClientConfig>,
     capacity: tokio::sync::Semaphore,
@@ -219,6 +228,7 @@ impl LdapProvider {
             Self {
                 id,
                 config,
+                groups: None,
                 bind_password: Secret::new(password),
                 tls: Arc::new(tls),
                 capacity: tokio::sync::Semaphore::new(64),
@@ -228,6 +238,147 @@ impl LdapProvider {
             fingerprint,
         ))
     }
+    /// Sync groups as `groups` says (from the row's `groups.ldap`, or the
+    /// `member_of` default when the row has a `groups` section without one).
+    pub fn with_groups(mut self, groups: Option<crate::groups::LdapGroups>) -> Self {
+        self.groups = groups;
+        self
+    }
+
+    /// The person's groups, read with the service bind on `ldap`: the entry's
+    /// `memberOf` values, or the group entries whose member attribute holds
+    /// `dn`. `None` when the directory could not answer completely (the
+    /// sync then changes nothing).
+    async fn groups_of(
+        &self,
+        ldap: &mut Ldap,
+        dn: &str,
+        member_of: &[String],
+    ) -> Option<Vec<super::types::RawGroup>> {
+        let spec = self.groups.as_ref()?;
+        match spec.mode {
+            crate::groups::LdapGroupMode::MemberOf => Some(
+                member_of
+                    .iter()
+                    .take(crate::groups::MAX_RAW_VALUES + 1)
+                    .filter_map(|value| group_from_dn(value, None))
+                    .collect(),
+            ),
+            crate::groups::LdapGroupMode::Search => {
+                let filter = format!(
+                    "(&(objectClass={})({}={}))",
+                    spec.object_class,
+                    spec.member_attribute,
+                    ldap3::ldap_escape(dn)
+                );
+                let base = spec
+                    .search_base_dn
+                    .as_deref()
+                    .unwrap_or(&self.config.base_dn);
+                let mut options = SearchOptions::new();
+                options.sizelimit =
+                    i32::try_from(crate::groups::MAX_RAW_VALUES + 1).unwrap_or(4097);
+                options.timelimit = 2;
+                let mut search = ldap
+                    .with_search_options(options)
+                    .streaming_search(
+                        base,
+                        Scope::Subtree,
+                        &filter,
+                        [spec.name_attribute.as_str()],
+                    )
+                    .await
+                    .ok()?;
+                let mut out = Vec::new();
+                while let Some(entry) = search.next().await.ok()? {
+                    if entry.is_ref() || entry.is_intermediate() {
+                        continue;
+                    }
+                    let entry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        SearchEntry::construct(entry)
+                    }))
+                    .ok()?;
+                    let name = entry
+                        .attrs
+                        .iter()
+                        .find(|(n, _)| n.eq_ignore_ascii_case(&spec.name_attribute))
+                        .and_then(|(_, v)| v.first().cloned());
+                    if let Some(g) = group_from_dn(&entry.dn, name) {
+                        out.push(g);
+                    }
+                    if out.len() > crate::groups::MAX_RAW_VALUES {
+                        break;
+                    }
+                }
+                let result = search.finish().await;
+                // A size-limited answer is incomplete: never applied.
+                if result.rc != 0 || !result.refs.is_empty() {
+                    return None;
+                }
+                Some(out)
+            }
+        }
+    }
+
+    /// The groups of the person whose immutable subject is `subject` (the
+    /// periodic sync), with the service bind only. `Ok(Some(vec![]))` when
+    /// the person no longer exists in the directory.
+    async fn lookup_groups(
+        &self,
+        subject: &str,
+    ) -> Result<Option<Vec<super::types::RawGroup>>, CredentialError> {
+        let Some(spec) = self.groups.clone() else {
+            return Ok(None);
+        };
+        let Some(filter) = subject_filter(
+            subject,
+            &self.config.subject_attribute,
+            self.config.subject_encoding,
+        ) else {
+            return Ok(None);
+        };
+        let mut lookup = self.connect().await?;
+        let bound = lookup
+            .ldap
+            .simple_bind(&self.config.bind_dn, self.bind_password.expose())
+            .await
+            .map_err(|_| CredentialError::Unavailable)?;
+        if bound.rc != 0 || !bound.refs.is_empty() {
+            return Err(CredentialError::Unavailable);
+        }
+        let mut options = SearchOptions::new();
+        options.sizelimit = 2;
+        options.timelimit = 2;
+        let (entries, result) = lookup
+            .ldap
+            .with_search_options(options)
+            .search(
+                &self.config.base_dn,
+                Scope::Subtree,
+                &filter,
+                [spec.member_of_attribute.as_str()],
+            )
+            .await
+            .map_err(|_| CredentialError::Unavailable)?
+            .success()
+            .map_err(|_| CredentialError::Unavailable)?;
+        if !result.refs.is_empty() || entries.len() > 1 {
+            return Err(CredentialError::Unavailable);
+        }
+        let Some(entry) = entries.into_iter().next() else {
+            return Ok(Some(Vec::new()));
+        };
+        let entry = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            SearchEntry::construct(entry)
+        }))
+        .map_err(|_| CredentialError::Unavailable)?;
+        let member_of = attribute_values(&entry, &spec.member_of_attribute);
+        let groups = self
+            .groups_of(&mut lookup.ldap, &entry.dn, &member_of)
+            .await;
+        groups.map(Some).ok_or(CredentialError::Unavailable)
+    }
+
     async fn connect(&self) -> Result<Connection, CredentialError> {
         let settings = LdapConnSettings::new()
             .set_config(self.tls.clone())
@@ -259,15 +410,16 @@ impl LdapProvider {
         let mut options = SearchOptions::new();
         options.sizelimit = 2;
         options.timelimit = 2;
+        let mut attributes = vec![self.config.subject_attribute.as_str()];
+        if let Some(g) = &self.groups
+            && g.mode == crate::groups::LdapGroupMode::MemberOf
+        {
+            attributes.push(g.member_of_attribute.as_str());
+        }
         let mut search = lookup
             .ldap
             .with_search_options(options)
-            .streaming_search(
-                &self.config.base_dn,
-                Scope::Subtree,
-                &filter,
-                [self.config.subject_attribute.as_str()],
-            )
+            .streaming_search(&self.config.base_dn, Scope::Subtree, &filter, attributes)
             .await
             .map_err(|_| CredentialError::Unavailable)?;
         let mut selected = None;
@@ -294,15 +446,19 @@ impl LdapProvider {
                 &self.config.subject_attribute,
                 self.config.subject_encoding,
             )?;
-            selected = Some((entry.dn, subject));
+            let member_of = self
+                .groups
+                .as_ref()
+                .map(|g| attribute_values(&entry, &g.member_of_attribute))
+                .unwrap_or_default();
+            selected = Some((entry.dn, subject, member_of));
         }
         let result = search.finish().await;
         if result.rc != 0 || !result.refs.is_empty() {
             return Err(CredentialError::Unavailable);
         }
-        let (dn, subject) = selected.ok_or(CredentialError::Invalid)?;
+        let (dn, subject, member_of) = selected.ok_or(CredentialError::Invalid)?;
         drop(search);
-        drop(lookup);
         // Never pool a user-bound connection with another user or with service lookups.
         let mut user = self.connect().await?;
         let result = user
@@ -316,6 +472,23 @@ impl LdapProvider {
         if result.rc != 0 || !result.refs.is_empty() {
             return Err(CredentialError::Unavailable);
         }
+        drop(user);
+        // Groups only after the password is verified (a wrong password costs
+        // no group search), on the service-bound lookup connection, within a
+        // quarter of the provider deadline: a slow or failing group read is
+        // "not asserted" and never fails the sign-in.
+        let groups = if self.groups.is_some() {
+            tokio::time::timeout(
+                Duration::from_millis((self.config.timeout_ms / 4).max(1)),
+                self.groups_of(&mut lookup.ldap, &dn, &member_of),
+            )
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
+        drop(lookup);
         Ok(ProviderIdentity {
             subject,
             email: None,
@@ -326,7 +499,105 @@ impl LdapProvider {
             picture: None,
             raw_claims: serde_json::json!({}),
             auth_time: None,
+            groups,
         })
+    }
+}
+
+/// Every value of `attribute` (case-insensitive name) as text.
+fn attribute_values(entry: &SearchEntry, attribute: &str) -> Vec<String> {
+    entry
+        .attrs
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case(attribute))
+        .flat_map(|(_, v)| v.iter().cloned())
+        .take(crate::groups::MAX_RAW_VALUES + 1)
+        .collect()
+}
+
+/// A group from its DN: the key is the DN with ASCII letters lower-cased and
+/// spaces around separators removed (DNs compare case-insensitively in the
+/// common schemas); the name is `name`, else the first RDN's value.
+pub(crate) fn group_from_dn(dn: &str, name: Option<String>) -> Option<super::types::RawGroup> {
+    let dn = dn.trim();
+    if dn.is_empty() || dn.len() > crate::groups::MAX_KEY_BYTES || dn.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let mut key = String::with_capacity(dn.len());
+    let mut escaped = false;
+    for ch in dn.chars() {
+        if escaped {
+            key.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                key.push(ch);
+                escaped = true;
+            }
+            ',' | '=' | '+' => {
+                while key.ends_with(' ') {
+                    key.pop();
+                }
+                key.push(ch);
+            }
+            ' ' if key.ends_with([',', '=', '+']) => {}
+            c => key.push(c.to_ascii_lowercase()),
+        }
+    }
+    let name = name.filter(|n| !n.trim().is_empty()).or_else(|| {
+        // The first RDN's value, unescaped up to the first unescaped comma.
+        let (_, rest) = dn.split_once('=')?;
+        let mut out = String::new();
+        let mut esc = false;
+        for ch in rest.chars() {
+            if esc {
+                out.push(ch);
+                esc = false;
+            } else if ch == '\\' {
+                esc = true;
+            } else if ch == ',' || ch == '+' {
+                break;
+            } else {
+                out.push(ch);
+            }
+        }
+        let out = out.trim().to_string();
+        (!out.is_empty()).then_some(out)
+    })?;
+    Some(super::types::RawGroup { key, name })
+}
+
+/// The search filter that finds the entry of a stored subject
+/// (`t:<attr>:<value>` or `b:<attr>:<hex>`) under the configured attribute.
+fn subject_filter(subject: &str, attribute: &str, encoding: SubjectEncoding) -> Option<String> {
+    let namespace = attribute.to_ascii_lowercase();
+    match encoding {
+        SubjectEncoding::Text => {
+            let value = subject
+                .strip_prefix("t:")?
+                .strip_prefix(namespace.as_str())?
+                .strip_prefix(':')?;
+            (!value.is_empty()).then(|| format!("({attribute}={})", ldap3::ldap_escape(value)))
+        }
+        SubjectEncoding::BinaryHex => {
+            let hex = subject
+                .strip_prefix("b:")?
+                .strip_prefix(namespace.as_str())?
+                .strip_prefix(':')?;
+            if hex.is_empty() || hex.len() % 2 != 0 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            let mut value = String::with_capacity(hex.len() * 3 / 2);
+            for pair in hex.as_bytes().chunks(2) {
+                value.push('\\');
+                value.push(pair[0] as char);
+                value.push(pair[1] as char);
+            }
+            Some(format!("({attribute}={value})"))
+        }
     }
 }
 #[async_trait::async_trait]
@@ -346,6 +617,25 @@ impl CredentialProvider for LdapProvider {
             .cloned()
             .and_then(|value| serde_json::from_value::<Config>(value).ok())
             .is_some_and(|config| config == self.config)
+            && ldap_groups_of(configuration) == self.groups
+    }
+    async fn directory_groups(
+        &self,
+        subject: &str,
+    ) -> Result<Option<Vec<super::types::RawGroup>>, CredentialError> {
+        let _permit = self
+            .capacity
+            .try_acquire()
+            .map_err(|_| CredentialError::Unavailable)?;
+        let lease = self.circuit.admit().ok_or(CredentialError::Unavailable)?;
+        let result = tokio::time::timeout(
+            Duration::from_millis(self.config.timeout_ms),
+            self.lookup_groups(subject),
+        )
+        .await
+        .unwrap_or(Err(CredentialError::Unavailable));
+        lease.finish(matches!(result, Err(CredentialError::Unavailable)));
+        result
     }
     async fn verify_password(
         &self,
@@ -620,6 +910,165 @@ mod tests {
         );
         assert!(untrusted.circuit.admit().is_none());
     }
+    #[tokio::test]
+    #[ignore = "requires the owned OpenLDAP fixture; run tools/owned_ldap_smoke.py"]
+    async fn owned_ldap_groups_sync_by_member_of_and_group_search() {
+        let env = |name: &str| std::env::var(name).ok();
+        let password = Secret::new(std::env::var("OWNED_LDAP_USER_PASSWORD").unwrap());
+        let config = Config {
+            endpoint: std::env::var("OWNED_LDAP_ENDPOINT").unwrap(),
+            starttls: std::env::var("OWNED_LDAP_STARTTLS").is_ok_and(|value| value == "1"),
+            ca: std::env::var("OWNED_LDAP_CA").unwrap().into(),
+            base_dn: "dc=example,dc=test".into(),
+            bind_dn: "cn=reader,dc=example,dc=test".into(),
+            bind_password_env: "OWNED_LDAP_BIND_KEY".into(),
+            username_attribute: "uid".into(),
+            subject_attribute: "entryUUID".into(),
+            subject_encoding: SubjectEncoding::Text,
+            timeout_ms: 2000,
+        };
+        let member_of =
+            LdapProvider::compile(ProviderId::new("owned-groups"), config.clone(), &env)
+                .unwrap()
+                .with_groups(Some(crate::groups::LdapGroups::default()));
+        // The fixture's directory manager adds a group whose member is alice;
+        // the memberof overlay maintains alice's memberOf.
+        let group_dn = "cn=Eng Team,dc=example,dc=test";
+        let mut admin = member_of.connect().await.unwrap();
+        let bound = admin
+            .ldap
+            .simple_bind(
+                &config.bind_dn,
+                &std::env::var("OWNED_LDAP_BIND_KEY").unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bound.rc, 0);
+        let added = admin
+            .ldap
+            .add(
+                group_dn,
+                vec![
+                    (
+                        "objectClass",
+                        std::collections::HashSet::from(["groupOfNames"]),
+                    ),
+                    ("cn", std::collections::HashSet::from(["Eng Team"])),
+                    (
+                        "member",
+                        std::collections::HashSet::from(["uid=alice,dc=example,dc=test"]),
+                    ),
+                ],
+            )
+            .await
+            .unwrap();
+        // 68: added by the run over the other transport (LDAPS, then StartTLS).
+        assert!(added.rc == 0 || added.rc == 68, "{added:?}");
+        let expected = vec![super::super::types::RawGroup {
+            key: "cn=eng team,dc=example,dc=test".into(),
+            name: "Eng Team".into(),
+        }];
+        let identity = member_of
+            .verify_password(PasswordInput::new("alice", &password).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(identity.groups.as_deref(), Some(expected.as_slice()));
+        // The periodic sync's lookup by immutable subject finds the same set.
+        assert_eq!(
+            member_of.directory_groups(&identity.subject).await.unwrap(),
+            Some(expected.clone())
+        );
+        // A subject the directory no longer has asserts no groups.
+        assert_eq!(
+            member_of
+                .directory_groups("t:entryuuid:00000000-0000-0000-0000-000000000000")
+                .await
+                .unwrap(),
+            Some(vec![])
+        );
+        // Group search mode reads the same group from its member attribute.
+        let search = LdapProvider::compile(ProviderId::new("owned-search"), config.clone(), &env)
+            .unwrap()
+            .with_groups(Some(crate::groups::LdapGroups {
+                mode: crate::groups::LdapGroupMode::Search,
+                ..crate::groups::LdapGroups::default()
+            }));
+        let identity = search
+            .verify_password(PasswordInput::new("alice", &password).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(identity.groups.as_deref(), Some(expected.as_slice()));
+        // A wrong password never yields groups.
+        let wrong = Secret::new("owned-wrong-password".into());
+        assert!(matches!(
+            member_of
+                .verify_password(PasswordInput::new("alice", &wrong).unwrap())
+                .await,
+            Err(CredentialError::Invalid)
+        ));
+        // Mapping rules applied to the real answer.
+        let rules = serde_json::from_value::<crate::groups::ProviderGroups>(
+            serde_json::json!({"include": "^cn=eng", "rewrite": {"pattern": "^Eng (.+)$", "replacement": "eng-$1"}}),
+        )
+        .unwrap()
+        .compile()
+        .unwrap();
+        assert_eq!(rules.map(&expected).unwrap()[0].name, "eng-Team");
+        // The fixture container is discarded afterwards; the vendored client
+        // accepts only the response types Hopae uses, so the group stays.
+    }
+
+    #[test]
+    fn group_dns_normalize_to_stable_keys_and_readable_names() {
+        let g = group_from_dn("CN=Eng Backend , OU=Groups,DC=Example,DC=Test", None).unwrap();
+        assert_eq!(g.key, "cn=eng backend,ou=groups,dc=example,dc=test");
+        assert_eq!(g.name, "Eng Backend");
+        let g = group_from_dn(r"cn=a\,b,dc=x", Some("Named".into())).unwrap();
+        assert_eq!(g.name, "Named");
+        assert_eq!(group_from_dn(r"cn=a\,b,dc=x", None).unwrap().name, "a,b");
+        assert!(group_from_dn("", None).is_none());
+        assert!(group_from_dn("cn=\u{7}", None).is_none());
+        assert!(group_from_dn(&format!("cn={}", "a".repeat(600)), None).is_none());
+    }
+
+    #[test]
+    fn stored_subjects_become_escaped_lookup_filters() {
+        assert_eq!(
+            subject_filter("t:entryuuid:abc*)(x=1", "entryUUID", SubjectEncoding::Text).unwrap(),
+            r"(entryUUID=abc\2a\29\28x=1)"
+        );
+        assert_eq!(
+            subject_filter(
+                "b:objectguid:0001ff",
+                "objectGUID",
+                SubjectEncoding::BinaryHex
+            )
+            .unwrap(),
+            r"(objectGUID=\00\01\ff)"
+        );
+        assert!(subject_filter("t:uid:abc", "entryUUID", SubjectEncoding::Text).is_none());
+        assert!(
+            subject_filter("b:objectguid:0g", "objectGUID", SubjectEncoding::BinaryHex).is_none()
+        );
+        assert!(
+            subject_filter("t:entryuuid:abc", "entryUUID", SubjectEncoding::BinaryHex).is_none()
+        );
+    }
+
+    #[test]
+    fn group_sync_settings_come_from_the_row_and_take_part_in_matching() {
+        let row = serde_json::json!({"ldap": {}, "groups": {"max_groups": 5}});
+        assert_eq!(
+            ldap_groups_of(&row),
+            Some(crate::groups::LdapGroups::default())
+        );
+        assert_eq!(ldap_groups_of(&serde_json::json!({"ldap": {}})), None);
+        let row = serde_json::json!({"groups": {"ldap": {"mode": "search", "search_base_dn": "ou=g,dc=x"}}});
+        let g = ldap_groups_of(&row).unwrap();
+        assert_eq!(g.mode, crate::groups::LdapGroupMode::Search);
+        assert_eq!(g.member_attribute, "member");
+    }
+
     #[test]
     fn ldap_configuration_rejects_plaintext_and_filter_injection() {
         let mut config = Config {

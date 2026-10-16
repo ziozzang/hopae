@@ -1,6 +1,6 @@
 # Documentation
 
-<!-- doc-rev: 11 -->
+<!-- doc-rev: 14 -->
 
 [한국어 목차](ko/README.md)
 
@@ -25,6 +25,10 @@ translations of their English sources and are updated in the same change. The
 - [Configuration reference](CONFIG.md) — every key, default and constraint, the command line and exit codes
 - [Operations](OPERATIONS.md) — running, state directory, instance lock, backups, key rotation, logs, health, counters, failure behavior
 - [Administration](ADMIN.md) — the management console and `/v1` API (M4-min, specified): console host and route, grants and roles, pages, endpoints, audit events, limits
+- [Subject directory](SUBJECT_DIRECTORY.md) — subject resolution, search, lifecycle feed and reconcile snapshot for the console and policy authorities
+- [Groups](GROUPS.md) — local, LDAP and OIDC groups, provider sync rules, the groups API and the signed membership projection for Pumgye
+- [Service credentials](SERVICE_CREDENTIALS.md) — route-scoped, read-only, mTLS-bound credentials for machine callers of the admin listener (Pumgye policy v2)
+- [Authentication explain](AUTHENTICATION_EXPLAIN.md) — what the authentication check would answer for a URL and a subject, and why, without side effects
 - [Deployment template](../deploy/README.md) — hardened Docker Compose service and gateway route examples
 
 Further reference pages (providers, sessions, management) are added as
@@ -37,6 +41,8 @@ milestones land. The [roadmap](ROADMAP.md) describes the intended shape.
 - [LDAP authentication](LDAP_AUTHENTICATION.md) — proposed direct-credential provider and lifecycle contract.
 
 - [Second-factor extensions](SECOND_FACTOR_EXTENSIONS.md) — native OTP and external API/Lua boundaries.
+
+- [WebAuthn passkeys](WEBAUTHN.md) — portal passkey registration, step-up, management, recovery codes (off by default).
 
 - [Kubernetes workload authentication](KUBERNETES_WORKLOAD.md) — native Pod-bound TokenReview connector; profile/transport integration pending.
 

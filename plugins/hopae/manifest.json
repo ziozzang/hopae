@@ -1,7 +1,7 @@
 {
   "id": "hopae",
   "name": "Hopae",
-  "version": "0.1.7",
+  "version": "0.1.10",
   "api_version": 1,
   "entry": "index.js",
   "assets": {
@@ -71,6 +71,96 @@
     },
     {
       "path": "sessions/terminate",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "subjects/resolve",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "subjects/search",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "subjects/lifecycle",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "subjects/lifecycle/snapshot",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "explain/authentication",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "groups/search",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "groups/get",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "subjects/groups",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "groups/create",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "groups/update",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "groups/delete",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "groups/members/add",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "groups/members/remove",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "users/get",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "users/factors",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "authentication/profiles/validate",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "users/factors/reset",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "users/bulk-disable",
       "method": "POST",
       "mutation": true
     }

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("remove.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t.get("remove.title") }}</h1>
+<p>{{ t.fmt("remove.body", "label", label) }}</p>
+<form method="post" action="/security/passkeys/remove">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="credential" value="{{ id }}">
+<input type="hidden" name="confirm" value="1">
+<button type="submit" class="danger">{{ t.get("remove.confirm") }}</button>
+</form>
+<p><a href="/security/passkeys">{{ t.get("remove.cancel") }}</a></p>
+{% endblock %}

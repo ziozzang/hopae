@@ -85,6 +85,18 @@ pub struct ProviderChoice {
     pub available: bool,
 }
 
+/// A passwordless passkey sign-in offered on the chooser (ADR-0017 decision 16).
+#[derive(Clone, Debug)]
+pub struct PasskeyOffer {
+    /// The ceremony bearer the form carries.
+    pub ceremony: Secret,
+    /// `navigator.credentials.get` options JSON.
+    pub options: String,
+    /// Origin of the transaction's return target: a successful sign-in
+    /// redirects there, and browsers apply `form-action` to that redirect.
+    pub form_origin: Origin,
+}
+
 /// Result of `GET /login?txn=`.
 #[derive(Clone, Debug)]
 pub enum LoginVisit {
@@ -95,6 +107,8 @@ pub enum LoginVisit {
         /// discovery: the page's CSP `form-action` lists them (R-5), because
         /// the browser enforces it on the redirect that follows the POST.
         form_origins: Vec<Origin>,
+        /// Passwordless sign-in, when configured and possible for this transaction.
+        passkey: Option<PasskeyOffer>,
     },
     /// Immediate redirect: single enabled provider, or single sign-on from a valid portal handle.
     Redirect(Redirect),

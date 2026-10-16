@@ -9,6 +9,7 @@ mod admin;
 mod directory;
 mod events;
 mod factors;
+pub(crate) mod groups;
 pub(crate) mod human_owner;
 mod human_subject;
 mod identity_owner;
@@ -18,12 +19,17 @@ pub(crate) mod primary_owner;
 #[allow(dead_code)]
 pub(crate) mod provider_owner;
 mod rows;
+pub mod service_credentials;
 mod sessions;
+pub(crate) mod subject_directory;
+pub mod workloads;
 // Provenance infrastructure; actual native Human candidate integration is queued.
 #[cfg(test)]
 mod tests;
 #[allow(dead_code)]
 pub(crate) mod totp_owner;
+pub(crate) mod webauthn;
+mod webauthn_owner;
 mod window;
 
 use std::collections::VecDeque;
@@ -45,8 +51,9 @@ use super::{Deadline, Directory, Events, Sessions, StoreError, StoreResult};
 use crate::crypto::{Clock, OsRng, Rng};
 use crate::event::types::Event;
 
-/// Embedded migrations in order. The version is the position + 1 and must
-/// match the numeric prefix of the file name.
+/// Embedded migrations in order. The version must match the numeric prefix of
+/// the file name; it is the position + 1 except where a number is reserved by
+/// a branch that merges first (0011-0013).
 const MIGRATIONS: &[(u32, &str, &str)] = &[
     (1, "0001_meta", include_str!("../migrations/0001_meta.sql")),
     (
@@ -93,6 +100,36 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         10,
         "0010_human_identity_owners",
         include_str!("../migrations/0010_human_identity_owners.sql"),
+    ),
+    (
+        11,
+        "0011_webauthn",
+        include_str!("../migrations/0011_webauthn.sql"),
+    ),
+    (
+        12,
+        "0012_session_webauthn_provenance",
+        include_str!("../migrations/0012_session_webauthn_provenance.sql"),
+    ),
+    (
+        13,
+        "0013_webauthn_login_challenges",
+        include_str!("../migrations/0013_webauthn_login_challenges.sql"),
+    ),
+    (
+        14,
+        "0014_groups",
+        include_str!("../migrations/0014_groups.sql"),
+    ),
+    (
+        15,
+        "0015_service_credentials",
+        include_str!("../migrations/0015_service_credentials.sql"),
+    ),
+    (
+        16,
+        "0016_workload_principals",
+        include_str!("../migrations/0016_workload_principals.sql"),
     ),
 ];
 
@@ -470,6 +507,16 @@ impl Store {
             .rng
             .write()
             .unwrap_or_else(|p| p.into_inner()) = rng;
+    }
+
+    /// Record required events on the caller's already-open publication
+    /// transaction (they commit or roll back with it).
+    pub(crate) fn record_in(
+        &self,
+        connection: &Connection,
+        events: &[crate::event::types::Event],
+    ) -> crate::store::StoreResult<()> {
+        events::insert_events(connection, self.shared(), events)
     }
 
     /// Check administrator authority on the caller's already-open publication transaction.
@@ -887,6 +934,27 @@ pub fn validate_foundation(conn: &Connection, version: u32) -> Result<(), StoreE
     }
     if version >= 10 {
         identity_owner::validate_foundation(conn)?;
+    }
+    if version >= 11 {
+        webauthn::validate_foundation(conn)?;
+    }
+    if version >= 12 {
+        webauthn_owner::validate_foundation(conn)?;
+    }
+    if version >= 13 {
+        webauthn::validate_login_foundation(conn)?;
+    }
+    if version >= 14 {
+        for t in [
+            "directory_groups",
+            "group_members",
+            "group_changes",
+            "group_sync_state",
+        ] {
+            if !table(t)? {
+                return Err(StoreError::Corrupt(format!("missing table {t}")));
+            }
+        }
     }
     Ok(())
 }

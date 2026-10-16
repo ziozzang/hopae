@@ -95,6 +95,14 @@ pub enum EventKind {
     FactorRegistryPublished,
     FactorAuthorityPublished,
     FactorEnrollmentRevoked,
+    FactorWebauthnRegistered,
+    FactorWebauthnUsed,
+    FactorWebauthnRenamed,
+    FactorWebauthnRevoked,
+    FactorWebauthnFailed,
+    FactorWebauthnCloneSuspected,
+    FactorRecoveryCodesGenerated,
+    FactorRecoveryCodeUsed,
 
     SessionHandoff,
     HandoffRejected,
@@ -119,10 +127,51 @@ pub enum EventKind {
     AdminSessionTerminate,
     AdminSessionsTerminate,
     AdminDenied,
+    /// `hopae admin factors reset` and the console's factor reset (ADR-0017,
+    /// required; `attrs.scope` names what was reset).
+    AdminFactorReset,
+    /// A console publication of the service authentication profiles or the
+    /// credential projection plans (required; in the publication's transaction).
+    AdminProfilesPublish,
+    AdminProjectionsPublish,
+    /// An audited administrative read of the subject directory or the
+    /// authentication explain API (required; travels alone).
+    AdminRead,
+    /// Groups (ADR-0019, required): a group's lifecycle and memberships,
+    /// whether changed by an administrator, a provider sync or maintenance.
+    GroupCreated,
+    GroupUpdated,
+    GroupDeleted,
+    GroupMemberAdded,
+    GroupMemberRemoved,
+    /// A provider membership suspended because no successful assertion
+    /// refreshed it within `groups.max_staleness_secs`, and restored.
+    GroupMembershipStale,
+    GroupMembershipRestored,
+    /// A provider's group assertion was not applied (diagnostic).
+    GroupSyncRefused,
+    /// A route-scoped service credential was created, rotated, promoted or
+    /// revoked (required; travels with the change).
+    AdminServiceCredential,
+    /// Kubernetes workload identity (Hangang ADR 0021/0022, required): a
+    /// ServiceAccount principal authenticated for the first time by this
+    /// process, a principal retired (ServiceAccount deleted or re-created
+    /// with a new UID), and a deprecated Pod-bound subject observed as a
+    /// principal during the migration window. Lifecycle feed sources.
+    WorkloadPrincipalObserved,
+    WorkloadPrincipalRetired,
+    WorkloadLegacySubjectMapped,
+    /// A workload issuer's signing-key set changed (diagnostic).
+    WorkloadKeysRotated,
+    /// A workload revocation index became stale or current again (diagnostic).
+    WorkloadRevocationStale,
+    /// `authentication.source = config`: a start reconciled the stored
+    /// authentication profiles or projection plan to the file (required).
+    AuthenticationReconciled,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 33] = [
+    pub const ALL: &[EventKind] = &[
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -135,6 +184,14 @@ impl EventKind {
         EventKind::FactorRegistryPublished,
         EventKind::FactorAuthorityPublished,
         EventKind::FactorEnrollmentRevoked,
+        EventKind::FactorWebauthnRegistered,
+        EventKind::FactorWebauthnUsed,
+        EventKind::FactorWebauthnRenamed,
+        EventKind::FactorWebauthnRevoked,
+        EventKind::FactorWebauthnFailed,
+        EventKind::FactorWebauthnCloneSuspected,
+        EventKind::FactorRecoveryCodesGenerated,
+        EventKind::FactorRecoveryCodeUsed,
         EventKind::SessionHandoff,
         EventKind::HandoffRejected,
         EventKind::SessionTerminated,
@@ -156,6 +213,25 @@ impl EventKind {
         EventKind::AdminSessionTerminate,
         EventKind::AdminSessionsTerminate,
         EventKind::AdminDenied,
+        EventKind::AdminFactorReset,
+        EventKind::AdminProfilesPublish,
+        EventKind::AdminProjectionsPublish,
+        EventKind::AdminRead,
+        EventKind::GroupCreated,
+        EventKind::GroupUpdated,
+        EventKind::GroupDeleted,
+        EventKind::GroupMemberAdded,
+        EventKind::GroupMemberRemoved,
+        EventKind::GroupMembershipStale,
+        EventKind::GroupMembershipRestored,
+        EventKind::GroupSyncRefused,
+        EventKind::AdminServiceCredential,
+        EventKind::WorkloadPrincipalObserved,
+        EventKind::WorkloadPrincipalRetired,
+        EventKind::WorkloadLegacySubjectMapped,
+        EventKind::WorkloadKeysRotated,
+        EventKind::WorkloadRevocationStale,
+        EventKind::AuthenticationReconciled,
     ];
 
     /// Required kinds travel in the transaction of the state change they
@@ -168,6 +244,9 @@ impl EventKind {
                 | EventKind::TxnEvicted
                 | EventKind::EventsDropped
                 | EventKind::SinkBacklogOverflow
+                | EventKind::GroupSyncRefused
+                | EventKind::WorkloadKeysRotated
+                | EventKind::WorkloadRevocationStale
         )
     }
 
@@ -185,6 +264,14 @@ impl EventKind {
             EventKind::FactorRegistryPublished => "factor.registry_published",
             EventKind::FactorAuthorityPublished => "factor.authority_published",
             EventKind::FactorEnrollmentRevoked => "factor.enrollment_revoked",
+            EventKind::FactorWebauthnRegistered => "factor.webauthn_registered",
+            EventKind::FactorWebauthnUsed => "factor.webauthn_used",
+            EventKind::FactorWebauthnRenamed => "factor.webauthn_renamed",
+            EventKind::FactorWebauthnRevoked => "factor.webauthn_revoked",
+            EventKind::FactorWebauthnFailed => "factor.webauthn_failed",
+            EventKind::FactorWebauthnCloneSuspected => "factor.webauthn_clone_suspected",
+            EventKind::FactorRecoveryCodesGenerated => "factor.recovery_codes_generated",
+            EventKind::FactorRecoveryCodeUsed => "factor.recovery_code_used",
 
             EventKind::SessionHandoff => "session.handoff",
             EventKind::HandoffRejected => "handoff.rejected",
@@ -207,11 +294,30 @@ impl EventKind {
             EventKind::AdminSessionTerminate => "admin.session_terminate",
             EventKind::AdminSessionsTerminate => "admin.sessions_terminate",
             EventKind::AdminDenied => "admin.denied",
+            EventKind::AdminFactorReset => "admin.factor_reset",
+            EventKind::AdminProfilesPublish => "admin.profiles_publish",
+            EventKind::AdminProjectionsPublish => "admin.projections_publish",
+            EventKind::AdminRead => "admin.read",
+            EventKind::GroupCreated => "group.created",
+            EventKind::GroupUpdated => "group.updated",
+            EventKind::GroupDeleted => "group.deleted",
+            EventKind::GroupMemberAdded => "group.member_added",
+            EventKind::GroupMemberRemoved => "group.member_removed",
+            EventKind::GroupMembershipStale => "group.membership_stale",
+            EventKind::GroupMembershipRestored => "group.membership_restored",
+            EventKind::GroupSyncRefused => "group.sync_refused",
+            EventKind::AdminServiceCredential => "admin.service_credential",
+            EventKind::WorkloadPrincipalObserved => "workload.principal_observed",
+            EventKind::WorkloadPrincipalRetired => "workload.principal_retired",
+            EventKind::WorkloadLegacySubjectMapped => "workload.legacy_subject_mapped",
+            EventKind::WorkloadKeysRotated => "workload.keys_rotated",
+            EventKind::WorkloadRevocationStale => "workload.revocation_stale",
+            EventKind::AuthenticationReconciled => "authentication.reconciled",
         }
     }
 
     pub fn from_name(s: &str) -> Option<EventKind> {
-        EventKind::ALL.into_iter().find(|k| k.name() == s)
+        EventKind::ALL.iter().copied().find(|k| k.name() == s)
     }
 }
 
@@ -376,6 +482,15 @@ pub mod reasons {
         INVALID_AUTH_TIME = "invalid_auth_time",
         REAUTH = "reauth",
         FACTOR_REVOKED = "factor_revoked",
+        // WebAuthn and recovery codes (ADR-0017)
+        COUNTER_REGRESSION = "counter_regression",
+        COUNTER_STALE = "counter_stale",
+        FACTOR_RESET = "factor_reset",
+        HIGH_ASSURANCE_REQUIRED = "high_assurance_required",
+        PASSKEY_REMOVED = "passkey_removed",
+        CEREMONY_INVALID = "ceremony_invalid",
+        CEREMONY_EXPIRED = "ceremony_expired",
+        RECOVERY_CODE = "recovery_code",
         INVALID_CURSOR = "invalid_cursor",
         INVALID_FILTER = "invalid_filter",
         INVALID_ID = "invalid_id",
@@ -398,8 +513,26 @@ pub mod reasons {
 /// [`EventBuilder::attr`]; add keys here (a minor change, ADR-0009), never
 /// token-like names.
 pub const ATTR_ALLOWLIST: &[&str] = &[
+    "credential_id",
+    "credential_slot",
+    // Kubernetes workload identity (identifiers only, ADR 0021/0022).
+    "cluster",
+    "keys_added",
+    "keys_removed",
+    "legacy_subject_ref",
+    "namespace",
+    "principal",
+    "replacement",
+    "service",
+    "service_account",
+    "service_account_uid",
+    "spiffe_id",
+    "stale",
+    "subject_ref",
+    "previous_revision",
     "aal",
     "actor",
+    "assurance",
     "enrollment_id",
     "factor_id",
     "actor_session",
@@ -408,8 +541,10 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "delegated_operation",
     "app",
     "apps",
+    "change",
     "auth_time_source",
     "bound_ip",
+    "bulk_operation",
     "cause",
     "client_request_id",
     "config_digest",
@@ -419,8 +554,10 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "dropped_by_kind",
     "endpoint",
     "error",
+    "expires_at",
     "forced",
     "from_user_id",
+    "group_id",
     "host",
     "insecure_mode",
     "kind",
@@ -437,14 +574,19 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "provider",
     "providers",
     "purpose",
+    "query_sha256",
     "recorded_sha256",
     "recovery_depth",
+    "requested",
     "reauth",
     "retry_after",
+    "revision",
     "role",
     "route_id",
     "sampled_count",
+    "scope",
     "sink",
+    "source",
     "sso",
     "status",
     "to_user_id",
@@ -600,18 +742,45 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), EventKind::ALL.len());
-        for k in EventKind::ALL {
+        for &k in EventKind::ALL {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
-        let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 28);
+        // Completeness without a hand-kept count (parallel branches each
+        // adding a kind used to collide on the number): every arm of the
+        // exhaustive `name()` match is listed in `ALL`, and only the
+        // documented diagnostic kinds are not required.
+        let source = include_str!("types.rs");
+        let body = &source[source.find("pub fn name(self)").unwrap()..];
+        let body = &body[..body.find("pub fn from_name").unwrap()];
+        let arms = body
+            .lines()
+            .filter(|l| l.trim_start().starts_with("EventKind::") && l.contains("=> \""))
+            .count();
+        assert_eq!(
+            arms,
+            EventKind::ALL.len(),
+            "a kind is missing from EventKind::ALL"
+        );
+        let optional: Vec<_> = EventKind::ALL.iter().filter(|k| !k.is_required()).collect();
+        assert_eq!(
+            optional,
+            [
+                &EventKind::VerifyDenied,
+                &EventKind::ProviderError,
+                &EventKind::TxnEvicted,
+                &EventKind::EventsDropped,
+                &EventKind::SinkBacklogOverflow,
+                &EventKind::GroupSyncRefused,
+                &EventKind::WorkloadKeysRotated,
+                &EventKind::WorkloadRevocationStale,
+            ]
+        );
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 33);
         for (kind, name) in [
             (
                 EventKind::FactorExternalConsumed,
@@ -627,6 +796,7 @@ mod tests {
                 "admin.sessions_terminate",
             ),
             (EventKind::AdminDenied, "admin.denied"),
+            (EventKind::AdminRead, "admin.read"),
         ] {
             assert_eq!(kind.name(), name);
             assert!(kind.is_required(), "{name} travels in the outbox");

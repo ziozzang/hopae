@@ -13,6 +13,7 @@ pub mod i18n;
 pub mod pages;
 pub mod password_attempts;
 pub mod ports;
+pub mod settings;
 #[cfg(test)]
 mod tests;
 
@@ -67,6 +68,8 @@ impl PortalConfig {
 pub struct PortalState {
     pub cfg: Arc<PortalConfig>,
     pub services: Arc<dyn PortalServices>,
+    /// Security settings and passkeys (ADR-0017); `None` when `webauthn` is not configured.
+    pub settings: Option<Arc<dyn settings::SecurityServices>>,
     pub clock: Arc<dyn Clock>,
     pub rng: Arc<dyn Rng>,
     pub(crate) csrf_key: CsrfKey,
@@ -87,11 +90,18 @@ impl PortalState {
         PortalState {
             cfg: Arc::new(cfg),
             services,
+            settings: None,
             clock,
             rng,
             csrf_key,
             in_flight,
             password_attempts: Arc::new(password_attempts::PasswordAttempts::default()),
         }
+    }
+
+    /// Enable the security settings and passkey routes.
+    pub fn with_settings(mut self, settings: Arc<dyn settings::SecurityServices>) -> PortalState {
+        self.settings = Some(settings);
+        self
     }
 }

@@ -19,6 +19,8 @@ pub struct Rules<'a> {
     /// Lower-case domains.
     pub authoritative_domains: &'a [String],
     pub trust_email: bool,
+    /// Dotted path of the groups claim when the provider syncs groups.
+    pub groups_claim: Option<&'a str>,
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
@@ -117,6 +119,12 @@ pub fn build(token: &Value, userinfo: Option<&Value>, rules: &Rules<'_>) -> Prov
         // A present `null` is a present, invalid claim (ADR-0016 decision 15):
         // it is carried so the validator rejects it, never read as absent.
         auth_time: token.get("auth_time").cloned(),
+        // The ID token's claim when present, else the user-info response's
+        // (whose `sub` was checked); absent or malformed: not asserted.
+        groups: rules.groups_claim.and_then(|path| {
+            crate::groups::config::claim_values(token, path)
+                .or_else(|| userinfo.and_then(|u| crate::groups::config::claim_values(u, path)))
+        }),
     }
 }
 
@@ -133,7 +141,25 @@ mod tests {
         Rules {
             authoritative_domains: d,
             trust_email: trust,
+            groups_claim: None,
         }
+    }
+
+    #[test]
+    fn groups_come_from_the_configured_claim_of_the_token_then_userinfo() {
+        let mut r = rules(&[], false);
+        let t = json!({"sub":"s1","groups":["a","b"],"realm_access":{"roles":["r"]}});
+        assert!(build(&t, None, &r).groups.is_none());
+        r.groups_claim = Some("groups");
+        assert_eq!(build(&t, None, &r).groups.unwrap().len(), 2);
+        r.groups_claim = Some("realm_access.roles");
+        assert_eq!(build(&t, None, &r).groups.unwrap()[0].key, "r");
+        r.groups_claim = Some("teams");
+        let ui = json!({"sub":"s1","teams":["t1"]});
+        assert_eq!(build(&t, Some(&ui), &r).groups.unwrap()[0].name, "t1");
+        assert!(build(&t, None, &r).groups.is_none());
+        // Groups never enter the stored raw claims.
+        assert!(build(&t, None, &r).raw_claims.get("groups").is_none());
     }
 
     fn tok() -> Value {

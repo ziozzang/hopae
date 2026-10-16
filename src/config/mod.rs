@@ -42,6 +42,9 @@ pub struct Config {
     pub external_verifiers: Vec<crate::factor::external_transport::Config>,
     #[serde(default)]
     pub totp_keyring: Option<crate::factor::keyring::Configuration>,
+    /// WebAuthn passkeys (ADR-0017); absent: disabled.
+    #[serde(default)]
+    pub webauthn: Option<crate::factor::webauthn::Configuration>,
     #[serde(default)]
     pub listen: Listen,
     /// Writable directory for runtime state (created with mode 0700).
@@ -65,6 +68,18 @@ pub struct Config {
     pub authentication_gateway: Option<crate::auth_gateway::runtime::Config>,
     #[serde(default)]
     pub credential_projection: Option<crate::auth_gateway::projection::Configuration>,
+    /// Which side owns the authentication profiles and the credential
+    /// projection plan: the store (default, console/API edits) or this file
+    /// (`config`: reconciled at every start, console edits refused).
+    #[serde(default)]
+    pub authentication: AuthenticationCfg,
+    /// Polling of mounted material that changes while Hopae runs.
+    #[serde(default)]
+    pub reload: ReloadCfg,
+    /// The file this configuration was read from (set by [`load`]; never
+    /// configured). Live reconciliation polls it.
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
     #[serde(default)]
     pub linking: Linking,
     #[serde(default)]
@@ -82,6 +97,9 @@ pub struct Config {
     /// The management console (ADR-0016); enabled by `admin.public_url`.
     #[serde(default)]
     pub admin: AdminCfg,
+    /// Groups and the signed membership projection (ADR-0019).
+    #[serde(default)]
+    pub groups: Option<crate::groups::GroupsConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -151,6 +169,87 @@ pub enum AdminRoleCfg {
     Viewer,
 }
 
+/// `authentication` (configuration ownership of the authentication profiles
+/// and the credential projection plan).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthenticationCfg {
+    #[serde(default)]
+    pub source: AuthenticationSource,
+    /// `source = config`: how often the configuration file is polled for a
+    /// changed profile or projection plan (milliseconds; `0` turns live
+    /// reconciliation off, so only a restart applies a change).
+    #[serde(default)]
+    pub reload_interval_ms: Option<u64>,
+}
+
+/// Default poll of the configuration file in `authentication.source = config`.
+pub const AUTH_RELOAD_DEFAULT_MS: u64 = 1000;
+/// Default poll of TLS certificate, key and CA files.
+pub const TLS_RELOAD_DEFAULT_SECS: u64 = 10;
+
+/// `reload`: polling of TLS material (no file-system notifications: a
+/// Kubernetes secret volume swaps a symlink, which inotify watches miss).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReloadCfg {
+    /// Seconds between polls of every TLS certificate, key and CA file
+    /// (listeners and outbound mTLS clients); `0` turns reloading off.
+    #[serde(default)]
+    pub tls_interval_secs: Option<u64>,
+}
+
+impl Config {
+    /// The TLS poll interval, `None` when reloading is off.
+    pub fn tls_reload_interval(&self) -> Option<Duration> {
+        match self
+            .reload
+            .tls_interval_secs
+            .unwrap_or(TLS_RELOAD_DEFAULT_SECS)
+        {
+            0 => None,
+            n => Some(Duration::from_secs(n)),
+        }
+    }
+
+    /// The configuration poll interval in `authentication.source = config`,
+    /// `None` in store mode or when turned off.
+    pub fn auth_reload_interval(&self) -> Option<Duration> {
+        if self.authentication.source != AuthenticationSource::Config {
+            return None;
+        }
+        match self
+            .authentication
+            .reload_interval_ms
+            .unwrap_or(AUTH_RELOAD_DEFAULT_MS)
+        {
+            0 => None,
+            n => Some(Duration::from_millis(n)),
+        }
+    }
+}
+
+/// `authentication.source`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthenticationSource {
+    /// The store is authoritative; the file only bootstraps an empty store.
+    #[default]
+    Store,
+    /// The file is authoritative: every start reconciles the store to it
+    /// through the validated CAS publication; console/API edits are refused.
+    Config,
+}
+
+impl AuthenticationSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthenticationSource::Store => "store",
+            AuthenticationSource::Config => "config",
+        }
+    }
+}
+
 /// `admin` (ADR-0016): the console's address, policy and seeded grants.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -172,8 +271,26 @@ pub struct AdminCfg {
     pub untrusted_peers: Option<UntrustedPeers>,
     #[serde(default)]
     pub query_budget_ms: Option<u64>,
+    /// The least private profile the subject directory and the explain API
+    /// may answer with; a request may only ask for a stricter one.
+    #[serde(default)]
+    pub directory_privacy: Option<DirectoryPrivacy>,
     #[serde(default)]
     pub users: Vec<AdminUserEntry>,
+    /// The audience route-scoped service credentials must name
+    /// (`x-hopae-audience`); default the console origin.
+    #[serde(default)]
+    pub service_audience: Option<String>,
+}
+
+/// `admin.directory_privacy`: the operator's floor for the privacy profile of
+/// the audited directory reads. `strict` > `standard`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectoryPrivacy {
+    #[default]
+    Standard,
+    Strict,
 }
 
 /// One seeded grant: at least one of `user_id` and `email`.
@@ -198,6 +315,8 @@ pub struct AdminLimits {
     pub require_aal: Aal,
     pub untrusted_peers: UntrustedPeers,
     pub query_budget: Duration,
+    /// `admin.directory_privacy` (default `standard`).
+    pub directory_privacy: DirectoryPrivacy,
 }
 
 const ADMIN_MAX_AUTH_AGE_DEFAULT: Duration = Duration::from_secs(12 * 3600);
@@ -416,6 +535,10 @@ pub struct AppEntry {
     pub logout_confirm: Option<bool>,
     #[serde(default)]
     pub step_up: Vec<StepUpEntry>,
+    /// Highest assurance level presented to this application (ADR-0018):
+    /// `2` (default) or `3`. `3` needs `webauthn.high_assurance`.
+    #[serde(default)]
+    pub max_emitted_aal: Option<u8>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -524,6 +647,9 @@ pub struct ProviderEntry {
     pub auto_link: bool,
     #[serde(default)]
     pub trust_email: bool,
+    /// Group sync rules (ADR-0019); absent: the provider syncs no groups.
+    #[serde(default)]
+    pub groups: Option<crate::groups::ProviderGroups>,
 }
 
 fn default_scope() -> String {
@@ -736,7 +862,9 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         return Err(ConfigError::TooLarge { path: display });
     }
     let text = std::fs::read_to_string(path).map_err(io)?;
-    parse(&text)
+    let mut cfg = parse(&text)?;
+    cfg.source_path = Some(path.to_path_buf());
+    Ok(cfg)
 }
 
 /// Parse and validate configuration text.
@@ -786,6 +914,20 @@ impl Config {
     /// Check every constraint that does not need the environment.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut errs = Vec::new();
+        if let Some(n) = self.reload.tls_interval_secs
+            && n > 3600
+        {
+            errs.push("reload.tls_interval_secs must be between 0 (off) and 3600".to_string());
+        }
+        if let Some(n) = self.authentication.reload_interval_ms
+            && n != 0
+            && !(200..=60_000).contains(&n)
+        {
+            errs.push(
+                "authentication.reload_interval_ms must be 0 (off) or between 200 and 60000"
+                    .to_string(),
+            );
+        }
         let portal = self.listen.portal.parse::<SocketAddr>();
         let gateway = self.listen.gateway.parse::<SocketAddr>();
         if portal.is_err() {
@@ -850,6 +992,11 @@ impl Config {
         {
             errs.push("listen.admin_tls requires an enabled console and absolute TLS paths".into());
         }
+        if let Some(a) = &self.admin.service_audience
+            && (a.is_empty() || a.len() > 256 || !a.bytes().all(|b| b.is_ascii_graphic()))
+        {
+            errs.push("admin.service_audience must be 1-256 visible ASCII characters".into());
+        }
         if let Some(a) = &self.listen.admin {
             match a.parse::<SocketAddr>() {
                 Err(_) => errs.push(
@@ -907,6 +1054,15 @@ impl Config {
             errs.push(
                 "human_material_key_env must be a bounded environment variable reference".into(),
             );
+        }
+        if let Some(webauthn) = &self.webauthn {
+            errs.extend(webauthn.validate(&self.portal.public_url));
+            if self.gateway.allow_unauthenticated_caller {
+                errs.push("webauthn requires authenticated gateway callers".into());
+            }
+            if !self.portal.public_url.starts_with("https://") || !self.cookie.secure {
+                errs.push("webauthn requires an https portal and secure cookies".into());
+            }
         }
         if let Some(keys) = &self.totp_keyring {
             if keys.validate_references().is_err() {
@@ -986,12 +1142,13 @@ impl Config {
                         self.authentication_gateway.as_ref().is_none_or(|gateway| {
                             !gateway.profiles.iter().any(|profile| {
                                 profile.service_id == scope.service
-                                    && profile.kubernetes_tokenreview.is_some()
+                                    && (profile.kubernetes_tokenreview.is_some()
+                                        || profile.kubernetes_workload.is_some())
                             })
                         })
                     }))
             {
-                errs.push("workload_receipts requires mTLS gRPC and native TokenReview profiles for every scope".into());
+                errs.push("workload_receipts requires mTLS gRPC and native Kubernetes workload profiles for every scope".into());
             }
             if let Some(humans) = &config.human_receipts {
                 if self.listen.grpc_gateway.is_none() || self.listen.native_gateway_tls.is_none() {
@@ -1172,6 +1329,10 @@ impl Config {
     }
 
     fn validate_apps(&self, errs: &mut Vec<String>) {
+        let high_assurance = self
+            .webauthn
+            .as_ref()
+            .is_some_and(|w| w.high_assurance.is_some());
         let mut ids = HashSet::new();
         let mut hosts: HashMap<String, String> = HashMap::new();
         for (i, a) in self.apps.iter().enumerate() {
@@ -1183,6 +1344,14 @@ impl Config {
                     "{at}.app_id {:?} is used by more than one application",
                     a.app_id
                 ));
+            }
+            match a.max_emitted_aal {
+                None | Some(2) => {}
+                Some(3) if self.webauthn.as_ref().is_some_and(|w| w.high_assurance.is_some()) => {}
+                Some(3) => errs.push(format!(
+                    "{at}.max_emitted_aal 3 needs webauthn.high_assurance (only an attested, allowlisted security key yields AAL 3)"
+                )),
+                Some(_) => errs.push(format!("{at}.max_emitted_aal must be 2 or 3")),
             }
             let is_default = a.app_id == "default";
             if is_default && !a.hosts.is_empty() {
@@ -1231,8 +1400,13 @@ impl Config {
                 }
             }
             for (k, rule) in a.step_up.iter().enumerate() {
-                if !(1..=2).contains(&rule.require.aal) {
-                    errs.push(format!("{at}.step_up[{k}].require.aal must be 1 or 2"));
+                match rule.require.aal {
+                    1 | 2 => {}
+                    3 if high_assurance => {}
+                    3 => errs.push(format!(
+                        "{at}.step_up[{k}].require.aal 3 needs webauthn.high_assurance (only an attested, allowlisted security key yields AAL 3)"
+                    )),
+                    _ => errs.push(format!("{at}.step_up[{k}].require.aal must be 1, 2 or 3")),
                 }
                 if let Some(p) = &rule.path_prefix
                     && !p.starts_with('/')
@@ -1301,10 +1475,14 @@ impl Config {
         {
             errs.push("admin.max_auth_age must be at least 30m".to_string());
         }
-        if let Some(n) = a.require_aal
-            && !(1..=2).contains(&n)
-        {
-            errs.push("admin.require_aal must be 1 or 2".to_string());
+        match a.require_aal {
+            None | Some(1 | 2) => {}
+            Some(3) if self.webauthn.as_ref().is_some_and(|w| w.high_assurance.is_some()) => {}
+            Some(3) => errs.push(
+                "admin.require_aal 3 needs webauthn.high_assurance (only an attested, allowlisted security key yields AAL 3)"
+                    .to_string(),
+            ),
+            Some(_) => errs.push("admin.require_aal must be 1, 2 or 3".to_string()),
         }
         if let Some(ms) = a.query_budget_ms
             && !(100..=30_000).contains(&ms)
@@ -1351,8 +1529,23 @@ impl Config {
 
     fn validate_providers(&self, errs: &mut Vec<String>) {
         let mut ids = HashSet::new();
+        if let Some(g) = &self.groups {
+            g.validate(errs);
+        }
         for (i, p) in self.providers.iter().enumerate() {
             let at = format!("providers[{i}]");
+            if let Some(g) = &p.groups {
+                g.validate(&i.to_string(), p.kind == ProviderKind::Ldap, errs);
+                let staleness = self.groups.as_ref().map_or(
+                    crate::groups::GroupsConfig::default().max_staleness_secs,
+                    |c| c.max_staleness_secs,
+                );
+                if g.sync_interval_secs.is_some_and(|s| s >= staleness) {
+                    errs.push(format!(
+                        "{at}.groups.sync_interval_secs must be shorter than groups.max_staleness_secs"
+                    ));
+                }
+            }
             if !valid_slug(&p.provider_id) {
                 errs.push(format!(
                     "{at}.provider_id must match [a-z0-9][a-z0-9_-]{{0,31}}"
@@ -1562,12 +1755,10 @@ impl Config {
         let a = &self.admin;
         Some(AdminLimits {
             max_auth_age: a.max_auth_age.map_or(ADMIN_MAX_AUTH_AGE_DEFAULT, |d| d.0),
-            require_aal: a
-                .require_aal
-                .and_then(|n| Aal::from_i64(i64::from(n)))
-                .unwrap_or(Aal::One),
+            require_aal: a.require_aal.and_then(aal_requirement).unwrap_or(Aal::One),
             untrusted_peers: a.untrusted_peers.unwrap_or_default(),
             query_budget: Duration::from_millis(a.query_budget_ms.unwrap_or(2000)),
+            directory_privacy: a.directory_privacy.unwrap_or_default(),
         })
     }
 
@@ -1602,16 +1793,18 @@ impl Config {
             on_authz_change: AuthzChange::Terminate,
             verify_cache_seconds: 0,
             logout_confirm: true,
-            step_up: if limits.require_aal == Aal::Two {
+            step_up: if limits.require_aal >= Aal::Two {
                 vec![StepUpRule {
                     path_prefix: Some("/".into()),
-                    aal: Aal::Two,
+                    aal: limits.require_aal,
                     max_age: None,
                 }]
             } else {
                 Vec::new()
             },
             max_auth_age: Some(limits.max_auth_age),
+            // The console never presents AAL 3 (ADR-0018).
+            max_emitted_aal: Aal::Two,
         })
     }
 
@@ -1665,7 +1858,9 @@ impl Config {
     /// The numbers the verify engine needs.
     pub fn verify_limits(&self) -> VerifyLimits {
         VerifyLimits {
-            stepup_enabled: self.totp_keyring.is_some() || !self.external_verifiers.is_empty(),
+            stepup_enabled: self.totp_keyring.is_some()
+                || !self.external_verifiers.is_empty()
+                || self.webauthn.is_some(),
             max_recoveries: self.handoff.max_recoveries,
             txn_per_ip_per_minute: self.txn.per_ip_per_minute,
             txn_max_rows: self.txn.max_rows,
@@ -1693,6 +1888,7 @@ impl Config {
                 enabled: p.enabled,
                 client_id: p.client_id.clone(),
                 ldap: p.ldap.clone(),
+                groups: p.groups.clone(),
                 client_secret_env: p.client_secret_env.clone(),
                 issuer: p.issuer.clone(),
                 scope: p.scope.clone(),
@@ -1781,6 +1977,7 @@ impl Config {
             && self.admin.require_aal == Some(2)
             && self.totp_keyring.is_none()
             && self.external_verifiers.is_empty()
+            && self.webauthn.is_none()
         {
             w.push(
                 "admin.require_aal: no second factor exists yet; every console request will be refused"
@@ -1852,12 +2049,17 @@ fn resolve_app(entry: Option<&AppEntry>, base: &AppPolicy, cfg: &Config, id: &st
             .filter_map(|r| {
                 Some(StepUpRule {
                     path_prefix: r.path_prefix.clone(),
-                    aal: Aal::from_i64(i64::from(r.require.aal))?,
+                    aal: aal_requirement(r.require.aal)?,
                     max_age: r.require.max_age.map(Duration::from_secs),
                 })
             })
             .collect(),
         max_auth_age: None,
+        // Never inherited from `default`: AAL 3 is opted in per application (review F11).
+        max_emitted_aal: match a.max_emitted_aal {
+            Some(3) => Aal::Three,
+            _ => Aal::Two,
+        },
     }
 }
 
@@ -1984,6 +2186,12 @@ pub fn check_env(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<S
     {
         out.push("totp_keyring: unavailable or invalid key material".into());
     }
+    if let Some(webauthn) = &cfg.webauthn
+        && let Err(error) =
+            crate::factor::webauthn::RelyingParty::compile(webauthn, &cfg.portal.public_url)
+    {
+        out.push(error);
+    }
     if let Some(config) = &cfg.authentication_gateway
         && let Err(error) = crate::auth_gateway::runtime::Runtime::compile(config, &lookup)
     {
@@ -2011,6 +2219,15 @@ pub fn env_warnings(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Ve
         .collect()
 }
 
+/// A configured requirement level: 1, 2, or 3 (AAL 3 is a requirement and a
+/// presentation, never a stored level; ADR-0018).
+fn aal_requirement(n: u8) -> Option<Aal> {
+    match n {
+        3 => Some(Aal::Three),
+        n => Aal::from_i64(i64::from(n)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2026,7 +2243,7 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_str(BASE).unwrap();
         value["apps"] =
             serde_json::json!([{"app_id":"orders","hosts":["app.example.test"],"ports":[443]}]);
-        value["authentication_gateway"] = serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"app.example.test","ports":[443],"realm":"example-cluster","kubernetes_tokenreview":{"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"k8s:"}}]});
+        value["authentication_gateway"] = serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"app.example.test","ports":[443],"realm":"example-cluster","kubernetes_tokenreview":{"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"k8s:","subject":"service_account"}}]});
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
         let loaded = load(file.path()).unwrap();
@@ -2045,6 +2262,60 @@ mod tests {
         assert!(
             error.contains("environment variable name")
                 && !error.contains("do-not-display-fixture")
+        );
+    }
+    /// ADR 0022 migration: an existing TokenReview profile without an explicit
+    /// `subject` fails at load (before deploy) with a pointer to the migration,
+    /// instead of silently changing the published subject.
+    #[test]
+    fn s900_11_tokenreview_profile_without_subject_fails_loud_at_load() {
+        let mut value: serde_json::Value = serde_json::from_str(BASE).unwrap();
+        value["apps"] =
+            serde_json::json!([{"app_id":"orders","hosts":["app.example.test"],"ports":[443]}]);
+        value["authentication_gateway"] = serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"app.example.test","ports":[443],"realm":"example-cluster","kubernetes_tokenreview":{"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://issuer.example.test","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"k8s:"}}]});
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        let error = load(file.path()).unwrap_err().to_string();
+        assert!(
+            error.contains("kubernetes_tokenreview.subject is required")
+                && error.contains("legacy_pod")
+                && error.contains("KUBERNETES_WORKLOAD.md#migration-from-pod-bound-subjects"),
+            "{error}"
+        );
+        let tr = &mut value["authentication_gateway"]["profiles"][0]["kubernetes_tokenreview"];
+        tr["subject"] = "legacy_pod".into();
+        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(
+            load(file.path())
+                .unwrap_err()
+                .to_string()
+                .contains("legacy_until_ms")
+        );
+        let tr = &mut value["authentication_gateway"]["profiles"][0]["kubernetes_tokenreview"];
+        tr["legacy_until_ms"] = 4_000_000_000_000u64.into();
+        tr["legacy_mapping_until_ms"] = 4_000_000_000_000u64.into();
+        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        load(file.path()).unwrap();
+        let tr = &mut value["authentication_gateway"]["profiles"][0]["kubernetes_tokenreview"];
+        tr["subject"] = "service_account".into();
+        tr.as_object_mut().unwrap().remove("legacy_until_ms");
+        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        load(file.path()).unwrap();
+        // New offline profiles default to the ServiceAccount principal.
+        value["authentication_gateway"]["profiles"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("kubernetes_tokenreview");
+        value["authentication_gateway"]["profiles"][0]["kubernetes_workload"] = serde_json::json!({"issuer":"https://kubernetes.default.svc.cluster.local","cluster_id":"example-cluster","trust_domain":"cluster.example.test","audience":"world.hangang.dev/example-cluster","namespaces":["blue"],"keys":{"source":"static","jwks_env":"OWNED_JWKS"},"token_prefix":"k8s:"});
+        std::fs::write(file.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        let loaded = load(file.path()).unwrap();
+        assert_eq!(
+            loaded.authentication_gateway.unwrap().profiles[0]
+                .kubernetes_workload
+                .as_ref()
+                .unwrap()
+                .subject,
+            crate::auth_gateway::workload::SubjectMode::ServiceAccount
         );
     }
     #[test]
@@ -2100,6 +2371,47 @@ mod tests {
     }
 
     #[test]
+    fn max_emitted_aal_is_per_application_and_never_inherited() {
+        let cfg = with(r#"{"webauthn":{"high_assurance":{"attestation_ca_files":["/x.pem"],"aaguids":["cb69481e-8ff7-4039-93ec-0a2729a154a8"]}},"apps":[{"app_id":"default","max_emitted_aal":3},{"app_id":"a","hosts":["a.example.test"]},{"app_id":"b","hosts":["b.example.test"],"max_emitted_aal":3}]}"#).unwrap();
+        let snap = cfg.snapshot(1);
+        let get = |id: &str| {
+            snap.apps
+                .iter()
+                .find(|a| a.app_id.as_str() == id)
+                .unwrap()
+                .max_emitted_aal
+        };
+        assert_eq!(get("a"), Aal::Two);
+        assert_eq!(get("b"), Aal::Three);
+    }
+
+    #[test]
+    fn webauthn_is_off_by_default_and_validated_when_present() {
+        let base = with("{}").unwrap();
+        assert!(base.webauthn.is_none());
+        assert!(!base.verify_limits().stepup_enabled);
+        let on = with(r#"{"webauthn":{}}"#).unwrap();
+        assert!(on.webauthn.is_some());
+        assert!(on.verify_limits().stepup_enabled);
+        assert!(with(r#"{"webauthn":{"rp_id":"example.test","rp_name":"Example"}}"#).is_ok());
+        assert!(invalid(r#"{"webauthn":{"rp_id":"other.test"}}"#).contains("webauthn.rp_id"));
+        assert!(invalid(r#"{"webauthn":{"origin":"https://x.example.test"}}"#).contains("origin"));
+        assert!(invalid(r#"{"webauthn":{"rp_name":""}}"#).contains("rp_name"));
+        assert!(
+            invalid(
+                r#"{"webauthn":{"high_assurance":{"attestation_ca_files":[],"aaguids":["nope"]}}}"#
+            )
+            .contains("high_assurance")
+        );
+        let missing = with(r#"{"webauthn":{"high_assurance":{"attestation_ca_files":["/nonexistent/ca.pem"],"aaguids":["cb69481e-8ff7-4039-93ec-0a2729a154a8"]}}}"#).unwrap();
+        assert!(
+            check_env(&missing, |_| Some("x".into()))
+                .iter()
+                .any(|p| p.contains("cannot read"))
+        );
+    }
+
+    #[test]
     fn totp_key_references_validate_and_material_errors_are_redacted() {
         let config=with(r#"{"totp_keyring":{"active_key":"owned","keys":[{"id":"owned","key_env":"OWNED_FACTOR_KEY"}]}}"#).unwrap();
         assert!(config.totp_keyring.is_some());
@@ -2132,6 +2444,29 @@ mod tests {
             Err(e) => e.to_string(),
             Ok(_) => panic!("expected an error for {extra}"),
         }
+    }
+
+    #[test]
+    fn reload_intervals_default_turn_off_and_are_bounded() {
+        let c = with("{}").unwrap();
+        assert_eq!(c.tls_reload_interval(), Some(Duration::from_secs(10)));
+        assert_eq!(c.auth_reload_interval(), None, "store mode never polls");
+        let c = with(r#"{"authentication": {"source": "config"}}"#).unwrap();
+        assert_eq!(c.auth_reload_interval(), Some(Duration::from_millis(1000)));
+        let c = with(r#"{"authentication": {"source": "config", "reload_interval_ms": 0}, "reload": {"tls_interval_secs": 0}}"#).unwrap();
+        assert_eq!(
+            (c.auth_reload_interval(), c.tls_reload_interval()),
+            (None, None)
+        );
+        assert!(
+            invalid(r#"{"reload": {"tls_interval_secs": 3601}}"#)
+                .contains("reload.tls_interval_secs")
+        );
+        assert!(
+            invalid(r#"{"authentication": {"reload_interval_ms": 50}}"#)
+                .contains("reload_interval_ms")
+        );
+        assert!(invalid(r#"{"reload": {"inotify": true}}"#).contains("inotify"));
     }
 
     #[test]
@@ -2308,6 +2643,8 @@ mod tests {
         assert!(invalid(r#"{"providers": [{"provider_id": "g", "kind": "oidc", "client_id": "c", "client_secret": "literal"}]}"#).contains("environment variable name"));
         assert!(!invalid(r#"{"providers": [{"provider_id": "g", "kind": "oidc", "client_id": "c", "client_secret": "literal"}]}"#).contains("literal\""));
         assert!(invalid(r#"{"providers": [{"provider_id": "g", "kind": "oidc", "client_id": "c", "issuer": "http://example.org"}]}"#).contains("providers[0].issuer"));
+        // A periodic group sync must refresh before memberships go stale.
+        assert!(invalid(r#"{"groups": {"max_staleness_secs": 3600}, "providers": [{"provider_id": "d", "kind": "ldap", "groups": {"sync_interval_secs": 3600}}]}"#).contains("must be shorter than groups.max_staleness_secs"));
         assert!(
             invalid(
                 r#"{"providers": [{"provider_id": "g", "kind": "password", "client_id": "c"}]}"#
@@ -2448,6 +2785,7 @@ mod tests {
             r#"{"listen": {"admin": "127.0.0.1:9999"},
                 "admin": {"session": {"idle": "10m", "absolute": "2h"}, "binding": {"ip": "prefix", "ua": "strict", "on_mismatch": "drop_handle"},
                           "max_auth_age": "45m", "untrusted_peers": "as_client", "query_budget_ms": 750,
+                          "directory_privacy": "strict",
                           "public_url": "https://hopae-admin.example.test:8443"}}"#,
         )
         .unwrap();
@@ -2467,6 +2805,13 @@ mod tests {
         assert_eq!(l.max_auth_age, Duration::from_secs(45 * 60));
         assert_eq!(l.untrusted_peers, UntrustedPeers::AsClient);
         assert_eq!(l.query_budget, Duration::from_millis(750));
+        assert_eq!(l.directory_privacy, DirectoryPrivacy::Strict);
+        let d = admin_with(r#"{"admin": {}}"#).unwrap();
+        assert_eq!(
+            d.admin_limits().unwrap().directory_privacy,
+            DirectoryPrivacy::Standard
+        );
+        assert!(admin_with(r#"{"admin": {"directory_privacy": "open"}}"#).is_err());
     }
 
     #[test]
@@ -2489,6 +2834,21 @@ mod tests {
                 .iter()
                 .all(|w| !w.contains("require_aal"))
         );
+    }
+
+    #[test]
+    fn aal3_requirements_need_high_assurance_and_map_to_aal3_rules() {
+        let ha = r#""webauthn": {"high_assurance": {"attestation_ca_files": ["/x.pem"], "aaguids": ["cb69481e-8ff7-4039-93ec-0a2729a154a8"]}}"#;
+        let c = admin_with(&format!(r#"{{"admin": {{"require_aal": 3}}, {ha}}}"#)).unwrap();
+        assert_eq!(c.admin_limits().unwrap().require_aal, Aal::Three);
+        assert_eq!(c.admin_policy().unwrap().step_up[0].aal, Aal::Three);
+        assert_eq!(c.admin_policy().unwrap().max_emitted_aal, Aal::Two);
+        let refused = admin_invalid(r#"{"admin": {"require_aal": 3}}"#);
+        assert!(
+            refused.contains("admin.require_aal 3 needs webauthn.high_assurance"),
+            "{refused}"
+        );
+        assert!(admin_invalid(r#"{"admin": {"require_aal": 4}}"#).contains("must be 1, 2 or 3"));
     }
 
     #[test]

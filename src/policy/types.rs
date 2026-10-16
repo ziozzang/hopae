@@ -163,6 +163,9 @@ pub struct AppPolicy {
     /// Freshness bound of the session's `auth_time` (ADR-0016). Set only for
     /// the implicit console application in M4-min; not a configuration key.
     pub max_auth_age: Option<Duration>,
+    /// Highest level verify and receipts present for this application
+    /// (ADR-0018): `Two` (default) or `Three`.
+    pub max_emitted_aal: crate::session::types::Aal,
 }
 
 impl AppPolicy {
@@ -181,6 +184,7 @@ impl AppPolicy {
             logout_confirm: true,
             step_up: Vec::new(),
             max_auth_age: None,
+            max_emitted_aal: crate::session::types::Aal::Two,
         }
     }
 }
@@ -211,6 +215,8 @@ pub struct ProviderConfig {
     pub enabled: bool,
     pub client_id: String,
     pub ldap: Option<crate::provider::ldap::Config>,
+    /// `providers[].groups` (ADR-0019).
+    pub groups: Option<crate::groups::ProviderGroups>,
     /// Environment variable *name*; the value is never held here.
     pub client_secret_env: Option<String>,
     pub issuer: Option<String>,

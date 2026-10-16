@@ -159,6 +159,19 @@ fn params(st: &AdminState, q: &Query) -> Result<Params, Fail> {
                 .to_canonical(),
         ),
     };
+    // A kind prefix (`factor.`, `admin.user_`): lowercase letters, digits, `_` and `.`.
+    let kind_prefix = match text("kind_prefix") {
+        None => None,
+        Some(v)
+            if v.len() <= 64
+                && v.bytes().all(|b| {
+                    b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.'
+                }) =>
+        {
+            Some(v)
+        }
+        Some(_) => return Err(invalid_filter()),
+    };
     let (since, until) = (secs_param(q, "since")?, secs_param(q, "until")?);
     if let (Some(s), Some(u)) = (since, until)
         && s > u
@@ -194,6 +207,7 @@ fn params(st: &AdminState, q: &Query) -> Result<Params, Fail> {
             "client_ip",
             client_ip.map(|i| i.to_string()).unwrap_or_default(),
         ),
+        ("kind_prefix", kind_prefix.clone().unwrap_or_default()),
         (
             "since",
             since.map(|t| t.secs().to_string()).unwrap_or_default(),
@@ -210,6 +224,7 @@ fn params(st: &AdminState, q: &Query) -> Result<Params, Fail> {
             user_id,
             session_id,
             client_ip,
+            kind_prefix,
             since,
             until,
             limit,

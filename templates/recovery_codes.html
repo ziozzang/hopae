@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("recovery.title") }}{% endblock %}
+{% block content %}
+{% if !codes.is_empty() %}
+<h1>{{ t.get("recovery.shown_title") }}</h1>
+<p>{{ t.get("recovery.shown_intro") }}</p>
+<ol class="codes">
+{% for c in codes %}<li><code>{{ c }}</code></li>{% endfor %}
+</ol>
+<p><a class="button" href="/security?done=codes">{{ t.get("recovery.done") }}</a></p>
+{% else %}
+<h1>{{ t.get("recovery.title") }}</h1>
+{% if first %}<p class="notice" role="status">{{ t.get("recovery.first") }}</p>{% endif %}
+<p>{{ t.get("recovery.intro") }}</p>
+{% include "_messages.html" %}
+{% if generated %}<p>{{ t.fmt("security.recovery.unused", "count", unused) }}</p>{% else %}<p>{{ t.get("recovery.none") }}</p>{% endif %}
+{% if !has_factor %}<p>{{ t.get("recovery.needs_factor") }}</p>
+{% else %}
+{% if generated %}<p class="hint">{{ t.get("recovery.regenerate_warning") }}</p>{% endif %}
+<form method="post" action="/security/recovery-codes">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<button type="submit">{% if generated %}{{ t.get("recovery.regenerate") }}{% else %}{{ t.get("recovery.generate") }}{% endif %}</button>
+</form>
+{% endif %}
+<p><a href="/security">{{ t.get("security.back") }}</a></p>
+{% endif %}
+{% endblock %}

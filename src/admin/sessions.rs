@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use crate::config::valid_user_id;
 use crate::event::types::{EventKind, Outcome, reasons};
 use crate::identity::types::UserId;
-use crate::session::types::SessionId;
+use crate::session::types::{Aal, SessionId};
 use crate::store::types::{AdminRole, Cursor, HandleRow, SessionSummary, SessionsQuery};
 use crate::telemetry::counters;
 
@@ -116,6 +116,7 @@ struct SessionPage<'a> {
 
 struct Params {
     user_id: Option<UserId>,
+    aal: Option<Aal>,
     limit: usize,
     cursor: Option<Cursor>,
 }
@@ -126,8 +127,16 @@ fn params(st: &AdminState, q: &Query) -> Result<Params, Fail> {
         Some(v) if valid_user_id(v) => Some(UserId::new(v)),
         Some(_) => return Err(invalid_filter()),
     };
+    // The stored level: 1 or 2 (AAL 3 is a presentation, never stored).
+    let aal = match q.get("aal") {
+        None | Some("") => None,
+        Some("1") => Some(Aal::One),
+        Some("2") => Some(Aal::Two),
+        Some(_) => return Err(invalid_filter()),
+    };
     Ok(Params {
         user_id,
+        aal,
         limit: limit_of(q)?,
         cursor: cursor_of(st, q)?,
     })
@@ -143,6 +152,7 @@ async fn load(
         .list_live_sessions(
             SessionsQuery {
                 user_id: p.user_id,
+                aal: p.aal,
                 limit: p.limit,
                 cursor: p.cursor,
                 now: st.clock.now(),
@@ -178,11 +188,12 @@ pub async fn list_page(State(st): State<Arc<AdminState>>, c: Ctx, uri: Uri) -> R
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_default();
+        let aal = p.aal.map(|a| a.as_i64().to_string()).unwrap_or_default();
         let page = load(&st, &c, p).await?;
         let next = next_url(
             &st,
             "/sessions",
-            &[("user_id", user_id.clone())],
+            &[("user_id", user_id.clone()), ("aal", aal)],
             &page.next,
         );
         let chrome = Chrome::signed_in(&st, &c.req, &c.principal, "sessions");
@@ -289,10 +300,11 @@ pub async fn detail_page(
 }
 
 /// Terminate one session; `Ok(changed)`. CSRF and the role were checked by the listener.
-async fn terminate(st: &AdminState, c: &Ctx, id: &str) -> Result<bool, Fail> {
+async fn terminate(st: &AdminState, c: &Ctx, id: &str, m: &Mutation) -> Result<bool, Fail> {
     if !valid_session_id(id) {
         return Err(fail(StatusCode::BAD_REQUEST, "invalid_id"));
     }
+    let reason = common::reason_of(m)?;
     let actor = api::actor(&c.principal);
     let policy = api::actor_policy(st, &c.principal);
     let dl = api::deadline(st);
@@ -311,11 +323,13 @@ async fn terminate(st: &AdminState, c: &Ctx, id: &str) -> Result<bool, Fail> {
         .provider(&row.provider_id)
         .reason(reasons::ADMIN)
         .build();
-    let admin_event =
-        common::admin_event(st, c, EventKind::AdminSessionTerminate, Outcome::Success)
-            .user(&row.user_id)
-            .session(&row.session_id)
-            .build();
+    let admin_event = super::users::with_note(
+        common::admin_event(st, c, EventKind::AdminSessionTerminate, Outcome::Success),
+        reason.as_deref(),
+    )
+    .user(&row.user_id)
+    .session(&row.session_id)
+    .build();
     let changed = match st
         .sessions
         .admin_terminate_session(&actor, &policy, &sid, dl, admin_event, session_event)
@@ -341,8 +355,9 @@ pub async fn terminate_api(
     State(st): State<Arc<AdminState>>,
     c: Ctx,
     Path(id): Path<String>,
+    Extension(m): Extension<Mutation>,
 ) -> Response {
-    match terminate(&st, &c, &id).await {
+    match terminate(&st, &c, &id, &m).await {
         Ok(changed) => api::json(StatusCode::OK, &json!({ "changed": changed })),
         Err(f) => f.respond(&st, &c),
     }
@@ -354,7 +369,7 @@ pub async fn terminate_page(
     Path(id): Path<String>,
     Extension(m): Extension<Mutation>,
 ) -> Response {
-    match terminate(&st, &c, &id).await {
+    match terminate(&st, &c, &id, &m).await {
         Ok(_) => {
             let get = |n: &str| m.form.as_ref().and_then(|f| f.get(n));
             let mut r = StatusCode::SEE_OTHER.into_response();

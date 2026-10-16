@@ -184,7 +184,13 @@ pub(crate) fn fence(
                AND h.created_at <= :now + :skew
                AND :now < MIN(h.absolute_expires_at, h.created_at + :handle_absolute)
                AND :now < h.last_seen_at + :handle_idle
-               AND h.issued_aal >= :require_aal
+               AND h.issued_aal >= MIN(:require_aal, 2)
+               AND (:require_aal < 3 OR EXISTS (
+                     SELECT 1 FROM session_webauthn_provenance p
+                     JOIN webauthn_credentials w ON w.credential_id = p.credential_id AND w.user_id = p.user_id
+                     WHERE p.session_id = s.session_id AND p.credential_generation = s.cred_gen
+                       AND s.aal = 2 AND p.assurance = 'aal3' AND w.assurance = 'aal3'
+                       AND w.state = 'active' AND w.backup_eligible = 0 AND w.backup_state = 0))
                AND u.status = 'active'
                AND u.authz_version = s.authz_version_at_auth
                AND g.revoked_at IS NULL
@@ -216,7 +222,7 @@ pub(crate) fn fence(
 /// Open the write transaction of a fenced mutation: the `admin_mutation` gate
 /// (test hook), `BEGIN IMMEDIATE`, the deadline check (the lock may have been
 /// waited for), then the fence as the first statement.
-fn begin_fenced<'a>(
+pub(super) fn begin_fenced<'a>(
     env: &'a mut WriterEnv,
     check: &Check,
     actor: &Actor,
@@ -234,7 +240,7 @@ fn begin_fenced<'a>(
 
 /// Just before COMMIT: the `admin_precommit` gate (test hook), then the
 /// deadline check, so a job that reaches its deadline never commits late.
-fn before_commit(shared: &Shared, check: &Check) -> StoreResult<()> {
+pub(super) fn before_commit(shared: &Shared, check: &Check) -> StoreResult<()> {
     if let Some(h) = &shared.hooks {
         h.pass_gate("admin_precommit");
     }

@@ -1,6 +1,6 @@
 # 관리
 
-<!-- translation-status: source=../ADMIN.md source-rev=5 status=current -->
+<!-- translation-status: source=../ADMIN.md source-rev=9 status=current -->
 
 [문서 목차](README.md) · [English](../ADMIN.md)
 
@@ -107,6 +107,9 @@ version N is older than this binary (M): start the instance once to migrate`), �
 | `hopae admin revoke <user_id 또는 email> --config <path>` | 부여를 취소합니다. 사용자의 다음 콘솔 요청은 `403 not_admin`입니다. 행은 파일 가져오기가 절대 되살리지 않는 묘비(`managed_by = api`)가 됩니다. `admin.revoke`를 기록합니다. |
 | `hopae admin list [--all] --config <path>` | 살아 있는 모든 부여를 출력합니다: 사용자 id, 이메일, 역할, `managed_by`, 부여 시각, 부여자, 메모. `--all`은 취소된 행을 취소 정보와 함께 더합니다. 부여가 없으면 아무것도 출력하지 않습니다. |
 | `hopae admin import [--force <user_id 또는 email>] --config <path>` | 파일의 `admin.users[]`를 [심기 규칙](#설정-파일의-부여)으로 저장소에 적용하고(같은 가져오기가 시작 시에도 실행됨) 삽입·갱신·취소·변경 없음·강제·건너뜀을 사유와 함께 출력합니다. `--force`는 같은 키 규칙으로 기존 행을 고르고(이메일은 어떤 해결보다 먼저 `source_email`로 묶인 행을 고름) 파일 항목을 `api` 관리 행이나 취소된 행 위에 다시 적용합니다. `attrs.actor = file`인 `admin.grant` / `admin.revoke`를 기록합니다. |
+| `hopae admin factors list <user_id 또는 email> --config <path>` | 사용자의 2차 인증 요소(인증 앱, 사용하지 않은 복구 코드, 해시 ID·이름·종류·등급·시각이 있는 패스키)를 출력합니다. 키 자료는 출력하지 않습니다. [WebAuthn 패스키](WEBAUTHN.md#관리)를 보십시오. |
+| `hopae admin factors reset <user_id 또는 email> --config <path>` | 사용자의 모든 패스키, 인증 앱, 복구 코드를 폐기하고 모든 세션을 종료합니다. `attrs.actor = cli`인 `admin.factor_reset`을 기록합니다. |
+| `hopae admin service-credentials create\|rotate\|promote\|revoke\|list …` | 기계 호출자(Pumgye 정책 v2)를 위한 경로 범위·읽기 전용·mTLS 바인딩 자격 증명입니다. 토큰은 한 번만 출력되고 digest만 저장됩니다. [서비스 자격 증명](SERVICE_CREDENTIALS.md)을 참고하십시오. |
 
 출력은 따로 밝히지 않으면 stdout입니다(시각은 UTC, `-`는 없는 값, 제공자가 준 텍스트의
 제어 문자는 `?`로 출력됨). `hopae admin grant`는 해결 블록을 먼저 출력하고 결과를 냅니다.
@@ -299,16 +302,30 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'`을 가집니다. 어
 | 메서드와 경로 | 역할 | 응답 |
 | --- | --- | --- |
 | `GET /v1/me` | viewer | `{user_id, email, display_name, role, session_id, auth_time, auth_time_source, aal}` |
-| `GET /v1/users?q=&status=&limit=&cursor=` | viewer | `{items: [{user_id, primary_email, email_verified, email_authoritative, display_name, username, status, authz_version, created_at, last_login_at, live_sessions, role}], next_cursor}` |
+| `GET /v1/users?q=&status=&provider=&mfa=&group=&limit=&cursor=` | viewer | `{items: [{user_id, primary_email, email_verified, email_authoritative, display_name, username, status, authz_version, created_at, last_login_at, live_sessions, role}], next_cursor}` |
 | `GET /v1/users/{user_id}` | viewer | `{user, identities: [≤ 50개의 {provider_id, subject, email, email_verified, name, first_seen_at, last_seen_at}], sessions_live: [최근 생성순 ≤ 20개 요약], sessions_live_total, sessions_terminated: [최근 ≤ 20개], events: [최근 ≤ 50개], grant: {role, managed_by, granted_at, granted_by, note} 또는 null}`. `sessions_url`과 `events_url`이 필터된 목록을 가리킴 |
 | `POST /v1/users/{user_id}/disable` | admin | `{changed, sessions_terminated}`. 비활성화하고 `authz_version`을 올리며 살아 있는 모든 세션을 종료 |
 | `POST /v1/users/{user_id}/enable` | admin | `{changed}`. 어떤 세션도 되살리지 않음 |
 | `POST /v1/users/{user_id}/sessions/terminate` | admin | `{terminated}` |
-| `GET /v1/sessions?user_id=&limit=&cursor=` | viewer | `{items: [{session_id, user_id, primary_email, provider_id, aal, factors, hosts, created_at, last_seen_at, absolute_expires_at, auth_time, auth_time_source, bound_ip, ua_prefix}], next_cursor}`(살아 있는 세션만, 최근 생성순) |
+| `GET /v1/users/{user_id}/factors` | viewer | `{user_id, second_factors, passkeys: [{factor_id, label, aaguid, authenticator, kind(synced 또는 device_bound), backup_eligible, backup_state, user_verified, attested, attestation_format, assurance, transports, created_at, last_used_at}], totp: {active}, recovery_codes: {remaining, generated_at, reenrollment_required_at}}`. 감사되는 읽기(`admin.read`, 목적 `users.factors`). [인증 요소 관리](#인증-요소-관리) 참조 |
+| `POST /v1/users/{user_id}/factors/reset` | admin | `{"scope": "all" \| "passkey" \| "totp" \| "recovery_codes", "factor_id": "pk_…"(passkey만), "reason": "…"}` → `{changed, scope, passkeys_revoked, totp_revoked, recovery_codes_removed, sessions_terminated}` |
+| `POST /v1/users/bulk/disable` | admin | `{"ids": [서로 다른 사용자 ID 1~100개], "reason": "…"}` → `{bulk_operation, requested, disabled, failed, halted, items: [{id, result, sessions_terminated 또는 error}]}`. [일괄 비활성화](#일괄-비활성화) 참조 |
+| `GET /v1/sessions?user_id=&aal=&limit=&cursor=` | viewer | `{items: [{session_id, user_id, primary_email, provider_id, aal, factors, hosts, created_at, last_seen_at, absolute_expires_at, auth_time, auth_time_source, bound_ip, ua_prefix}], next_cursor}`(살아 있는 세션만, 최근 생성순) |
 | `GET /v1/sessions/{session_id}` | viewer | 요약과 `handles: [≤ 100개의 {host, issued_aal, created_at, last_seen_at, absolute_expires_at, revoked_at, revoked_reason}]`, `terminated_at`, `terminated_reason` |
 | `POST /v1/sessions/{session_id}/terminate` | admin | `{changed}` |
-| `GET /v1/events?kind=&outcome=&user_id=&session_id=&client_ip=&since=&until=&limit=&cursor=` | viewer | `{items: [로그 싱크가 쓰는 형식의 이벤트 JSON], next_cursor}` 최신순 |
+| `GET /v1/events?kind=&kind_prefix=&outcome=&user_id=&session_id=&client_ip=&since=&until=&limit=&cursor=` | viewer | `{items: [로그 싱크가 쓰는 형식의 이벤트 JSON], next_cursor}` 최신순 |
 | `GET /v1/status` | viewer | [상태](#상태) 참조 |
+| `POST /v1/subjects/resolve` | viewer | 주체 참조 최대 100개를 표시 정보로 해석. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
+| `POST /v1/subjects/search` | viewer | 선택기를 위한 사람 또는 서비스 주체 검색. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
+| `POST /v1/subjects/lifecycle` | viewer | 지속 커서 이후의 주체 생성과 상태 변경. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
+| `POST /v1/subjects/lifecycle/snapshot` | viewer | 예약된 모든 주체와 상태, 피드 워터마크. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
+| `POST /v1/explain/authentication` | viewer | 인증 검사가 무엇을 왜 답할지. [인증 설명](AUTHENTICATION_EXPLAIN.md) 참조 |
+| `POST /v1/groups/search`, `/v1/groups/get`, `/v1/subjects/groups` | viewer | 그룹, 그룹 구성원, 사람의 그룹. [그룹](GROUPS.md) 참조 |
+| `POST /v1/groups/create`, `/update`, `/delete`, `/members/add`, `/members/remove` | admin | 사유와 `expected_revision`을 붙인 로컬 그룹 쓰기. [그룹](GROUPS.md) 참조 |
+| `POST /v1/groups/projection/snapshot`, `/changes` | viewer | Pumgye를 위한 서명된 멤버십 투영. [그룹](GROUPS.md) 참조 |
+| `GET`, `PUT /v1/authentication/profiles` | viewer, admin | 서비스 인증 프로필. [프로필 게시](AUTH_PROFILE_PUBLICATION.md) 참조 |
+| `POST /v1/authentication/profiles/validate` | viewer | `{"configuration": …}` → 게시하지 않고 `{valid, errors: [{path, code, message}]}`. [프로필 게시](AUTH_PROFILE_PUBLICATION.md#게시-없는-검증) 참조 |
+| `GET`, `PUT /v1/authentication/projections` | viewer, admin | 자격 증명 투영 계획 |
 
 오류 본문은 거부 표의 코드를 담은 `{"error": "<code>"}`입니다.
 
@@ -317,9 +334,9 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'`을 가집니다. 어
 - `limit`은 1부터 200까지(기본 50)입니다. `next_cursor`는 불투명하고 변조가 드러나는 위치이며 이어서 조회하려면 `cursor`로 되돌려 줍니다. 위조되거나 오래된 커서는 `400 invalid_cursor`입니다. `next_cursor`가 없으면 순회가 끝난 것입니다.
 - 모든 페이지는 최대 **후보 1만 행**만 살펴봅니다: 인덱스 하나의 범위 스캔 한 번 뒤에 그 창 안에서 나머지 필터를 적용합니다. 창의 크기와 마지막 후보는 무엇이 맞았든 알 수 있으므로, 창이 가득 찼으면 페이지가 항목을 하나도 돌려주지 않았더라도 `next_cursor`는 마지막으로 살펴본 후보 뒤를 가리킵니다. 따라서 큰 테이블의 희소한 필터는 짧은 페이지 여러 번이 되지 요청 하나에서 테이블 전체를 훑지 않습니다. 커서 페이지는 자기 위치로 바로 탐색하므로(인덱스에 대한 복합 행 값 비교) 깊은 페이지도 첫 페이지보다 비싸지 않습니다. 밀집한 순회는 약 `rows / limit`번, 희소한 순회는 거기에 최대 `rows / 10,000`번이 더 걸립니다. `admin.query_budget_ms`에 닿은 페이지는 저장소 안에서 중단되고 `503`으로 답합니다.
 - 정렬은 고정이며 불변입니다: 사용자는 생성(최신순), 세션은 생성(최신순, `last_seen_at` 표시), 이벤트는 시각(최신순). 순회는 시작 시점에 존재한 행을 그 사이의 활동과 무관하게 건너뛰거나 반복하지 않으며, 순회 시작 뒤에 만들어진 행은 순회에 들지 않습니다.
-- 사용자: `q`(최대 128자)는 창 안에서 `primary_email`과 `username`을 접두사로, `display_name`을 부분 문자열로 대조합니다. `status`는 `active` 또는 `disabled`입니다.
-- 세션: `user_id`로 한 사용자로 좁힙니다. 살아 있는 세션만 나열합니다(종료된 세션은 사용자 상세에서 미리보기로 봅니다).
-- 이벤트: `kind`는 정확한 이벤트 종류(`login.failed`, `admin.user_disable`, …), `outcome`은 `success`, `failure`, `info`, `client_ip`는 정확한 주소 하나(IPv4 매핑 IPv6는 정규화), `since`와 `until`은 유닉스 초(`since`는 `until`을 넘을 수 없음)입니다. 필터는 AND로 결합됩니다. 인덱스는 `session_id`, 없으면 `user_id`, 없으면 `client_ip`, 없으면 `kind`, 없으면 시각 순으로 고르고 나머지 필터는 창 안에서 적용합니다.
+- 사용자: `q`(최대 128자)는 창 안에서 `primary_email`과 `username`을 접두사로, `display_name`을 부분 문자열로 대조합니다. `status`는 `active` 또는 `disabled`입니다. `provider`(설정된 제공자 ID)는 그 제공자의 신원이 있는 사용자를, `mfa=enrolled`는 활성 패스키나 인증 앱이 있는 사용자를, `mfa=none`은 둘 다 없는 사용자를 남깁니다(복구 코드는 세지 않음). `group`(`grp1:` 참조)은 유효한 멤버십이 있는 사용자를 남깁니다. 즉 그룹이 활성이고 멤버십이 정지되거나 만료되지 않아야 합니다([그룹](GROUPS.md)).
+- 세션: `user_id`로 한 사용자로 좁힙니다. `aal`(`1` 또는 `2`)은 그 저장 수준의 세션을 남깁니다(AAL 3은 저장되지 않음, [ADR-0018](../adr/0018-aal3-emission.md)). 살아 있는 세션만 나열합니다(종료된 세션은 사용자 상세에서 미리보기로 봅니다).
+- 이벤트: `kind`는 정확한 이벤트 종류(`login.failed`, `admin.user_disable`, …), `kind_prefix`는 그것으로 시작하는 종류(`factor.`, `admin.user_`. 영문 소문자, 숫자, `_`, `.`), `outcome`은 `success`, `failure`, `info`, `client_ip`는 정확한 주소 하나(IPv4 매핑 IPv6는 정규화), `since`와 `until`은 유닉스 초(`since`는 `until`을 넘을 수 없음)입니다. 필터는 AND로 결합됩니다. 인덱스는 `session_id`, 없으면 `user_id`, 없으면 `client_ip`, 없으면 `kind`, 없으면 시각 순으로 고르고 나머지 필터는 창 안에서 적용합니다.
 
 ### 상태를 바꾸는 요청
 
@@ -328,6 +345,46 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'`을 가집니다. 어
 - 모든 변경은 저장소 트랜잭션의 첫 문장으로 verify 엔진 자신의 수명 의미론에 따라 행위자를 다시 평가합니다: 세션이 살아 있고 실효 절대(`min(저장값, created_at + session.absolute)`)·유휴 마감 안에 있는지, 콘솔 호스트의 핸들이 취소되지 않고 실효 마감 안에 있으며 요구 수준인지, 둘 다 60초를 넘어 미래에 만들어지지 않았는지, 사용자가 `active`이고 인가 기준이 바뀌지 않았는지, 신선도 술어를 만족하는지, 부여가 살아 있는 `admin`인지. 먼저 커밋된 변화는 쓰기를 거부하고(`403 actor_revoked`) 아무것도 바꾸지 않습니다.
 - 변경도 `admin.query_budget_ms` 아래에서 실행됩니다. 자기 작업 때문이든 다른 연결이 쓰기 잠금을 쥐고 있기 때문이든 마감까지 끝나지 못하는 비활성화나 전체 종료는 중단되고 롤백되며 `503`으로 답합니다. 부분적으로 커밋되는 것은 없고 마감 뒤에 커밋되는 것도 없습니다.
 - 아무것도 바꾸지 않는 변경(비활성화된 사용자 비활성화, 끝난 세션 종료)은 `changed: false`와 함께 `200`으로 답하고 이벤트를 쓰지 않습니다.
+- **사유.** 비활성화, 활성화, 전체 종료, 종료, 인증 요소 초기화, 일괄 비활성화, 프로필과 투영 게시는 선택적 `reason`을 받습니다. 폼 필드 `reason`이나 JSON 본문의 `"reason"`입니다. 앞뒤 공백을 떼고 최대 256자이며 제어 문자나 보이지 않는 서식 문자(양방향 재정의, 폭 없는 문자)가 없어야 합니다. 그렇지 않으면 `400 invalid_reason`이고 아무것도 바꾸지 않습니다. 사유는 변경의 `admin.*` 이벤트에 `attrs.note`로 기록됩니다. 빈 사유는 사유 없음입니다.
+
+### 인증 요소 관리
+
+`GET /v1/users/{user_id}/factors`는 지원 업무를 위해 사용자의 2차 인증 요소를
+나열합니다. 각 패스키는 `pk_` 요소 ID(자격 증명 ID나 키는 절대 아님), 이름,
+인증기의 AAGUID와 알려진 AAGUID라면 그 이름(동기화 패스키와 `none` 증명의 0으로만
+된 AAGUID는 `null`), 동기화 여부(`backup_eligible`)와 현재 백업 여부, 사용자 확인,
+증명, 보증 등급, 전송 방식, 등록 시각과 마지막 사용 시각으로 보입니다. 인증 앱이
+활성인지, 복구 코드가 몇 개 남았는지, 사용된 코드 때문에 재등록이 필요해진 시각도
+보입니다. 부여가 있으면 누구나 읽을 수 있고, 모든 응답은 먼저 `admin.read`(목적
+`users.factors`)를 쓰며 행위자별로 속도가 제한됩니다(60회, 초당 1회 보충).
+
+`POST /v1/users/{user_id}/factors/reset`(역할 `admin`)은 `admin.factor_reset` 기록과
+같은 트랜잭션에서 다음을 제거합니다.
+
+| `scope` | 제거 | 종료 |
+| --- | --- | --- |
+| `passkey`(`factor_id`와 함께) | 그 패스키 | 그 패스키로 수립되거나 상향된 세션(`reason=factor_reset`) |
+| `totp` | 인증 앱 | TOTP 코드로 상향된 세션 |
+| `recovery_codes` | 사용하지 않은 복구 코드 | 없음(코드는 AAL 1 근거) |
+| `all` | 모든 패스키, 인증 앱, 모든 복구 코드, 재등록 요구 | 사용자의 모든 세션 |
+
+사용자가 갖지 않은 패스키는 `404 factor_not_found`입니다. 지울 것이 없는 초기화는
+`changed: false`로 답하고 아무것도 쓰지 않습니다. 관리자는 여기서 자기 인증 요소를
+초기화할 수 없습니다(`403 self_target`. 콘솔 세션 자체가 끝나기 때문). 사용자는 새로
+로그인한 뒤 다시 등록합니다([WebAuthn 패스키](WEBAUTHN.md)). 콘솔 없이 복구할 때를
+위해 명령줄의 `hopae admin factors reset`은 그대로 있습니다.
+
+### 일괄 비활성화
+
+`POST /v1/users/bulk/disable`은 서로 다른 사용자 최대 100명을 비활성화하며, 각각을
+`POST /v1/users/{id}/disable`과 똑같이 자기 펜스 트랜잭션에서 처리합니다. 세션이
+끝나고 `admin.user_disable` 기록에 사유와 호출의 요청 ID인 `attrs.bulk_operation`이
+실리므로 일괄 작업 전체를 다시 찾을 수 있습니다. 응답은 모든 항목을 순서대로 `result`와
+함께 나열합니다. `disabled`, `unchanged`(이미 비활성), 또는 코드(`invalid_id`,
+`not_found`, `self_target`)가 있는 `error`입니다. 행위자 자신이 거부되거나
+(`actor_revoked`) 저장소가 실패하면 나머지 항목은 `not_attempted`이고 `halted`가
+원인을 가리킵니다. 빈 목록, 100개 초과, 중복 ID는 `400`입니다. 일괄 호출은
+행위자별로 속도가 제한됩니다(10회, 10초마다 1회 보충).
 
 ### 감사 이벤트
 
@@ -345,8 +402,17 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'`을 가집니다. 어
 | `admin.grant`, `admin.revoke` | `user_id` = 부여된 사용자 | `actor`(`cli` 또는 `file`), `role`, `previous_role`, `managed_by` | `admin_grants` 행 |
 | `admin.denied` | `user_id`, `session_id` = 요청자 | `endpoint`(라우트 패턴), `method`. `reason` ∈ `not_admin`, `role_insufficient`, `auth_too_old`, `aal_insufficient`, `self_target`, `actor_revoked` | 없음(단독 필수 이벤트) |
 | `csrf.rejected` | `user_id`, `session_id` = 요청자 | `purpose=admin`, `cause` | 없음 |
+| `admin.read` | `user_id`, `session_id` = 설명한 사용자와 세션(설명 API만). 인증 요소를 나열한 사용자는 `user_id` | `actor`, `actor_session`, `purpose`, `endpoint`, `query_sha256`, `requested`, `count`, `status`, `host`, `port`, `app`, `navigation` | 없음(응답 전에 쓰는 단독 필수 이벤트) |
+| `admin.factor_reset` | `user_id` = 대상 | `actor`(또는 `cli`), `actor_session`, `scope`, `factor_id`(passkey 범위), `count`(제거한 요소 수), `note`. `reason=factor_reset` | 취소와 끝난 세션마다 `session.terminated`(`reason=factor_reset`) 하나 |
+| `admin.profiles_publish`, `admin.projections_publish` | — | `actor`, `actor_session`, `revision`(새 리비전), `status`(`enabled` 또는 `disabled`), `note` | 게시와 같은 트랜잭션(거부되거나 충돌한 게시는 아무것도 기록하지 않음) |
 
-읽기는 감사하지 않습니다. 콘솔 로그인은 `app_id = admin`인 일반
+모든 콘솔 변경 이벤트에는 사유가 있으면 `attrs.note`, 일괄 호출의 일부였으면
+`attrs.bulk_operation`, Hangang 콘솔이 보냈으면 `delegated_issuer`,
+`delegated_actor`, `delegated_operation`도 실립니다.
+
+읽기는 감사하지 않습니다. 다만 [주체 디렉터리](SUBJECT_DIRECTORY.md),
+[인증 설명](AUTHENTICATION_EXPLAIN.md), 인증 요소 목록, 프로필 검증 읽기는
+`admin.read`를 쓰며, 이를 쓸 수 없으면 거부합니다. 콘솔 로그인은 `app_id = admin`인 일반
 `session.handoff` 이벤트로, 재인증은 `attrs.reauth = true`와
 `attrs.auth_time_source`가 있는 `login.succeeded`로 보입니다.
 
@@ -361,6 +427,9 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'`을 가집니다. 어
 | `store` | `kind`, `schema_version`, `users`, `live_sessions`, `events`, 싱크별 `deliveries`(`pending`, `failed`), `last_prune_at` |
 | `build` | `version`, `contract`(`1.1`), `started_at` |
 | `config` | `generation`, `digest`, `insecure_mode`, `unauthenticated_caller`, `listeners` |
+| `portal` | `public_url`, `passkeys`(WebAuthn 설정 여부), `passwordless` |
+| `console` | `public_url`(콘솔 origin), `authority`: `{mode, delegation}`. `mode`는 `local`(네이티브 부여 테이블이 결정) 또는 `hangang`(Hangang 콘솔이 권한 주체, `admin.hangang_delegation.authority = hangang`)이고 `delegation`은 `none`, `mapped`(Hangang 행위자를 네이티브 세션에 대응) 또는 `hangang`입니다 |
+| `reload` | `tls[]`: 리스너나 클라이언트별 `name`, 리프 `fingerprint`, `reloads`, `last_reload_at`, `failing`, `error`. `config`(`authentication.source = config`일 때만): `failing`, `error`, `restart_required`, `profiles_revision`, `projections_revision`, `last_reconciled_at`([운영](OPERATIONS.md#tls-인증서-갱신)) |
 
 제공자와 애플리케이션의 실행 중 변경은 M4-min에 포함되지 않습니다. 추가될 때
 API로 바뀐 제공자는 `managed_by = api`가
@@ -373,12 +442,40 @@ API로 바뀐 제공자는 `managed_by = api`가
 | --- | --- | --- |
 | `hopae_admin_requests_total` | `role`(`admin`, `viewer`, 인증 전에는 `none`), `outcome`(`ok`, `denied`, `client_error`, `server_error`, 또는 인증 전에 거부된 요청의 거부 코드). `cookie.secure`가 `false`이면 `insecure_mode="true"`가 더해짐 | 관리 리스너가 답한 요청 |
 | `hopae_admin_denied_total` | `reason` | 리스너와 핸들러의 거부를 사유별로(`untrusted_peer`, `login_required`, `not_admin`, `role_insufficient`, `auth_too_old`, `aal_insufficient`, `self_target`, `actor_revoked`, `overloaded`) |
-| `hopae_admin_mutations_total` | `kind`(`user_disable`, `user_enable`, `sessions_terminate`, `session_terminate`) | 무언가를 바꾼 변경 |
+| `hopae_admin_mutations_total` | `kind`(`user_disable`, `user_enable`, `sessions_terminate`, `session_terminate`, `factor_reset`) | 무언가를 바꾼 변경 |
 | `hopae_admin_rows_examined_total` | `list`(`users`, `sessions`, `events`) | 목록이 살펴본 후보 행 |
 | `hopae_admin_grants_imported_total` | `outcome`(`inserted`, `updated`, `revoked`, `unchanged`, `skipped`) | 시작할 때의 가져오기가 적용한 부여 |
 | `hopae_store_interrupts_total` | 없음 | 마감에서 SQLite 안에서 중단된 저장소 작업 |
 
 노출은 M7이며 그동안은 `test-hooks` 빌드가 보여 줍니다([운영](OPERATIONS.md#카운터)).
+
+### Hangang 콘솔 라우트
+
+`admin.hangang_delegation`이 있으면 Hangang 콘솔 브로커는 콘솔 패키지
+(`plugins/hopae/manifest.json`, 버전 0.1.10)의 다음 라우트를 서명된 `POST`로
+호출합니다. 어댑터는 서명, 재생 창, 본문을 확인한 뒤 요청을 네이티브 엔드포인트로
+넘기며, 거기서 다른 콘솔 요청과 똑같이 부여(또는 Hangang 권한), JSON API 규칙,
+역할, 쓰기 펜스가 적용됩니다. 어댑터가 모르는 필드는 거부되고(`403
+delegation_rejected`), 네이티브 엔드포인트가 거부하는 값은 그 응답을
+유지합니다(`400 invalid_filter` 등).
+
+| 라우트 | 변경 | 본문 | 네이티브 엔드포인트 |
+| --- | --- | --- | --- |
+| `status`, `me` | 아니오 | 없음(`GET`) | `GET /v1/status`, `GET /v1/me` |
+| `users/query` | 아니오 | `{cursor, limit, q, status, provider, mfa, group}` | `GET /v1/users?…` |
+| `sessions/query` | 아니오 | `{cursor, limit, user_id, aal}` | `GET /v1/sessions?…` |
+| `events/query` | 아니오 | `{cursor, limit, kind, kind_prefix, outcome, user_id, session_id, client_ip, since, until}` | `GET /v1/events?…` |
+| `users/get` | 아니오 | `{id}` | `GET /v1/users/{id}` |
+| `users/factors` | 아니오 | `{id}` | `GET /v1/users/{id}/factors` |
+| `users/factors/reset` | 예 | `{id, scope, factor_id, reason}` | `POST /v1/users/{id}/factors/reset` |
+| `users/disable`, `users/enable`, `users/sessions-terminate`, `sessions/terminate` | 예 | `{id, reason}` | `POST /v1/users/{id}/disable`, `/enable`, `/sessions/terminate`, `POST /v1/sessions/{id}/terminate` |
+| `users/bulk-disable` | 예 | `{ids, reason}` | `POST /v1/users/bulk/disable` |
+| `authentication/profiles`, `authentication/projections` | 아니오 | 없음(`GET`) | `GET /v1/authentication/profiles`, `/projections` |
+| `authentication/profiles/publish`, `authentication/projections/publish` | 예 | `{revision, configuration, reason}` | `If-Match`가 있는 `PUT …` |
+| `authentication/profiles/validate` | 아니오 | `{configuration}` | `POST /v1/authentication/profiles/validate` |
+| `subjects/resolve`, `subjects/search`, `subjects/lifecycle`, `subjects/lifecycle/snapshot`, `explain/authentication` | 아니오 | 네이티브 엔드포인트와 같음 | 같은 경로 |
+| `groups/search`, `groups/get`, `subjects/groups` | 아니오 | 네이티브 엔드포인트와 같음 | 같은 경로 |
+| `groups/create`, `groups/update`, `groups/delete`, `groups/members/add`, `groups/members/remove` | 예 | 네이티브 엔드포인트와 같음 | 같은 경로 |
 
 ## 제한과 호환성
 

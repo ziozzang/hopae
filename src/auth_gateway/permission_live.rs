@@ -12,10 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
-use tonic::{
-    metadata::MetadataValue,
-    transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity},
-};
+use tonic::metadata::MetadataValue;
 const MAXIMUM: u64 = 9_007_199_254_740_991;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Refused;
@@ -174,10 +171,11 @@ impl Request {
     }
 }
 pub struct Client {
-    rpc: ProjectionPermitsClient<Channel>,
+    channel: super::mtls_channel::ReloadingChannel,
+    rpc: ProjectionPermitsClient<super::mtls_channel::ReloadingChannel>,
     observed_rpc:
         pumgye_grpc::v1::observed_projection_permits_client::ObservedProjectionPermitsClient<
-            Channel,
+            super::mtls_channel::ReloadingChannel,
         >,
     credential: MetadataValue<tonic::metadata::Ascii>,
     admission: Semaphore,
@@ -267,19 +265,14 @@ impl Client {
         let mut credential: MetadataValue<tonic::metadata::Ascii> =
             format!("Bearer {token}").parse().map_err(|_| Refused)?;
         credential.set_sensitive(true);
-        let tls = ClientTlsConfig::new()
-            .domain_name(server_name)
-            .ca_certificate(Certificate::from_pem(ca))
-            .identity(Identity::from_pem(certificate, key));
-        let channel = Endpoint::from_shared(address.to_owned())
-            .map_err(|_| Refused)?
-            .connect_timeout(Duration::from_secs(1))
-            .timeout(Duration::from_secs(1))
-            .tcp_nodelay(true)
-            .tls_config(tls)
-            .map_err(|_| Refused)?
-            .connect_lazy();
+        let channel = super::mtls_channel::ReloadingChannel::new(
+            address,
+            server_name,
+            super::mtls_channel::channel(address, server_name, ca, certificate, key)
+                .map_err(|_| Refused)?,
+        );
         Ok(Self {
+            channel: channel.clone(),
             observed_rpc: pumgye_grpc::v1::observed_projection_permits_client::ObservedProjectionPermitsClient::new(channel.clone()).max_encoding_message_size(8192).max_decoding_message_size(1024),
             rpc: ProjectionPermitsClient::new(channel)
                 .max_encoding_message_size(8192)
@@ -456,6 +449,26 @@ impl Client {
     }
 }
 
+impl Client {
+    /// Use new mTLS material for every later call ([`crate::reload`]).
+    pub(crate) fn reload_tls(
+        &self,
+        ca: &[u8],
+        certificate: &[u8],
+        key: &[u8],
+    ) -> Result<(), Refused> {
+        if [ca, certificate, key]
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 128 * 1024)
+        {
+            return Err(Refused);
+        }
+        self.channel
+            .replace(ca, certificate, key)
+            .map_err(|_| Refused)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,11 +502,15 @@ mod tests {
         .unwrap()
     }
     fn client() -> Client {
+        let channel = super::super::mtls_channel::ReloadingChannel::new(
+            "https://owned.example.test",
+            "owned.example.test",
+            tonic::transport::Channel::from_static("https://owned.example.test").connect_lazy(),
+        );
         Client {
-            observed_rpc:pumgye_grpc::v1::observed_projection_permits_client::ObservedProjectionPermitsClient::new(Channel::from_static("https://owned.example.test").connect_lazy()),
-            rpc: ProjectionPermitsClient::new(
-                Channel::from_static("https://owned.example.test").connect_lazy(),
-            ),
+            channel: channel.clone(),
+            observed_rpc:pumgye_grpc::v1::observed_projection_permits_client::ObservedProjectionPermitsClient::new(channel.clone()),
+            rpc: ProjectionPermitsClient::new(channel),
             credential: "Bearer owned-fixture".parse().unwrap(),
             admission: Semaphore::new(1),
             sequence: AtomicU64::new(1),
@@ -812,6 +829,32 @@ mod tests {
         .unwrap();
         assert!(wrong.validate(request(now() + 900), &now).await.is_err());
         assert!(client.validate(request(now() + 900), &now).await.is_ok());
+        // Live reload: a client certificate the server does not trust fails;
+        // the trusted material restores it, without a new client.
+        crate::reload::tests::pki(root.path(), "other");
+        let other_cert = std::fs::read(root.path().join("other-client.pem")).unwrap();
+        let other_key = std::fs::read(root.path().join("other-client.key")).unwrap();
+        client.reload_tls(&ca, &other_cert, &other_key).unwrap();
+        assert!(client.validate(request(now() + 900), &now).await.is_err());
+        prepared.reload_tls(&ca, &other_cert, &other_key).unwrap();
+        assert!(
+            prepared
+                .client
+                .validate(request(now() + 900), &now)
+                .await
+                .is_err()
+        );
+        prepared.reload_tls(&ca, &certificate, &key).unwrap();
+        assert!(
+            prepared
+                .client
+                .validate(request(now() + 900), &now)
+                .await
+                .is_ok()
+        );
+        client.reload_tls(&ca, &certificate, &key).unwrap();
+        assert!(client.validate(request(now() + 900), &now).await.is_ok());
+        assert!(client.reload_tls(&ca, b"", &key).is_err());
         stop.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(3), running)
             .await
