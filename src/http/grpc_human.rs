@@ -58,7 +58,7 @@ impl Human {
 fn wire_context(
     c: &receipt_binding::Context<'_>,
 ) -> Result<v1::AuthenticationReceiptContext, Status> {
-    if c.identity.kind != PrincipalKind::Human || !matches!(c.identity.aal, 1 | 2) {
+    if c.identity.kind != PrincipalKind::Human || !(1..=3).contains(&c.identity.aal) {
         return Err(refused());
     }
     Ok(v1::AuthenticationReceiptContext {
@@ -81,7 +81,7 @@ fn native_context(
     c: &v1::AuthenticationReceiptContext,
 ) -> Result<receipt_binding::Context<'_>, Status> {
     let i = c.identity.as_ref().ok_or_else(refused)?;
-    if i.kind != 1 || !matches!(i.aal, 1 | 2) {
+    if i.kind != 1 || !(1..=3).contains(&i.aal) {
         return Err(refused());
     }
     Ok(receipt_binding::Context {

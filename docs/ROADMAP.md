@@ -1,6 +1,6 @@
 # Roadmap
 
-<!-- doc-rev: 9 -->
+<!-- doc-rev: 13 -->
 
 [Documentation](README.md) · [한국어](ko/ROADMAP.md)
 
@@ -230,6 +230,8 @@ Scope (scenarios 400–499):
 - [ ] Lua hooks (400–439) in isolated worker processes following the gateway's model: claims mapping after authentication, additional authorization input, header mapping; explicit list of what Lua cannot do (no network, no secrets, no update control).
 - [ ] Login-notification webhooks (440–469): events from ADR-0009 (login success, failure, new device, lockout, logout, revocation) delivered from the per-destination delivery rows, at-least-once with `event_id` as the idempotency key; HMAC-signed deliveries; bounded retries and backlog with dead-lettering; per-endpoint secrets from the environment; destination restrictions against internal address ranges by default.
 - [ ] Second-factor mechanism (470–499) per ADR-0008: `Factor` trait (enroll, challenge, verify, recover, administrator reset); step-up rules per application evaluated at verify; TOTP first, WebAuthn second, recovery codes.
+  - WebAuthn passkeys ([ADR-0017](adr/0017-webauthn-passkeys.md), scenarios 480–486, [design](WEBAUTHN.md)): first pass in source behind the default-off `webauthn` configuration — portal-only registration and step-up, security overview and passkey management, portal security confirmation, recovery codes (AAL 1, forced re-enrollment), last-factor rule, sign-count regression handling, administrator reset from the command line. AAL 3 is classified and recorded, not emitted. Phase 2: native Human owner provenance for passkey elevations (migration 12).
+  - Phase 2 (in source): passwordless (discoverable) sign-in with conditional UI on the login page (scenario 487). Deferred: factor management in the console; a passkey requirement for console operators (`admin.require_aal` with a phishing-resistant factor); requiring AAL 3 in step-up rules, `admin.require_aal` and Pumgye plans (emission itself is ADR-0018, per application, opt-in).
 
 Exit: a route requiring a second factor denies a first-factor-only session live; a webhook delivery is verified against a loopback receiver and one real endpoint.
 
@@ -292,7 +294,7 @@ Not scheduled; recorded so they are not re-discussed from scratch:
 
 - OIDC provider mode for third-party applications; SAML; SCIM provisioning.
 - Generic forward-auth adapter profiles (nginx `auth_request`, Traefik, Caddy, Envoy `ext_authz`) behind the ADR-0013 boundary.
-- Device authorization flow; passkey-first sign-in.
+- Device authorization flow. (Passkey-first sign-in moved to the next WebAuthn pass of M5.)
 - `Domain=` cookie mode for sibling subdomains (rejected in M1 because of cookie tossing).
 - Suffix host patterns (`*.example.test`) for applications (rejected: a dangling subdomain becomes a credential destination).
 - Redis as a positive session cache (rejected: a stale entry that still answers outlives every revocation bound).

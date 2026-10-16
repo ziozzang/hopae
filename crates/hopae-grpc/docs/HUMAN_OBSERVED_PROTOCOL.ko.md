@@ -14,7 +14,7 @@ H1 bind_actual은 실제 본문을 한 번 해시하고 private필드의 계산�
 반환합니다. 기존 digest출력은 같으며 호출자 digest발급 준비 API는 없습니다.
 
 epoch는 hobs1:<nonce32>:<authority40>:s:<원천scope리비전>:a:<앱세대>입니다.
-TimeReply6은 source_revision입니다. kind1/AAL1또는2/human1:+소문자64hex만
+TimeReply6은 source_revision입니다. kind1/AAL1·2·3(3은 옵트인한 애플리케이션만, Hopae ADR-0018)/human1:+소문자64hex만
 허용합니다. 사용자리비전과 credential세대는 각각 양수이나 원천리비전이나
 서로 같을 필요가 없습니다. 사용자 전체에 적용하는 전역floor는 없습니다.
 

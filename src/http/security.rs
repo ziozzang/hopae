@@ -34,6 +34,36 @@ pub fn csp_with_form_action(origins: &[Origin]) -> String {
     format!("default-src 'none'; style-src 'self'; form-action {form}; frame-ancestors 'none'")
 }
 
+/// Response extension of a page that runs the WebAuthn ceremony script
+/// (ADR-0017 decision 3); every other page keeps the no-script policy.
+#[derive(Clone, Copy, Debug)]
+pub struct CeremonyScript;
+
+/// The policy of a ceremony page: the base policy plus the one same-origin
+/// script, Trusted Types, no `<base>`, and `form-action` as for any page.
+pub fn csp_with_script(origins: &[Origin]) -> String {
+    let base = csp_with_form_action(origins);
+    let base = base.replacen(
+        "style-src 'self';",
+        "style-src 'self'; script-src 'self';",
+        1,
+    );
+    format!("{base}; base-uri 'none'; require-trusted-types-for 'script'; trusted-types 'none'")
+}
+
+/// Switch `headers` to the ceremony policy and grant WebAuthn to the portal origin only.
+pub fn with_ceremony_script(headers: &mut HeaderMap, origins: &[Origin]) {
+    if let Ok(v) = HeaderValue::from_str(&csp_with_script(origins)) {
+        headers.insert("content-security-policy", v);
+    }
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static(
+            "publickey-credentials-create=(self), publickey-credentials-get=(self)",
+        ),
+    );
+}
+
 /// Replace the policy in `headers` with one whose `form-action` also lists `origins`.
 pub fn with_form_action(headers: &mut HeaderMap, origins: &[Origin]) {
     if let Ok(v) = HeaderValue::from_str(&csp_with_form_action(origins)) {
@@ -99,6 +129,7 @@ mod tests {
             "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'"
         );
         assert!(!get("content-security-policy").contains("unsafe"));
+        assert!(!get("content-security-policy").contains("script-src"));
         assert_eq!(h.get_all("cache-control").iter().count(), 1);
     }
 
@@ -159,5 +190,23 @@ mod tests {
         ] {
             assert!(!origin_allowed(bad, o), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn ceremony_pages_allow_only_the_same_origin_script() {
+        let o = |s: &str| url::Url::parse(s).unwrap().origin();
+        let mut h = HeaderMap::new();
+        apply(&mut h);
+        with_ceremony_script(&mut h, &[o("https://app.example.test")]);
+        let csp = h.get("content-security-policy").unwrap().to_str().unwrap();
+        assert_eq!(
+            csp,
+            "default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self' https://app.example.test; frame-ancestors 'none'; base-uri 'none'; require-trusted-types-for 'script'; trusted-types 'none'"
+        );
+        assert!(!csp.contains("unsafe") && !csp.contains("connect-src"));
+        assert_eq!(
+            h.get("permissions-policy").unwrap(),
+            "publickey-credentials-create=(self), publickey-credentials-get=(self)"
+        );
     }
 }

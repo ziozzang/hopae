@@ -2260,3 +2260,221 @@ mod native_rpc_tests;
 
 #[path = "../auth_gateway/human_projection_tests.rs"]
 mod native_projection_tests;
+
+// ---- ADR-0017 phase 2: native passkey provenance ---------------------------
+impl Fx {
+    /// A native passkey step-up of the portal session behind `cookie`: a
+    /// registered credential (store-level record; the relying-party
+    /// cryptography is covered by `factor::webauthn`), a step-up ceremony and
+    /// the elevation transaction, then the hand-off to the application.
+    async fn elevate_passkey(&self, cookie: &Secret) -> Secret {
+        use crate::store::Passkeys;
+        use crate::store::passkeys::*;
+        let portal = self
+            .portal
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|secret| Secret::new(secret.expose().into()))
+            .expect("actual native portal handle");
+        let app = self
+            .store
+            .lookup_handle(&cookie.digest(), &Host::parse("app.example.test").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let view = self
+            .store
+            .lookup_handle(&portal.digest(), &Host::parse("auth.example.test").unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(app.session.session_id, view.session.session_id);
+        let now = self.clock.now();
+        let ip = "192.0.2.10".parse().unwrap();
+        let bind = random_token(self.rng.as_ref(), 16);
+        let binding = bind.digest();
+        let portal_cookie = random_token(self.rng.as_ref(), 16).digest();
+        let actor = || FactorActor {
+            request_id: "native-passkey".into(),
+            view: view.clone(),
+            provider_configuration: (
+                if self.provider_config.get("ldap").is_some() {
+                    crate::provider::types::ProviderKind::Ldap
+                } else {
+                    crate::provider::types::ProviderKind::Oidc
+                },
+                self.provider_config.clone(),
+            ),
+            client_ip: ip,
+            authorized_at: now,
+            session_idle: Duration::from_secs(300),
+            handle_idle: Duration::from_secs(300),
+        };
+        let ceremony = |purpose, txn| {
+            let digest = random_token(self.rng.as_ref(), 32).digest();
+            (
+                digest,
+                NewCeremony {
+                    actor: actor(),
+                    purpose,
+                    digest,
+                    portal_binding: portal_cookie,
+                    transaction: txn,
+                    state: "{}".into(),
+                    expires_at: now.add(Duration::from_secs(300)),
+                },
+            )
+        };
+        let (reg, c) = ceremony(CeremonyPurpose::Register, None);
+        self.store.begin_ceremony(c).await.unwrap();
+        self.store
+            .register_passkey(RegisterPasskey {
+                actor: actor(),
+                ceremony: reg,
+                portal_binding: portal_cookie,
+                record: PasskeyRecord {
+                    credential_id: vec![7; 32],
+                    user_id: view.session.user_id.clone(),
+                    label: "Laptop".into(),
+                    passkey: "{}".into(),
+                    aaguid: None,
+                    transports: vec![],
+                    backup_eligible: true,
+                    backup_state: true,
+                    user_verified: true,
+                    attestation_format: "none".into(),
+                    attested: false,
+                    assurance: Assurance::Aal2,
+                    sign_count: 0,
+                    created_at: now,
+                    last_used_at: None,
+                    revision: 1,
+                },
+                events: vec![],
+            })
+            .await
+            .unwrap();
+        let token = random_token(self.rng.as_ref(), 32);
+        self.store
+            .create_transaction(
+                NewTransaction {
+                    txn_sha256: token.digest(),
+                    created_at: now,
+                    expires_at: now.add(Duration::from_secs(60)),
+                    app_id: crate::policy::types::AppId::new("app"),
+                    return_target: "https://app.example.test/data".parse().unwrap(),
+                    bind_sha256: Some(binding),
+                    portal_bind_sha256: None,
+                    retry_bind_sha256: None,
+                    client_ip: ip,
+                    ua_sha256: None,
+                    provider_id: None,
+                    state_sha256: None,
+                    nonce: None,
+                    pkce_verifier: None,
+                    portal_session_id: Some(view.session.session_id.clone()),
+                    purpose: TxnPurpose::Stepup,
+                    conflicting_handle_sha256: None,
+                    pending_identity: None,
+                    recovery_depth: 0,
+                    reauth_max_age: None,
+                },
+                vec![],
+            )
+            .await
+            .unwrap();
+        let (step, c) = ceremony(CeremonyPurpose::StepUp, Some(token.digest()));
+        self.store.begin_ceremony(c).await.unwrap();
+        let fresh = handle_value(self.rng.as_ref());
+        let mut handle = view.handle.clone();
+        handle.handle_sha256 = fresh.digest();
+        handle.issued_aal = Aal::Two;
+        handle.created_at = now;
+        handle.last_seen_at = now;
+        let code_secret = random_token(self.rng.as_ref(), 32);
+        let code = HandoffCodeRow {
+            code_sha256: code_secret.digest(),
+            session_id: view.session.session_id.clone(),
+            host: Host::parse("app.example.test").unwrap(),
+            return_target: "https://app.example.test/data".parse().unwrap(),
+            client_ip: ip,
+            bind_sha256: binding,
+            issued_aal: Aal::Two,
+            cred_gen: view.session.cred_gen + 1,
+            recovery_depth: 0,
+            created_at: now,
+            expires_at: now.add(Duration::from_secs(30)),
+            consumed_at: None,
+            consumed_reason: None,
+        };
+        self.store
+            .elevate_webauthn(WebauthnElevation {
+                actor: actor(),
+                ceremony: step,
+                portal_binding: portal_cookie,
+                transaction: token.digest(),
+                config_generation: self.ctx.snapshot.load().generation,
+                used: PasskeyUse {
+                    credential_id: vec![7; 32],
+                    passkey: "{\"used\":1}".into(),
+                    sign_count: 1,
+                    backup_eligible: true,
+                    backup_state: true,
+                    assurance: Assurance::Aal2,
+                },
+                portal_handle: handle,
+                handoff: code,
+                events: vec![],
+            })
+            .await
+            .unwrap();
+        *self.portal.lock().unwrap() = Some(fresh);
+        let target = "https://app.example.test/data".parse().unwrap();
+        let location = crate::session::handoff::landing_location(&target, code_secret.expose());
+        self.redeem(location, &bind).await
+    }
+}
+
+#[tokio::test]
+async fn native_human_engine_passkey_provenance_and_revocation() {
+    let f = Fx::new(None).await;
+    let (old, _) = f.login().await;
+    let cookie = f.elevate_passkey(&old).await;
+    let witness = f.witness(&cookie).await;
+    assert_eq!(witness.view.handle.issued_aal, Aal::Two);
+    let checked = witness.finish(&f.input(&cookie)).await.unwrap();
+    // Another use of the same passkey (counter, flags, revision) does not retire the owner.
+    f.sql("UPDATE webauthn_credentials SET sign_count=sign_count+1, revision=revision+1");
+    checked.require_current(&f.input(&cookie)).await.unwrap();
+    f.sql(
+        "UPDATE webauthn_credentials SET state='revoked', revoked_at=1, revoked_reason='removed'",
+    );
+    assert!(checked.require_current(&f.input(&cookie)).await.is_err());
+}
+
+#[tokio::test]
+async fn native_human_engine_passkey_provenance_is_exact() {
+    for mutation in [
+        "DELETE FROM session_webauthn_provenance",
+        "UPDATE session_webauthn_provenance SET verified_at_ms=verified_at_ms-1",
+        "UPDATE session_webauthn_provenance SET factor_index=0",
+        "UPDATE session_webauthn_provenance SET config_generation=NULL",
+        "UPDATE session_webauthn_provenance SET credential_generation=credential_generation-1",
+        "UPDATE sessions SET factors=json_set(factors,'$[#-1].kind','external')",
+    ] {
+        let f = Fx::new(None).await;
+        let (old, _) = f.login().await;
+        let cookie = f.elevate_passkey(&old).await;
+        f.sql(mutation);
+        let (decision, _, witness) = decide_for_human(
+            &f.ctx,
+            &f.input(&cookie),
+            f.owner.clone(),
+            f.owner.admit(Duration::from_millis(400)).unwrap(),
+        )
+        .await;
+        assert!(!matches!(decision, Decision::Allow { .. }), "{mutation}");
+        assert!(witness.is_none(), "{mutation}");
+    }
+}

@@ -1,10 +1,16 @@
 # Second-factor extensions
 
-<!-- doc-rev: 17 -->
+<!-- doc-rev: 18 -->
 
 [Documentation](README.md) · [한국어](ko/SECOND_FACTOR_EXTENSIONS.md)
 
 ## Implementation status
+
+WebAuthn passkeys are implemented in source behind the default-off `webauthn`
+configuration: portal registration and management, passkey step-up, portal
+security confirmation and recovery codes. See [WebAuthn passkeys](WEBAUTHN.md)
+and [ADR-0017](adr/0017-webauthn-passkeys.md). A recovery entry is AAL 1 evidence
+only and no longer satisfies an AAL 2 rule.
 
 Unreleased source now embeds Lua 5.4 for external-factor eligibility; see
 [configuration](CONFIG.md#external-verifier-startup-configuration). Its isolated

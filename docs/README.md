@@ -1,6 +1,6 @@
 # Documentation
 
-<!-- doc-rev: 11 -->
+<!-- doc-rev: 12 -->
 
 [한국어 목차](ko/README.md)
 
@@ -37,6 +37,8 @@ milestones land. The [roadmap](ROADMAP.md) describes the intended shape.
 - [LDAP authentication](LDAP_AUTHENTICATION.md) — proposed direct-credential provider and lifecycle contract.
 
 - [Second-factor extensions](SECOND_FACTOR_EXTENSIONS.md) — native OTP and external API/Lua boundaries.
+
+- [WebAuthn passkeys](WEBAUTHN.md) — portal passkey registration, step-up, management, recovery codes (off by default).
 
 - [Kubernetes workload authentication](KUBERNETES_WORKLOAD.md) — native Pod-bound TokenReview connector; profile/transport integration pending.
 

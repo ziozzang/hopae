@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("passkeys.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t.get("passkeys.title") }}</h1>
+<p>{{ t.get("passkeys.intro") }}</p>
+{% include "_messages.html" %}
+{% if passkeys.is_empty() %}<p>{{ t.get("passkeys.empty") }}</p>{% endif %}
+<ul class="items">
+{% for p in passkeys %}
+<li class="item">
+<form method="post" action="/security/passkeys/rename" class="rename">
+<input type="hidden" name="csrf" value="{{ csrf_rename }}">
+<input type="hidden" name="credential" value="{{ p.id }}">
+<label for="name-{{ loop.index }}">{{ t.get("passkeys.name") }}</label>
+<input id="name-{{ loop.index }}" name="label" type="text" value="{{ p.label }}" maxlength="64" required autocomplete="off">
+<button type="submit" class="secondary">{{ t.get("passkeys.save") }}</button>
+</form>
+<p class="badge">{{ t.get(p.kind) }}</p>
+<dl>
+<dt>{{ t.get("passkeys.created") }}</dt><dd>{{ p.created }}</dd>
+<dt>{{ t.get("passkeys.last_used") }}</dt><dd>{% if let Some(u) = p.last_used %}{{ u }}{% else %}{{ t.get("passkeys.never") }}{% endif %}</dd>
+</dl>
+{% if only_factor %}<p class="muted">{{ t.get("passkeys.last_factor") }}</p>{% else %}
+<form method="post" action="/security/passkeys/remove">
+<input type="hidden" name="csrf" value="{{ csrf_remove }}">
+<input type="hidden" name="credential" value="{{ p.id }}">
+<button type="submit" class="danger">{{ t.get("passkeys.remove") }}</button>
+</form>{% endif %}
+</li>
+{% endfor %}
+</ul>
+<p><a class="button" href="/security/passkeys/new">{{ t.get("passkeys.add") }}</a></p>
+{% if high_assurance %}<p><a href="/security/passkeys/new?kind=high_assurance">{{ t.get("passkeys.add_high_assurance") }}</a></p>{% endif %}
+<p><a href="/security">{{ t.get("security.back") }}</a></p>
+{% endblock %}

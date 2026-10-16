@@ -771,7 +771,16 @@ impl Checked {
                 .subject_for_witness(issuer, w)?;
             let facts = SourceFacts {
                 subject,
-                aal: w.view.handle.issued_aal as u8,
+                // ADR-0018: AAL 3 only for an opted-in application whose
+                // exact current establishing factor is a high-assurance passkey.
+                aal: if w.app().max_emitted_aal == crate::session::Aal::Three
+                    && w.view.handle.issued_aal == crate::session::Aal::Two
+                    && w.durable.as_ref().is_some_and(|c| c.establishing_aal3())
+                {
+                    3
+                } else {
+                    w.view.handle.issued_aal as u8
+                },
                 user_revision: w.view.user.authz_version,
                 credential_generation: w.view.session.cred_gen,
                 application_generation: w.snapshot.generation,

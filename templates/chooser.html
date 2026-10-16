@@ -1,8 +1,35 @@
 {% extends "base.html" %}
 {% block title %}{{ t.get("login.title") }}{% endblock %}
+{% block head %}{% if passkey.is_some() %}<script src="/assets/webauthn.js" integrity="{{ integrity }}" defer></script>{% endif %}{% endblock %}
 {% block content %}
 <h1>{{ t.get("login.title") }}</h1>
 <p>{{ t.get("login.lead") }}</p>
+{% if let Some(e) = passkey_error %}<p class="error" role="alert">{{ t.get(e) }}</p>{% endif %}
+{% if let Some((ceremony, options)) = passkey %}
+<section class="passkey-login" aria-labelledby="passkey-login-title">
+<h2 id="passkey-login-title">{{ t.get("login.passkey.title") }}</h2>
+<form method="post" action="/login/passkey">
+<input type="hidden" name="csrf" value="{{ passkey_csrf }}">
+<input type="hidden" name="txn" value="{{ txn }}">
+<input type="hidden" name="ceremony" value="{{ ceremony }}">
+<input type="hidden" name="credential" value="">
+<label for="passkey-username">{{ t.get("login.passkey.field") }}</label>
+<input id="passkey-username" name="username" type="text" autocomplete="username webauthn" autocapitalize="none" spellcheck="false" maxlength="256" aria-describedby="passkey-username-hint">
+<p id="passkey-username-hint" class="hint">{{ t.get("login.passkey.hint") }}</p>
+<button type="button" hidden disabled data-webauthn="login" data-status="webauthn-status" data-options="{{ options }}">{{ t.get("login.passkey.button") }}</button>
+</form>
+<p id="webauthn-status" class="status" aria-live="polite" hidden
+ data-msg-waiting="{{ t.get("webauthn.waiting") }}"
+ data-msg-verifying="{{ t.get("webauthn.verifying") }}"
+ data-msg-cancelled="{{ t.get("webauthn.cancelled") }}"
+ data-msg-duplicate="{{ t.get("webauthn.failed") }}"
+ data-msg-security="{{ t.get("webauthn.security") }}"
+ data-msg-unsupported="{{ t.get("login.passkey.unsupported") }}"
+ data-msg-failed="{{ t.get("webauthn.failed") }}"></p>
+<noscript><p class="muted">{{ t.get("login.passkey.noscript") }}</p></noscript>
+</section>
+{% if !providers.is_empty() %}<p class="divider"><span>{{ t.get("login.passkey.or") }}</span></p>{% endif %}
+{% endif %}
 {% for p in providers %}
 {% if p.available %}
 <form method="post" action="/login/{{ p.id }}">

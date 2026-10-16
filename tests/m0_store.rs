@@ -66,14 +66,20 @@ fn open_applies_migration_and_sets_pragmas() {
             "login_txns",
             "meta",
             "providers",
+            "recovery_codes",
             "schema_migrations",
             "session_handles",
             "session_primary_provenance",
             "session_totp_provenance",
+            "session_webauthn_elevations",
+            "session_webauthn_provenance",
             "sessions",
             "totp_enrollments",
             "txn_admissions",
-            "users"
+            "users",
+            "webauthn_challenges",
+            "webauthn_credentials",
+            "webauthn_login_challenges"
         ]
     );
 }

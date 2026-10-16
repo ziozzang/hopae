@@ -76,6 +76,7 @@ impl Fake {
                         .unwrap()
                         .origin(),
                 ],
+                passkey: None,
             }),
             begin: Mutex::new(Ok(redirect(PROVIDER_URL))),
             callback: Mutex::new(CallbackOutcome::Redirect(redirect(
