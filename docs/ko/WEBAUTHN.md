@@ -1,6 +1,6 @@
 # WebAuthn 패스키
 
-<!-- translation-status: source=../WEBAUTHN.md source-rev=1 status=current -->
+<!-- translation-status: source=../WEBAUTHN.md source-rev=2 status=current -->
 
 [문서 목차](README.md) · [English](../WEBAUTHN.md)
 
@@ -76,7 +76,7 @@ AAL 3 분류(기록만).
 | `POST /security/passkeys/rename`, `POST /security/passkeys/remove` | 이름 변경(살아 있는 세션)과 삭제(최근 2차 요소, 마지막 요소는 불가). |
 | `GET /security/verify`, `POST /security/verify/passkey`, `POST /security/verify/totp`, `POST /security/verify/recovery` | 보안 확인: 2차 요소를 증명하고 인증 요소 관리를 위해 포털 세션을 상승시킵니다. |
 | `GET /security/recovery-codes`, `POST /security/recovery-codes` | 상태와 (재)생성. 코드는 한 번만 표시됩니다. |
-| `GET /stepup?txn=…` | 사용자에게 패스키가 있으면 패스키를 먼저 제시하고 다른 방법을 링크합니다. |
+| `GET /stepup?txn=…` | 사용자에게 패스키가 있으면 패스키를 먼저 제시하고 인증 앱, 외부 요소, 복구 코드 경로를 링크합니다. 요소가 하나도 없는 사용자는 `/security`로 안내합니다. |
 | `POST /stepup/webauthn` | 패스키로 애플리케이션 단계 상승을 완료합니다. |
 | `GET /assets/webauthn.js` | 포털의 유일한 스크립트([ADR-0017](../adr/0017-webauthn-passkeys.md) 결정 3). |
 
@@ -91,6 +91,8 @@ AAL 3 분류(기록만).
 - 등록은 기본적으로 사용자 확인과 비상주 자격 증명을 요청합니다. 항상 발견 가능한 패스키를 만드는 플랫폼(iCloud 키체인, Google 비밀번호 관리자)도 동작합니다.
 - `excludeCredentials`에 사용자의 기존 패스키를 넣어 같은 인증기를 두 번 등록하지 않게 합니다. 브라우저가 이를 알리면 페이지가 설명합니다.
 - 알려진 제공자(예: iCloud 키체인, Google 비밀번호 관리자, Windows Hello, 1Password, Bitwarden, YubiKey)이면 AAGUID로 패스키 이름을 정하고, 아니면 "패스키" 또는 "보안 키"로 정합니다. 사용자는 이름을 바꿀 수 있습니다.
+- 첫 패스키를 만든 뒤에는 복구 코드 만들기로 이동합니다. 복구 코드를 사용한 뒤에는 모든 보안 페이지가 새 요소를 요구합니다.
+- 단계 상승에는 여전히 5분 이내의 1차 로그인이 필요합니다(TOTP 규칙). 더 오래된 세션은 먼저 제공자 재인증을 거칩니다.
 - 취소되거나 시간이 지난 요청(`NotAllowedError`), 이미 등록된 인증기(`InvalidStateError`), RP ID 불일치(`SecurityError`), 미지원 환경에는 각각 영어와 한국어 메시지가 있습니다.
 
 ## 보증 수준
@@ -140,6 +142,15 @@ hopae admin factors reset <user-id-or-email>
 `factor.webauthn_clone_suspected`, `factor.recovery_codes_generated`,
 `factor.recovery_code_used`, `admin.factor_reset`. 자격 증명 ID는 `factor_id`
 (`pk_`와 SHA-256의 16자리 16진수)로만 나타납니다.
+
+## 테스트
+
+저장소, 신뢰 당사자, 프로세스 수준 테스트는 `webauthn-authenticator-rs`의
+소프트웨어 인증기(소프트웨어 패스키와 증명하는 소프트웨어 토큰)를 사용합니다:
+등록, 어설션, 잘못된 origin과 RP ID, 재사용과 만료, 브라우저 바인딩, 카운터 역행,
+마지막 요소 거부, 복구 코드 1회 사용, AAL 도출, 기본값이 꺼진 설정. 시나리오
+480–486이 사례를 매핑합니다. 설계 검토(G2) 전까지 `draft`이며, 실제 브라우저와
+인증기로 실행(G8)하기 전까지 `verified-live` 아래에 머뭅니다.
 
 ## 관련 페이지
 

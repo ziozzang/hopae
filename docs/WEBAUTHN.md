@@ -1,6 +1,6 @@
 # WebAuthn passkeys
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/WEBAUTHN.md)
 
@@ -79,7 +79,7 @@ requires a CSRF token bound to the portal handle and an exact `Origin`.
 | `POST /security/passkeys/rename`, `POST /security/passkeys/remove` | Rename (live session) and remove (recent second factor, never the last factor). |
 | `GET /security/verify`, `POST /security/verify/passkey`, `POST /security/verify/totp`, `POST /security/verify/recovery` | Security confirmation: proves a second factor and elevates the portal session for factor management. |
 | `GET /security/recovery-codes`, `POST /security/recovery-codes` | Status and (re)generation; codes are displayed once. |
-| `GET /stepup?txn=…` | Offers a passkey first when the user has one; links to the other methods. |
+| `GET /stepup?txn=…` | Offers a passkey first when the user has one, with links to the authenticator app, external factors and the recovery-code path; a user without any factor is sent to `/security`. |
 | `POST /stepup/webauthn` | Completes an application step-up with a passkey. |
 | `GET /assets/webauthn.js` | The only portal script ([ADR-0017](adr/0017-webauthn-passkeys.md) decision 3). |
 
@@ -94,6 +94,8 @@ the other methods.
 - Registration requests user verification and a non-resident credential by default; platforms that always create discoverable passkeys (iCloud Keychain, Google Password Manager) still work.
 - `excludeCredentials` lists the user's existing passkeys, so the same authenticator is not registered twice; the browser reports this and the page explains it.
 - The page names a passkey from its AAGUID when it is a known provider (for example iCloud Keychain, Google Password Manager, Windows Hello, 1Password, Bitwarden, YubiKey); otherwise "Passkey" or "Security key". Users can rename it.
+- After the first passkey the user is taken to create recovery codes; after using a recovery code every security page asks for a new factor.
+- A step-up still requires a primary sign-in at most five minutes old (the TOTP rule); an older session is sent through provider reauthentication first.
 - Cancelled or timed-out prompts (`NotAllowedError`), an already registered authenticator (`InvalidStateError`), an RP ID mismatch (`SecurityError`) and missing support each have their own message in English and Korean.
 
 ## Assurance
@@ -142,6 +144,16 @@ again after a fresh sign-in.
 `factor.webauthn_clone_suspected`, `factor.recovery_codes_generated`,
 `factor.recovery_code_used`, `admin.factor_reset`. Credential IDs appear only as
 `factor_id` (`pk_` plus 16 hex digits of their SHA-256).
+
+## Testing
+
+Store, relying-party and process-level tests use `webauthn-authenticator-rs`
+software authenticators (a software passkey and an attesting software token):
+registration, assertion, wrong origin and RP ID, replay and expiry, browser
+binding, counter regression, last-factor refusal, recovery-code single use,
+AAL derivation and the default-off configuration. Scenarios 480–486 map the
+cases; they are `draft` until the design review (G2) and remain below
+`verified-live` until a run with real browsers and authenticators (G8).
 
 ## Related pages
 

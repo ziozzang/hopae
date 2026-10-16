@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 35 -->
+<!-- doc-rev: 36 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -31,6 +31,8 @@ main tables in the change that implements it.
 | `hopae admin revoke <user_id or email> --config <path>` | Revoke the grant; the row stays as a tombstone. Records `admin.revoke`. |
 | `hopae admin list [--all] --config <path>` | Print the live grants; `--all` adds revoked rows. |
 | `hopae admin import [--force <user_id or email>] --config <path>` | Apply `admin.users[]` of the file to the store (the same import runs at start) and print what was inserted, updated, revoked, unchanged, forced and skipped. |
+| `hopae admin factors list <user_id or email> --config <path>` | Print a user's second factors: authenticator app state, unused recovery codes (and whether a used code requires re-enrollment), and every active passkey with its hashed id (`pk_…`), label, kind (synced or device-bound), recorded class (`aal2` or `aal3`), creation and last use. Never prints key material ([WebAuthn passkeys](WEBAUTHN.md#administration)). |
+| `hopae admin factors reset <user_id or email> --config <path>` | Revoke every passkey, authenticator app and recovery code of the user, end every session of the user and record `admin.factor_reset`. The user enrolls again after a fresh sign-in. |
 | `hopae --version` | Print the version and exit `0`; needs no configuration. |
 
 Exit status: `0` success; `2` an invalid or unsafe configuration (including a
@@ -310,6 +312,28 @@ With no keyring, these routes return 404. Enrollment alone does not raise AAL. A
 The deployment must expose the portal through its existing trusted HTTPS ingress.
 
 AAL 1 primary-freshness rules use provider reauthentication even without a keyring.
+
+## WebAuthn passkeys
+
+Optional `webauthn` enables passkeys ([ADR-0017](adr/0017-webauthn-passkeys.md),
+[WebAuthn passkeys](WEBAUTHN.md)). Absent (the default), every passkey and
+security-settings route answers `404` and nothing changes. Example:
+
+```json
+{"webauthn":{"rp_id":"auth.example.test","rp_name":"Example sign-in","high_assurance":{"attestation_ca_files":["/etc/hopae/webauthn/vendor-root.pem"],"aaguids":["cb69481e-8ff7-4039-93ec-0a2729a154a8"]}}}
+```
+
+| Key | Default | Constraint |
+| --- | --- | --- |
+| `webauthn.rp_id` | the host of `portal.public_url` | The portal host or a parent domain of it on a label boundary; not an IP literal or a single label. Changing it makes every registered passkey unusable. |
+| `webauthn.rp_name` | `Hopae` | 1–64 printable characters. |
+| `webauthn.high_assurance.attestation_ca_files` | — | 1–64 readable PEM files; required with `aaguids`. Read at start and by `hopae --check`. |
+| `webauthn.high_assurance.aaguids` | — | 1–64 non-zero UUIDs; required with `attestation_ca_files`. |
+
+The allowed origin is exactly the portal origin and cannot be configured.
+`webauthn` requires an `https` portal, `cookie.secure = true` and authenticated
+gateway callers. It also enables the browser step-up flow (`/stepup`) for
+applications with `step_up` rules, as `totp_keyring` does.
 
 ## External verifier startup configuration
 

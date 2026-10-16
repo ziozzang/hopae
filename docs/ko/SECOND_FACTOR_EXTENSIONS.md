@@ -1,10 +1,15 @@
 # 2차 인증 확장
 
-<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=17 status=current -->
+<!-- translation-status: source=../SECOND_FACTOR_EXTENSIONS.md source-rev=18 status=current -->
 
 [English](../SECOND_FACTOR_EXTENSIONS.md) · [문서](README.md)
 
 ## 구현 상태
+
+WebAuthn 패스키는 기본값이 꺼진 `webauthn` 설정 뒤에서 소스에 구현되어 있습니다:
+포털 등록과 관리, 패스키 단계 상승, 포털 보안 확인, 복구 코드.
+[WebAuthn 패스키](WEBAUTHN.md)와 [ADR-0017](../adr/0017-webauthn-passkeys.md)을
+보십시오. 복구 항목은 AAL 1 증거일 뿐이며 더 이상 AAL 2 규칙을 충족하지 않습니다.
 
 미릴리스 소스는 외부 factor 사용 조건에 Lua 5.4를 내장합니다.
 [설정](../CONFIG.md#external-verifier-startup-configuration)을 참고하세요. 격리된

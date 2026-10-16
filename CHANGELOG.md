@@ -8,6 +8,40 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- WebAuthn passkeys behind the new, default-off `webauthn` configuration
+  ([ADR-0017](docs/adr/0017-webauthn-passkeys.md), [WebAuthn passkeys](docs/WEBAUTHN.md)):
+  portal security overview, passkey registration, list, rename and removal,
+  security confirmation by passkey, authenticator code or recovery code,
+  passkey step-up for applications with `step_up` rules (AAL 2), and an
+  optional high-assurance registration for attested, allowlisted,
+  non-synchronized security keys (classified AAL 3, recorded only).
+- Recovery codes (ten, Argon2id-hashed, single use) that yield AAL 1 and
+  require enrolling a new factor.
+- `hopae admin factors list|reset` for support and administrator reset.
+- Schema migration 11 (`webauthn_credentials`, `webauthn_challenges`,
+  `recovery_codes`, `session_webauthn_elevations`, two nullable `users`
+  columns). Roll back by restoring the pre-migration backup.
+
+### Changed
+
+- A recovery factor entry no longer counts as AAL 2 evidence in step-up
+  evaluation (no such entry existed before).
+- With a passkey enrolled, adding an authenticator app needs a second factor
+  verified in the last five minutes.
+
+### Security
+
+- Passkey ceremonies run only on the portal with the origin pinned and
+  server-side, single-use, session- and browser-bound state; a
+  signature-verified sign-count regression revokes the credential and ends
+  the sessions it elevated; the last second factor cannot be removed. The
+  portal's only script is a static same-origin file with Subresource
+  Integrity, served with Trusted Types and only on ceremony pages.
+- New dependencies: `webauthn-rs` 0.5.5 (MPL-2.0) with OpenSSL vendored
+  into the binary, `argon2` 0.5, `serde_cbor_2` 0.13.
+
 ## 0.0.8 — 2026-10-15
 
 ### Added

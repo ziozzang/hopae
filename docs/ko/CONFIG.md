@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=35 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=36 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -30,6 +30,8 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `hopae admin revoke <user_id 또는 email> --config <path>` | 부여를 철회합니다. 행은 묘비로 남습니다. `admin.revoke`를 기록합니다. |
 | `hopae admin list [--all] --config <path>` | 유효한 부여를 출력합니다. `--all`은 철회된 행도 더합니다. |
 | `hopae admin import [--force <user_id 또는 email>] --config <path>` | 파일의 `admin.users[]`를 저장소에 적용하고(시작할 때도 같은 가져오기가 실행됩니다) 삽입, 갱신, 철회, 변경 없음, 강제, 건너뛴 항목을 출력합니다. |
+| `hopae admin factors list <user_id 또는 email> --config <path>` | 사용자의 2차 인증 요소를 출력합니다: 인증 앱 상태, 사용하지 않은 복구 코드(사용한 코드 때문에 재등록이 필요한지 포함), 그리고 모든 활성 패스키의 해시 ID(`pk_…`), 이름, 종류(동기화 또는 기기 귀속), 기록 등급(`aal2` 또는 `aal3`), 생성·마지막 사용 시각. 키 자료는 출력하지 않습니다([WebAuthn 패스키](WEBAUTHN.md#관리)). |
+| `hopae admin factors reset <user_id 또는 email> --config <path>` | 사용자의 모든 패스키, 인증 앱, 복구 코드를 폐기하고 사용자의 모든 세션을 종료하며 `admin.factor_reset`을 기록합니다. 사용자는 새로 로그인한 뒤 다시 등록합니다. |
 | `hopae --version` | 버전을 출력하고 `0`으로 종료합니다. 설정이 필요 없습니다. |
 
 종료 상태: `0` 성공. `2` 유효하지 않거나 안전하지 않은 설정(호출자 키 변수가 없거나
@@ -303,6 +305,28 @@ route는 404입니다. 등록만으로 AAL이 올라가지는 않습니다. 인�
 통해 portal을 노출해야 합니다.
 
 AAL 1의 1차 인증 신선도 규칙은 keyring 없이도 제공자 재인증으로 처리합니다.
+
+## WebAuthn 패스키
+
+선택 `webauthn`은 패스키를 켭니다([ADR-0017](../adr/0017-webauthn-passkeys.md),
+[WebAuthn 패스키](WEBAUTHN.md)). 없으면(기본값) 모든 패스키·보안 설정 경로가
+`404`로 응답하고 아무것도 바뀌지 않습니다. 예:
+
+```json
+{"webauthn":{"rp_id":"auth.example.test","rp_name":"Example sign-in","high_assurance":{"attestation_ca_files":["/etc/hopae/webauthn/vendor-root.pem"],"aaguids":["cb69481e-8ff7-4039-93ec-0a2729a154a8"]}}}
+```
+
+| 키 | 기본값 | 제약 |
+| --- | --- | --- |
+| `webauthn.rp_id` | `portal.public_url`의 호스트 | 포털 호스트이거나 레이블 경계에서 그 상위 도메인. IP 리터럴이나 단일 레이블은 안 됩니다. 바꾸면 등록된 모든 패스키를 쓸 수 없게 됩니다. |
+| `webauthn.rp_name` | `Hopae` | 출력 가능한 1–64자. |
+| `webauthn.high_assurance.attestation_ca_files` | — | 읽을 수 있는 PEM 파일 1–64개. `aaguids`와 함께 필수. 시작할 때와 `hopae --check`에서 읽습니다. |
+| `webauthn.high_assurance.aaguids` | — | 0이 아닌 UUID 1–64개. `attestation_ca_files`와 함께 필수. |
+
+허용 origin은 정확히 포털 origin이며 설정할 수 없습니다. `webauthn`에는 `https`
+포털, `cookie.secure = true`, 인증된 게이트웨이 호출자가 필요합니다. 또한
+`totp_keyring`처럼 `step_up` 규칙이 있는 애플리케이션에 대해 브라우저 단계 상승
+흐름(`/stepup`)을 켭니다.
 
 ## 외부 verifier 시작 설정
 
