@@ -12,7 +12,7 @@ use crate::provider::types::ProviderId;
 use crate::session::types::SessionId;
 use crate::store::core::{
     AdminStore, ConsoleStore, CoreStore, GroupStore, GroupsOfUsers, HandoffStore, NonceStore,
-    nonce_key_ok,
+    SubjectDirectoryStore, nonce_key_ok,
 };
 use crate::store::types::*;
 use crate::store::{Deadline, Directory, Events, Sessions, StoreError, StoreResult};
@@ -500,5 +500,63 @@ impl GroupStore for Store {
         deadline: Deadline,
     ) -> StoreResult<()> {
         Store::groups_sync_result(self, provider, error, deadline).await
+    }
+}
+
+#[async_trait]
+impl SubjectDirectoryStore for Store {
+    async fn admin_directory_rows(
+        &self,
+        users: Vec<String>,
+        deadline: Deadline,
+    ) -> StoreResult<std::collections::BTreeMap<String, super::subject_directory::DirectoryRow>>
+    {
+        Store::admin_directory_rows(self, users, deadline).await
+    }
+    async fn admin_ledger_after(
+        &self,
+        after: i64,
+        limit: usize,
+        deadline: Deadline,
+    ) -> StoreResult<Vec<super::subject_directory::LedgerRow>> {
+        Store::admin_ledger_after(self, after, limit, deadline).await
+    }
+    async fn admin_ledger_at(
+        &self,
+        positions: Vec<i64>,
+        deadline: Deadline,
+    ) -> StoreResult<std::collections::BTreeMap<i64, String>> {
+        Store::admin_ledger_at(self, positions, deadline).await
+    }
+    async fn admin_ledger_head(&self, deadline: Deadline) -> StoreResult<i64> {
+        Store::admin_ledger_head(self, deadline).await
+    }
+    async fn admin_outbox_head(
+        &self,
+        deadline: Deadline,
+    ) -> StoreResult<super::subject_directory::OutboxPosition> {
+        Store::admin_outbox_head(self, deadline).await
+    }
+    async fn admin_feed_changes(
+        &self,
+        after: super::subject_directory::OutboxPosition,
+        limit: usize,
+        groups: bool,
+        deadline: Deadline,
+    ) -> StoreResult<
+        Result<super::subject_directory::StatusPage, super::subject_directory::PositionLost>,
+    > {
+        Store::admin_feed_changes(self, after, limit, groups, deadline).await
+    }
+    async fn admin_live_handle(
+        &self,
+        session: String,
+        host: String,
+        deadline: Deadline,
+    ) -> StoreResult<Option<HandleRow>> {
+        Store::admin_live_handle(self, session, host, deadline).await
+    }
+    async fn admin_totp_active(&self, user: String, deadline: Deadline) -> StoreResult<bool> {
+        Store::admin_totp_active(self, user, deadline).await
     }
 }

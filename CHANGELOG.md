@@ -111,6 +111,12 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   PostgreSQL schema 4, and the configuration generation in the slice
   contract. Factor writes lock the subject user's row before re-checking the
   acting session.
+- PostgreSQL store slice 3: the event relay (`Events`; claims with
+  `SKIP LOCKED` and a lease, so relays on several replicas never double
+  claim), console listings (`ConsoleStore`), groups and the projection
+  journal (`GroupStore`; gapless revisions in commit order) and the subject
+  directory feeds (`SubjectDirectoryStore`; ledger and lifecycle-feed
+  positions in commit order), PostgreSQL schema 5.
 
 ### Changed
 

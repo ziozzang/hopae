@@ -6,6 +6,7 @@
 //! constraints, so several replicas behave like the single SQLite writer.
 //! Times come from the application clock, never from `now()`.
 mod admin;
+mod directory;
 mod events;
 mod factors;
 mod groups;

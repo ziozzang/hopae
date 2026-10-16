@@ -112,6 +112,36 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - When: the challenge is bound with another authority, then with the published one; a proof for another session, a valid proof and the same proof again are presented; the authority's binding is rotated.
 - Then: `external factor disabled or changed`; the binding succeeds; `external proof context unavailable`; the session is at AAL 2 with an external factor; the replay is refused; the elevated session ends with `factor_revoked`.
 
+### S600-17 Event relay agrees (slice 3)
+
+- Given: six required events, one diagnostic event, sink `log`.
+- When: a required kind is appended as diagnostic; an append runs past its deadline; two relays claim four each at once; the leased rows are claimed again; one delivery is acknowledged, one retried, one failed for good; the lease expires; history and status are read; a prune runs with a count bound of 5 and a backlog cap of 2, then after the retention.
+- Then: `Conflict`; `Unavailable(deadline)` and nothing written; every delivery is handed out exactly once; nothing is due while leased; only the retried one comes back (attempt 2), then the four expired leases; history is oldest first and status counts 4 pending and 1 failed; the prune deletes the two oldest events, dead-letters the backlog overflow with one `sink.backlog_overflow` event and records `last_prune_at`; the age pass empties the outbox.
+
+### S600-18 Console listings agree (slice 3)
+
+- Given: five users created a second apart, three sessions (one ended), three `login.failed` events of one user.
+- When: users are listed two per page with cursors and searched in another case; live sessions are listed for all and per user; a user's detail and a session summary are read; events are listed by user and kind two per page; a listing runs past its deadline.
+- Then: newest first across pages, the window size reported, the cursor ending the listing; the search ignores ASCII case; only live sessions with their hosts and owner address; the detail counts identities and live and ended sessions; the summary carries the handles; events newest first with a final page; `Unavailable(deadline)`.
+
+### S600-19 Local groups and projection agree (slice 3)
+
+- Given: an administrator and a person.
+- When: a group is created twice with one key; the person is added, added again and added on a stale revision; the group is renamed; groups are searched, members and a person's groups read; the projection journal and snapshot are read; the group is deleted without and with force; the administrator's grant is revoked.
+- Then: `key_in_use`; revisions move 1→2→3 with `already_member` and `Stale(2)`; the person's `groups` mirror and `authz_version` follow; the search ignores case; the journal is gapless and ordered, a revision beyond the head is lost; the snapshot lists the person; `group_not_empty`, then a tombstone with the mirror cleared; `actor_revoked`.
+
+### S600-20 Provider groups and journal order agree (slice 3)
+
+- Given: eight people and provider `mock`.
+- When: a sync asserts two groups, then four (over the bound), then one; maintenance runs with a zero grace; seven syncs race; the periodic-sync cursor is taken twice and results recorded.
+- Then: two groups created and joined; the over-bound assertion changes nothing; the dropped membership is pending, then removed; the racing syncs leave a gapless journal whose every revision is listed; the cursor returns all eight people once, then nothing until the interval.
+
+### S600-21 Subject directory feeds agree (slice 3)
+
+- Given: an administrator; eight people created at once.
+- When: the ledger and directory rows are read; three people are disabled and a group created; the lifecycle feed is read without and with group changes, resumed, and read from a forged and a negative position; the explain reads run.
+- Then: the ledger lists every person in increasing position with the head last; the feed reports the three disables in order (and the group creation when asked) and its next position is the head; resuming yields nothing; both bad positions are lost; the live handle and TOTP state are reported; a batch over 200 is refused.
+
 ### S600-5 PostgreSQL ledger, migrations and newer schema
 
 - Given: a PostgreSQL store.
@@ -130,12 +160,12 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | --- | --- | --- |
 | Replay | S600-5, S600-11, S600-12, S600-14, S600-16 | yes: a reserved user ID, a nonce, an OTP counter, a ceremony, a recovery code and an external proof are each accepted once, whichever replica writes |
 | Tampering | S600-6 | yes: credentials only by environment reference; unknown keys refused |
-| Race / timing | S600-3, S600-10, S600-11, S600-12, S600-13 | yes: racing writers on two backends; the fence locks the actor's rows so a revocation orders before or after a mutation, never inside it |
-| Resource exhaustion | — | no: pool bounds and statement timeouts are configuration (validated in S600-6); load is slice 4 |
+| Race / timing | S600-3, S600-10 to S600-13, S600-17, S600-20, S600-21 | yes: racing writers on two backends; the fence locks the actor's rows so a revocation orders before or after a mutation, never inside it |
+| Resource exhaustion | S600-17, S600-18 | yes: bounded backlog per sink, bounded listing windows and deadlines; load is slice 4 |
 | Confused deputy | S600-6, S600-10 | yes: no silent fallback from PostgreSQL to a local SQLite file; a revoked or out-of-policy administrator cannot mutate |
 | Spoofed or duplicated headers | — | no: no HTTP surface in this slice |
 | Downgrade | S600-5 | yes: a newer schema is refused, never down-migrated |
-| Enumeration | — | no: no external surface |
+| Enumeration | S600-21 | yes: directory batches are bounded (200) |
 
 ## Observability expectations
 
@@ -162,6 +192,11 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-14 | `s600_14_passkeys_and_recovery_codes_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-15 | `s600_15_passwordless_sign_in_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-16 | `s600_16_external_factor_stepup_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-17 | `s600_17_event_relay_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-18 | `s600_18_console_listings_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-19 | `s600_19_local_groups_and_projection_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-20 | `s600_20_provider_groups_and_journal_order_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-21 | `s600_21_subject_directory_feeds_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
 | S600-6 | `s600_6_serving_refuses_the_incomplete_postgres_backend` | `src/app.rs` | unit | passing |
@@ -174,8 +209,8 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 
 ## Open questions
 
-- Slice 3–4 scope (ADR-0020). Hosted CI stays disabled; `make test-postgres` is the PostgreSQL run.
+- Slice 4 scope (ADR-0020): authentication-gateway owners, the migration tool, serving. Hosted CI stays disabled; `make test-postgres` is the PostgreSQL run.
 
 ## 한국어 요약
 
-슬라이스 1 저장소 계약(사용자·신원·사용자 ID 원장, 제공자 부트스트랩, 세션·핸들, 아웃박스)이 SQLite와 PostgreSQL에서 동시 쓰기 상황을 포함해 똑같이 동작하는지 확인합니다. 예약된 사용자 ID는 어느 복제본에서도 재사용되지 않고, 더 새로운 스키마는 거부되며, 미완성 PostgreSQL 설정은 서비스되지 않고 SQLite로 대체되지도 않습니다. 슬라이스 2b는 관리자 권한 부여·회수, 행 잠금(`FOR SHARE`)으로 재평가하는 관리자 펜스와 그 아래의 사용자 상태 변경·세션 종료, 복제본 간에 공유되는 재사용 방지 논스 원장을 두 저장소에서 같은 결과로 검증합니다. 슬라이스 2c는 TOTP 등록·카운터·단계 상승, 외부 인증 요소 레지스트리와 일회용 증명, 패스키 등록·검증·제거, 복구 코드, 비밀번호 없는 로그인, 요소 초기화를 같은 방식으로 검증합니다.
+슬라이스 1 저장소 계약(사용자·신원·사용자 ID 원장, 제공자 부트스트랩, 세션·핸들, 아웃박스)이 SQLite와 PostgreSQL에서 동시 쓰기 상황을 포함해 똑같이 동작하는지 확인합니다. 예약된 사용자 ID는 어느 복제본에서도 재사용되지 않고, 더 새로운 스키마는 거부되며, 미완성 PostgreSQL 설정은 서비스되지 않고 SQLite로 대체되지도 않습니다. 슬라이스 2b는 관리자 권한 부여·회수, 행 잠금(`FOR SHARE`)으로 재평가하는 관리자 펜스와 그 아래의 사용자 상태 변경·세션 종료, 복제본 간에 공유되는 재사용 방지 논스 원장을 두 저장소에서 같은 결과로 검증합니다. 슬라이스 2c는 TOTP 등록·카운터·단계 상승, 외부 인증 요소 레지스트리와 일회용 증명, 패스키 등록·검증·제거, 복구 코드, 비밀번호 없는 로그인, 요소 초기화를 같은 방식으로 검증합니다. 슬라이스 3은 이벤트 전달(동시 claim, 임대, 재시도, 정리), 콘솔 목록, 그룹과 프로젝션 저널, 주체 디렉터리 피드를 검증하며, 저널과 피드의 위치가 커밋 순서대로 보이는지(소비자가 건너뛰지 않는지)를 확인합니다.

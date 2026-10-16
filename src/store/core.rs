@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use super::Deadline;
 use super::StoreResult;
 use super::sqlite::groups;
+use super::sqlite::subject_directory as directory;
 use super::types::*;
 use crate::crypto::{Digest, Timestamp};
 use crate::event::types::{Event, Reason};
@@ -354,3 +355,45 @@ pub trait GroupStore: Send + Sync {
 /// Each person's live groups (and whether the list was cut).
 pub type GroupsOfUsers =
     std::collections::BTreeMap<String, (Vec<(groups::MemberRow, groups::GroupRow)>, bool)>;
+
+/// Slice 3 (ADR-0020): the read-only subject directory and its lifecycle
+/// feeds (reservation ledger, status and group changes). Positions are
+/// handed out in commit order, so a consumer that has read position N never
+/// later finds a new entry below N; a position the store no longer holds is
+/// reported as lost (take a new snapshot).
+#[async_trait]
+pub trait SubjectDirectoryStore: Send + Sync {
+    async fn admin_directory_rows(
+        &self,
+        users: Vec<String>,
+        deadline: Deadline,
+    ) -> StoreResult<std::collections::BTreeMap<String, directory::DirectoryRow>>;
+    async fn admin_ledger_after(
+        &self,
+        after: i64,
+        limit: usize,
+        deadline: Deadline,
+    ) -> StoreResult<Vec<directory::LedgerRow>>;
+    async fn admin_ledger_at(
+        &self,
+        positions: Vec<i64>,
+        deadline: Deadline,
+    ) -> StoreResult<std::collections::BTreeMap<i64, String>>;
+    async fn admin_ledger_head(&self, deadline: Deadline) -> StoreResult<i64>;
+    async fn admin_outbox_head(&self, deadline: Deadline)
+    -> StoreResult<directory::OutboxPosition>;
+    async fn admin_feed_changes(
+        &self,
+        after: directory::OutboxPosition,
+        limit: usize,
+        groups: bool,
+        deadline: Deadline,
+    ) -> StoreResult<Result<directory::StatusPage, directory::PositionLost>>;
+    async fn admin_live_handle(
+        &self,
+        session: String,
+        host: String,
+        deadline: Deadline,
+    ) -> StoreResult<Option<HandleRow>>;
+    async fn admin_totp_active(&self, user: String, deadline: Deadline) -> StoreResult<bool>;
+}

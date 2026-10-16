@@ -7,9 +7,13 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::core::{AdminStore, ConsoleStore, CoreStore, GroupStore, HandoffStore, NonceStore};
+use super::core::{
+    AdminStore, ConsoleStore, CoreStore, GroupStore, HandoffStore, NonceStore,
+    SubjectDirectoryStore,
+};
 use super::passkeys::*;
 use super::sqlite::groups::{Cas, Edit, WritePolicy};
+use super::sqlite::subject_directory::OutboxPosition;
 use super::types::*;
 use super::{Events, Factors, Passkeys};
 use super::{StoreError, StoreResult};
@@ -32,6 +36,7 @@ pub(crate) struct Backend {
     pub events: Arc<dyn Events>,
     pub console: Arc<dyn ConsoleStore>,
     pub groups: Arc<dyn GroupStore>,
+    pub directory: Arc<dyn SubjectDirectoryStore>,
     pub clock: Arc<TestClock>,
     pub rng: Arc<SeededRng>,
     _dir: Option<tempfile::TempDir>,
@@ -74,7 +79,8 @@ fn sqlite() -> Backend {
         passkeys: store.clone(),
         events: store.clone(),
         console: store.clone(),
-        groups: store,
+        groups: store.clone(),
+        directory: store,
         clock,
         rng,
         _dir: Some(dir),
@@ -116,6 +122,7 @@ pub(crate) async fn postgres() -> Option<Backend> {
         events: store.clone(),
         console: store.clone(),
         groups: store.clone(),
+        directory: store.clone(),
         store: store.clone(),
         clock,
         rng: Arc::new(SeededRng::new(42)),
@@ -3566,6 +3573,215 @@ async fn s600_19_local_groups_and_projection_agree_on_both_backends() {
 async fn s600_20_provider_groups_and_journal_order_agree_on_both_backends() {
     for b in backends().await {
         provider_groups(&b).await;
+        b.cleanup().await;
+    }
+}
+
+// ---- slice 3c: the subject directory and its feeds -----------------------
+
+async fn subject_directory(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let (actor, policy) = admin_actor(b, 1).await;
+    // Eight people created at once: the ledger lists every one, in order.
+    let mut tasks = Vec::new();
+    for n in 2..=9 {
+        let store = b.store.clone();
+        let (u, email) = new_user(n);
+        tasks.push(tokio::spawn(async move {
+            store
+                .create_user(
+                    u,
+                    identity("mock", &format!("sub-{n}"), Some(&email)),
+                    vec![],
+                )
+                .await
+                .unwrap()
+        }));
+    }
+    let mut people = Vec::new();
+    for t in tasks {
+        people.push(t.await.unwrap());
+    }
+    let head = b.directory.admin_ledger_head(deadline()).await.unwrap();
+    let ledger = b
+        .directory
+        .admin_ledger_after(0, 100, deadline())
+        .await
+        .unwrap();
+    assert_eq!(ledger.len(), 9, "{name}");
+    assert_eq!(ledger.last().unwrap().position, head);
+    assert!(
+        ledger.windows(2).all(|w| w[0].position < w[1].position),
+        "{name}"
+    );
+    let at = b
+        .directory
+        .admin_ledger_at(vec![ledger[0].position], deadline())
+        .await
+        .unwrap();
+    assert_eq!(at[&ledger[0].position], ledger[0].user_id, "{name}");
+    let rows = b
+        .directory
+        .admin_directory_rows(
+            vec![people[0].user_id.to_string(), "u_UNKNOWN".into()],
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "{name}");
+    let row = &rows[people[0].user_id.as_str()];
+    assert_eq!(
+        (row.providers.clone(), row.ledger.is_some()),
+        (vec!["mock".to_string()], true),
+        "{name}"
+    );
+    // The lifecycle feed: status changes (and group changes when asked).
+    let start = b.directory.admin_outbox_head(deadline()).await.unwrap();
+    let mk = |_: &SessionRow| grant_event(b);
+    let disable = |u: &User| {
+        let mut e = EventBuilder::new(
+            b.clock.as_ref(),
+            b.rng.as_ref(),
+            EventKind::AdminUserDisable,
+            Outcome::Success,
+            "req",
+        )
+        .build();
+        e.user_id = Some(u.user_id.clone());
+        e
+    };
+    for p in &people[..3] {
+        b.admin
+            .set_user_status(
+                &actor,
+                &policy,
+                &p.user_id,
+                UserStatus::Disabled,
+                deadline(),
+                disable(p),
+                &mk,
+            )
+            .await
+            .unwrap();
+    }
+    let gid = crate::groups::new_ref(b.rng.as_ref());
+    let created = b
+        .groups
+        .groups_admin_edit(
+            &actor,
+            &policy,
+            Edit::Create {
+                group_id: gid.clone(),
+                key: "ops".into(),
+                name: "Ops".into(),
+                description: None,
+            },
+            GROUP_POLICY,
+            ev(b, EventKind::GroupCreated),
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(created, Cas::Done(_)));
+    let page = b
+        .directory
+        .admin_feed_changes(start.clone(), 50, false, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    let changes: Vec<_> = page
+        .changes
+        .iter()
+        .map(|c| (c.change, c.user_id.clone().unwrap()))
+        .collect();
+    let expected: Vec<_> = people[..3]
+        .iter()
+        .map(|p| ("disabled", p.user_id.to_string()))
+        .collect();
+    assert_eq!(changes, expected, "{name}");
+    assert_eq!(
+        page.next.row, page.head,
+        "{name}: the group change was examined, not reported"
+    );
+    let with_groups = b
+        .directory
+        .admin_feed_changes(start.clone(), 50, true, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        with_groups
+            .changes
+            .last()
+            .map(|c| (c.change, c.group_id.clone())),
+        Some(("group_created", Some(gid.clone()))),
+        "{name}"
+    );
+    // Resuming after a page returns nothing new; a forged position is lost.
+    let rest = b
+        .directory
+        .admin_feed_changes(page.next.clone(), 50, true, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rest.changes.is_empty(), "{name}");
+    let forged = OutboxPosition {
+        row: page.next.row,
+        event_id: Some("e_FORGED".into()),
+    };
+    assert!(
+        b.directory
+            .admin_feed_changes(forged, 50, true, deadline())
+            .await
+            .unwrap()
+            .is_err(),
+        "{name}"
+    );
+    assert!(
+        b.directory
+            .admin_feed_changes(
+                OutboxPosition {
+                    row: -1,
+                    event_id: None
+                },
+                50,
+                true,
+                deadline()
+            )
+            .await
+            .unwrap()
+            .is_err()
+    );
+    // Explain reads.
+    let (s, h) = session(b, &people[4]).await;
+    let live = b
+        .directory
+        .admin_live_handle(s.session_id.to_string(), PORTAL.into(), deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(live.handle_sha256, h.handle_sha256, "{name}");
+    assert!(
+        !b.directory
+            .admin_totp_active(people[4].user_id.to_string(), deadline())
+            .await
+            .unwrap()
+    );
+    assert!(conflict(
+        b.directory
+            .admin_directory_rows(vec!["x".into(); 201], deadline())
+            .await
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_21_subject_directory_feeds_agree_on_both_backends() {
+    for b in backends().await {
+        subject_directory(&b).await;
         b.cleanup().await;
     }
 }
