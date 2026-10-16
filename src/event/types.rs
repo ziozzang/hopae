@@ -165,10 +165,13 @@ pub enum EventKind {
     WorkloadKeysRotated,
     /// A workload revocation index became stale or current again (diagnostic).
     WorkloadRevocationStale,
+    /// `authentication.source = config`: a start reconciled the stored
+    /// authentication profiles or projection plan to the file (required).
+    AuthenticationReconciled,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 59] = [
+    pub const ALL: [EventKind; 60] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -228,6 +231,7 @@ impl EventKind {
         EventKind::WorkloadLegacySubjectMapped,
         EventKind::WorkloadKeysRotated,
         EventKind::WorkloadRevocationStale,
+        EventKind::AuthenticationReconciled,
     ];
 
     /// Required kinds travel in the transaction of the state change they
@@ -308,6 +312,7 @@ impl EventKind {
             EventKind::WorkloadLegacySubjectMapped => "workload.legacy_subject_mapped",
             EventKind::WorkloadKeysRotated => "workload.keys_rotated",
             EventKind::WorkloadRevocationStale => "workload.revocation_stale",
+            EventKind::AuthenticationReconciled => "authentication.reconciled",
         }
     }
 
@@ -524,6 +529,7 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "spiffe_id",
     "stale",
     "subject_ref",
+    "previous_revision",
     "aal",
     "actor",
     "assurance",
@@ -740,14 +746,14 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 51);
+        assert_eq!(required, 52);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 59);
+        assert_eq!(EventKind::ALL.len(), 60);
         for (kind, name) in [
             (
                 EventKind::FactorExternalConsumed,

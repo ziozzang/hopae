@@ -24,7 +24,8 @@ pub async fn get(
     let result = tokio::time::timeout(state.cfg.query_budget, task).await;
     let mut response = match result {
         Ok(Ok(Ok(Some(document)))) => match serde_json::to_value(&document) {
-            Ok(value) => {
+            Ok(mut value) => {
+                value["source"] = state.profile_config.authentication.source.as_str().into();
                 let mut response = api::json(StatusCode::OK, &value);
                 if let Ok(etag) = format!("\"{}\"", document.revision).parse() {
                     response.headers_mut().insert(header::ETAG, etag);
@@ -35,7 +36,8 @@ pub async fn get(
         },
         Ok(Ok(Ok(None))) => api::json(
             StatusCode::OK,
-            &serde_json::json!({"revision":0,"configuration":null}),
+            &serde_json::json!({"revision":0,"configuration":null,
+                "source": state.profile_config.authentication.source.as_str()}),
         ),
         _ => api::json_error(StatusCode::SERVICE_UNAVAILABLE, "profiles_unavailable"),
     };
@@ -53,6 +55,11 @@ pub async fn put(
     Extension(mutation): Extension<super::csrf::Mutation>,
     headers: axum::http::HeaderMap,
 ) -> Response {
+    // `authentication.source = config`: the file owns this document; an edit
+    // here would be undone at the next start, so it is refused outright.
+    if state.profile_config.authentication.source == crate::config::AuthenticationSource::Config {
+        return api::json_error(StatusCode::CONFLICT, "config_authoritative");
+    }
     let mut matches = headers.get_all(header::IF_MATCH).iter();
     let expected = match (matches.next(), matches.next()) {
         (Some(value), None) => value.to_str().ok().and_then(|value| {

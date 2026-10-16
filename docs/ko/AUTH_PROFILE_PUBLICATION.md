@@ -159,3 +159,35 @@ credential digest를 포함하므로 비밀이나 보안 옵션이 바뀌면 재
 않습니다. 시간 기준은 프로세스 로컬이며 재시작 watermark는 아닙니다. 삭제 후 재생성
 커넥터·프로세스 교체의 영속 circuit/quarantine 수명주기는 남아 있습니다. 소스 검증된
 변경이며 현재 내부 바이너리에는 이 연속성 수정이 아직 들어가지 않았습니다.
+
+
+## 설정 권위 모드
+
+`authentication.source`는 인증 프로필(`authentication_gateway`)과 자격 증명 투영
+계획(`credential_projection`)의 소유자를 정합니다.
+
+| `authentication.source` | 소유자 | 시작 | 콘솔·API 편집 |
+| --- | --- | --- | --- |
+| `store`(기본값) | 저장소 | 파일은 빈 저장소만 초기화하며, 저장된 문서(또는 tombstone)가 바뀐 파일보다 우선합니다 | 허용(`PUT /v1/authentication/profiles`, `/projections`) |
+| `config` | 파일 | 시작할 때마다 저장소를 파일에 맞춥니다 | 거부: `409 config_authoritative` |
+
+`config` 모드의 시작은 먼저 파일의 프로필을 게시와 같은 검사로 검증하고 컴파일합니다.
+파일이 잘못되었으면 명확한 오류로 시작을 멈추고 저장소는 건드리지 않습니다. 저장된
+문서가 파일과 다르면 CAS 게시로 파일을 게시합니다. 다음 리비전, actor가 `config`인 감사
+행, 파일에 없으면 비활성 tombstone, 그리고 필수 이벤트 `authentication.reconciled`
+(`attrs.kind` = `profiles` 또는 `projections`, `previous_revision`, `revision`,
+`actor`)가 남습니다. 같은 문서는 리비전을 유지하고 아무것도 쓰지 않습니다. 투영 계획은
+plans를 비교하고 파일의 plans를 저장소의 다음 리비전으로 게시합니다(이 모드에서는 파일의
+`revision`을 무시합니다). `GET /v1/authentication/profiles`는 `source`를 알려 줍니다.
+
+Kubernetes 패키지가 필요로 하는 선언적 모드입니다. Helm values가 파일을 바꾸고
+롤아웃이 파드를 재시작하면 저장소가 따라갑니다.
+
+이전 절차:
+
+- **store → config:** 현재 문서(`GET /v1/authentication/profiles`와 `/projections`)를
+  파일에 옮기고 `authentication.source = "config"`로 설정한 뒤 재시작합니다. 같은 문서는
+  리비전을 유지하고, 다른 부분은 다음 리비전으로 게시되고 기록됩니다.
+- **config → store:** `authentication.source = "store"`로 설정(또는 제거)하고
+  재시작합니다. 저장소는 마지막으로 맞춘 문서를 유지하고 콘솔 편집이 다시 동작합니다.
+  이후 파일 변경은 적용되지 않으며 파일은 빈 저장소만 초기화합니다.

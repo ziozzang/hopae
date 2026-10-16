@@ -68,6 +68,11 @@ pub struct Config {
     pub authentication_gateway: Option<crate::auth_gateway::runtime::Config>,
     #[serde(default)]
     pub credential_projection: Option<crate::auth_gateway::projection::Configuration>,
+    /// Which side owns the authentication profiles and the credential
+    /// projection plan: the store (default, console/API edits) or this file
+    /// (`config`: reconciled at every start, console edits refused).
+    #[serde(default)]
+    pub authentication: AuthenticationCfg,
     #[serde(default)]
     pub linking: Linking,
     #[serde(default)]
@@ -155,6 +160,36 @@ pub enum UntrustedPeers {
 pub enum AdminRoleCfg {
     Admin,
     Viewer,
+}
+
+/// `authentication` (configuration ownership of the authentication profiles
+/// and the credential projection plan).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthenticationCfg {
+    #[serde(default)]
+    pub source: AuthenticationSource,
+}
+
+/// `authentication.source`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthenticationSource {
+    /// The store is authoritative; the file only bootstraps an empty store.
+    #[default]
+    Store,
+    /// The file is authoritative: every start reconciles the store to it
+    /// through the validated CAS publication; console/API edits are refused.
+    Config,
+}
+
+impl AuthenticationSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuthenticationSource::Store => "store",
+            AuthenticationSource::Config => "config",
+        }
+    }
 }
 
 /// `admin` (ADR-0016): the console's address, policy and seeded grants.

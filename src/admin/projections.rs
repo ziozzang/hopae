@@ -57,6 +57,11 @@ pub async fn put(
     Extension(mutation): Extension<super::csrf::Mutation>,
     headers: HeaderMap,
 ) -> Response {
+    // `authentication.source = config`: the file owns this document; an edit
+    // here would be undone at the next start, so it is refused outright.
+    if state.profile_config.authentication.source == crate::config::AuthenticationSource::Config {
+        return api::json_error(StatusCode::CONFLICT, "config_authoritative");
+    }
     let mut matches = headers.get_all(header::IF_MATCH).iter();
     let expected = match (matches.next(), matches.next()) {
         (Some(v), None) => v

@@ -127,6 +127,13 @@ impl Snapshot {
         })
     }
 }
+/// What a configuration-authoritative start did to the store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Reconciled {
+    pub previous: u64,
+    pub revision: u64,
+    pub changed: bool,
+}
 pub struct Authorization<'a> {
     pub actor: &'a str,
     pub guard: &'a dyn Fn(&Connection) -> Result<(), publication::Error>,
@@ -179,6 +186,56 @@ impl Authority {
             runtime.activate(Some(sink.clone()));
         }
         self.workload_signals = Some(sink);
+    }
+    /// `authentication.source = config`: the file is authoritative. The
+    /// desired profiles are validated and compiled first (an invalid file
+    /// never touches the store), then the store is reconciled through the
+    /// same CAS publication (revision + audit row, actor `config`) when its
+    /// durable document differs. Equal documents keep their revision.
+    pub fn load_from_config(
+        connection: &mut Connection,
+        desired: Option<runtime::Config>,
+        env: &dyn Fn(&str) -> Option<String>,
+        validate: &dyn Fn(&runtime::Config) -> Result<(), publication::Error>,
+    ) -> Result<(Self, Reconciled), publication::Error> {
+        let runtime = Self::compile(desired.as_ref(), env, validate)?;
+        let durable = publication::read(connection)?;
+        let previous = durable.as_ref().map_or(0, |d| d.revision);
+        let same = match &durable {
+            Some(d) => {
+                serde_json::to_value(&d.configuration).map_err(|_| publication::Error::Invalid)?
+                    == serde_json::to_value(&desired).map_err(|_| publication::Error::Invalid)?
+            }
+            None => desired.is_none(),
+        };
+        let revision = if same {
+            previous
+        } else {
+            publication::publish(connection, previous, desired, "config")?.revision
+        };
+        let observed_time = runtime
+            .as_ref()
+            .map(|runtime| runtime.observed_time.clone())
+            .unwrap_or_default();
+        if let Some(runtime) = &runtime {
+            runtime.activate(None);
+        }
+        Ok((
+            Self {
+                observed_time,
+                snapshot: Arc::new(ArcSwap::from_pointee(Snapshot {
+                    publication: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    revision,
+                    runtime,
+                })),
+                workload_signals: None,
+            },
+            Reconciled {
+                previous,
+                revision,
+                changed: !same,
+            },
+        ))
     }
     fn compile(
         configuration: Option<&runtime::Config>,
@@ -511,5 +568,68 @@ mod tests {
         assert!(owner.snapshot().available());
         assert!(!Arc::ptr_eq(&old, &owner.snapshot()));
         assert_eq!(owner.snapshot().revision, 2);
+    }
+
+    /// S319-1/S319-A1: configuration-authoritative reconciliation through the
+    /// CAS publication; an invalid file never touches the store.
+    #[test]
+    fn s319_1_config_authoritative_start_reconciles_through_publication() {
+        use super::super::{publication, runtime};
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT")
+            .unwrap();
+        let profile = |subject: &str| -> runtime::Config {
+            serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{
+                "service_id":"orders","host":"app.example.test","ports":[443],"realm":"services",
+                "api_keys":[{"token_env":"OWNED_KEY","subject":subject}]}]}))
+            .unwrap()
+        };
+        let env = |_: &str| Some("owned-service-credential-of-sufficient-length".to_string());
+        let ok = |_: &runtime::Config| Ok(());
+        let (a, done) =
+            super::Authority::load_from_config(&mut db, Some(profile("worker")), &env, &ok)
+                .unwrap();
+        assert_eq!((done.previous, done.revision, done.changed), (0, 1, true));
+        assert_eq!(a.snapshot().revision, 1);
+        let (_, done) =
+            super::Authority::load_from_config(&mut db, Some(profile("worker")), &env, &ok)
+                .unwrap();
+        assert_eq!(
+            (done.revision, done.changed),
+            (1, false),
+            "an equal file keeps the revision"
+        );
+        let (a, done) =
+            super::Authority::load_from_config(&mut db, Some(profile("batch")), &env, &ok).unwrap();
+        assert_eq!((done.previous, done.revision, done.changed), (1, 2, true));
+        assert!(a.snapshot().runtime.is_some());
+        // An invalid file: refused, the store keeps revision 2.
+        let refuse = |_: &runtime::Config| Err(publication::Error::Invalid);
+        assert!(
+            super::Authority::load_from_config(&mut db, Some(profile("other")), &env, &refuse)
+                .is_err()
+        );
+        let missing = |_: &str| None;
+        assert!(
+            super::Authority::load_from_config(&mut db, Some(profile("other")), &missing, &ok)
+                .is_err()
+        );
+        let doc = publication::read(&db).unwrap().unwrap();
+        assert_eq!(doc.revision, 2);
+        assert_eq!(
+            doc.configuration.unwrap().profiles[0].api_keys[0].subject,
+            "batch"
+        );
+        // Removing the profiles from the file publishes the disabled tombstone.
+        let (a, done) = super::Authority::load_from_config(&mut db, None, &env, &ok).unwrap();
+        assert_eq!((done.revision, done.changed), (3, true));
+        assert!(a.snapshot().runtime.is_none());
+        let audits: i64 = db
+            .query_row("SELECT count(*) FROM meta WHERE key LIKE 'authentication_profile_publication_audit:%' AND value LIKE '%\"actor\":\"config\"%'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            audits, 3,
+            "every reconciliation is audited with actor config"
+        );
     }
 }

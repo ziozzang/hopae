@@ -137,6 +137,12 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   `x-hopae-workload-spiffe-id`; `workload.*` lifecycle events and
   `include_workloads` on the subject lifecycle feed; workload subjects in
   the authentication explain API; `hopae_workload_*` counters.
+- `authentication.source = "config"`: the configuration file owns the
+  authentication profiles and the credential projection plan; every start
+  reconciles the store through the validated CAS publication (audit row,
+  `authentication.reconciled` event), an invalid file leaves the store
+  untouched, console/API edits answer `409 config_authoritative`. The default
+  `store` mode is unchanged.
 
 ### Changed
 

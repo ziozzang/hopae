@@ -189,6 +189,7 @@ pub(super) const ROOT: Node = Obj(&[
             ),
         ]),
     ),
+    ("authentication", Obj(&[("source", Leaf)])),
     (
         "authentication_gateway",
         Obj(&[
