@@ -99,6 +99,7 @@ fn membership(m: &MemberRow) -> Value {
         "removal_pending_at": m.removal_pending_at,
         "added_by": m.added_by,
         "reason": m.reason,
+        "stale_at": m.stale_at,
     })
 }
 
@@ -462,7 +463,9 @@ pub(crate) async fn brief_groups(
         .map(|(u, (rows, more))| {
             let v = rows
                 .iter()
-                .map(|(_, gr)| json!({"group_id": gr.group_id, "name": gr.name, "source": gr.source}))
+                .map(|(m, gr)| {
+                    json!({"group_id": gr.group_id, "name": gr.name, "source": gr.source, "stale": m.stale_at.is_some()})
+                })
                 .collect();
             (u, (v, more))
         })
@@ -495,6 +498,9 @@ enum WriteBody {
     Delete {
         group_id: String,
         expected_revision: i64,
+        /// Required to delete a group that still has members.
+        #[serde(default)]
+        force: bool,
         reason: String,
     },
     AddMember {
@@ -602,6 +608,7 @@ async fn write(st: &AdminState, c: &Ctx, op: &'static str, bytes: &[u8]) -> Resu
         WriteBody::Delete {
             group_id,
             expected_revision,
+            force,
             reason,
         } => {
             if !g::valid_ref(&group_id) || expected_revision < 1 || !reason_ok(&reason) {
@@ -611,6 +618,7 @@ async fn write(st: &AdminState, c: &Ctx, op: &'static str, bytes: &[u8]) -> Resu
                 Edit::Delete {
                     group_id,
                     expected: expected_revision,
+                    force,
                 },
                 reason,
                 EventKind::GroupDeleted,
@@ -879,6 +887,18 @@ pub async fn projection_snapshot_api(
                 Some(v) => {
                     let (w, u) = snapshot_cursor(v)
                         .ok_or(Fail(StatusCode::BAD_REQUEST, "invalid_cursor"))?;
+                    // A watermark beyond the journal head is not one this
+                    // store issued: the page would attest a position that
+                    // never existed.
+                    let (head, _) = st
+                        .groups
+                        .store
+                        .groups_journal_bounds(api::deadline(st))
+                        .await
+                        .map_err(fail)?;
+                    if w > head {
+                        return Err(expired());
+                    }
                     (w, Some(u))
                 }
             };
@@ -917,6 +937,8 @@ pub async fn projection_snapshot_api(
             })
             .await?;
             payload.insert("watermark".into(), watermark.into());
+            // The request's cursor, so a page cannot stand in for another one.
+            payload.insert("cursor".into(), req.cursor.clone().into());
             payload.insert("entries".into(), items.into());
             payload.insert("next_cursor".into(), next.into());
             payload.insert("more".into(), more.into());

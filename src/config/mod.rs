@@ -1380,6 +1380,15 @@ impl Config {
             let at = format!("providers[{i}]");
             if let Some(g) = &p.groups {
                 g.validate(&i.to_string(), p.kind == ProviderKind::Ldap, errs);
+                let staleness = self.groups.as_ref().map_or(
+                    crate::groups::GroupsConfig::default().max_staleness_secs,
+                    |c| c.max_staleness_secs,
+                );
+                if g.sync_interval_secs.is_some_and(|s| s >= staleness) {
+                    errs.push(format!(
+                        "{at}.groups.sync_interval_secs must be shorter than groups.max_staleness_secs"
+                    ));
+                }
             }
             if !valid_slug(&p.provider_id) {
                 errs.push(format!(
@@ -2338,6 +2347,8 @@ mod tests {
         assert!(invalid(r#"{"providers": [{"provider_id": "g", "kind": "oidc", "client_id": "c", "client_secret": "literal"}]}"#).contains("environment variable name"));
         assert!(!invalid(r#"{"providers": [{"provider_id": "g", "kind": "oidc", "client_id": "c", "client_secret": "literal"}]}"#).contains("literal\""));
         assert!(invalid(r#"{"providers": [{"provider_id": "g", "kind": "oidc", "client_id": "c", "issuer": "http://example.org"}]}"#).contains("providers[0].issuer"));
+        // A periodic group sync must refresh before memberships go stale.
+        assert!(invalid(r#"{"groups": {"max_staleness_secs": 3600}, "providers": [{"provider_id": "d", "kind": "ldap", "groups": {"sync_interval_secs": 3600}}]}"#).contains("must be shorter than groups.max_staleness_secs"));
         assert!(
             invalid(
                 r#"{"providers": [{"provider_id": "g", "kind": "password", "client_id": "c"}]}"#

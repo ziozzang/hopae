@@ -198,13 +198,15 @@ pub fn vocabulary_digest(groups: &[String]) -> String {
 /// Reference verifier (the contract Pumgye implements): the envelope format,
 /// a pinned key for `(issuer_ref, key_epoch)` from `keys`, the signature over
 /// `DOMAIN || payload` with strict Ed25519 verification, then the header
-/// binding: `issuer_ref`/`key_epoch` equal the envelope's, the audience and
+/// binding: `kind` is the one asked for, `issuer_ref`/`key_epoch` equal the envelope's, the audience and
 /// vocabulary digest equal the expected ones, and `issued_at` is within
 /// `max_age_ms` of `now_ms` (and not more than 60 s ahead). Returns the
 /// parsed payload.
+#[allow(clippy::too_many_arguments)]
 pub fn verify(
     envelope: &str,
     keys: &dyn Fn(&str, u64) -> Option<VerifyingKey>,
+    kind: &str,
     audience: &str,
     vocabulary_sha256: &str,
     now_ms: i64,
@@ -238,7 +240,8 @@ pub fn verify(
         serde_json::from_slice(&bytes).map_err(|_| VerifyError::Malformed)?;
     let header: Header =
         serde_json::from_value(value.clone()).map_err(|_| VerifyError::Malformed)?;
-    if header.issuer_ref != env.key.issuer_ref
+    if header.kind != kind
+        || header.issuer_ref != env.key.issuer_ref
         || header.key_epoch != env.key.key_epoch
         || header.audience != audience
         || header.vocabulary_sha256 != vocabulary_sha256
@@ -279,8 +282,13 @@ mod tests {
         );
         let env = s.seal(&page(&s, 1_000, &vocab)).unwrap();
         let text = serde_json::to_string(&env).unwrap();
-        let v = verify(&text, &keys, "pumgye", &vocab, 2_000, 60_000).unwrap();
+        let v = verify(&text, &keys, "snapshot", "pumgye", &vocab, 2_000, 60_000).unwrap();
         assert_eq!(v["kind"], "snapshot");
+        // A snapshot page is not a changes page.
+        assert_eq!(
+            verify(&text, &keys, "changes", "pumgye", &vocab, 2_000, 60_000),
+            Err(VerifyError::Binding)
+        );
 
         // Tampered payload, signature, key id, audience, vocabulary, age.
         let mut bad = env.clone();
@@ -291,6 +299,7 @@ mod tests {
             verify(
                 &serde_json::to_string(&bad).unwrap(),
                 &keys,
+                "snapshot",
                 "pumgye",
                 &vocab,
                 2_000,
@@ -304,6 +313,7 @@ mod tests {
             verify(
                 &serde_json::to_string(&bad).unwrap(),
                 &keys,
+                "snapshot",
                 "pumgye",
                 &vocab,
                 2_000,
@@ -312,15 +322,15 @@ mod tests {
             Err(VerifyError::UnknownKey)
         );
         assert_eq!(
-            verify(&text, &keys, "other", &vocab, 2_000, 60_000),
+            verify(&text, &keys, "snapshot", "other", &vocab, 2_000, 60_000),
             Err(VerifyError::Binding)
         );
         assert_eq!(
-            verify(&text, &keys, "pumgye", "00", 2_000, 60_000),
+            verify(&text, &keys, "snapshot", "pumgye", "00", 2_000, 60_000),
             Err(VerifyError::Binding)
         );
         assert_eq!(
-            verify(&text, &keys, "pumgye", &vocab, 100_000, 60_000),
+            verify(&text, &keys, "snapshot", "pumgye", &vocab, 100_000, 60_000),
             Err(VerifyError::Binding)
         );
         // A signature by another key under the pinned id.
@@ -330,6 +340,7 @@ mod tests {
             verify(
                 &serde_json::to_string(&forged).unwrap(),
                 &keys,
+                "snapshot",
                 "pumgye",
                 &vocab,
                 2_000,
@@ -347,6 +358,7 @@ mod tests {
             verify(
                 &serde_json::to_string(&cross).unwrap(),
                 &keys,
+                "snapshot",
                 "pumgye",
                 &vocab,
                 2_000,

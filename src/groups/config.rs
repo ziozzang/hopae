@@ -20,6 +20,9 @@ fn default_maintenance_secs() -> u64 {
 fn default_stale_group_days() -> u32 {
     30
 }
+fn default_max_staleness_secs() -> u64 {
+    7 * 86_400
+}
 
 /// `groups`: instance-wide settings. Absent means every default.
 #[derive(Clone, Debug, Deserialize)]
@@ -42,6 +45,12 @@ pub struct GroupsConfig {
     /// many days is deleted (a tombstone stays).
     #[serde(default = "default_stale_group_days")]
     pub stale_group_days: u32,
+    /// A provider membership that no successful assertion (sign-in or
+    /// periodic sync) refreshed for this long is suspended: kept, but left
+    /// out of the projection and the gateway mirror until it is asserted
+    /// again (fail-static with a bound).
+    #[serde(default = "default_max_staleness_secs")]
+    pub max_staleness_secs: u64,
     /// Mirror a person's group references into `users.groups`, so that the
     /// gateway contract's `x-forwarded-groups` carries them (ADR-0018
     /// decision 6). Off by default.
@@ -60,6 +69,7 @@ impl Default for GroupsConfig {
             change_retention_days: default_retention_days(),
             maintenance_interval_secs: default_maintenance_secs(),
             stale_group_days: default_stale_group_days(),
+            max_staleness_secs: default_max_staleness_secs(),
             gateway_header: false,
             projection: None,
         }
@@ -103,6 +113,9 @@ impl GroupsConfig {
         }
         if !(1..=3650).contains(&self.stale_group_days) {
             errs.push("groups.stale_group_days must be between 1 and 3650".into());
+        }
+        if !(3600..=31_536_000).contains(&self.max_staleness_secs) {
+            errs.push("groups.max_staleness_secs must be between 3600 and 31536000".into());
         }
         if let Some(p) = &self.projection {
             if !ident(&p.issuer_ref) || !ident(&p.audience) {
@@ -405,7 +418,7 @@ impl Refusal {
 }
 
 fn clean(s: &str, max_bytes: usize) -> bool {
-    !s.trim().is_empty() && s.len() <= max_bytes && !s.chars().any(char::is_control)
+    !s.trim().is_empty() && s.len() <= max_bytes && !s.chars().any(super::hidden)
 }
 
 fn cut_chars(s: &str, max: usize) -> String {
@@ -439,7 +452,7 @@ impl Rules {
                 _ => g.name.clone(),
             };
             let name = cut_chars(&name, MAX_NAME_CHARS);
-            if name.is_empty() || name.chars().any(char::is_control) {
+            if name.is_empty() || name.chars().any(super::hidden) {
                 continue;
             }
             out.entry(g.key.clone()).or_insert(name);
@@ -528,6 +541,7 @@ mod tests {
                 "/eng/backend",
                 " ",
                 "a\nb",
+                "/eng/x\u{202E}y",
             ]))
             .unwrap();
         assert_eq!(
@@ -578,11 +592,11 @@ mod tests {
         assert!(errs.is_empty());
         let c: GroupsConfig = serde_json::from_value(json!({
             "max_groups_per_user": 0, "change_retention_days": 0,
-            "maintenance_interval_secs": 1, "stale_group_days": 0,
+            "maintenance_interval_secs": 1, "stale_group_days": 0, "max_staleness_secs": 60,
             "projection": {"issuer_ref": "bad ref", "key_epoch": 0, "public_key": "x", "seed_env": "a b", "audience": "pumgye"}
         }))
         .unwrap();
         c.validate(&mut errs);
-        assert_eq!(errs.len(), 8, "{errs:?}");
+        assert_eq!(errs.len(), 9, "{errs:?}");
     }
 }

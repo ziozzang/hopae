@@ -37,7 +37,7 @@ pub const MAX_PAGE_REFS: usize = 50_000;
 const MAINTENANCE_BATCH: i64 = 1_000;
 
 const GROUP_COLS: &str = "g.group_id, g.source, g.provider_id, g.external_key, g.name, g.description, g.state, g.revision, g.created_at, g.updated_at, g.last_seen_at, g.deleted_at, (SELECT COUNT(*) FROM group_members m WHERE m.group_id = g.group_id)";
-const MEMBER_COLS: &str = "gm.group_id, gm.user_id, gm.source, gm.provider_id, gm.first_seen_at, gm.last_seen_at, gm.expires_at, gm.removal_pending_at, gm.added_by, gm.reason";
+const MEMBER_COLS: &str = "gm.group_id, gm.user_id, gm.source, gm.provider_id, gm.first_seen_at, gm.last_seen_at, gm.expires_at, gm.removal_pending_at, gm.added_by, gm.reason, gm.stale_at";
 
 /// One group as stored.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -70,6 +70,8 @@ pub struct MemberRow {
     pub removal_pending_at: Option<i64>,
     pub added_by: Option<String>,
     pub reason: Option<String>,
+    /// Provider memberships only: suspended (stale) since this time.
+    pub stale_at: Option<i64>,
 }
 
 fn group_row(r: &Row<'_>) -> rusqlite::Result<GroupRow> {
@@ -102,6 +104,7 @@ fn member_row(r: &Row<'_>, o: usize) -> rusqlite::Result<MemberRow> {
         removal_pending_at: r.get(o + 7)?,
         added_by: r.get(o + 8)?,
         reason: r.get(o + 9)?,
+        stale_at: r.get(o + 10)?,
     })
 }
 
@@ -141,6 +144,8 @@ pub enum Edit {
     Delete {
         group_id: String,
         expected: i64,
+        /// Delete even when the group still has members.
+        force: bool,
     },
     AddMember {
         group_id: String,
@@ -165,6 +170,8 @@ pub struct SyncReport {
     pub pending: u32,
     pub groups_created: u32,
     pub groups_renamed: u32,
+    /// Suspended (stale) memberships asserted again.
+    pub restored: u32,
     /// `Some(reason)`: nothing was applied.
     pub refused: Option<&'static str>,
 }
@@ -177,6 +184,10 @@ pub struct MaintenanceReport {
     pub orphaned: u32,
     pub stale_groups: u32,
     pub journal_pruned: u32,
+    /// Provider memberships suspended by this pass (max staleness).
+    pub suspended: u32,
+    /// Suspended provider memberships after this pass (a gauge).
+    pub stale_total: i64,
 }
 
 /// The settings a write needs from the configuration.
@@ -235,6 +246,11 @@ enum Change {
     GroupDeleted,
     MemberAdded,
     MemberRemoved,
+    /// A provider membership suspended for staleness: removed from the
+    /// projection (journaled as `member_removed`), kept in the store.
+    MemberSuspended,
+    /// A suspended membership asserted again (journaled as `member_added`).
+    MemberRestored,
 }
 
 impl Change {
@@ -243,8 +259,8 @@ impl Change {
             Change::GroupCreated => "group_created",
             Change::GroupUpdated => "group_updated",
             Change::GroupDeleted => "group_deleted",
-            Change::MemberAdded => "member_added",
-            Change::MemberRemoved => "member_removed",
+            Change::MemberAdded | Change::MemberRestored => "member_added",
+            Change::MemberRemoved | Change::MemberSuspended => "member_removed",
         }
     }
 
@@ -255,6 +271,8 @@ impl Change {
             Change::GroupDeleted => EventKind::GroupDeleted,
             Change::MemberAdded => EventKind::GroupMemberAdded,
             Change::MemberRemoved => EventKind::GroupMemberRemoved,
+            Change::MemberSuspended => EventKind::GroupMembershipStale,
+            Change::MemberRestored => EventKind::GroupMembershipRestored,
         }
     }
 }
@@ -316,7 +334,7 @@ impl Journal<'_> {
             let refs: Vec<String> = if enabled {
                 let mut st = tx.prepare_cached(
                     "SELECT gm.group_id FROM group_members gm JOIN directory_groups g ON g.group_id = gm.group_id
-                     WHERE gm.user_id = ?1 AND g.state = 'active' ORDER BY gm.group_id LIMIT ?2",
+                     WHERE gm.user_id = ?1 AND g.state = 'active' AND gm.stale_at IS NULL ORDER BY gm.group_id LIMIT ?2",
                 )?;
                 st.query_map(params![user, GATEWAY_HEADER_MAX as i64], |r| r.get(0))?
                     .collect::<Result<_, _>>()?
@@ -548,11 +566,18 @@ impl Store {
                     j.record(&tx, Change::GroupUpdated, &k, None, revision, true, &[("change", if renamed { "renamed" } else { "described" }.into())])?;
                     group_id
                 }
-                Edit::Delete { group_id, expected } => {
+                Edit::Delete {
+                    group_id,
+                    expected,
+                    force,
+                } => {
                     let g = match local_at(&tx, &group_id, expected)? {
                         Ok(g) => g,
                         Err(e) => return Ok(cas(e)),
                     };
+                    if g.members > 0 && !force {
+                        return Ok(Cas::Conflict("group_not_empty"));
+                    }
                     delete_group(&tx, &mut j, &g, check, &[])?;
                     group_id
                 }
@@ -715,20 +740,27 @@ impl Store {
             }
             check.now()?;
             // The person's current memberships from this provider.
-            let current: HashMap<String, Option<i64>> = {
+            let current: HashMap<String, (Option<i64>, Option<i64>)> = {
                 let mut st = tx.prepare_cached(
-                    "SELECT group_id, removal_pending_at FROM group_members WHERE user_id = ?1 AND source = ?2 AND provider_id = ?3",
+                    "SELECT group_id, removal_pending_at, stale_at FROM group_members WHERE user_id = ?1 AND source = ?2 AND provider_id = ?3",
                 )?;
-                st.query_map(params![user, src, pid], |r| Ok((r.get(0)?, r.get(1)?)))?
-                    .collect::<Result<_, _>>()?
+                st.query_map(params![user, src, pid], |r| {
+                    Ok((r.get(0)?, (r.get(1)?, r.get(2)?)))
+                })?
+                .collect::<Result<_, _>>()?
             };
             for id in wanted.keys() {
                 let k = GroupKey { id, source: src, provider: Some(pid) };
-                if current.contains_key(id) {
+                if let Some((_, stale)) = current.get(id) {
                     tx.execute(
-                        "UPDATE group_members SET last_seen_at = ?3, removal_pending_at = NULL WHERE group_id = ?1 AND user_id = ?2",
+                        "UPDATE group_members SET last_seen_at = ?3, removal_pending_at = NULL, stale_at = NULL WHERE group_id = ?1 AND user_id = ?2",
                         params![id, user, secs],
                     )?;
+                    if stale.is_some() {
+                        let revision = bump(&tx, id, secs)?;
+                        j.record(&tx, Change::MemberRestored, &k, Some(&user), revision, true, &[])?;
+                        report.restored += 1;
+                    }
                 } else {
                     tx.execute(
                         "INSERT INTO group_members (group_id, user_id, source, provider_id, first_seen_at, last_seen_at)
@@ -740,7 +772,7 @@ impl Store {
                     report.added += 1;
                 }
             }
-            for (id, pending) in &current {
+            for (id, (pending, _)) in &current {
                 if wanted.contains_key(id) {
                     continue;
                 }
@@ -789,10 +821,12 @@ impl Store {
     /// named keeps its pending memberships), memberships of tombstoned
     /// providers, stale provider groups and journal retention. Bounded per
     /// call; the report says what was done.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn groups_maintenance(
         &self,
         grace: HashMap<String, u64>,
         stale_before: i64,
+        suspend_before: i64,
         journal_before: i64,
         settings: WritePolicy,
         template: Event,
@@ -826,7 +860,7 @@ impl Store {
                 let mut q = st.query(params![secs, MAINTENANCE_BATCH])?;
                 while let Some(r) = q.next()? {
                     let m = member_row(r, 0)?;
-                    let gone_provider: bool = r.get(10)?;
+                    let gone_provider: bool = r.get(11)?;
                     if m.source == "local" {
                         if m.expires_at.is_some_and(|e| e <= secs) {
                             doomed.push((m, "expired"));
@@ -857,6 +891,47 @@ impl Store {
                     _ => report.orphaned += 1,
                 }
             }
+            // Provider memberships no successful assertion refreshed since
+            // `suspend_before`: suspended, not deleted (fail-static with a
+            // maximum staleness).
+            let stale_members: Vec<MemberRow> = {
+                let sql = format!(
+                    "SELECT {MEMBER_COLS} FROM group_members gm
+                     WHERE gm.source <> 'local' AND gm.stale_at IS NULL AND gm.last_seen_at < ?1
+                     LIMIT ?2"
+                );
+                let mut st = tx.prepare(&sql)?;
+                st.query_map(params![suspend_before, MAINTENANCE_BATCH], |r| member_row(r, 0))?
+                    .collect::<Result<_, _>>()?
+            };
+            for m in &stale_members {
+                check.now()?;
+                tx.execute(
+                    "UPDATE group_members SET stale_at = ?3 WHERE group_id = ?1 AND user_id = ?2",
+                    params![m.group_id, m.user_id, secs],
+                )?;
+                let revision = bump(&tx, &m.group_id, secs)?;
+                let k = GroupKey {
+                    id: &m.group_id,
+                    source: &m.source,
+                    provider: m.provider_id.as_deref(),
+                };
+                j.record(
+                    &tx,
+                    Change::MemberSuspended,
+                    &k,
+                    Some(&m.user_id),
+                    revision,
+                    true,
+                    &[("cause", "stale".into())],
+                )?;
+                report.suspended += 1;
+            }
+            report.stale_total = tx.query_row(
+                "SELECT COUNT(*) FROM group_members WHERE stale_at IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )?;
             // Provider groups with no member, unseen since `stale_before`, or
             // whose provider is gone.
             let stale: Vec<GroupRow> = {
@@ -1015,19 +1090,19 @@ impl Store {
                         |r| {
                             let m = member_row(r, 0)?;
                             let g = GroupRow {
-                                group_id: r.get(10)?,
-                                source: r.get(11)?,
-                                provider_id: r.get(12)?,
-                                external_key: r.get(13)?,
-                                name: r.get(14)?,
-                                description: r.get(15)?,
-                                state: r.get(16)?,
-                                revision: r.get(17)?,
-                                created_at: r.get(18)?,
-                                updated_at: r.get(19)?,
-                                last_seen_at: r.get(20)?,
-                                deleted_at: r.get(21)?,
-                                members: r.get(22)?,
+                                group_id: r.get(11)?,
+                                source: r.get(12)?,
+                                provider_id: r.get(13)?,
+                                external_key: r.get(14)?,
+                                name: r.get(15)?,
+                                description: r.get(16)?,
+                                state: r.get(17)?,
+                                revision: r.get(18)?,
+                                created_at: r.get(19)?,
+                                updated_at: r.get(20)?,
+                                last_seen_at: r.get(21)?,
+                                deleted_at: r.get(22)?,
+                                members: r.get(23)?,
                             };
                             Ok((m, g))
                         },
@@ -1076,7 +1151,7 @@ impl Store {
                  JOIN directory_groups g ON g.group_id = gm.group_id AND g.state = 'active'
                  JOIN users u ON u.user_id = gm.user_id
                  WHERE gm.group_id IN (SELECT value FROM json_each(?1)) AND gm.user_id > ?2
-                   AND (gm.expires_at IS NULL OR gm.expires_at > ?3)
+                   AND (gm.expires_at IS NULL OR gm.expires_at > ?3) AND gm.stale_at IS NULL
                  ORDER BY gm.user_id, gm.group_id",
                 )?;
                 let mut q = st.query(params![vocab, after.unwrap_or_default(), now])?;
@@ -1449,6 +1524,7 @@ mod tests {
             .groups_maintenance(
                 grace,
                 now - 86_400,
+                i64::MIN,
                 now - 86_400,
                 POLICY,
                 tpl(&f.clock),
@@ -1548,6 +1624,7 @@ mod tests {
             .groups_maintenance(
                 HashMap::new(),
                 now - 1,
+                i64::MIN,
                 now + 1,
                 POLICY,
                 tpl(&f.clock),
@@ -1698,6 +1775,85 @@ mod tests {
                 "SELECT COUNT(*) FROM group_sync_state WHERE last_error='provider_unavailable'"
             ),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_provider_memberships_are_suspended_not_deleted_and_restored_by_an_assertion() {
+        let f = fx();
+        let on = WritePolicy {
+            max_groups_per_user: 3,
+            gateway_header: true,
+        };
+        f.sync("u_a", &["a"], 0, on).await;
+        let gid: String = f
+            .store
+            .conn()
+            .query_row("SELECT group_id FROM directory_groups", [], |r| r.get(0))
+            .unwrap();
+        f.clock.advance(Duration::from_secs(10));
+        let now = f.clock.now().secs();
+        let maintain = |suspend_before: i64| {
+            f.store.groups_maintenance(
+                HashMap::new(),
+                now - 86_400,
+                suspend_before,
+                now - 86_400,
+                on,
+                tpl(&f.clock),
+                dl(),
+            )
+        };
+        // Not yet stale.
+        let r = maintain(now - 60).await.unwrap();
+        assert_eq!((r.suspended, r.stale_total), (0, 0));
+        // Stale: suspended, kept, out of the projection and the mirror.
+        let r = maintain(now).await.unwrap();
+        assert_eq!((r.suspended, r.stale_total), (1, 1));
+        assert_eq!(f.keys("u_a"), ["a"]);
+        let (page, _) = f
+            .store
+            .groups_projection_snapshot(vec![gid.clone()], None, 10, now, dl())
+            .await
+            .unwrap();
+        assert!(page.is_empty());
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM users WHERE user_id='u_a' AND groups='[]'"),
+            1
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM events WHERE kind='group.membership_stale'"),
+            1
+        );
+        let feed = f
+            .store
+            .groups_projection_changes(vec![gid.clone()], 0, 100, dl())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(feed.changes.last().unwrap().change, "member_removed");
+        // Suspending twice does nothing more.
+        let r = maintain(now).await.unwrap();
+        assert_eq!((r.suspended, r.stale_total), (0, 1));
+        // A new assertion restores it.
+        let r = f.sync("u_a", &["a"], 0, on).await;
+        assert_eq!((r.restored, r.added), (1, 0));
+        let (page, _) = f
+            .store
+            .groups_projection_snapshot(vec![gid.clone()], None, 10, now, dl())
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM events WHERE kind='group.membership_restored'"),
+            1
+        );
+        // Local memberships never go stale.
+        assert_eq!(
+            f.count(
+                "SELECT COUNT(*) FROM group_members WHERE source='local' AND stale_at IS NOT NULL"
+            ),
+            0
         );
     }
 }

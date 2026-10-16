@@ -129,12 +129,16 @@ pub enum EventKind {
     GroupDeleted,
     GroupMemberAdded,
     GroupMemberRemoved,
+    /// A provider membership suspended because no successful assertion
+    /// refreshed it within `groups.max_staleness_secs`, and restored.
+    GroupMembershipStale,
+    GroupMembershipRestored,
     /// A provider's group assertion was not applied (diagnostic).
     GroupSyncRefused,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 40] = [
+    pub const ALL: [EventKind; 42] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -174,6 +178,8 @@ impl EventKind {
         EventKind::GroupDeleted,
         EventKind::GroupMemberAdded,
         EventKind::GroupMemberRemoved,
+        EventKind::GroupMembershipStale,
+        EventKind::GroupMembershipRestored,
         EventKind::GroupSyncRefused,
     ];
 
@@ -233,6 +239,8 @@ impl EventKind {
             EventKind::GroupDeleted => "group.deleted",
             EventKind::GroupMemberAdded => "group.member_added",
             EventKind::GroupMemberRemoved => "group.member_removed",
+            EventKind::GroupMembershipStale => "group.membership_stale",
+            EventKind::GroupMembershipRestored => "group.membership_restored",
             EventKind::GroupSyncRefused => "group.sync_refused",
         }
     }
@@ -638,14 +646,14 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 34);
+        assert_eq!(required, 36);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 40);
+        assert_eq!(EventKind::ALL.len(), 42);
         for (kind, name) in [
             (
                 EventKind::FactorExternalConsumed,

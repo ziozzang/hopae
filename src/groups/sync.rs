@@ -218,16 +218,31 @@ impl GroupService {
             .groups_maintenance(
                 grace,
                 now - i64::from(self.cfg.stale_group_days) * 86_400,
+                now - i64::try_from(self.cfg.max_staleness_secs).unwrap_or(i64::MAX / 2),
                 now - i64::from(self.cfg.change_retention_days) * 86_400,
                 self.policy(),
                 self.template("maintenance", "maintenance"),
                 Deadline::after(STORE_BUDGET),
             )
             .await
+            .inspect(|report| {
+                crate::telemetry::counters::set(
+                    crate::telemetry::counters::GROUP_MEMBERSHIPS_STALE,
+                    &[],
+                    report.stale_total,
+                );
+            })
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "group maintenance failed");
                 MaintenanceReport::default()
             });
+        if report.suspended > 0 {
+            crate::telemetry::counters::add(
+                crate::telemetry::counters::GROUP_MEMBERSHIPS_SUSPENDED_TOTAL,
+                &[],
+                u64::from(report.suspended),
+            );
+        }
         for row in rows
             .iter()
             .filter(|r| r.kind == ProviderKind::Ldap && r.enabled && r.deleted_at.is_none())
@@ -318,7 +333,12 @@ impl GroupService {
                 }
             }
             let report = self.maintain(directory.as_ref(), lookup.as_ref()).await;
-            if report != MaintenanceReport::default() {
+            if report
+                != (MaintenanceReport {
+                    stale_total: report.stale_total,
+                    ..MaintenanceReport::default()
+                })
+            {
                 tracing::info!(?report, "group maintenance");
             }
             every.reset(self.clock.as_ref());

@@ -62,7 +62,7 @@ fn projection_console(extra: Value) -> Console {
     console(v, &[(SEED_ENV, Box::leak(seed.into_boxed_str()))])
 }
 
-fn verify(k: &Console, r: &Response, vocab: &[String]) -> Value {
+fn verify(k: &Console, kind: &str, r: &Response, vocab: &[String]) -> Value {
     assert_eq!(r.status, 200, "{r:?}");
     let key = ed25519_dalek::SigningKey::from_bytes(&SEED).verifying_key();
     let keys = |i: &str, e: u64| (i == "hopae-groups" && e == 1).then_some(key);
@@ -70,6 +70,7 @@ fn verify(k: &Console, r: &Response, vocab: &[String]) -> Value {
     hopae::groups::projection::verify(
         &r.body,
         &keys,
+        kind,
         "pumgye",
         &hopae::groups::projection::vocabulary_digest(vocab),
         now,
@@ -249,6 +250,30 @@ fn s310_2_viewers_read_but_cannot_write() {
 }
 
 #[test]
+fn s310_3_deleting_a_group_with_members_requires_force() {
+    let k = console(json!({}), &[]);
+    let a = k.admin("ha310e", AdminRole::Admin);
+    k.add_user("u_g3", "g3@example.test", "G3");
+    let g = create(&k, &a, "full", "Full");
+    let g = add(&k, &a, &g, "u_g3");
+    let body = |force: bool| json!({"group_id": g["group_id"], "expected_revision": g["revision"], "reason": "retire", "force": force});
+    let r = post(&k, &a, "/v1/groups/delete", body(false));
+    assert_eq!((r.status, code(&r)), (409, "group_not_empty".into()));
+    let r = post(
+        &k,
+        &a,
+        "/v1/groups/delete",
+        json!({"group_id": g["group_id"], "expected_revision": g["revision"], "reason": "retire"}),
+    );
+    assert_eq!(code(&r), "group_not_empty");
+    let r = post(&k, &a, "/v1/groups/delete", body(true));
+    assert_eq!(r.status, 200, "{r:?}");
+    assert_eq!(r.json()["group"]["members"], 0);
+    let ev = k.events("group.deleted");
+    assert_eq!(ev.last().unwrap()["attrs"]["count"], 1);
+}
+
+#[test]
 fn s310_a1_bodies_and_bounds_are_refused_before_any_write() {
     let k = console(json!({}), &[]);
     let a = k.admin("ha310c", AdminRole::Admin);
@@ -409,6 +434,47 @@ fn s311_1_oidc_claim_is_mapped_filtered_and_synced_at_sign_in() {
 }
 
 #[test]
+fn s311_3_stale_provider_memberships_are_suspended_then_restored() {
+    let k = oidc_console();
+    let a = k.admin("ha311c", AdminRole::Admin);
+    k.idp.set_extra_claims(json!({"groups": ["eng-api"]}));
+    let p = k.login("person311c", "p311c@example.test", "P");
+    let api = post(&k, &a, "/v1/subjects/groups", json!({"id": p.user_id}));
+    assert_eq!(
+        api.json()["items"][0]["membership"]["stale_at"],
+        Value::Null
+    );
+    // The console session does not survive the clock jump: read the store.
+    let stale = |k: &Console| -> Value {
+        let v: Option<i64> = k
+            .sql()
+            .query_row(
+                "SELECT stale_at FROM group_members WHERE user_id = ?1",
+                [&p.user_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        v.map_or(Value::Null, Value::from)
+    };
+    // Eight days without a successful assertion (default bound: 7 days).
+    k.h.advance(std::time::Duration::from_secs(8 * 86_400));
+    let mut suspended = false;
+    for _ in 0..80 {
+        if stale(&k).is_i64() {
+            suspended = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(suspended, "the maintenance pass suspended the membership");
+    assert_eq!(k.events("group.membership_stale").len(), 1);
+    // The membership is kept; a sign-in asserting it restores it.
+    k.login("person311c", "p311c@example.test", "P");
+    assert_eq!(stale(&k), Value::Null);
+    assert_eq!(k.events("group.membership_restored").len(), 1);
+}
+
+#[test]
 fn s311_2_provider_without_groups_section_syncs_nothing() {
     let k = console(json!({}), &[]);
     let a = k.admin("ha311b", AdminRole::Admin);
@@ -439,23 +505,27 @@ fn s312_1_snapshot_and_changes_are_signed_bounded_and_resumable() {
         "/v1/groups/projection/snapshot",
         json!({"groups": vocab, "limit": 1}),
     );
-    let p1 = verify(&k, &first, &vocab);
+    let p1 = verify(&k, "snapshot", &first, &vocab);
     assert_eq!(p1["kind"], "snapshot");
     assert_eq!(p1["max_aal"], 2);
     assert_eq!(p1["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(p1["cursor"], Value::Null);
     let watermark = p1["watermark"].as_i64().unwrap();
     let next = p1["next_cursor"].as_str().unwrap().to_string();
     let p2 = verify(
         &k,
+        "snapshot",
         &post(
             &k,
             &a,
             "/v1/groups/projection/snapshot",
-            json!({"groups": vocab, "cursor": next, "limit": 1}),
+            json!({"groups": vocab, "cursor": next.clone(), "limit": 1}),
         ),
         &vocab,
     );
     assert_eq!(p2["more"], false);
+    assert_eq!(p2["cursor"], next.as_str());
+    assert_eq!(p2["watermark"], watermark);
     let users: Vec<&str> = [&p1, &p2]
         .iter()
         .flat_map(|p| p["entries"].as_array().unwrap().iter())
@@ -477,6 +547,7 @@ fn s312_1_snapshot_and_changes_are_signed_bounded_and_resumable() {
     add(&k, &a, &g2, "u_pa");
     let ch = verify(
         &k,
+        "changes",
         &post(
             &k,
             &a,
@@ -504,10 +575,11 @@ fn s312_1_snapshot_and_changes_are_signed_bounded_and_resumable() {
         hopae::groups::projection::verify(
             &page.body,
             &|_, _| Some(key),
+            "snapshot",
             "pumgye",
             &hopae::groups::projection::vocabulary_digest(&vocab),
-            0,
-            i64::MAX / 2,
+            k.h.hooks.now_ms(),
+            60_000,
         )
         .is_err()
     );
@@ -517,10 +589,11 @@ fn s312_1_snapshot_and_changes_are_signed_bounded_and_resumable() {
         hopae::groups::projection::verify(
             &first.body,
             &|_, _| Some(wrong),
+            "snapshot",
             "pumgye",
             &hopae::groups::projection::vocabulary_digest(&vocab),
-            0,
-            i64::MAX / 2,
+            k.h.hooks.now_ms(),
+            60_000,
         )
         .is_err()
     );

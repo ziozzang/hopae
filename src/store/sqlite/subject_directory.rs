@@ -369,11 +369,15 @@ impl Store {
                     "group.deleted" if groups => Some("group_deleted"),
                     "group.member_added" if groups => Some("member_added"),
                     "group.member_removed" if groups => Some("member_removed"),
+                    "group.membership_stale" if groups => Some("member_suspended"),
+                    "group.membership_restored" if groups => Some("member_restored"),
                     _ => None,
                 };
                 let wanted = match change {
                     Some("disabled" | "enabled") => user.is_some(),
-                    Some("member_added" | "member_removed") => user.is_some() && group.is_some(),
+                    Some("member_added" | "member_removed" | "member_suspended" | "member_restored") => {
+                        user.is_some() && group.is_some()
+                    }
                     Some(_) => group.is_some(),
                     None => false,
                 };

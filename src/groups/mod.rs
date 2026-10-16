@@ -85,7 +85,15 @@ pub fn valid_local_key(s: &str) -> bool {
 /// A display text: 1..=`max` characters after trimming, no control characters.
 pub fn valid_text(s: &str, max: usize) -> bool {
     let t = s.trim();
-    !t.is_empty() && t.chars().count() <= max && !t.chars().any(char::is_control)
+    !t.is_empty() && t.chars().count() <= max && !t.chars().any(hidden)
+}
+
+/// Control characters and the invisible formatting characters that can make
+/// a displayed name look like another (bidirectional overrides and
+/// isolates, zero-width characters, the byte order mark).
+pub fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
 }
 
 #[cfg(test)]
@@ -114,5 +122,7 @@ mod tests {
         assert!(!valid_text("  ", 256));
         assert!(!valid_text("a\nb", 256));
         assert!(!valid_text(&"가".repeat(257), 256));
+        assert!(!valid_text("admin\u{202E}nimda", 256));
+        assert!(!valid_text("ad\u{200B}min", 256));
     }
 }

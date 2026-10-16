@@ -432,6 +432,7 @@ pub(super) const ROOT: Node = Obj(&[
             ("change_retention_days", Leaf),
             ("maintenance_interval_secs", Leaf),
             ("stale_group_days", Leaf),
+            ("max_staleness_secs", Leaf),
             ("gateway_header", Leaf),
             (
                 "projection",

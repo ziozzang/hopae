@@ -48,12 +48,18 @@ CREATE TABLE group_members (
     -- Provider memberships only: the sync stopped reporting the membership at
     -- this time; it is removed once the provider's removal grace has passed.
     removal_pending_at INTEGER,
+    -- Provider memberships only: suspended at this time because no
+    -- successful assertion refreshed it for `groups.max_staleness_secs`;
+    -- a suspended membership is kept but excluded from the projection and
+    -- the gateway mirror until an assertion restores it.
+    stale_at           INTEGER,
     added_by           TEXT,
     reason             TEXT CHECK (reason IS NULL OR length(reason) <= 256),
     PRIMARY KEY (group_id, user_id),
     CHECK ((source = 'local') = (provider_id IS NULL)),
     CHECK (source = 'local' OR expires_at IS NULL),
-    CHECK (source <> 'local' OR removal_pending_at IS NULL)
+    CHECK (source <> 'local' OR removal_pending_at IS NULL),
+    CHECK (source <> 'local' OR stale_at IS NULL)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX group_members_user ON group_members (user_id, group_id);
 

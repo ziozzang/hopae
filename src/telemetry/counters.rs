@@ -53,6 +53,10 @@ pub const ADMIN_GRANTS_IMPORTED_TOTAL: &str = "hopae_admin_grants_imported_total
 pub const BUILD_INFO: &str = "hopae_build_info";
 /// Gauge: unix seconds of the last configuration load.
 pub const CONFIG_LOADED_TIMESTAMP: &str = "hopae_config_loaded_timestamp";
+/// Gauge: provider group memberships currently suspended for staleness.
+pub const GROUP_MEMBERSHIPS_STALE: &str = "hopae_group_memberships_stale";
+/// Counter: provider group memberships suspended for staleness.
+pub const GROUP_MEMBERSHIPS_SUSPENDED_TOTAL: &str = "hopae_group_memberships_suspended_total";
 
 fn table() -> &'static Mutex<BTreeMap<String, i64>> {
     static T: OnceLock<Mutex<BTreeMap<String, i64>>> = OnceLock::new();
