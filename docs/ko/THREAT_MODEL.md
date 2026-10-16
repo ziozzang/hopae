@@ -1,6 +1,6 @@
 # 위협 모델
 
-<!-- translation-status: source=../THREAT_MODEL.md source-rev=15 status=current -->
+<!-- translation-status: source=../THREAT_MODEL.md source-rev=16 status=current -->
 
 [문서 목차](README.md) · [English](../THREAT_MODEL.md)
 
@@ -112,13 +112,14 @@
 | TM-51 | 복구 코드 탈취 또는 추측 | S | 위장 | 코드당 50비트 비밀을 Argon2id로 해시. 조건부 갱신으로 1회용. 주소별 시도 허용 한도. 사용 시 AAL 1만 부여하고 재등록 요구를 설정하며 기록합니다. 재생성은 이전 세트를 무효화. 코드는 `no-store`로 한 번만 표시 | 485 |
 | TM-52 | 포털의 스크립트가 XSS 발판이 됨(WebAuthn 페이지에서 무스크립트 원칙 완화) | S | 권한 상승, 정보 노출 | 같은 origin의 정적 파일 하나와 SRI. 해당 응답에만 `script-src 'self'`. Trusted Types 필수. 인라인 스크립트·핸들러 없음. `connect-src 'none'`. 스크립트는 이스케이프된 `data-` 속성을 읽고 서버가 다시 검증하는(CSRF, `Origin`, 챌린지 바인딩) 일반 폼을 제출합니다. 다른 모든 페이지는 고정된 무스크립트 정책을 유지 | 481 |
 | TM-53 | 보증 수준 과대 주장 또는 전송 형식 혼동: 동기화되거나 증명되지 않은 패스키가 AAL 3으로 보고되거나, AAL 3 값이 1과 2만 아는 피어에 도달 | 5, 9 | 권한 상승, 서비스 거부 | AAL 3은 기록된 등급일 뿐입니다(운영자 CA로의 증명 체인, 허용 목록 AAGUID, 백업 불가, 백업되지 않음, 사용자 확인, 어설션마다 재확인). 이 릴리스에서는 어떤 헤더·열·영수증·설정 값도 3을 담지 않습니다([ADR-0017](../adr/0017-webauthn-passkeys.md) 전송 형식 분석) | 486 |
+| TM-54 | 비밀번호 없는 로그인 남용: 패스키 경로를 통한 계정 열거, 중계된 발견 가능 어설션, 의식 폭주, 패스키보다 오래 사는 세션 | 2, S | 위장, 정보 노출, 서비스 거부 | 사용자 이름을 묻지 않습니다. 모든 실패(모르는 핸들, 다른 계정의 자격 증명, 비활성 사용자, 잘못된 서명)는 같은 리디렉션과 `login.failed` 기록입니다. origin, RP ID, 사용자 확인은 TM-47과 같습니다. 의식은 로그인 트랜잭션·바인딩 쿠키·주소에 묶이고 1회용이며 주소당 분당 30개, 전체 10,000개입니다. POST에 CSRF와 정확한 `Origin`. 패스키가 삭제·복제 폐기·초기화되면 세션도 끝납니다 | 487 |
 
 ## 흐름별 STRIDE
 
 | 흐름 | Spoofing | Tampering | Repudiation | Information disclosure | Denial of service | Elevation |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 첫 방문 | TM-06, TM-21, TM-26 | TM-01 | 이벤트 `login.started` | TM-21 | TM-07, TM-20, TM-31 | TM-14 |
-| 2 로그인 | TM-03, TM-04, TM-17 | TM-01 | 이벤트(아웃박스, TM-28) | TM-12 | 제공자 지연은 타임아웃으로 제한. TM-31 | TM-08 |
+| 2 로그인 | TM-03, TM-04, TM-17, TM-54 | TM-01 | 이벤트(아웃박스, TM-28) | TM-12 | 제공자 지연은 타임아웃으로 제한. TM-31 | TM-08 |
 | 3 콜백 | TM-08, TM-09, TM-04, TM-25, TM-30 | 토큰 검증(`iss`, `aud`, `exp`, `nonce`, 서명) | 이벤트 `login.succeeded/failed`(TM-28, TM-32) | TM-12 | TM-20 | TM-09, TM-25, TM-30 |
 | 4 핸드오프 | TM-02, TM-05, TM-22, TM-30, TM-33 | TM-01, TM-36 | 이벤트 `session.handoff` | 60초 이하 동안 URL에 코드 존재, TM-36 | TM-20, TM-31 | TM-05, TM-22, TM-23, TM-38 |
 | 5 verify | TM-06, TM-13, TM-14, TM-40 | TM-19, TM-27, TM-36, TM-39, TM-41 | 샘플링된 `verify.denied` | TM-12, TM-40 | TM-07, TM-29, TM-35, TM-37 | TM-18, TM-24, TM-27, TM-37, TM-38, TM-39, TM-41 |

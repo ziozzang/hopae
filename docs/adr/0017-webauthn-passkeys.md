@@ -35,6 +35,8 @@
 
 15. **Native Human owner provenance (phase 2).** Migration 12 adds `session_webauthn_provenance`, the counterpart of `session_totp_provenance` ([native TOTP provenance](../HUMAN_TOTP_PROVENANCE.md)): one row per session, written only in the elevation transaction of an application passkey step-up or a portal passkey confirmation, naming the user, the new credential generation, the credential id, the recorded class, the factor index and time, and the configuration generation (the step-up's, or the one in force for a portal confirmation). A portal confirmation with an authenticator code records the TOTP row the same way. The native Human owner accepts an AAL 2 handle only when exactly the row of the current credential generation exists (TOTP or WebAuthn), its factor entry is unchanged, the passkey is still active for the same user, and the configuration generation is current; freshness rules use that factor's time. Another use of the same passkey does not retire the owner; revocation does. Receipts are unchanged: they seal AAL 2 as before and carry no factor kind, so no peer changes.
 
+16. **Passwordless sign-in (phase 2).** With `webauthn.passwordless = true` the login chooser offers a passkey beside the providers: an input with `autocomplete="username webauthn"` for conditional mediation (autofill) and a button for the modal prompt; registrations then request `residentKey: preferred` so new passkeys are discoverable. The ceremony is discoverable (`allowCredentials` empty, user verification required) and lives in `webauthn_login_challenges` (migration 13), bound to the login transaction, the portal binding cookie and the client address, single use, five minutes, at most 30 per address per minute and 10,000 in total (beyond that the passkey option is simply not offered and a single provider is used directly). The response's user handle selects the account (`users.webauthn_user_handle`); unknown handles, foreign credentials, disabled users and bad signatures all produce the same "couldn't sign you in" redirect (enumeration resistance) and a `login.failed` record. Success creates, in one transaction with the ceremony, the login transaction and the passkey counter, a session with the reserved provider id `hopae.passkey` (not a slug, so no configured provider can take it; no `providers` row), factor `webauthn` and **AAL 2** — a user-verified passkey is a multi-factor cryptographic authenticator. The session lives while that passkey is active: removal, a clone signal or an administrator reset end it. Reauthentication transactions (`max_auth_age`) are not completed by a passkey; such a session is asked to sign out and in. The native Human owner refuses passkey sessions (no primary provenance), as before for any session without it.
+
 ### AAL 3 wire analysis
 
 | Reader | Today | Effect of emitting 3 |
@@ -66,7 +68,7 @@ Emission therefore needs, in order: a schema migration that rebuilds the three t
 
 ### Neutral
 
-- Passwordless (discoverable) sign-in with conditional UI, console factor management and a passkey requirement for console operators are deferred (roadmap).
+- Console factor management and a passkey requirement for console operators are deferred (roadmap). Passwordless sign-in arrived in phase 2 (decision 16).
 
 ## Alternatives considered
 

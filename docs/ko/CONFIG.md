@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=36 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=37 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -320,6 +320,7 @@ AAL 1의 1차 인증 신선도 규칙은 keyring 없이도 제공자 재인증�
 | --- | --- | --- |
 | `webauthn.rp_id` | `portal.public_url`의 호스트 | 포털 호스트이거나 레이블 경계에서 그 상위 도메인. IP 리터럴이나 단일 레이블은 안 됩니다. 바꾸면 등록된 모든 패스키를 쓸 수 없게 됩니다. |
 | `webauthn.rp_name` | `Hopae` | 출력 가능한 1–64자. |
+| `webauthn.passwordless` | `false` | 로그인 페이지에서 비밀번호 없는 패스키 로그인을 제시합니다([WebAuthn 패스키](WEBAUTHN.md#비밀번호-없는-로그인)). 세션은 예약 제공자 ID `hopae.passkey`를 씁니다. |
 | `webauthn.high_assurance.attestation_ca_files` | — | 읽을 수 있는 PEM 파일 1–64개. `aaguids`와 함께 필수. 시작할 때와 `hopae --check`에서 읽습니다. |
 | `webauthn.high_assurance.aaguids` | — | 0이 아닌 UUID 1–64개. `attestation_ca_files`와 함께 필수. |
 

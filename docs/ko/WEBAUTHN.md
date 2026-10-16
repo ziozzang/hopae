@@ -1,6 +1,6 @@
 # WebAuthn 패스키
 
-<!-- translation-status: source=../WEBAUTHN.md source-rev=3 status=current -->
+<!-- translation-status: source=../WEBAUTHN.md source-rev=4 status=current -->
 
 [문서 목차](README.md) · [English](../WEBAUTHN.md)
 
@@ -21,8 +21,9 @@
 확인, 복구 코드, 마지막 요소 규칙, 서명 카운터 역행 처리, 명령줄 관리자 초기화와 조회,
 AAL 3 분류(기록만).
 
-이번 단계에서 구현하지 않음: 조건부 UI를 쓰는 비밀번호 없는 로그인, 콘솔의 인증 요소
-관리, 콘솔 운영자에 대한 패스키 요구, AAL 3 내보내기.
+2단계에서 조건부 UI를 쓰는 비밀번호 없는 로그인과 네이티브 Human 소유자 출처를
+추가했습니다. 구현하지 않음: 콘솔의 인증 요소 관리와 콘솔 운영자에 대한 패스키 요구.
+AAL 3 내보내기는 아래에 설명합니다.
 [로드맵](ROADMAP.md#m5--확장-지점050)을 보십시오.
 
 ## 목표와 비목표
@@ -57,6 +58,7 @@ AAL 3 분류(기록만).
 | `webauthn.rp_id` | `portal.public_url`의 호스트 | 신뢰 당사자(RP) ID. 포털 호스트이거나 레이블 경계에서 그 상위 도메인이어야 하며, IP 리터럴이나 단일 레이블은 안 됩니다. **나중에 바꾸면 등록된 모든 패스키를 쓸 수 없게 됩니다.** |
 | `webauthn.rp_name` | `Hopae` | 인증기가 보여 주는 이름. 1–64자. |
 | `webauthn.high_assurance.attestation_ca_files` | 없음 | 인증기 제조사 루트의 PEM 파일. `aaguids`와 함께 "보안 키(고보증)" 등록을 켭니다. |
+| `webauthn.passwordless` | `false` | 로그인 페이지에서 비밀번호 없는 패스키 로그인을 제시합니다. |
 | `webauthn.high_assurance.aaguids` | 없음 | AAL 3으로 분류될 수 있는 AAGUID. `attestation_ca_files`와 함께 필수. 최대 64개. |
 
 허용 origin은 언제나 정확히 포털 origin이며 설정할 수 없습니다. `hopae --check`는
@@ -107,6 +109,18 @@ AAL 3 분류(기록만).
 [ADR](../adr/0017-webauthn-passkeys.md#aal-3-wire-analysis)에 먼저 바뀌어야 할 모든
 판독자가 나열되어 있습니다. `x-hopae-aal`은 `1` 또는 `2`로 유지됩니다. 복구 항목은
 AAL 2 단계 상승 규칙을 결코 충족하지 않습니다.
+
+## 비밀번호 없는 로그인
+
+`webauthn.passwordless = true`이면 로그인 페이지가 제공자 옆에 패스키를 제시합니다
+([ADR-0017](../adr/0017-webauthn-passkeys.md) 결정 16):
+
+- 패스키 입력란(`autocomplete="username webauthn"`)은 브라우저 자동 완성에 저장된 패스키를 보여 줍니다(조건부 중개: Chrome, Edge, Safari, Firefox). "패스키로 로그인" 버튼은 모달 요청을 엽니다(보안 키, 하이브리드 전송의 휴대전화).
+- 사용자 이름이나 비밀번호를 묻지 않으며 패스키의 사용자 핸들이 계정을 정합니다. 모르는 패스키, 다른 계정의 자격 증명, 비활성 사용자, 잘못된 서명 등 모든 실패는 같은 메시지를 돌려줍니다.
+- 세션은 요소 `webauthn`, 제공자 `hopae.passkey`(`x-hopae-provider`)인 AAL 2이며, 그 패스키가 활성인 동안 유지되고 다른 세션처럼 단일 로그인으로 모든 애플리케이션에 이어집니다.
+- 의식은 로그인 트랜잭션, 브라우저의 바인딩 쿠키와 주소에 묶이며 주소당 분당 최대 30개입니다. 제시할 수 없으면 패스키가 없을 때처럼 동작합니다(제공자가 하나면 바로 사용).
+- 비밀번호 없는 로그인이 켜진 동안 등록하는 패스키는 발견 가능하게 요청합니다(`residentKey: preferred`). 그 전에 보안 키에 등록한 패스키는 아닐 수 있습니다.
+- 제한: 애플리케이션의 `max_auth_age` 재인증은 패스키로 완료할 수 없습니다(로그아웃 후 다시 로그인). 네이티브 Human 소유자 경로는 패스키 세션을 거부합니다.
 
 ## 네이티브 Human 소유자 경로
 

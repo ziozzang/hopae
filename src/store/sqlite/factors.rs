@@ -525,13 +525,17 @@ fn require_actor(
         return Err(StoreError::Conflict("factor authorization expired"));
     }
     let view = &actor.view;
-    super::sessions::require_provider_configuration(
-        tx,
-        view.session.provider_id.as_str(),
-        Some(&actor.provider_configuration),
-    )?;
+    let passkey_session =
+        view.session.provider_id.as_str() == crate::provider::types::PASSKEY_PROVIDER;
+    if !passkey_session {
+        super::sessions::require_provider_configuration(
+            tx,
+            view.session.provider_id.as_str(),
+            Some(&actor.provider_configuration),
+        )?;
+    }
     let live:bool=tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sessions s JOIN session_handles h ON h.session_id=s.session_id JOIN users u ON u.user_id=s.user_id JOIN providers p ON p.provider_id=s.provider_id WHERE s.session_id=?1 AND s.user_id=?2 AND h.handle_sha256=?3 AND h.host=?4 AND s.cred_gen=?5 AND s.auth_time=?6 AND s.authz_version_at_auth=u.authz_version AND u.status='active' AND s.terminated_at IS NULL AND h.revoked_at IS NULL AND p.enabled=1 AND p.deleted_at IS NULL AND s.aal>=?11 AND h.issued_aal>=?12 AND s.absolute_expires_at>?7 AND h.absolute_expires_at>?7 AND s.last_seen_at>?8 AND h.last_seen_at>?9 AND s.auth_time>=?10 AND s.auth_time<=?7 AND s.factors=?13)",
+        "SELECT EXISTS(SELECT 1 FROM sessions s JOIN session_handles h ON h.session_id=s.session_id JOIN users u ON u.user_id=s.user_id LEFT JOIN providers p ON p.provider_id=s.provider_id WHERE s.session_id=?1 AND s.user_id=?2 AND h.handle_sha256=?3 AND h.host=?4 AND s.cred_gen=?5 AND s.auth_time=?6 AND s.authz_version_at_auth=u.authz_version AND u.status='active' AND s.terminated_at IS NULL AND h.revoked_at IS NULL AND ((s.provider_id='hopae.passkey' AND p.provider_id IS NULL) OR (p.enabled=1 AND p.deleted_at IS NULL)) AND s.aal>=?11 AND h.issued_aal>=?12 AND s.absolute_expires_at>?7 AND h.absolute_expires_at>?7 AND s.last_seen_at>?8 AND h.last_seen_at>?9 AND s.auth_time>=?10 AND s.auth_time<=?7 AND s.factors=?13)",
         params![view.session.session_id.as_str(),user,&view.handle.handle_sha256.0[..],view.handle.host.as_str(),view.session.cred_gen as i64,view.session.auth_time.secs(),now.secs(),now.secs().saturating_sub(actor.session_idle.as_secs() as i64),now.secs().saturating_sub(actor.handle_idle.as_secs() as i64),now.secs().saturating_sub(300),view.session.aal.as_i64().max(1),view.handle.issued_aal.as_i64().max(1),super::rows::json_str(&view.session.factors)?],|r|r.get(0),
     )?;
     if !live {

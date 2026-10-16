@@ -373,10 +373,17 @@ pub(crate) async fn login_get(State(st): State<PortalState>, req: Request) -> Re
         LoginVisit::Chooser {
             providers,
             form_origins,
+            passkey,
         } => {
             let views: Vec<ChoiceView> = providers.iter().map(ChoiceView::from).collect();
             let csrf = token_for(&st, bind.expose(), Purpose::Login);
-            render_page_status(
+            let passkey_csrf = token_for(
+                &st,
+                &settings_handlers::login_binding(&txn, bind.expose()),
+                Purpose::PasskeyLogin,
+            );
+            let error = settings_handlers::login_error(query(&parts).as_ref());
+            let page = render_page_status(
                 &rq,
                 StatusCode::OK,
                 pages::Chooser {
@@ -385,10 +392,21 @@ pub(crate) async fn login_get(State(st): State<PortalState>, req: Request) -> Re
                     csrf: &csrf,
                     txn: &txn,
                     providers: &views,
+                    passkey: passkey
+                        .as_ref()
+                        .map(|p| (p.ceremony.expose(), p.options.as_str())),
+                    passkey_csrf: &passkey_csrf,
+                    passkey_error: error,
+                    integrity: pages::script_integrity(),
                 },
                 &planted,
                 &form_origins,
-            )
+            );
+            if passkey.is_some() {
+                settings_handlers::ceremony_page(page)
+            } else {
+                page
+            }
         }
         LoginVisit::Redirect(r) => redirect_response(&st, &rq, &r, &planted),
         LoginVisit::ConfirmNewHost { host, form_origin } => {

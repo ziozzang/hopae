@@ -29,6 +29,44 @@ pub mod refusal {
     pub const CEREMONY_UNAVAILABLE: &str = "ceremony unavailable";
     /// The stored counter already moved past the asserted one (same user, out-of-order tabs).
     pub const COUNTER_STALE: &str = "counter stale";
+    /// Too many passwordless ceremonies from one address, or the table is full.
+    pub const LOGIN_BUSY: &str = "passkey sign-in busy";
+}
+
+/// Most passwordless ceremonies one client address may start per minute.
+pub const LOGIN_CEREMONIES_PER_MINUTE: i64 = 30;
+/// Most live passwordless ceremony rows in total.
+pub const MAX_LOGIN_CEREMONIES: i64 = 10_000;
+
+/// A passwordless sign-in ceremony (no user or session yet).
+pub struct NewLoginCeremony {
+    pub digest: Digest,
+    pub transaction: Digest,
+    pub portal_binding: Digest,
+    pub client_ip: std::net::IpAddr,
+    pub state: String,
+    pub expires_at: Timestamp,
+}
+
+#[derive(Clone, Debug)]
+pub struct LoginCeremonyRecord {
+    pub transaction: Digest,
+    pub portal_bind_sha256: Digest,
+    pub client_ip: std::net::IpAddr,
+    pub state: String,
+}
+
+/// A verified passwordless sign-in: one transaction consumes the ceremony and
+/// the login transaction, records the passkey use and creates the session.
+pub struct PasskeyLogin {
+    pub ceremony: Digest,
+    pub transaction: Digest,
+    pub portal_binding: Digest,
+    pub client_ip: std::net::IpAddr,
+    pub used: PasskeyUse,
+    pub session: super::SessionRow,
+    pub portal_handle: HandleRow,
+    pub events: Vec<Event>,
 }
 
 /// Most active passkeys per user.
@@ -267,6 +305,23 @@ pub trait Passkeys: Send + Sync {
     ) -> StoreResult<()>;
     /// The hash of an unused recovery code.
     async fn recovery_code_hash(&self, user: &UserId, lookup: &str) -> StoreResult<Option<String>>;
+    async fn begin_login_ceremony(&self, ceremony: NewLoginCeremony) -> StoreResult<()>;
+    async fn login_ceremony(&self, digest: &Digest) -> StoreResult<Option<LoginCeremonyRecord>>;
+    async fn fail_login_ceremony(&self, digest: &Digest, events: Vec<Event>) -> StoreResult<()>;
+    /// The active user a WebAuthn user handle names, with their active passkeys.
+    async fn passkey_account(
+        &self,
+        handle: [u8; 16],
+    ) -> StoreResult<Option<(UserId, Vec<PasskeyRecord>)>>;
+    async fn create_passkey_session(&self, login: PasskeyLogin) -> StoreResult<()>;
+    /// A clone signal during passwordless sign-in: consume the ceremony, revoke
+    /// the credential and end the sessions it established or elevated.
+    async fn passkey_login_clone(
+        &self,
+        ceremony: &Digest,
+        credential_id: &[u8],
+        events: Vec<Event>,
+    ) -> StoreResult<()>;
     /// Administrator reset: every factor revoked, every session ended.
     async fn reset_factors(
         &self,

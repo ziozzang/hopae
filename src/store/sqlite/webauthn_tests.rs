@@ -153,7 +153,7 @@ fn refused(r: StoreResult<impl std::fmt::Debug>, what: &str) {
 #[tokio::test]
 async fn webauthn_schema_is_v11_and_foundation_detects_tampering() {
     let f = fx();
-    assert_eq!(f.store.schema_version().unwrap(), 12);
+    assert_eq!(f.store.schema_version().unwrap(), 13);
     crate::store::sqlite::webauthn::validate_foundation(&f.store.conn()).unwrap();
     f.store
         .conn()

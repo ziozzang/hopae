@@ -152,6 +152,7 @@ pub(super) const ROOT: Node = Obj(&[
         Obj(&[
             ("rp_id", Leaf),
             ("rp_name", Leaf),
+            ("passwordless", Leaf),
             (
                 "high_assurance",
                 Obj(&[

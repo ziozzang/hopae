@@ -156,6 +156,15 @@ pub trait SecurityServices: Send + Sync {
         cookies: &Cookies,
         transaction: &Secret,
     ) -> Result<StepUpCeremony, Refusal>;
+    /// Complete a passwordless passkey sign-in on the chooser's transaction.
+    async fn finish_login(
+        &self,
+        ctx: &RequestCtx,
+        cookies: &Cookies,
+        transaction: &Secret,
+        ceremony: &Secret,
+        response: &str,
+    ) -> Result<Redirect, Refusal>;
     async fn complete_stepup(
         &self,
         ctx: &RequestCtx,

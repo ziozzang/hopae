@@ -120,6 +120,25 @@ fn see_other(location: &str, cookies: &[String]) -> Response {
     r
 }
 
+/// The CSRF binding of the passwordless sign-in form.
+pub(super) fn login_binding(txn: &str, bind: &str) -> zeroize::Zeroizing<String> {
+    zeroize::Zeroizing::new(format!("passkey-login:{txn}:{bind}"))
+}
+
+/// The error a failed passwordless sign-in redirect names (fixed keys).
+pub(super) fn login_error(params: Option<&Params>) -> Option<&'static str> {
+    match params.and_then(|p| p.get("passkey_error")) {
+        Some("rejected") => Some("login.passkey.rejected"),
+        Some("expired") => Some("refusal.expired"),
+        Some("busy") => Some("refusal.rate_limited"),
+        _ => None,
+    }
+}
+
+pub(super) fn ceremony_page(r: Response) -> Response {
+    ceremony_response(r)
+}
+
 /// A ceremony page: no caching, no referrer, the script policy.
 fn ceremony_response(mut r: Response) -> Response {
     r.extensions_mut().insert(security::CeremonyScript);
@@ -915,5 +934,87 @@ pub(crate) async fn stepup_post(State(st): State<PortalState>, req: Request) -> 
                 .await
                 .unwrap_or_else(|| error_response(rq.t(), rq.rid(), ErrorPage::Failed))
         }
+    }
+}
+
+// ---- Passwordless passkey sign-in (ADR-0017 decision 16) -------------------
+
+pub(crate) async fn login_post(State(st): State<PortalState>, req: Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let rq = match prepare(&st, &parts) {
+        Ok(rq) => rq,
+        Err(r) => return r,
+    };
+    let Some(settings) = st.settings.clone() else {
+        return error_response(rq.t(), rq.rid(), ErrorPage::NotFound);
+    };
+    if !rq.ctx.https {
+        return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+    }
+    let form = match read_form(&st, &rq, &parts, body).await {
+        Ok(f) => f,
+        Err(r) => return r,
+    };
+    let allowed = ["txn", "csrf", "ceremony", "credential", "username"];
+    if form.0.0.iter().any(|(k, _)| !allowed.contains(&k.as_str()))
+        || ["txn", "csrf", "ceremony", "credential"]
+            .iter()
+            .any(|n| form.0.0.iter().filter(|(k, _)| k == n).count() != 1)
+        || form.0.0.iter().filter(|(k, _)| k == "username").count() > 1
+    {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let txn = form.0.get("txn").unwrap_or("").to_owned();
+    if !simple_id(&txn, 128) {
+        return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let Some(bind) = rq.presented.bind.clone() else {
+        return error_response(rq.t(), rq.rid(), ErrorPage::Forbidden);
+    };
+    let binding = login_binding(&txn, bind.expose());
+    if let Err(r) = guard(
+        &st,
+        &rq,
+        &parts,
+        &form,
+        Purpose::PasskeyLogin,
+        Some(&binding),
+    )
+    .await
+    {
+        return r;
+    }
+    let back = |code: &str| {
+        let q = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("txn", &txn)
+            .append_pair("passkey_error", code)
+            .finish();
+        see_other(&format!("/login?{q}"), &[])
+    };
+    if !st.password_attempts.admit(rq.ctx.client_ip) {
+        return back("busy");
+    }
+    let credential = form.0.get("credential").unwrap_or("");
+    if credential.is_empty() || credential.len() > 32 * 1024 {
+        return back("rejected");
+    }
+    let cookies = Cookies {
+        handle: rq.presented.handle.clone(),
+        bind: Some(bind),
+    };
+    match settings
+        .finish_login(
+            &rq.ctx,
+            &cookies,
+            &Secret::new(txn.clone()),
+            &Secret::new(form.0.get("ceremony").unwrap_or("").into()),
+            credential,
+        )
+        .await
+    {
+        Ok(redirect) => redirect_response(&st, &rq, &redirect, &[]),
+        Err(Refusal::Expired) => back("expired"),
+        Err(r @ (Refusal::Failure(_) | Refusal::CloneSuspected)) => refusal_page(&rq, r),
+        Err(_) => back("rejected"),
     }
 }

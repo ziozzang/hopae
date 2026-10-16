@@ -40,11 +40,14 @@
     return { publicKey: pk };
   }
 
-  function requestOptions(json) {
+  function requestOptions(json, signal, conditional) {
     var pk = JSON.parse(json).publicKey;
     pk.challenge = b64urlToBytes(pk.challenge);
     pk.allowCredentials = descriptors(pk.allowCredentials);
-    return { publicKey: pk };
+    var out = { publicKey: pk };
+    if (signal) out.signal = signal;
+    if (conditional) out.mediation = "conditional";
+    return out;
   }
 
   var TRANSPORTS = ["usb", "nfc", "ble", "internal", "hybrid"];
@@ -121,11 +124,31 @@
     button.hidden = false;
     button.disabled = false;
     var busy = false;
+    // Passwordless sign-in: offer saved passkeys in the field's autofill
+    // (conditional mediation) until the button asks for the modal prompt.
+    var autofill = null;
+    function submitWith(json) {
+      field.value = JSON.stringify(json);
+      say(status, "verifying");
+      form.submit();
+    }
+    function startAutofill() {
+      if (mode !== "login" || typeof PublicKeyCredential.isConditionalMediationAvailable !== "function") return;
+      PublicKeyCredential.isConditionalMediationAvailable().then(function (ok) {
+        if (!ok || busy) return;
+        autofill = new AbortController();
+        navigator.credentials
+          .get(requestOptions(options, autofill.signal, true))
+          .then(encodeAssertion)
+          .then(submitWith, function () { /* aborted or dismissed: the button remains */ });
+      }, function () {});
+    }
     button.addEventListener("click", function (event) {
       event.preventDefault();
       if (busy) return;
       busy = true;
       button.disabled = true;
+      if (autofill) { autofill.abort(); autofill = null; }
       say(status, "waiting");
       var started;
       try {
@@ -135,16 +158,13 @@
       } catch (e) {
         started = Promise.reject(e);
       }
-      started.then(function (json) {
-        field.value = JSON.stringify(json);
-        say(status, "verifying");
-        form.submit();
-      }, function (err) {
+      started.then(submitWith, function (err) {
         busy = false;
         button.disabled = false;
         say(status, messageFor(err));
       });
     });
+    startAutofill();
   }
 
   function start() {

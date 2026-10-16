@@ -106,6 +106,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         "0012_session_webauthn_provenance",
         include_str!("../migrations/0012_session_webauthn_provenance.sql"),
     ),
+    (
+        13,
+        "0013_webauthn_login_challenges",
+        include_str!("../migrations/0013_webauthn_login_challenges.sql"),
+    ),
 ];
 
 /// The schema version this binary migrates to (the last embedded migration).
@@ -905,6 +910,9 @@ pub fn validate_foundation(conn: &Connection, version: u32) -> Result<(), StoreE
     }
     if version >= 12 {
         webauthn_owner::validate_foundation(conn)?;
+    }
+    if version >= 13 {
+        webauthn::validate_login_foundation(conn)?;
     }
     Ok(())
 }

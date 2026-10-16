@@ -71,6 +71,7 @@ fn rp_id_defaults_to_the_portal_host_and_only_parents_are_allowed() {
     let cfg = Configuration {
         rp_id: None,
         rp_name: Some(String::new()),
+        passwordless: false,
         high_assurance: Some(HighAssuranceConfiguration {
             attestation_ca_files: vec![],
             aaguids: vec!["00000000-0000-0000-0000-000000000000".into()],
@@ -228,6 +229,7 @@ fn high_assurance_registration_needs_an_attested_allowlisted_key() {
     let cfg = |aaguid: &str| Configuration {
         rp_id: None,
         rp_name: None,
+        passwordless: false,
         high_assurance: Some(HighAssuranceConfiguration {
             attestation_ca_files: vec![pem.clone()],
             aaguids: vec![aaguid.into()],

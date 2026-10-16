@@ -33,3 +33,6 @@ button:disabled { opacity: 0.5; cursor: default; }
 .links { padding-left: 1.2rem; line-height: 1.8; }
 details { margin: 1rem 0; }
 summary { cursor: pointer; }
+.divider { display: flex; align-items: center; gap: 0.6rem; margin: 1.2rem 0 0.4rem; font-size: 0.85rem; opacity: 0.7; }
+.divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid currentColor; opacity: 0.4; }
+.passkey-login h2 { margin-top: 0.5rem; }

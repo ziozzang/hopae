@@ -106,16 +106,20 @@ fn require_security_actor(
         return Err(conflict("factor authorization expired"));
     }
     let view = &actor.view;
-    super::sessions::require_provider_configuration(
-        tx,
-        view.session.provider_id.as_str(),
-        Some(&actor.provider_configuration),
-    )?;
+    let passkey_session =
+        view.session.provider_id.as_str() == crate::provider::types::PASSKEY_PROVIDER;
+    if !passkey_session {
+        super::sessions::require_provider_configuration(
+            tx,
+            view.session.provider_id.as_str(),
+            Some(&actor.provider_configuration),
+        )?;
+    }
     let live: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sessions s JOIN session_handles h ON h.session_id=s.session_id JOIN users u ON u.user_id=s.user_id JOIN providers p ON p.provider_id=s.provider_id \
+        "SELECT EXISTS(SELECT 1 FROM sessions s JOIN session_handles h ON h.session_id=s.session_id JOIN users u ON u.user_id=s.user_id LEFT JOIN providers p ON p.provider_id=s.provider_id \
          WHERE s.session_id=?1 AND s.user_id=?2 AND h.handle_sha256=?3 AND h.host=?4 AND s.cred_gen=?5 AND s.auth_time=?6 \
          AND s.authz_version_at_auth=u.authz_version AND u.status='active' AND s.terminated_at IS NULL AND h.revoked_at IS NULL \
-         AND p.enabled=1 AND p.deleted_at IS NULL AND s.aal=?10 AND h.issued_aal=?11 AND s.absolute_expires_at>?7 AND h.absolute_expires_at>?7 \
+         AND ((s.provider_id='hopae.passkey' AND p.provider_id IS NULL) OR (p.enabled=1 AND p.deleted_at IS NULL)) AND s.aal=?10 AND h.issued_aal=?11 AND s.absolute_expires_at>?7 AND h.absolute_expires_at>?7 \
          AND s.last_seen_at>?8 AND h.last_seen_at>?9 AND s.auth_time<=?7 AND s.factors=?12)",
         params![
             view.session.session_id.as_str(),
@@ -1072,6 +1076,200 @@ impl Passkeys for Store {
         .await
     }
 
+    async fn begin_login_ceremony(&self, ceremony: NewLoginCeremony) -> StoreResult<()> {
+        if ceremony.state.len() > 65_536 {
+            return Err(conflict("invalid ceremony"));
+        }
+        self.write("begin_passkey_login", move |env| {
+            let shared = env.shared.clone();
+            let now = shared.clock.now();
+            let tx = env.begin()?;
+            if ceremony.expires_at <= now || ceremony.expires_at.since(now) > std::time::Duration::from_secs(600) {
+                return Err(conflict("invalid ceremony"));
+            }
+            let ip = ceremony.client_ip.to_string();
+            let live: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM login_txns WHERE txn_sha256=?1 AND purpose='login' AND client_ip=?2 AND consumed_at IS NULL AND created_at<=?3 AND expires_at>?3 \
+                 AND state_sha256 IS NULL AND reauth_max_age IS NULL AND (portal_bind_sha256 IS NULL OR portal_bind_sha256=?4))",
+                params![blob(&ceremony.transaction), ip, now.secs(), blob(&ceremony.portal_binding)],
+                |r| r.get(0),
+            )?;
+            if !live {
+                return Err(conflict("login transaction unavailable"));
+            }
+            tx.execute("DELETE FROM webauthn_login_challenges WHERE expires_at<=?1 OR consumed_at IS NOT NULL", [now.secs()])?;
+            let recent: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM webauthn_login_challenges WHERE client_ip=?1 AND created_at>?2",
+                params![ip, now.secs() - 60],
+                |r| r.get(0),
+            )?;
+            let total: i64 = tx.query_row("SELECT COUNT(*) FROM webauthn_login_challenges", [], |r| r.get(0))?;
+            if recent >= LOGIN_CEREMONIES_PER_MINUTE || total >= MAX_LOGIN_CEREMONIES {
+                return Err(conflict(refusal::LOGIN_BUSY));
+            }
+            tx.execute(
+                "INSERT INTO webauthn_login_challenges(challenge_sha256,txn_sha256,portal_bind_sha256,client_ip,state,created_at,expires_at,consumed_at) VALUES(?1,?2,?3,?4,?5,?6,?7,NULL)",
+                params![blob(&ceremony.digest), blob(&ceremony.transaction), blob(&ceremony.portal_binding), ip, ceremony.state, now.secs(), ceremony.expires_at.secs()],
+            )?;
+            commit(tx, &shared, None)
+        })
+        .await
+    }
+
+    async fn login_ceremony(&self, digest: &Digest) -> StoreResult<Option<LoginCeremonyRecord>> {
+        let digest = *digest;
+        let clock = self.inner.shared.clock.clone();
+        self.read("passkey_login_ceremony", move |conn| {
+            let row = conn
+                .query_row(
+                    "SELECT txn_sha256,portal_bind_sha256,client_ip,state FROM webauthn_login_challenges WHERE challenge_sha256=?1 AND consumed_at IS NULL AND expires_at>?2",
+                    params![blob(&digest), clock.now().secs()],
+                    |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)),
+                )
+                .optional()?;
+            let Some((txn, bind, ip, state)) = row else { return Ok(None) };
+            let corrupt = |c: &str| StoreError::Corrupt(format!("webauthn_login_challenges.{c}"));
+            Ok(Some(LoginCeremonyRecord {
+                transaction: Digest(<[u8; 32]>::try_from(txn.as_slice()).map_err(|_| corrupt("txn_sha256"))?),
+                portal_bind_sha256: Digest(<[u8; 32]>::try_from(bind.as_slice()).map_err(|_| corrupt("portal_bind_sha256"))?),
+                client_ip: ip.parse().map_err(|_| corrupt("client_ip"))?,
+                state,
+            }))
+        })
+        .await
+    }
+
+    async fn fail_login_ceremony(&self, digest: &Digest, events: Vec<Event>) -> StoreResult<()> {
+        let digest = *digest;
+        self.write("fail_passkey_login", move |env| {
+            let shared = env.shared.clone();
+            let now = shared.clock.now();
+            let tx = env.begin()?;
+            tx.execute(
+                "UPDATE webauthn_login_challenges SET consumed_at=?2 WHERE challenge_sha256=?1 AND consumed_at IS NULL",
+                params![blob(&digest), now.secs()],
+            )?;
+            insert_events(&tx, &shared, &events)?;
+            commit(tx, &shared, None)
+        })
+        .await
+    }
+
+    async fn passkey_account(
+        &self,
+        handle: [u8; 16],
+    ) -> StoreResult<Option<(UserId, Vec<PasskeyRecord>)>> {
+        self.read("passkey_account", move |conn| {
+            let user: Option<String> = conn
+                .query_row(
+                    "SELECT user_id FROM users WHERE webauthn_user_handle=?1 AND status='active'",
+                    [&handle[..]],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(user) = user else { return Ok(None) };
+            let passkeys = conn
+                .prepare(&format!("SELECT {PASSKEY_COLS} FROM webauthn_credentials WHERE user_id=?1 AND state='active' ORDER BY created_at, credential_id"))?
+                .query_map([user.as_str()], |r| Ok(passkey_row(r)))?
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .collect::<StoreResult<Vec<_>>>()?;
+            Ok(Some((UserId::new(user), passkeys)))
+        })
+        .await
+    }
+
+    async fn create_passkey_session(&self, login: PasskeyLogin) -> StoreResult<()> {
+        let s = &login.session;
+        if s.provider_id.as_str() != crate::provider::types::PASSKEY_PROVIDER
+            || s.aal != Aal::Two
+            || s.cred_gen != 1
+            || s.factors.len() != 1
+            || s.factors[0].kind != FactorKind::Webauthn
+            || login.portal_handle.session_id != s.session_id
+            || login.portal_handle.issued_aal != Aal::Two
+        {
+            return Err(conflict("invalid passkey session"));
+        }
+        self.write("create_passkey_session", move |env| {
+            let shared = env.shared.clone();
+            let now = shared.clock.now();
+            let tx = env.begin()?;
+            let s = &login.session;
+            let ip = login.client_ip.to_string();
+            let consumed = tx.execute(
+                "UPDATE webauthn_login_challenges SET consumed_at=?5 WHERE challenge_sha256=?1 AND txn_sha256=?2 AND portal_bind_sha256=?3 AND client_ip=?4 AND consumed_at IS NULL AND expires_at>?5",
+                params![blob(&login.ceremony), blob(&login.transaction), blob(&login.portal_binding), ip, now.secs()],
+            )?;
+            if consumed != 1 {
+                return Err(conflict(refusal::CEREMONY_UNAVAILABLE));
+            }
+            let txn = tx.execute(
+                "UPDATE login_txns SET consumed_at=?2, consumed_reason='completed', portal_bind_sha256=COALESCE(portal_bind_sha256,?4) WHERE txn_sha256=?1 AND purpose='login' AND client_ip=?3 \
+                 AND consumed_at IS NULL AND created_at<=?2 AND expires_at>?2 AND state_sha256 IS NULL AND reauth_max_age IS NULL AND (portal_bind_sha256 IS NULL OR portal_bind_sha256=?4)",
+                params![blob(&login.transaction), now.secs(), ip, blob(&login.portal_binding)],
+            )?;
+            if txn != 1 {
+                return Err(conflict("login transaction unavailable"));
+            }
+            let active: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM users WHERE user_id=?1 AND status='active' AND authz_version=?2)",
+                params![s.user_id.as_str(), i64::try_from(s.authz_version).unwrap_or(i64::MAX)],
+                |r| r.get(0),
+            )?;
+            if !active {
+                return Err(conflict("user unavailable"));
+            }
+            apply_use(&tx, s.user_id.as_str(), &login.used, now)?;
+            super::sessions::insert_session(&tx, s)?;
+            super::sessions::insert_handle(&tx, &login.portal_handle)?;
+            tx.execute("UPDATE users SET last_login_at=?2 WHERE user_id=?1", params![s.user_id.as_str(), s.created_at.secs()])?;
+            // Removing the passkey (or a clone signal) ends the session it established.
+            tx.execute(
+                "INSERT INTO session_webauthn_elevations(session_id,credential_id,at) VALUES(?1,?2,?3)",
+                params![s.session_id.as_str(), login.used.credential_id, now.secs()],
+            )?;
+            insert_events(&tx, &shared, &login.events)?;
+            commit(tx, &shared, Some("login_commit"))
+        })
+        .await
+    }
+
+    async fn passkey_login_clone(
+        &self,
+        ceremony: &Digest,
+        credential_id: &[u8],
+        events: Vec<Event>,
+    ) -> StoreResult<()> {
+        let (ceremony, credential_id) = (*ceremony, credential_id.to_vec());
+        self.write("passkey_login_clone", move |env| {
+            let shared = env.shared.clone();
+            let now = shared.clock.now();
+            let tx = env.begin()?;
+            if tx.execute(
+                "UPDATE webauthn_login_challenges SET consumed_at=?2 WHERE challenge_sha256=?1 AND consumed_at IS NULL",
+                params![blob(&ceremony), now.secs()],
+            )? != 1
+            {
+                return Err(conflict(refusal::CEREMONY_UNAVAILABLE));
+            }
+            let user: Option<String> = tx
+                .query_row("SELECT user_id FROM webauthn_credentials WHERE credential_id=?1 AND state='active'", [&credential_id], |r| r.get(0))
+                .optional()?;
+            if let Some(user) = user {
+                let user = UserId::new(user);
+                tx.execute(
+                    "UPDATE webauthn_credentials SET state='revoked',revoked_at=?2,revoked_reason='counter_regression',revision=revision+1 WHERE credential_id=?1 AND state='active'",
+                    params![credential_id, now.secs()],
+                )?;
+                end_elevated_sessions(&tx, &shared, &user, &credential_id, None, reasons::COUNTER_REGRESSION, "r_webauthn_store")?;
+            }
+            insert_events(&tx, &shared, &events)?;
+            commit(tx, &shared, None)
+        })
+        .await
+    }
+
     async fn reset_factors(
         &self,
         user: &UserId,
@@ -1178,6 +1376,42 @@ pub(crate) fn validate_foundation(conn: &rusqlite::Connection) -> StoreResult<()
                 "schema v11 invalid WebAuthn structure".into(),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Read-only foundation check of the v13 passwordless ceremony table.
+pub(crate) fn validate_login_foundation(conn: &rusqlite::Connection) -> StoreResult<()> {
+    let migration = include_str!("../migrations/0013_webauthn_login_challenges.sql");
+    let normalize = |s: &str| -> String {
+        s.to_ascii_lowercase()
+            .lines()
+            .map(|l| l.split("--").next().unwrap_or(""))
+            .collect::<String>()
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .trim_end_matches(';')
+            .to_owned()
+    };
+    let start = migration
+        .find("CREATE TABLE")
+        .expect("embedded login ceremony schema");
+    let expected = format!(
+        "{}) STRICT",
+        migration[start..].split(") STRICT;").next().expect("table")
+    );
+    let actual: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='webauthn_login_challenges'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if actual.as_deref().map(normalize) != Some(normalize(&expected)) {
+        return Err(StoreError::Corrupt(
+            "schema v13 invalid WebAuthn sign-in structure".into(),
+        ));
     }
     Ok(())
 }

@@ -64,7 +64,7 @@ mlua = { version = "0.12.2", default-features = false, features = ["lua54", "ven
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
 # WebAuthn relying party (ADR-0017). Ceremony state is persisted between the
 # two HTTP requests of a ceremony, hence the state-serialisation feature.
-webauthn-rs = { version = "=0.5.5", features = ["danger-allow-state-serialisation", "danger-credential-internals", "attestation"] }
+webauthn-rs = { version = "=0.5.5", features = ["danger-allow-state-serialisation", "danger-credential-internals", "attestation", "conditional-ui"] }
 # webauthn-rs-core links OpenSSL; vendored keeps release binaries static.
 openssl = { version = "0.10", features = ["vendored"] }
 # Recovery-code hashes (ADR-0017); RustCrypto, MIT/Apache-2.0.

@@ -31,6 +31,50 @@ pub(super) struct WebauthnDeps {
 }
 
 impl Adapter {
+    /// A passwordless ceremony for the chooser, when configured and the
+    /// transaction allows it. Never fails the page: any refusal (rate limit,
+    /// reauthentication, store) just omits the passkey option.
+    pub(super) async fn passkey_offer(
+        &self,
+        ctx: &RequestCtx,
+        txn: &Secret,
+        cookies: &Cookies,
+    ) -> Option<PasskeyOffer> {
+        let deps = self.webauthn.as_ref().filter(|d| d.rp.passwordless())?;
+        let bind = cookies.bind.as_ref()?;
+        if !ctx.https {
+            return None;
+        }
+        self.svc
+            .passkey_login_txn(&Self::sctx(ctx), txn)
+            .await
+            .ok()?;
+        let (options, state) = deps.rp.start_login().ok()?;
+        let options = serde_json::to_string(&options).ok()?;
+        let bearer = crate::crypto::random_token(deps.rng.as_ref(), 32);
+        match deps
+            .store
+            .begin_login_ceremony(crate::store::passkeys::NewLoginCeremony {
+                digest: bearer.digest(),
+                transaction: txn.digest(),
+                portal_binding: bind.digest(),
+                client_ip: ctx.client_ip,
+                state,
+                expires_at: deps.clock.now().add(CEREMONY_LIFETIME),
+            })
+            .await
+        {
+            Ok(()) => Some(PasskeyOffer {
+                ceremony: bearer,
+                options,
+            }),
+            Err(e) => {
+                tracing::info!(request_id = %ctx.request_id, error = %e, "passkey sign-in not offered");
+                None
+            }
+        }
+    }
+
     pub fn with_webauthn(
         mut self,
         store: Arc<crate::store::Store>,
@@ -445,7 +489,10 @@ impl SecurityServices for Adapter {
                 high_assurance,
             )
             .map_err(|_| unavailable())?;
-        let options = serde_json::to_string(&options).map_err(|_| unavailable())?;
+        let options = deps
+            .rp
+            .registration_options_json(&options)
+            .map_err(|_| unavailable())?;
         let ceremony = deps
             .ceremony(actor, CeremonyPurpose::Register, bind, None, state)
             .await?;
@@ -827,6 +874,150 @@ impl SecurityServices for Adapter {
             page: Some(CeremonyPage { ceremony, options }),
             form_origin,
             totp,
+        })
+    }
+
+    async fn finish_login(
+        &self,
+        ctx: &RequestCtx,
+        cookies: &Cookies,
+        transaction: &Secret,
+        ceremony: &Secret,
+        response: &str,
+    ) -> Result<Redirect, Refusal> {
+        let deps = self.deps()?;
+        if !deps.rp.passwordless() || !ctx.https {
+            return Err(forbidden());
+        }
+        let bind = cookies.bind.as_ref().ok_or_else(forbidden)?;
+        let sctx = Self::sctx(ctx);
+        let row = self
+            .svc
+            .passkey_login_txn(&sctx, transaction)
+            .await
+            .map_err(|_| Refusal::Expired)?;
+        let record = deps
+            .store
+            .login_ceremony(&ceremony.digest())
+            .await
+            .map_err(|_| unavailable())?
+            .ok_or(Refusal::Expired)?;
+        if record.transaction != transaction.digest()
+            || record.portal_bind_sha256 != bind.digest()
+            || record.client_ip != ctx.client_ip
+        {
+            return Err(Refusal::Expired);
+        }
+        // Every refusal below looks the same to the browser: no account,
+        // credential or user state is revealed (enumeration resistance).
+        let fail = |cause: &'static str, user: Option<&crate::identity::types::UserId>| {
+            let mut b = EventBuilder::new(
+                deps.clock.as_ref(),
+                deps.rng.as_ref(),
+                EventKind::LoginFailed,
+                Outcome::Failure,
+                &ctx.request_id,
+            )
+            .ip(ctx.client_ip)
+            .reason(reasons::CEREMONY_INVALID)
+            .attr("kind", "webauthn")
+            .attr("cause", cause);
+            if let Some(u) = user {
+                b = b.user(u);
+            }
+            b.build()
+        };
+        let Some((handle, credential_id)) = RelyingParty::identify_login(response) else {
+            deps.store
+                .fail_login_ceremony(&ceremony.digest(), vec![fail("malformed", None)])
+                .await
+                .map_err(|_| unavailable())?;
+            return Err(Refusal::Rejected);
+        };
+        let account = deps
+            .store
+            .passkey_account(handle)
+            .await
+            .map_err(|_| unavailable())?;
+        let Some((user, passkeys)) =
+            account.filter(|(_, p)| p.iter().any(|p| p.credential_id == credential_id))
+        else {
+            deps.store
+                .fail_login_ceremony(&ceremony.digest(), vec![fail("unknown_credential", None)])
+                .await
+                .map_err(|_| unavailable())?;
+            return Err(Refusal::Rejected);
+        };
+        let stored: Vec<_> = passkeys
+            .iter()
+            .map(|p| StoredCredential {
+                credential: &p.passkey,
+                assurance: p.assurance,
+            })
+            .collect();
+        let asserted = match deps.rp.finish_login(response, &record.state, &stored) {
+            Ok(a) => a,
+            Err(Ceremony::CounterRegression) => {
+                let event = EventBuilder::new(
+                    deps.clock.as_ref(),
+                    deps.rng.as_ref(),
+                    EventKind::FactorWebauthnCloneSuspected,
+                    Outcome::Failure,
+                    &ctx.request_id,
+                )
+                .user(&user)
+                .reason(reasons::COUNTER_REGRESSION)
+                .attr(
+                    "factor_id",
+                    crate::store::sqlite::webauthn::factor_id(&credential_id),
+                )
+                .attr("purpose", "login")
+                .build();
+                tracing::warn!(request_id = %ctx.request_id, "passkey counter regression at sign-in: credential revoked");
+                deps.store
+                    .passkey_login_clone(&ceremony.digest(), &credential_id, vec![event])
+                    .await
+                    .map_err(store_refusal)?;
+                return Err(Refusal::CloneSuspected);
+            }
+            Err(cause) => {
+                deps.store
+                    .fail_login_ceremony(&ceremony.digest(), vec![fail(cause.label(), Some(&user))])
+                    .await
+                    .map_err(|_| unavailable())?;
+                return Err(Refusal::Rejected);
+            }
+        };
+        let used = PasskeyUse {
+            credential_id: asserted.credential_id,
+            passkey: asserted.credential,
+            sign_count: asserted.sign_count,
+            backup_eligible: asserted.backup_eligible,
+            backup_state: asserted.backup_state,
+            assurance: asserted.assurance,
+        };
+        let (location, issued) = self
+            .svc
+            .complete_passkey_login(
+                &sctx,
+                deps.store.as_ref(),
+                &row,
+                bind.digest(),
+                ceremony.digest(),
+                &user,
+                used,
+            )
+            .await
+            .map_err(|e| match e {
+                crate::session::service::SessionError::Store(e) => store_refusal(e),
+                _ => Refusal::Rejected,
+            })?;
+        Ok(Redirect {
+            location,
+            set_handle: Some(HandleCookie {
+                value: issued.value,
+                max_age: issued.max_age,
+            }),
         })
     }
 

@@ -1,6 +1,6 @@
 # WebAuthn passkeys
 
-<!-- doc-rev: 3 -->
+<!-- doc-rev: 4 -->
 
 [Documentation](README.md) · [한국어](ko/WEBAUTHN.md)
 
@@ -22,9 +22,9 @@ passkey list, rename and removal, the portal security confirmation, recovery
 codes, the last-factor rule, sign-count regression handling, administrator reset
 and listing from the command line, AAL 3 classification (recorded only).
 
-Not implemented in this pass: passwordless sign-in with conditional UI, factor
-management in the console, a passkey requirement for console operators, AAL 3
-emission. See the [roadmap](ROADMAP.md#m5--extension-points-050).
+Phase 2 adds passwordless sign-in with conditional UI and native Human owner
+provenance. Not implemented: factor management in the console and a passkey
+requirement for console operators; AAL 3 emission is described below. See the [roadmap](ROADMAP.md#m5--extension-points-050).
 
 ## Goal and non-goals
 
@@ -59,6 +59,7 @@ between deployments, and any change to the gateway contract or to peers.
 | `webauthn.rp_id` | the host of `portal.public_url` | The relying-party ID. May be the portal host or a parent domain of it on a label boundary; never an IP literal or a single label. **Changing it later makes every registered passkey unusable.** |
 | `webauthn.rp_name` | `Hopae` | Name the authenticator shows. 1–64 characters. |
 | `webauthn.high_assurance.attestation_ca_files` | none | PEM files of authenticator vendor roots. With `aaguids`, enables the "security key (high assurance)" registration. |
+| `webauthn.passwordless` | `false` | Offer passwordless passkey sign-in on the sign-in page. |
 | `webauthn.high_assurance.aaguids` | none | AAGUIDs that may be classed AAL 3. Required with `attestation_ca_files`. At most 64. |
 
 The allowed origin is always exactly the portal origin; it is not configurable.
@@ -109,6 +110,18 @@ the other methods.
 AAL 3 is not emitted in this release; the [ADR](adr/0017-webauthn-passkeys.md#aal-3-wire-analysis)
 lists every reader that would have to change first. `x-hopae-aal` stays `1` or `2`.
 A recovery entry never satisfies an AAL 2 step-up rule.
+
+## Passwordless sign-in
+
+With `webauthn.passwordless = true` the sign-in page offers a passkey beside the
+providers ([ADR-0017](adr/0017-webauthn-passkeys.md) decision 16):
+
+- The passkey field (`autocomplete="username webauthn"`) shows saved passkeys in the browser's autofill (conditional mediation: Chrome, Edge, Safari, Firefox); the "Sign in with a passkey" button opens the modal prompt (security keys, phones over hybrid transport).
+- No username or password is asked for; the passkey's user handle names the account. Every failure — unknown passkey, another account's credential, disabled user, bad signature — returns the same message.
+- The session is AAL 2 with factor `webauthn` and provider `hopae.passkey` (`x-hopae-provider`), lives while that passkey is active, and reaches every application by single sign-on like any other session.
+- Ceremonies are bound to the sign-in transaction, the browser's binding cookie and its address; at most 30 per address per minute. When none can be offered, the page behaves as without passkeys (one provider is used directly).
+- Passkeys registered while passwordless sign-in is on are requested discoverable (`residentKey: preferred`); passkeys registered earlier on a security key may not be.
+- Limitations: an application's `max_auth_age` reauthentication cannot be completed with a passkey (the user signs out and in); the native Human owner path refuses passkey sessions.
 
 ## Native Human owner path
 

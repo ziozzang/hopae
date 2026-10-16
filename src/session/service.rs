@@ -687,21 +687,29 @@ impl Service {
         {
             return Err(SessionError::Refused(reasons::INVALID_STATE));
         }
-        let provider = self
-            .directory
-            .providers()
-            .await?
-            .into_iter()
-            .find(|row| {
-                row.provider_id == view.session.provider_id
-                    && row.enabled
-                    && row.deleted_at.is_none()
-            })
-            .ok_or(SessionError::Refused(reasons::INVALID_STATE))?;
+        // A passwordless passkey session has no provider row (ADR-0017
+        // decision 16); the store re-checks it by its reserved id instead.
+        let provider_configuration =
+            if view.session.provider_id.as_str() == crate::provider::types::PASSKEY_PROVIDER {
+                (ProviderKind::Oidc, serde_json::Value::Null)
+            } else {
+                let provider = self
+                    .directory
+                    .providers()
+                    .await?
+                    .into_iter()
+                    .find(|row| {
+                        row.provider_id == view.session.provider_id
+                            && row.enabled
+                            && row.deleted_at.is_none()
+                    })
+                    .ok_or(SessionError::Refused(reasons::INVALID_STATE))?;
+                (provider.kind, provider.config)
+            };
         let snapshot = self.snapshot.load_full();
         Ok(crate::store::FactorActor {
             request_id: ctx.request_id.clone(),
-            provider_configuration: (provider.kind, provider.config),
+            provider_configuration,
             client_ip: ctx.client_ip,
             view,
             authorized_at: now,
@@ -2422,6 +2430,9 @@ pub(crate) fn ip_matches(mode: IpBinding, recorded: IpAddr, observed: IpAddr) ->
         }
     }
 }
+
+#[path = "passkey_login.rs"]
+mod passkey_login;
 
 #[cfg(test)]
 mod tests {

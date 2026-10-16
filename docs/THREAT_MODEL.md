@@ -1,6 +1,6 @@
 # Threat model
 
-<!-- doc-rev: 15 -->
+<!-- doc-rev: 16 -->
 
 [Documentation](README.md) · [한국어](ko/THREAT_MODEL.md)
 
@@ -113,13 +113,14 @@ cosmetic). "Scenario" names the scenario that exercises the threat.
 | TM-51 | Recovery code theft or guessing | S | Spoofing | 50 secret bits per code hashed with Argon2id; single use by conditional update; per-address attempt admission; use yields AAL 1 only, sets the re-enrollment requirement and is recorded; regeneration invalidates the previous set; codes are shown once with `no-store` | 485 |
 | TM-52 | Script on the portal becomes an XSS foothold (the no-script principle is relaxed for WebAuthn pages) | S | Elevation, Information disclosure | One static same-origin file with SRI; `script-src 'self'` only on those responses; Trusted Types required; no inline script or handler; `connect-src 'none'`; the script reads escaped `data-` attributes and submits an ordinary form that the server re-validates (CSRF, `Origin`, challenge binding); every other page keeps the pinned no-script policy | 481 |
 | TM-53 | Assurance overclaim or wire confusion: a synchronized or unattested passkey is reported as AAL 3, or an AAL 3 value reaches a peer that only understands 1 and 2 | 5, 9 | Elevation, Denial of service | AAL 3 is only a recorded class (attested chain to an operator CA, allowlisted AAGUID, not backup-eligible, not backed up, user verified, re-checked per assertion); no header, column, receipt or configuration value carries 3 in this release ([ADR-0017](adr/0017-webauthn-passkeys.md) wire analysis) | 486 |
+| TM-54 | Passwordless sign-in abuse: account enumeration through the passkey path, a relayed discoverable assertion, ceremony flooding, or a session that outlives its passkey | 2, S | Spoofing, Information disclosure, Denial of service | No username is asked; every failure (unknown handle, foreign credential, disabled user, bad signature) is the same redirect and a `login.failed` record; origin, RP ID and user verification as TM-47; ceremonies bound to the login transaction, binding cookie and address, single use, 30 per address per minute and 10,000 in total; CSRF and exact `Origin` on the POST; the session ends when its passkey is removed, revoked for cloning or reset | 487 |
 
 ## STRIDE per flow
 
 | Flow | Spoofing | Tampering | Repudiation | Information disclosure | Denial of service | Elevation |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 First visit | TM-06, TM-21, TM-26 | TM-01 | events `login.started` | TM-21 | TM-07, TM-20, TM-31 | TM-14 |
-| 2 Login | TM-03, TM-04, TM-17 | TM-01 | events (outbox, TM-28) | TM-12 | provider slowness bounded by timeouts; TM-31 | TM-08 |
+| 2 Login | TM-03, TM-04, TM-17, TM-54 | TM-01 | events (outbox, TM-28) | TM-12 | provider slowness bounded by timeouts; TM-31 | TM-08 |
 | 3 Callback | TM-08, TM-09, TM-04, TM-25, TM-30 | token validation (`iss`, `aud`, `exp`, `nonce`, signature) | events `login.succeeded/failed` (TM-28, TM-32) | TM-12 | TM-20 | TM-09, TM-25, TM-30 |
 | 4 Handoff | TM-02, TM-05, TM-22, TM-30, TM-33 | TM-01, TM-36 | events `session.handoff` | code in URL for ≤ 60 s; TM-36 | TM-20, TM-31 | TM-05, TM-22, TM-23, TM-38 |
 | 5 Verify | TM-06, TM-13, TM-14, TM-40 | TM-19, TM-27, TM-36, TM-39, TM-41 | sampled `verify.denied` | TM-12, TM-40 | TM-07, TM-29, TM-35, TM-37 | TM-18, TM-24, TM-27, TM-37, TM-38, TM-39, TM-41 |

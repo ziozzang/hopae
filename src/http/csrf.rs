@@ -38,6 +38,8 @@ pub enum Purpose {
     Security,
     /// The passkey step-up form, bound to the transaction, binding cookie and handle.
     PasskeyStepUp,
+    /// The passwordless passkey sign-in form, bound to the transaction and binding cookie.
+    PasskeyLogin,
 }
 
 impl Purpose {
@@ -55,6 +57,7 @@ impl Purpose {
             Purpose::Admin => "admin",
             Purpose::Security => "security",
             Purpose::PasskeyStepUp => "passkey_stepup",
+            Purpose::PasskeyLogin => "passkey_login",
         }
     }
 }

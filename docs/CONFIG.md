@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 36 -->
+<!-- doc-rev: 37 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -327,6 +327,7 @@ security-settings route answers `404` and nothing changes. Example:
 | --- | --- | --- |
 | `webauthn.rp_id` | the host of `portal.public_url` | The portal host or a parent domain of it on a label boundary; not an IP literal or a single label. Changing it makes every registered passkey unusable. |
 | `webauthn.rp_name` | `Hopae` | 1–64 printable characters. |
+| `webauthn.passwordless` | `false` | Offer passwordless passkey sign-in on the sign-in page ([WebAuthn passkeys](WEBAUTHN.md#passwordless-sign-in)). Sessions use the reserved provider id `hopae.passkey`. |
 | `webauthn.high_assurance.attestation_ca_files` | — | 1–64 readable PEM files; required with `aaguids`. Read at start and by `hopae --check`. |
 | `webauthn.high_assurance.aaguids` | — | 1–64 non-zero UUIDs; required with `attestation_ca_files`. |
 

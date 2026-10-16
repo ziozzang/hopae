@@ -101,6 +101,11 @@ pub struct Chooser<'a> {
     pub csrf: &'a str,
     pub txn: &'a str,
     pub providers: &'a [ChoiceView],
+    /// Passwordless sign-in: (ceremony bearer, options JSON) (ADR-0017 decision 16).
+    pub passkey: Option<(&'a str, &'a str)>,
+    pub passkey_csrf: &'a str,
+    pub passkey_error: Option<&'static str>,
+    pub integrity: &'a str,
 }
 
 /// No field can carry a password value back into the rendered page.

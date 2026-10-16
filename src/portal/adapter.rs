@@ -651,9 +651,11 @@ impl PortalServices for Adapter {
                 // Exactly one provider, and it works: no chooser, straight
                 // to the provider (the portal cookie is planted on this
                 // response by the handler).
+                let passkey = self.passkey_offer(ctx, txn, cookies).await;
                 if let [only] = choices.as_slice()
                     && only.available
                     && self.registry.credential(&only.id).is_none()
+                    && passkey.is_none()
                 {
                     return match self
                         .svc
@@ -667,6 +669,7 @@ impl PortalServices for Adapter {
                 LoginVisit::Chooser {
                     providers: choices,
                     form_origins: self.provider_origins(),
+                    passkey,
                 }
             }
             Err(e) => LoginVisit::Failed(failure(&e)),

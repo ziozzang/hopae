@@ -58,6 +58,7 @@ pub fn router(state: PortalState) -> Router {
             get(settings::recovery_get).post(settings::recovery_post),
         )
         .route("/stepup/webauthn", post(settings::stepup_post))
+        .route("/login/passkey", post(settings::login_post))
         .route("/login", get(handlers::login_get))
         .route("/login/retry", post(handlers::retry_post))
         .route("/login/continue", post(handlers::continue_post))

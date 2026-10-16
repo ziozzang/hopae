@@ -46,6 +46,33 @@ fn code_by_digest(conn: &Connection, d: &Digest) -> StoreResult<Option<HandoffCo
         .transpose()
 }
 
+/// Insert a new session row (the caller's transaction).
+pub(super) fn insert_session(tx: &Transaction<'_>, s: &SessionRow) -> StoreResult<()> {
+    tx.execute(
+        "INSERT INTO sessions (session_id, user_id, provider_id, auth_time, factors, aal, authz_version, cred_gen, snapshot, bound_ip, bound_ua_sha256, created_at, last_seen_at, absolute_expires_at, terminated_at, terminated_reason, authz_version_at_auth, auth_time_source, bound_ua_prefix) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL,?15,?16,?17)",
+        params![
+            s.session_id.as_str(),
+            s.user_id.as_str(),
+            s.provider_id.as_str(),
+            s.auth_time.secs(),
+            rows::json_str(&s.factors)?,
+            s.aal.as_i64(),
+            i64::try_from(s.authz_version).unwrap_or(i64::MAX),
+            i64::try_from(s.cred_gen).unwrap_or(i64::MAX),
+            snapshot_json(&s.snapshot).to_string(),
+            s.bound_ip.to_string(),
+            opt_blob(&s.bound_ua_sha256),
+            s.created_at.secs(),
+            s.last_seen_at.secs(),
+            s.absolute_expires_at.secs(),
+            i64::try_from(s.authz_version_at_auth).unwrap_or(i64::MAX),
+            s.auth_time_source.as_str(),
+            s.bound_ua_prefix,
+        ],
+    )?;
+    Ok(())
+}
+
 pub(super) fn insert_handle(conn: &Connection, h: &HandleRow) -> StoreResult<()> {
     conn.execute(
         "INSERT INTO session_handles (handle_sha256, session_id, host, issued_aal, created_at, last_seen_at, absolute_expires_at, revoked_at, revoked_reason) VALUES (?1,?2,?3,?4,?5,?6,?7,NULL,NULL)",
@@ -209,28 +236,7 @@ impl Store {
             require_provider_live(&tx, s.provider_id.as_str())?;
             require_provider_configuration(&tx, s.provider_id.as_str(), req.provider_configuration.as_ref())?;
 
-            tx.execute(
-                "INSERT INTO sessions (session_id, user_id, provider_id, auth_time, factors, aal, authz_version, cred_gen, snapshot, bound_ip, bound_ua_sha256, created_at, last_seen_at, absolute_expires_at, terminated_at, terminated_reason, authz_version_at_auth, auth_time_source, bound_ua_prefix) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,NULL,NULL,?15,?16,?17)",
-                params![
-                    s.session_id.as_str(),
-                    s.user_id.as_str(),
-                    s.provider_id.as_str(),
-                    s.auth_time.secs(),
-                    rows::json_str(&s.factors)?,
-                    s.aal.as_i64(),
-                    i64::try_from(s.authz_version).unwrap_or(i64::MAX),
-                    i64::try_from(s.cred_gen).unwrap_or(i64::MAX),
-                    snapshot_json(&s.snapshot).to_string(),
-                    s.bound_ip.to_string(),
-                    opt_blob(&s.bound_ua_sha256),
-                    s.created_at.secs(),
-                    s.last_seen_at.secs(),
-                    s.absolute_expires_at.secs(),
-                    i64::try_from(s.authz_version_at_auth).unwrap_or(i64::MAX),
-                    s.auth_time_source.as_str(),
-                    s.bound_ua_prefix,
-                ],
-            )?;
+            insert_session(&tx, s)?;
             insert_handle(&tx, &req.portal_handle)?;
             if let Some(primary)=&primary {primary.write(&self_store,&tx,s,0)?;}
             tx.execute(
@@ -875,6 +881,10 @@ impl Sessions for Store {
             // Ceremony rows are single use and short-lived (ADR-0017).
             tx.execute(
                 "DELETE FROM webauthn_challenges WHERE expires_at <= ?1 OR consumed_at IS NOT NULL",
+                [now.secs()],
+            )?;
+            tx.execute(
+                "DELETE FROM webauthn_login_challenges WHERE expires_at <= ?1 OR consumed_at IS NOT NULL",
                 [now.secs()],
             )?;
             // Handles and remaining codes of a deleted session go with it (ON DELETE CASCADE).

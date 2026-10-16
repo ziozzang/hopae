@@ -13,9 +13,9 @@ use url::Url;
 use webauthn_rs::prelude::{
     AttestationCaList, AttestationCaListBuilder, AttestationFormat, AttestationMetadata,
     AttestedPasskey, AttestedPasskeyRegistration, AuthenticationResult, CreationChallengeResponse,
-    Credential, CredentialID, Passkey, PasskeyAuthentication, PasskeyRegistration,
-    PublicKeyCredential, RegisterPublicKeyCredential, RequestChallengeResponse, Uuid, Webauthn,
-    WebauthnBuilder, WebauthnError,
+    Credential, CredentialID, DiscoverableAuthentication, DiscoverableKey, Passkey,
+    PasskeyAuthentication, PasskeyRegistration, PublicKeyCredential, RegisterPublicKeyCredential,
+    RequestChallengeResponse, Uuid, Webauthn, WebauthnBuilder, WebauthnError,
 };
 
 use crate::store::passkeys::Assurance;
@@ -32,6 +32,9 @@ pub struct Configuration {
     pub rp_name: Option<String>,
     #[serde(default)]
     pub high_assurance: Option<HighAssuranceConfiguration>,
+    /// Passwordless sign-in with passkeys on the login page (ADR-0017 decision 16).
+    #[serde(default)]
+    pub passwordless: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -181,6 +184,7 @@ pub struct RelyingParty {
     webauthn: Webauthn,
     rp_id: String,
     high: Option<HighAssurance>,
+    passwordless: bool,
 }
 
 impl std::fmt::Debug for RelyingParty {
@@ -260,11 +264,34 @@ impl RelyingParty {
             webauthn,
             rp_id,
             high,
+            passwordless: cfg.passwordless,
         })
     }
 
     pub fn rp_id(&self) -> &str {
         &self.rp_id
+    }
+
+    /// Whether passwordless sign-in is offered.
+    pub fn passwordless(&self) -> bool {
+        self.passwordless
+    }
+
+    /// Registration options as the page receives them. With passwordless
+    /// sign-in the credential is requested discoverable (`residentKey:
+    /// preferred`) so it can later sign in without a username.
+    pub fn registration_options_json(
+        &self,
+        options: &CreationChallengeResponse,
+    ) -> Result<String, Failure> {
+        let mut v = serde_json::to_value(options).map_err(|_| Failure::Malformed)?;
+        if self.passwordless
+            && let Some(sel) = v.pointer_mut("/publicKey/authenticatorSelection")
+            && let Some(o) = sel.as_object_mut()
+        {
+            o.insert("residentKey".into(), "preferred".into());
+        }
+        serde_json::to_string(&v).map_err(|_| Failure::Malformed)
     }
 
     /// Whether the high-assurance (attested security key) registration exists.
@@ -414,6 +441,85 @@ impl RelyingParty {
             options,
             serde_json::to_string(&state).map_err(|_| Failure::Malformed)?,
         ))
+    }
+
+    /// Options and state for a passwordless sign-in (ADR-0017 decision 16):
+    /// no user is known, the authenticator offers its discoverable passkeys
+    /// (conditional mediation or a modal prompt). User verification required.
+    pub fn start_login(&self) -> Result<(RequestChallengeResponse, String), Failure> {
+        let (mut options, state) = self
+            .webauthn
+            .start_discoverable_authentication()
+            .map_err(|_| Failure::Rejected)?;
+        // The page chooses the mediation (conditional autofill or a button).
+        options.mediation = None;
+        Ok((
+            options,
+            serde_json::to_string(&state).map_err(|_| Failure::Malformed)?,
+        ))
+    }
+
+    /// The user handle and credential id a passwordless response names
+    /// (unverified: only for looking up the candidate credentials).
+    pub fn identify_login(response: &str) -> Option<([u8; 16], Vec<u8>)> {
+        let r: PublicKeyCredential = serde_json::from_str(response).ok()?;
+        let handle: [u8; 16] = r.response.user_handle.as_ref()?.as_ref().try_into().ok()?;
+        Some((handle, r.raw_id.to_vec()))
+    }
+
+    /// Verify a passwordless assertion against the named user's credentials.
+    pub fn finish_login(
+        &self,
+        response: &str,
+        state: &str,
+        stored: &[StoredCredential<'_>],
+    ) -> Result<Asserted, Failure> {
+        let parsed: PublicKeyCredential =
+            serde_json::from_str(response).map_err(|_| Failure::Malformed)?;
+        let state: DiscoverableAuthentication =
+            serde_json::from_str(state).map_err(|_| Failure::Malformed)?;
+        let creds: Vec<(Credential, Assurance)> = stored
+            .iter()
+            .map(|s| serde_json::from_str::<Credential>(s.credential).map(|c| (c, s.assurance)))
+            .collect::<Result<_, _>>()
+            .map_err(|_| Failure::Malformed)?;
+        let keys: Vec<DiscoverableKey> = creds
+            .iter()
+            .map(|(c, _)| DiscoverableKey::from(Passkey::from(c.clone())))
+            .collect();
+        let result = self
+            .webauthn
+            .finish_discoverable_authentication(&parsed, state, &keys)
+            .map_err(|e| match e {
+                WebauthnError::CredentialPossibleCompromise => Failure::CounterRegression,
+                _ => Failure::Rejected,
+            })?;
+        if !result.user_verified() {
+            return Err(Failure::Rejected);
+        }
+        let id = result.cred_id().to_vec();
+        let (credential, class) = creds
+            .into_iter()
+            .find(|(c, _)| c.cred_id.as_slice() == id.as_slice())
+            .ok_or(Failure::Rejected)?;
+        let mut passkey = Passkey::from(credential);
+        passkey.update_credential(&result);
+        let assurance =
+            if class == Assurance::Aal3 && !result.backup_eligible() && !result.backup_state() {
+                Assurance::Aal3
+            } else {
+                Assurance::Aal2
+            };
+        Ok(Asserted {
+            credential_id: id,
+            sign_count: result.counter(),
+            backup_eligible: result.backup_eligible(),
+            backup_state: result.backup_state(),
+            user_verified: true,
+            assurance,
+            credential: serde_json::to_string(&Credential::from(passkey))
+                .map_err(|_| Failure::Malformed)?,
+        })
     }
 
     /// The credential id a response names, for a failure record (unverified).

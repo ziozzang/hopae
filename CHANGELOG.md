@@ -20,6 +20,11 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 - Recovery codes (ten, Argon2id-hashed, single use) that yield AAL 1 and
   require enrolling a new factor.
 - `hopae admin factors list|reset` for support and administrator reset.
+- Passwordless passkey sign-in with conditional UI (`webauthn.passwordless`),
+  sessions at AAL 2 with the reserved provider id `hopae.passkey`;
+  schema migration 13 (`webauthn_login_challenges`).
+- Passkey-elevated AAL 2 sessions on the native Human owner path through
+  `session_webauthn_provenance` (schema migration 12).
 - Schema migration 11 (`webauthn_credentials`, `webauthn_challenges`,
   `recovery_codes`, `session_webauthn_elevations`, two nullable `users`
   columns). Roll back by restoring the pre-migration backup.

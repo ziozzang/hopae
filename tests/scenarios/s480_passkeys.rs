@@ -100,7 +100,17 @@ impl Pk {
         };
         let r = pk.verify(HOME);
         assert_eq!(r.status, 302, "{r:?}");
-        let r = pk.portal.get(&path_of(r.location().unwrap()));
+        let mut r = pk.portal.get(&path_of(r.location().unwrap()));
+        if r.status == 200 {
+            // The chooser (passwordless offered beside the provider).
+            r = pk.post(
+                "/login/mock",
+                &[
+                    ("csrf", &field(&r.body, "/login/mock", "csrf")),
+                    ("txn", &field(&r.body, "/login/mock", "txn")),
+                ],
+            );
+        }
         assert_eq!(r.status, 302, "{r:?}");
         let cb = pk._idp.follow_authorization(r.location().unwrap());
         let back = pk.portal.send(Req::get(&cb).cross_site_navigation());
@@ -1035,4 +1045,279 @@ fn s481_a3_an_expired_ceremony_is_refused() {
     assert_eq!(r.status, 200, "{r:?}");
     assert!(r.body.contains("expired or was already used"), "{}", r.body);
     assert_eq!(p.sql("SELECT COUNT(*) FROM sessions WHERE aal=2"), 0);
+}
+
+// ---- 487: passwordless sign-in --------------------------------------------
+
+fn passwordless() -> Value {
+    passkey_config(json!({"webauthn": {"passwordless": true}}))
+}
+
+/// A second browser on the same machine: no cookies, same authenticator.
+struct Fresh {
+    portal: Client,
+    app_jar: Jar,
+}
+
+impl Pk {
+    fn fresh(&self) -> Fresh {
+        Fresh {
+            portal: self.h.portal_with(Jar::new()).with_ip(IP),
+            app_jar: Jar::new(),
+        }
+    }
+
+    fn verify_in(&self, b: &Fresh, url: &str) -> Response {
+        let jar = b.app_jar.for_host("app.example.test");
+        let mut req = VerifyRequest::document(url).ip(IP);
+        for n in [self.base.clone(), format!("{}_bind", self.base)] {
+            if let Some(v) = jar.value(&n) {
+                req = req.cookie(&n, &v);
+            }
+        }
+        let r = self.h.verify(req);
+        for c in r.set_cookies() {
+            b.app_jar.store("app.example.test", "/", true, c);
+        }
+        r
+    }
+
+    fn user_handle(&self, which: &str) -> String {
+        use base64::Engine as _;
+        let c = rusqlite::Connection::open(self.h.state_dir.path().join("state").join("hopae.db"))
+            .unwrap();
+        let v: Vec<u8> = c
+            .query_row(&format!("SELECT webauthn_user_handle FROM users WHERE webauthn_user_handle IS NOT NULL {which} LIMIT 1"), [], |r| r.get(0))
+            .unwrap();
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v)
+    }
+
+    /// The chooser page in `b`, a discoverable assertion carrying `handle`
+    /// (the software key cannot discover, so the test names its credential
+    /// and adds the user handle a discoverable authenticator returns), and
+    /// the form fields.
+    fn passwordless_form(&mut self, b: &Fresh, handle: &str) -> (Response, Vec<(String, String)>) {
+        let r = self.verify_in(b, HOME);
+        assert_eq!(r.status, 302, "{r:?}");
+        let page = b.portal.get(&path_of(r.location().unwrap()));
+        assert_eq!(page.status, 200, "{page:?} {}", page.body);
+        let mut opts: Value = serde_json::from_str(&options(&page.body)).unwrap();
+        assert_eq!(
+            opts["publicKey"]["allowCredentials"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or(0),
+            0,
+            "discoverable"
+        );
+        let id = {
+            use base64::Engine as _;
+            let c =
+                rusqlite::Connection::open(self.h.state_dir.path().join("state").join("hopae.db"))
+                    .unwrap();
+            let v: Vec<u8> = c
+                .query_row(
+                    "SELECT credential_id FROM webauthn_credentials WHERE state='active' LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v)
+        };
+        opts["publicKey"]["allowCredentials"] = json!([{"type": "public-key", "id": id}]);
+        let opts: RequestChallengeResponse = serde_json::from_value(opts).unwrap();
+        let cred = self
+            .key
+            .do_authentication(Url::parse(PORTAL).unwrap(), opts)
+            .unwrap();
+        let mut v: Value = serde_json::from_str(&browser_json(&cred)).unwrap();
+        v["response"]["userHandle"] = json!(handle);
+        let form = vec![
+            (
+                "csrf".to_string(),
+                field(&page.body, "/login/passkey", "csrf"),
+            ),
+            (
+                "txn".to_string(),
+                field(&page.body, "/login/passkey", "txn"),
+            ),
+            (
+                "ceremony".to_string(),
+                field(&page.body, "/login/passkey", "ceremony"),
+            ),
+            ("credential".to_string(), v.to_string()),
+        ];
+        (page, form)
+    }
+
+    fn post_in(&self, b: &Fresh, path: &str, form: &[(String, String)]) -> Response {
+        let refs: Vec<(&str, &str)> = form.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        b.portal
+            .send(Req::post(path).header("origin", PORTAL).form(&refs))
+    }
+}
+
+#[test]
+fn s487_1_passwordless_sign_in_creates_an_aal2_passkey_session() {
+    let mut p = Pk::start(passwordless());
+    assert_eq!(p.register("Laptop").status, 303);
+    assert!(
+        p.portal.get("/security/passkeys/new").status == 303,
+        "verification needed for a second key"
+    );
+    let handle = p.user_handle("");
+    let b = p.fresh();
+    let (page, form) = p.passwordless_form(&b, &handle);
+    assert!(page.body.contains("autocomplete=\"username webauthn\""));
+    let csp = page.header("content-security-policy").unwrap();
+    assert!(csp.contains("script-src 'self'"), "{csp}");
+    let done = p.post_in(&b, "/login/passkey", &form);
+    assert_eq!(done.status, 302, "{done:?}");
+    assert!(
+        done.set_cookies()
+            .iter()
+            .any(|c| c.starts_with(&format!("{}=", p.base))),
+        "portal handle planted"
+    );
+    let redeem = p.verify_in(&b, done.location().unwrap());
+    assert_eq!(redeem.status, 302, "{redeem:?}");
+    let clean = p.verify_in(&b, redeem.location().unwrap_or(HOME));
+    assert_eq!(clean.status, 200, "{clean:?}");
+    assert_eq!(clean.header("x-hopae-aal"), Some("2"));
+    assert_eq!(clean.header("x-hopae-provider"), Some("hopae.passkey"));
+    assert!(
+        clean
+            .header("x-hopae-factors")
+            .unwrap()
+            .contains("webauthn")
+    );
+    // The passkey session can open the security settings and an AAL 2 path.
+    assert_eq!(b.portal.get("/security").status, 200);
+    assert_eq!(p.verify_in(&b, ADMIN).status, 200);
+    let ok = p.h.hooks.events(Some("login.succeeded"), Some(10));
+    assert!(
+        ok.iter().any(|e| e["attrs"]["kind"] == "webauthn"),
+        "{ok:?}"
+    );
+}
+
+#[test]
+fn s487_2_without_passwordless_the_chooser_is_unchanged() {
+    let p = Pk::start(passkey_config(json!({})));
+    let b = p.fresh();
+    let r = p.verify_in(&b, HOME);
+    let login = b.portal.get(&path_of(r.location().unwrap()));
+    // One provider and no passwordless option: straight to the provider.
+    assert_eq!(login.status, 302, "{login:?}");
+    assert_eq!(p.sql("SELECT COUNT(*) FROM webauthn_login_challenges"), 0);
+}
+
+#[test]
+fn s487_a1_unknown_or_foreign_user_handles_fail_uniformly() {
+    let mut p = Pk::start(passwordless());
+    assert_eq!(p.register("Laptop").status, 303);
+    let b = p.fresh();
+    let (_, unknown) = p.passwordless_form(&b, "AAAAAAAAAAAAAAAAAAAAAA");
+    let r1 = p.post_in(&b, "/login/passkey", &unknown);
+    // Another user's handle with this user's credential.
+    p.exec("UPDATE users SET webauthn_user_handle=X'00112233445566778899AABBCCDDEEFF' WHERE webauthn_user_handle IS NULL AND user_id IN (SELECT user_id FROM users LIMIT 1 OFFSET 5)");
+    let (_, wrong) = p.passwordless_form(&b, "ABEiM0RVZneImaq7zN3u_w");
+    let r2 = p.post_in(&b, "/login/passkey", &wrong);
+    for r in [&r1, &r2] {
+        assert_eq!(r.status, 303, "{r:?}");
+        assert!(
+            r.location().unwrap().contains("passkey_error=rejected"),
+            "{r:?}"
+        );
+    }
+    assert_eq!(
+        p.sql("SELECT COUNT(*) FROM sessions WHERE provider_id='hopae.passkey'"),
+        0
+    );
+    let shown = b.portal.get(r1.location().unwrap());
+    assert!(
+        shown.body.contains("sign you in with that passkey"),
+        "{}",
+        shown.body
+    );
+}
+
+#[test]
+fn s487_a2_a_replayed_sign_in_is_refused() {
+    let mut p = Pk::start(passwordless());
+    assert_eq!(p.register("Laptop").status, 303);
+    let handle = p.user_handle("");
+    let b = p.fresh();
+    let (_, form) = p.passwordless_form(&b, &handle);
+    assert_eq!(p.post_in(&b, "/login/passkey", &form).status, 302);
+    let again = p.post_in(&b, "/login/passkey", &form);
+    assert_eq!(again.status, 303, "{again:?}");
+    assert!(
+        again.location().unwrap().contains("passkey_error=expired"),
+        "{again:?}"
+    );
+    assert_eq!(
+        p.sql("SELECT COUNT(*) FROM sessions WHERE provider_id='hopae.passkey'"),
+        1
+    );
+}
+
+#[test]
+fn s487_a3_another_browser_cannot_complete_the_ceremony() {
+    let mut p = Pk::start(passwordless());
+    assert_eq!(p.register("Laptop").status, 303);
+    let handle = p.user_handle("");
+    let b = p.fresh();
+    let (_, form) = p.passwordless_form(&b, &handle);
+    let other = p.fresh();
+    let _ = other.portal.get("/security"); // no session: plants nothing useful
+    let r = p.post_in(&other, "/login/passkey", &form);
+    assert_eq!(r.status, 403, "{r:?}");
+    assert_eq!(
+        p.sql("SELECT COUNT(*) FROM sessions WHERE provider_id='hopae.passkey'"),
+        0
+    );
+}
+
+#[test]
+fn s487_a4_ceremonies_per_address_are_bounded() {
+    let p = Pk::start(passwordless());
+    let b = p.fresh();
+    let r = p.verify_in(&b, HOME);
+    let login = path_of(r.location().unwrap());
+    let mut offered = 0;
+    loop {
+        let page = b.portal.get(&login);
+        if page.status == 200 && page.body.contains("/login/passkey") {
+            offered += 1;
+            assert!(offered <= 30, "unbounded");
+            continue;
+        }
+        // Withheld: the single provider is used directly, as without passkeys.
+        assert_eq!(page.status, 302, "{page:?}");
+        break;
+    }
+    // 30 per address and minute; the fixture's own sign-in used one.
+    assert_eq!(offered, 29, "LOGIN_CEREMONIES_PER_MINUTE");
+}
+
+#[test]
+fn s487_a5_removing_the_passkey_ends_its_passwordless_sessions() {
+    let mut p = Pk::start(passwordless());
+    assert_eq!(p.register("Laptop").status, 303);
+    let handle = p.user_handle("");
+    let b = p.fresh();
+    let (_, form) = p.passwordless_form(&b, &handle);
+    assert_eq!(p.post_in(&b, "/login/passkey", &form).status, 302);
+    p.h.cli(&["admin", "factors", "reset", &{
+        let c = rusqlite::Connection::open(p.h.state_dir.path().join("state").join("hopae.db"))
+            .unwrap();
+        c.query_row::<String, _, _>(
+            "SELECT user_id FROM webauthn_credentials LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }]);
+    assert_eq!(p.sql("SELECT COUNT(*) FROM sessions WHERE provider_id='hopae.passkey' AND terminated_at IS NULL"), 0);
 }
