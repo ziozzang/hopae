@@ -37,7 +37,11 @@ and a read-only administrator can read but never write.
 
 ## Alternative flows
 
-None beyond the abuse cases.
+### S310-3 Deleting a group with members requires force
+
+- Given: a local group with one member.
+- When: delete with `force: false`, without `force`, then with `force: true`.
+- Then: `409 group_not_empty` twice; then `200`, the tombstone has no member and `group.deleted` carries `attrs.count: 1`.
 
 ## Abuse cases
 
@@ -75,6 +79,7 @@ None beyond the abuse cases.
 | --- | --- | --- | --- | --- |
 | S310-1 | `s310_1_local_group_lifecycle_with_cas_and_audit` | `tests/scenarios/s310_groups.rs` | integration | passing |
 | S310-2 | `s310_2_viewers_read_but_cannot_write` | `tests/scenarios/s310_groups.rs` | integration | passing |
+| S310-3 | `s310_3_deleting_a_group_with_members_requires_force` | `tests/scenarios/s310_groups.rs` | integration | passing |
 | S310-A1 | `s310_a1_bodies_and_bounds_are_refused_before_any_write` | `tests/scenarios/s310_groups.rs` | integration | passing |
 | S310-A2 | `s310_a2_per_actor_write_rate_limit` | `tests/scenarios/s310_groups.rs` | integration | passing |
 
@@ -89,7 +94,7 @@ are covered by the unit tests in `src/store/sqlite/groups.rs`.
 
 ## Open questions
 
-- Should deleting a local group with members require an explicit `force`?
+- None. (Deleting a group with members requires `force: true`, case 310-3.)
 
 ## 한국어 요약
 

@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 36 -->
+<!-- doc-rev: 37 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -212,6 +212,7 @@ Groups, provider group sync and the signed membership projection ([groups](GROUP
 | `groups.change_retention_days` | integer, 1 to 3650 | `30` | Age after which projection journal rows are pruned (the newest is kept); an older projection cursor is `410 cursor_expired`. |
 | `groups.maintenance_interval_secs` | integer, 10 to 86400 | `300` | Interval of the maintenance pass: local expiry, removal grace, deleted providers, stale provider groups, journal retention, periodic LDAP sync. |
 | `groups.stale_group_days` | integer, 1 to 3650 | `30` | A provider group with no member and no sync report for this long is deleted (tombstone). |
+| `groups.max_staleness_secs` | integer, 3600 to 31536000 | `604800` | A provider membership no successful assertion confirmed for this long is suspended: kept, but left out of the projection and the gateway mirror until asserted again. Must exceed every provider's `sync_interval_secs`. |
 | `groups.gateway_header` | boolean | `false` | Mirror up to 32 group references into `users.groups`, so `x-forwarded-groups` carries them; a change bumps `authz_version`. |
 | `groups.projection.issuer_ref` | string, 1 to 128 of `[A-Za-z0-9_.:-]` | none | Key identity in every projection envelope and payload. The projection endpoints answer `503 projection_unavailable` without `groups.projection`. |
 | `groups.projection.key_epoch` | integer, at least 1 | none | Key epoch; raise it when the key changes. |

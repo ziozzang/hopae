@@ -59,16 +59,24 @@ the vocabulary Pumgye asks for.
    asserts no groups. Unasserted memberships are removed immediately or after
    `removal_grace_secs`. Sync happens at sign-in (OIDC claim from the ID token,
    else user-info; LDAP `memberOf` or group search with the service bind,
-   applied only after the password is verified) and, for LDAP, in a bounded
-   periodic refresh of linked identities. A sync never blocks a sign-in; a
-   failed sync keeps the previous memberships (fail-static, documented as a
-   residual).
+   applied only after the password is verified, within a quarter of the
+   provider deadline) and, for LDAP, in a bounded periodic refresh of linked
+   identities. A sync never blocks a sign-in; a failed sync keeps the
+   previous memberships (fail-static) **for at most
+   `groups.max_staleness_secs`** (default 7 days): a provider membership no
+   successful assertion confirmed for that long is suspended — kept, shown
+   as stale, but excluded from the projection and the gateway mirror
+   (`group.membership_stale`, journaled as `member_removed`) — until an
+   assertion restores it. A periodic sync interval must be shorter than the
+   bound. Names with control or invisible formatting characters are dropped.
 4. **Administration.** POST JSON endpoints on the admin listener for search,
    detail with members, a person's groups, `include_groups` on resolution,
    and local writes with a required reason and `expected_revision`
    (compare-and-swap on the group revision). Reads are `admin.read`-audited
    and bucketed like the subject directory; writes are console mutations
-   (CSRF, `admin` role, actor fence) with their own bucket.
+   (CSRF, `admin` role, actor fence) with their own bucket. Deleting a group
+   that still has members requires `force: true` (else
+   `409 group_not_empty`).
 5. **Projection.** Snapshot pages (people with their memberships among the
    vocabulary, with a watermark) and a journal feed (`r<revision>` cursors,
    `410` after retention or for a foreign store), restricted to a
@@ -79,7 +87,10 @@ the vocabulary Pumgye asks for.
    the issue time and `max_aal`. The key is a dedicated `groups.projection`
    key loaded like the receipt issuer's and refused if it equals the receipt
    key. Pumgye pins keys by `(issuer_ref, key_epoch)`; rotation is
-   add-next-then-switch-then-retire.
+   add-next-then-switch-then-retire. The verifier checks the page `kind`;
+   snapshot pages echo their request cursor and watermark, changes pages
+   their `from`. GroupRefs are canonical in lower-case Crockford base32 and
+   compared byte for byte; the vocabulary stays per request.
 6. **Gateways and receipts.** Groups are **not** emitted to gateways by
    default. `groups.gateway_header: true` mirrors at most 32 GroupRefs into
    `users.groups` (bumping `authz_version`) so the existing
@@ -107,10 +118,10 @@ the vocabulary Pumgye asks for.
 ### Negative
 
 - Memberships of people who never sign in again are refreshed only for LDAP
-  (periodic sync); OIDC memberships stay until sign-in, disablement or
-  provider deletion.
+  (periodic sync); OIDC memberships are suspended after the staleness bound
+  (SCIM provisioning is a P2 roadmap item).
 - While a directory is unreachable, memberships it would remove stay
-  effective.
+  effective up to the staleness bound.
 - Large deployments must shard the vocabulary (1,024 per request).
 - The migration number depends on another branch's merge order.
 
@@ -133,7 +144,43 @@ the vocabulary Pumgye asks for.
 
 ## Adversarial review
 
-Not yet reviewed (G2 pending). The PR records the open questions.
+| Pass | Date | S1 | S2 | S3 | S4 | Outcome |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 (self, orchestrator) | 2026-10-16 | 0 | 3 | 4 | 1 | All FIX_FIRST applied; independent G2 review still pending |
+
+Scope: authorization bypass, projection signature confusion, sync injection
+through claims and DNs, rate limits, privacy.
+
+- F-1 (S2) A snapshot page could be presented as a changes page or the
+  reverse (same key, same header): the verifier now requires the expected
+  `kind`.
+- F-2 (S2) Signed pages did not bind the request position: snapshot pages
+  echo `cursor`, every page carries its watermark, a watermark beyond the
+  journal head is refused (`410`); the contract requires `from` and
+  `cursor` to match what Pumgye asked.
+- F-3 (S2) Unbounded fail-static: provider memberships stayed effective
+  forever while a directory or IdP was unreachable or the person stopped
+  signing in: maximum staleness with suspension (decision 3).
+- F-4 (S3) Display-name spoofing with bidirectional overrides and
+  zero-width characters in claim values, LDAP names and console input:
+  such names are dropped or refused.
+- F-5 (S3) An LDAP group search ran with the service bind before the
+  password was checked, so wrong passwords amplified directory load, and a
+  slow group search could fail the sign-in: groups are now read after the
+  user bind succeeds, within a quarter of the provider deadline, and a
+  timeout is "not asserted".
+- F-6 (S3) A periodic interval longer than the staleness bound would
+  suspend memberships between refreshes: refused by configuration
+  validation.
+- F-7 (S3) Deleting a populated group was a single unguarded write:
+  `force: true` required.
+- F-8 (S4) Case-variant GroupRefs could be compared case-insensitively by a
+  consumer: lower case is declared canonical, byte comparison required.
+
+Refuted: projection read access for the read-only role (a viewer can
+already list groups and members; pages are bound to Pumgye's audience and
+useless to anyone else); include/exclude matching the normalized LDAP key
+(documented: patterns are written in lower case).
 
 ## References
 

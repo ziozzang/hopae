@@ -1,6 +1,6 @@
 # Groups and the membership projection
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/GROUPS.md)
 
@@ -26,6 +26,7 @@ the projection needs a signing key:
     "change_retention_days": 30,
     "maintenance_interval_secs": 300,
     "stale_group_days": 30,
+    "max_staleness_secs": 604800,
     "gateway_header": false,
     "projection": {
       "issuer_ref": "hopae-groups", "key_epoch": 1,
@@ -59,7 +60,7 @@ the receipt issuer's key, or Hopae refuses to start.
 | Object | Fields |
 | --- | --- |
 | Group | `group_id` (GroupRef), `source` (`local`, `ldap`, `oidc`), `provider_id` (null for local), `key` (stable source key: the local key, the normalized LDAP DN, or the OIDC claim value), `name`, `description`, `state` (`active`, `deleted`), `revision`, `members`, `created_at`, `updated_at`, `last_seen_at` (last sync report), `deleted_at` |
-| Membership | person (Hopae user ID, exported as the `human1:` subject), group, `source`, `provider_id`, `first_seen_at`, `last_seen_at`, `expires_at` (local only), `removal_pending_at` (provider only), `added_by` and `reason` (local only) |
+| Membership | person (Hopae user ID, exported as the `human1:` subject), group, `source`, `provider_id`, `first_seen_at`, `last_seen_at` (last successful assertion), `expires_at` (local only), `removal_pending_at` and `stale_at` (provider only), `added_by` and `reason` (local only) |
 
 Times are Unix seconds. A deleted group stays as a tombstone so that its
 reference keeps resolving; a new group never takes an old reference, even
@@ -81,7 +82,10 @@ provider. It is applied in one store transaction:
 1. Each source value goes through the provider's rules: invalid values
    (empty, over 512 bytes, control characters) are dropped; `include` keeps
    only matching keys, then `exclude` drops matching keys; `rewrite` maps the
-   display name (the key never changes); duplicates collapse.
+   display name (the key never changes); duplicates collapse. For LDAP the
+   key is the normalized DN (ASCII letters lower-cased), so write patterns
+   in lower case. Names with control or invisible formatting characters
+   (bidirectional overrides, zero-width characters) are dropped.
 2. More than `max_groups` groups after filtering, more than 4,096 raw values,
    or a result above `groups.max_groups_per_user`, **refuses the whole
    assertion**: nothing changes and a `group.sync_refused` diagnostic event is
@@ -120,7 +124,26 @@ Sources:
 
 A sync never blocks a sign-in: a failed or refused sync keeps the previous
 memberships. Memberships therefore reflect the provider as of the last
-successful sync; while a directory is unreachable they are not withdrawn.
+successful sync; while a directory is unreachable they are not withdrawn —
+but only for a bounded time (fail-static with a maximum staleness):
+
+### Maximum staleness
+
+A provider membership that no successful assertion (a sign-in through that
+provider, or a periodic LDAP refresh) confirmed for
+`groups.max_staleness_secs` (default 7 days) is **suspended** by the
+maintenance pass: `stale_at` is set and a `group.membership_stale` event is
+written. A suspended membership is kept in the store and shown in the
+console (`membership.stale_at`, `stale: true` in resolution), but it is left
+out of the membership projection (journaled as `member_removed`) and of the
+gateway mirror. The next assertion that includes it restores it
+(`group.membership_restored`, journaled as `member_added`); an assertion
+that omits it removes it as usual. Local memberships never go stale. The
+gauge `hopae_group_memberships_stale` reports the suspended memberships after
+each pass and `hopae_group_memberships_suspended_total` counts suspensions.
+A provider's `sync_interval_secs` must be shorter than the bound, and its
+`sync_batch` large enough for a whole cycle of linked people to finish
+within it.
 
 ### Maintenance
 
@@ -158,7 +181,7 @@ signed assertion over the exact body.
 | `/v1/groups/get` | `group_id`, `members_limit` (0–200, default 50), `members_cursor`, `privacy_profile` | `group`, `members` (`subject` in the resolve shape, `membership`), `next_members_cursor`, `privacy_profile` |
 | `/v1/subjects/groups` | `id` (`u_…` or `human1:…`), `limit` (1–200, default 100), `cursor` | `id`, `user_id`, `status` (`resolved`, `unknown`), `items` (group views with `membership`), `next_cursor` |
 | `/v1/subjects/resolve` | as in the [subject directory](SUBJECT_DIRECTORY.md), plus `include_groups` | each person's item gains `groups` (≤20: `group_id`, `name`, `source`) and `groups_truncated` |
-| `/v1/subjects/lifecycle` | as in the subject directory, plus `include_groups` | also `group_created`, `group_updated`, `group_deleted`, `member_added`, `member_removed` changes with `group_id` |
+| `/v1/subjects/lifecycle` | as in the subject directory, plus `include_groups` | also `group_created`, `group_updated`, `group_deleted`, `member_added`, `member_removed`, `member_suspended`, `member_restored` changes with `group_id` |
 
 Listing cursors are process-bound like every console cursor. Every answered
 read writes `admin.read` (`purpose` `groups.read`, `groups.projection`, or
@@ -170,7 +193,7 @@ the subject purposes) before the answer.
 | --- | --- | --- |
 | `/v1/groups/create` | `key` (1–128 of `[A-Za-z0-9._:-]`), `name` (≤256), `description` (≤1024), `reason` | `201 {"group": …}` |
 | `/v1/groups/update` | `group_id`, `expected_revision`, `name` and/or `description` (`""` clears), `reason` | `200 {"group": …}` |
-| `/v1/groups/delete` | `group_id`, `expected_revision`, `reason` | `200`, the tombstone |
+| `/v1/groups/delete` | `group_id`, `expected_revision`, `force` (required `true` when the group has members), `reason` | `200`, the tombstone |
 | `/v1/groups/members/add` | `group_id`, `expected_revision`, `user_id`, `expires_at` (optional, within a year), `reason` | `200`, the group |
 | `/v1/groups/members/remove` | `group_id`, `expected_revision`, `user_id`, `reason` | `200`, the group |
 
@@ -180,7 +203,8 @@ group or its members increments its `revision`; a write whose
 `current_revision`. Other answers: `400 invalid_request`, `404
 group_not_found`, `404 unknown_user`, `409 key_in_use` (a live local group
 has the key), `409 already_member`, `409 not_member`, `409 group_not_local`,
-`409 too_many_groups`, `409 group_full` (50,000 members),
+`409 too_many_groups`, `409 group_full` (50,000 members), `409 group_not_empty`
+(delete without `force: true` while members remain),
 `409 too_many_local_groups` (10,000), `410 group_deleted`, `403` from the
 console's authentication, role check and actor fence, `429 rate_limited`,
 `503 store_unavailable`.
@@ -190,7 +214,8 @@ console's authentication, role check and actor fence, `429 rate_limited`,
 Each change writes a required event in the same transaction:
 `group.created`, `group.updated` (`attrs.change`: `renamed` or `described`),
 `group.deleted` (`attrs.count` members removed), `group.member_added`,
-`group.member_removed`, with `attrs.group_id`, `attrs.source`,
+`group.member_removed`, `group.membership_stale`, `group.membership_restored`,
+with `attrs.group_id`, `attrs.source`,
 `attrs.revision`, `attrs.cause` (`admin`, `login`, `periodic_sync`,
 `expired`, `grace_elapsed`, `provider_deleted`, `stale`, `maintenance`), and
 for administrator writes the actor attributes and `attrs.note` (the reason).
@@ -241,7 +266,9 @@ identity), `vocabulary_sha256` (SHA-256 hex of the sorted, de-duplicated
 vocabulary joined by `\n`), `issued_at` (milliseconds) and `max_aal` (the
 highest AAL Hopae issues, ADR 0021's capability advertisement), and:
 
-- snapshot: `watermark` (the journal revision before the first page),
+- snapshot: `watermark` (the journal revision before the first page;
+  later pages echo it from their cursor), `cursor` (the request's cursor,
+  null for the first page),
   `entries` (`principal` — the `human1:` subject, or null when Human
   receipts are not configured — `user_id`, `status`, `groups`),
   `next_cursor` (`p1.<watermark>.<user_id>`), `more`;
@@ -254,20 +281,28 @@ highest AAL Hopae issues, ADR 0021's capability advertisement), and:
 
 1. Parse the envelope (unknown fields refused); `format` must be
    `hopae.membership-projection.v1`; the payload at most 4 MiB.
+   GroupRefs are canonical in **lower case**: `grp1:` followed by 26
+   characters of `0123456789abcdefghjkmnpqrstvwxyz` (Crockford base32 as
+   Hopae writes it). Compare them byte for byte and refuse any other
+   spelling (upper case, `i`/`l`/`o`/`u`); never case-fold.
 2. Look up the **pinned** public key for `(issuer_ref, key_epoch)` from
    Pumgye's own configuration; never accept a key from the envelope or from
    Hopae. Unknown pair: refuse.
 3. Verify the signature strictly (`verify_strict`) over the domain string
    followed by the decoded payload bytes. Only then parse the payload.
-4. Require `issuer_ref`/`key_epoch` equal the envelope's, `audience` equal
+4. Require `kind` equal the endpoint asked (`snapshot` or `changes`),
+   `issuer_ref`/`key_epoch` equal the envelope's, `audience` equal
    Pumgye's own identifier, `vocabulary_sha256` equal the digest of the
    vocabulary Pumgye sent, and `issued_at` within Pumgye's freshness bound
    (and not more than 60 s in the future).
 5. Keep `store`: a different value means a different or restored Hopae
    store — discard the projection and take a new snapshot.
-6. Apply a snapshot by walking all pages (same vocabulary), then apply the
-   feed from `watermark` until `more` is false; the projection revision is
-   the last applied `next_cursor`. Changes are set operations, so a replayed
+6. Apply a snapshot by walking all pages (same vocabulary): each page's
+   `cursor` must equal the cursor Pumgye sent (null for the first) and its
+   `watermark` the first page's. Then apply the feed from `watermark` until
+   `more` is false; each changes page's `from` must equal the revision Pumgye
+   asked from and its `next_cursor` must not go backwards; the projection
+   revision is the last applied `next_cursor`. Changes are set operations, so a replayed
    or overlapping page is harmless. `410 cursor_expired` means the journal no
    longer holds the position (retention, or a foreign store): take a new
    snapshot.
@@ -289,9 +324,10 @@ rises; older epochs are refused from then on).
   scope.
 - Hopae has no subject merge: memberships are never transferred and
   `merged` is not produced.
+- SCIM provisioning is planned (P2, [roadmap](ROADMAP.md#backlog)).
 - Provider memberships of a person are refreshed only at sign-in or by the
-  periodic LDAP sync; OIDC groups of a person who no longer signs in stay
-  until an administrator disables the person or the provider row is deleted.
+  periodic LDAP sync; OIDC groups of a person who no longer signs in are
+  suspended after `groups.max_staleness_secs`.
 - The projection vocabulary is at most 1,024 groups per request.
 
 ## Examples, verification and related pages
@@ -302,6 +338,12 @@ curl -sS https://hopae-admin.example.test/v1/groups/create \
   -b '__Host-hopae=<redacted>' \
   -d '{"key":"eng.oncall","name":"On-call","reason":"rota 2026-Q4"}'
 ```
+
+The owned OpenLDAP fixture (`tools/owned_ldap_smoke.py`, with the `memberof`
+overlay) runs `owned_ldap_groups_sync_by_member_of_and_group_search` against a
+real directory over LDAPS and StartTLS: `memberOf` and group search at sign-in,
+the periodic lookup by immutable subject, a vanished subject, and no groups
+for a wrong password.
 
 Scenarios [310](../scenarios/310-local-groups.md),
 [311](../scenarios/311-provider-group-sync.md),

@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=36 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=37 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -205,6 +205,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `groups.change_retention_days` | 정수, 1부터 3650 | `30` | 투영 저널 행을 정리하는 기간(가장 새 행은 남김). 더 오래된 투영 커서는 `410 cursor_expired`. |
 | `groups.maintenance_interval_secs` | 정수, 10부터 86400 | `300` | 유지 관리 단계 간격: 로컬 만료, 제거 유예, 삭제된 제공자, 오래된 제공자 그룹, 저널 보존, 주기 LDAP 동기화. |
 | `groups.stale_group_days` | 정수, 1부터 3650 | `30` | 구성원이 없고 이 기간 동안 동기화 보고가 없는 제공자 그룹은 삭제(묘비). |
+| `groups.max_staleness_secs` | 정수, 3600부터 31536000 | `604800` | 성공한 단언이 이 기간 동안 확인하지 않은 제공자 멤버십은 정지됨. 남아 있지만 다시 단언될 때까지 투영과 게이트웨이 반영에서 빠짐. 모든 제공자의 `sync_interval_secs`보다 커야 함. |
 | `groups.gateway_header` | 불리언 | `false` | 그룹 참조를 최대 32개까지 `users.groups`에 반영해 `x-forwarded-groups`가 싣게 함. 변경은 `authz_version`을 올림. |
 | `groups.projection.issuer_ref` | 문자열, `[A-Za-z0-9_.:-]` 1–128자 | 없음 | 모든 투영 봉투와 페이로드의 키 정체. `groups.projection`이 없으면 투영 엔드포인트는 `503 projection_unavailable`. |
 | `groups.projection.key_epoch` | 정수, 1 이상 | 없음 | 키 에포크. 키를 바꾸면 올림. |

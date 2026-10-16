@@ -26,7 +26,7 @@ forged, altered, mixed or stale page is refused by the documented verifier.
 
 - Given: the fixture.
 - When: snapshot of the relevant group with `limit: 1`, its second page; remove `u_pa` from it and add `u_pa` to the other group; read changes from the watermark; verify each page; verify a page of another vocabulary against the first digest; verify a page with a wrong key.
-- Then: every page verifies with the reference verifier (`kind`, `max_aal: 2`); the two pages list `u_pa` then `u_pb` with only the relevant group and never `u_pc`; `principal` is null without Human receipts; the feed has exactly one `member_removed` for `u_pa` and `more: false`; the other vocabulary and the wrong key are refused; the reads are recorded with `purpose: groups.projection`.
+- Then: every page verifies with the reference verifier for its `kind` (`max_aal: 2`); the second page echoes its request cursor and the first page's watermark; the two pages list `u_pa` then `u_pb` with only the relevant group and never `u_pc`; `principal` is null without Human receipts; the feed has exactly one `member_removed` for `u_pa` and `more: false`; the other vocabulary and the wrong key are refused; the reads are recorded with `purpose: groups.projection`.
 
 ## Alternative flows
 

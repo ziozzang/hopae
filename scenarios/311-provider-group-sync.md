@@ -18,7 +18,7 @@ read-only for administrators.
 ## Preconditions and fixtures
 
 - `m4-admin` with provider `mock` given `groups: {claim: "groups", include: "^eng-", max_groups: 3, rewrite: "^eng-(.+)$" → "Engineering $1"}`; the mock provider's extra-claims knob sets the ID token's `groups`.
-- LDAP group extraction is covered by unit tests (`provider::ldap` DN normalization and subject filters) and by the store sync tests; the owned OpenLDAP fixture is not extended.
+- LDAP: the owned OpenLDAP fixture (`tools/owned_ldap_smoke.py`, `memberof` overlay, image already used by the LDAP qualification) runs `owned_ldap_groups_sync_by_member_of_and_group_search`; DN normalization and subject filters are also unit tested.
 
 ## Main flow
 
@@ -36,7 +36,11 @@ read-only for administrators.
 
 ## Alternative flows
 
-None.
+### S311-3 Stale provider memberships are suspended, then restored
+
+- Given: a person signed in with `["eng-api"]`; default `groups.max_staleness_secs` (7 days).
+- When: the clock moves 8 days; the person signs in again with the same claim.
+- Then: the maintenance pass sets `stale_at` (the membership stays) and writes `group.membership_stale`; the sign-in clears it and writes `group.membership_restored`.
 
 ## Abuse cases
 
@@ -61,13 +65,21 @@ None.
 | Case | Test | File | Kind | Status |
 | --- | --- | --- | --- | --- |
 | S311-1 | `s311_1_oidc_claim_is_mapped_filtered_and_synced_at_sign_in` | `tests/scenarios/s310_groups.rs` | integration | passing |
+| S311-3 | `s311_3_stale_provider_memberships_are_suspended_then_restored` | `tests/scenarios/s310_groups.rs` | integration | passing |
 | S311-2 | `s311_2_provider_without_groups_section_syncs_nothing` | `tests/scenarios/s310_groups.rs` | integration | passing |
+
+Live LDAP case (outside `scenario-coverage`, run by `tools/owned_ldap_smoke.py`):
+`provider::ldap::tests::owned_ldap_groups_sync_by_member_of_and_group_search`
+— a real OpenLDAP with the `memberof` overlay over LDAPS and StartTLS:
+`memberOf` and group search at sign-in yield `cn=eng team,dc=example,dc=test`
+named `Eng Team`; the periodic lookup by `entryUUID` finds the same set; an
+unknown subject asserts no groups; a wrong password yields no groups.
 
 ## Live verification
 
 | Date | Hopae version | Gateway version | Provider | Environment label | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | Not yet run. |
+| 2026-10-16 | 0.0.10 + feat/groups | n/a | owned OpenLDAP (Debian bookworm image, `memberof`) | local Docker | pass | `tools/owned_ldap_smoke.py`, LDAPS and StartTLS |
 
 ## Open questions
 

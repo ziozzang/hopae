@@ -55,6 +55,13 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   `hopae::groups::projection::verify`.
 - `groups.gateway_header` (off by default) mirrors group references into
   `x-forwarded-groups`.
+- `groups.max_staleness_secs` (default 7 days): provider memberships that no
+  successful assertion confirmed for that long are suspended (kept, excluded
+  from the projection and the gateway mirror; `group.membership_stale` /
+  `group.membership_restored`, gauge `hopae_group_memberships_stale`).
+  Deleting a local group with members requires `force: true`. GroupRefs are
+  canonical in lower case. The owned OpenLDAP fixture enables `memberof` and
+  checks group sync against a real directory.
 
 ### Security
 
