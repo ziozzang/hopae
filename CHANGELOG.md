@@ -88,6 +88,13 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   canonical in lower case. The owned OpenLDAP fixture enables `memberof` and
   checks group sync against a real directory.
 
+- `authentication.source = "config"`: the configuration file owns the
+  authentication profiles and the credential projection plan; every start
+  reconciles the store through the validated CAS publication (audit row,
+  `authentication.reconciled` event), an invalid file leaves the store
+  untouched, console/API edits answer `409 config_authoritative`. The default
+  `store` mode is unchanged.
+
 ### Changed
 
 - A recovery factor entry no longer counts as AAL 2 evidence in step-up

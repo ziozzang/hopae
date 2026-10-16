@@ -586,6 +586,21 @@ impl Hopae {
         let _ = self.child.wait();
     }
 
+    /// Rewrite the configuration file (applied by the next [`Hopae::restart`]).
+    pub fn reconfigure(&mut self, edit: impl FnOnce(&mut Value)) {
+        edit(&mut self.config);
+        std::fs::write(
+            &self.config_path,
+            serde_json::to_vec_pretty(&self.config).expect("config json"),
+        )
+        .expect("write config");
+    }
+
+    /// The configuration as last written.
+    pub fn configuration(&self) -> &Value {
+        &self.config
+    }
+
     /// Kill if running, then start again on the same state directory and
     /// configuration. The listeners get new ephemeral ports (the fields update).
     pub fn restart(&mut self) {

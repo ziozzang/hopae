@@ -834,6 +834,11 @@ async fn bind_environment(
         .await
         .context("binding portal listener")?;
     let portal_addr = portal.local_addr()?;
+    let config_authoritative =
+        cfg.authentication.source == crate::config::AuthenticationSource::Config;
+    // `authentication.source = config`: events recording what the start
+    // reconciled (written after the publications commit).
+    let mut reconciled_events = Vec::new();
     let authentication_authority = {
         let mut connection = store.conn();
         let durable = crate::auth_gateway::publication::read(&connection)?;
@@ -845,14 +850,32 @@ async fn bind_environment(
                     .validate()
                     .map_err(|_| crate::auth_gateway::publication::Error::Invalid)
             };
-            Some(Arc::new(std::sync::Mutex::new(
+            let authority = if config_authoritative {
+                let (authority, done) = crate::auth_gateway::authority::Authority::load_from_config(
+                    &mut connection,
+                    cfg.authentication_gateway.clone(),
+                    &|name| std::env::var(name).ok(),
+                    &validate,
+                )
+                .context("authentication.source = config: the configured authentication profiles are invalid; the store was not changed")?;
+                if done.changed {
+                    tracing::info!(
+                        previous = done.previous,
+                        revision = done.revision,
+                        "authentication profiles reconciled to the configuration"
+                    );
+                    reconciled_events.push(("profiles", done.previous, done.revision));
+                }
+                authority
+            } else {
                 crate::auth_gateway::authority::Authority::load(
                     &mut connection,
                     cfg.authentication_gateway.clone(),
                     &|name| std::env::var(name).ok(),
                     &validate,
-                )?,
-            )))
+                )?
+            };
+            Some(Arc::new(std::sync::Mutex::new(authority)))
         } else {
             None
         }
@@ -861,7 +884,9 @@ async fn bind_environment(
         let mut connection = store.conn();
         let durable = crate::auth_gateway::projection_authority::read(&connection)
             .map_err(|_| anyhow::anyhow!("invalid durable credential projection state"))?;
-        if let Some(configuration) = durable.as_ref().and_then(|d| d.configuration.as_ref()) {
+        if !config_authoritative
+            && let Some(configuration) = durable.as_ref().and_then(|d| d.configuration.as_ref())
+        {
             crate::auth_gateway::projection::validate_capabilities(
                 configuration,
                 cfg.credential_projection.as_ref(),
@@ -872,7 +897,34 @@ async fn bind_environment(
         }
         let mut owner = crate::auth_gateway::projection_authority::Authority::load(&connection, 0)
             .map_err(|_| anyhow::anyhow!("credential projection owner unavailable"))?;
-        if durable.is_none()
+        if config_authoritative {
+            // The plan's revision is the store's: compare the plans, then
+            // publish the file's plans at the next revision.
+            let previous = durable.as_ref().map_or(0, |d| d.revision);
+            let plans = |c: &Option<crate::auth_gateway::projection::Configuration>| {
+                serde_json::to_value(c.as_ref().map(|c| &c.plans)).ok()
+            };
+            let current = durable.as_ref().and_then(|d| d.configuration.clone());
+            let same = match &durable {
+                Some(_) => plans(&current) == plans(&cfg.credential_projection),
+                None => cfg.credential_projection.is_none(),
+            };
+            if !same {
+                let mut desired = cfg.credential_projection.clone();
+                if let Some(d) = &mut desired {
+                    d.revision = previous + 1;
+                }
+                let document = owner
+                    .publish(&mut connection, previous, desired, "config", &|_| Ok(()))
+                    .map_err(|_| anyhow::anyhow!("authentication.source = config: the configured credential projection is invalid; the store was not changed"))?;
+                tracing::info!(
+                    previous,
+                    revision = document.revision,
+                    "credential projection reconciled to the configuration"
+                );
+                reconciled_events.push(("projections", previous, document.revision));
+            }
+        } else if durable.is_none()
             && let Some(configuration) = &cfg.credential_projection
         {
             owner
@@ -887,6 +939,29 @@ async fn bind_environment(
         }
         Arc::new(std::sync::Mutex::new(owner))
     };
+    if !reconciled_events.is_empty() {
+        let events = reconciled_events
+            .iter()
+            .map(|(target, previous, revision)| {
+                emitter.required(
+                    EventKind::AuthenticationReconciled,
+                    Outcome::Success,
+                    "startup",
+                    |b| {
+                        b.attr("kind", *target)
+                            .attr("previous_revision", *previous)
+                            .attr("revision", *revision)
+                            .attr("actor", "config")
+                    },
+                )
+            })
+            .collect();
+        store
+            .events()
+            .append_required(events)
+            .await
+            .context("recording the authentication reconciliation")?;
+    }
     let human_owner = crate::verify::human::Owner::new(
         store.clone(),
         registry.clone(),

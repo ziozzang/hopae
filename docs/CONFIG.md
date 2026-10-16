@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 40 -->
+<!-- doc-rev: 41 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -416,7 +416,11 @@ remain implementation work.
 
 ## Service authentication Lua eligibility (unreleased)
 
-`authentication_gateway` in the startup JSON bootstraps an empty authority only.
+`authentication.source` (`store` default, `config`) selects who owns the
+authentication profiles and the credential projection plan; in `config` mode
+every start reconciles the store to the file and console edits are refused
+([configuration-authoritative mode](AUTH_PROFILE_PUBLICATION.md#configuration-authoritative-mode)).
+In the default `store` mode, `authentication_gateway` in the startup JSON bootstraps an empty authority only.
 Once the DB contains an authentication-profile document (including a disable
 tombstone), the DB/PAP document takes precedence. Editing startup JSON and
 restarting does not replace it. Publish changes through the authenticated owner

@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=40 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=41 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -401,7 +401,10 @@ true도 인증된 HTTPS proof 검증과 네이티브 소유자의 원자적 완�
 
 ## 서비스 인증 Lua 사용 조건 (미릴리스)
 
-시작 JSON의 `authentication_gateway`는 비어 있는 authority만 초기화합니다. DB에
+`authentication.source`(`store` 기본값, `config`)가 인증 프로필과 자격 증명 투영
+계획의 소유자를 정합니다. `config` 모드에서는 시작할 때마다 저장소를 파일에 맞추고
+콘솔 편집을 거부합니다([설정 권위 모드](AUTH_PROFILE_PUBLICATION.md#설정-권위-모드)).
+기본 `store` 모드에서는 시작 JSON의 `authentication_gateway`는 비어 있는 authority만 초기화합니다. DB에
 인증 profile 문서(비활성 tombstone 포함)가 있으면 DB·PAP 문서가 우선하며 시작 JSON을
 고치고 재시작해도 덮어쓰지 않습니다. 인증된 소유자 API로 변경을 게시하세요. 오프라인
 검증은 독립 `profile-publication-candidate.db`에 네이티브 소유자 transaction을
