@@ -502,6 +502,19 @@ lease가 아닌 관측이다. 접근자는 공개 서명 근거만 제공하며 
 함수를 부르고, 요청마다 부르지는 않습니다. 이 함수는 `ArcSwap` load처럼 가벼워야
 합니다.
 
+```rust
+let tls = reloading.clone(); // 호출자의 재적재 보관자
+let client = Client::new_service(
+    ReloadableEndpointConfig {
+        address: "https://hopae:9443",
+        server_name: "hopae.internal",
+        tls: Arc::new(move || tls.current()),
+        caller_key: &token,
+    },
+    policy, clock, rates, limits,
+)?;
+```
+
 - SDK는 설정한 `server_name`을 검증하고, 설정에 없어도 `h2` ALPN 프로토콜을
   강제하며, 서버가 h2를 선택하도록 요구합니다.
 - 주소, 서버 이름, 호출자 키, 한도의 범위 검사는 PEM 경로와 같습니다.
