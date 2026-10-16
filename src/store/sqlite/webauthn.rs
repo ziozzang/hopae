@@ -465,6 +465,20 @@ impl Passkeys for Store {
         .await
     }
 
+    async fn active_totp_enrollment(&self, user: &UserId) -> StoreResult<Option<String>> {
+        let user = user.clone();
+        self.read("active_totp_enrollment", move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT enrollment_id FROM totp_enrollments WHERE user_id=?1 AND state='active'",
+                    [user.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()?)
+        })
+        .await
+    }
+
     async fn begin_ceremony(&self, ceremony: NewCeremony) -> StoreResult<()> {
         if ceremony.state.len() > 65_536
             || (ceremony.purpose == CeremonyPurpose::StepUp) != ceremony.transaction.is_some()

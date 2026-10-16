@@ -224,6 +224,8 @@ pub trait Passkeys: Send + Sync {
         candidate: [u8; 16],
     ) -> StoreResult<[u8; 16]>;
     async fn factor_summary(&self, user: &UserId) -> StoreResult<FactorSummary>;
+    /// The id of the user's active TOTP enrollment.
+    async fn active_totp_enrollment(&self, user: &UserId) -> StoreResult<Option<String>>;
     /// Persist a ceremony for the acting session (capped per session; a step-up
     /// ceremony requires a live step-up transaction of that session).
     async fn begin_ceremony(&self, ceremony: NewCeremony) -> StoreResult<()>;

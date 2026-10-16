@@ -33,7 +33,10 @@ struct ExternalDeps {
     clock: Arc<dyn crate::crypto::Clock>,
     rng: Arc<dyn crate::crypto::Rng>,
 }
+mod webauthn;
+
 pub struct Adapter {
+    webauthn: Option<webauthn::WebauthnDeps>,
     external: Option<ExternalDeps>,
     totp: Option<TotpDeps>,
     svc: Service,
@@ -181,6 +184,7 @@ impl Adapter {
         readiness: Readiness,
     ) -> Adapter {
         Adapter {
+            webauthn: None,
             external: None,
             totp: None,
             svc,

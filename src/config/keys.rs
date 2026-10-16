@@ -148,6 +148,20 @@ pub(super) const ROOT: Node = Obj(&[
         ]),
     ),
     (
+        "webauthn",
+        Obj(&[
+            ("rp_id", Leaf),
+            ("rp_name", Leaf),
+            (
+                "high_assurance",
+                Obj(&[
+                    ("attestation_ca_files", Arr(&Leaf)),
+                    ("aaguids", Arr(&Leaf)),
+                ]),
+            ),
+        ]),
+    ),
+    (
         "authentication_gateway",
         Obj(&[
             ("authority_id", Leaf),

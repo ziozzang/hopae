@@ -42,6 +42,9 @@ pub struct Config {
     pub external_verifiers: Vec<crate::factor::external_transport::Config>,
     #[serde(default)]
     pub totp_keyring: Option<crate::factor::keyring::Configuration>,
+    /// WebAuthn passkeys (ADR-0017); absent: disabled.
+    #[serde(default)]
+    pub webauthn: Option<crate::factor::webauthn::Configuration>,
     #[serde(default)]
     pub listen: Listen,
     /// Writable directory for runtime state (created with mode 0700).
@@ -908,6 +911,15 @@ impl Config {
                 "human_material_key_env must be a bounded environment variable reference".into(),
             );
         }
+        if let Some(webauthn) = &self.webauthn {
+            errs.extend(webauthn.validate(&self.portal.public_url));
+            if self.gateway.allow_unauthenticated_caller {
+                errs.push("webauthn requires authenticated gateway callers".into());
+            }
+            if !self.portal.public_url.starts_with("https://") || !self.cookie.secure {
+                errs.push("webauthn requires an https portal and secure cookies".into());
+            }
+        }
         if let Some(keys) = &self.totp_keyring {
             if keys.validate_references().is_err() {
                 errs.push("totp_keyring: invalid key references".into());
@@ -1665,7 +1677,9 @@ impl Config {
     /// The numbers the verify engine needs.
     pub fn verify_limits(&self) -> VerifyLimits {
         VerifyLimits {
-            stepup_enabled: self.totp_keyring.is_some() || !self.external_verifiers.is_empty(),
+            stepup_enabled: self.totp_keyring.is_some()
+                || !self.external_verifiers.is_empty()
+                || self.webauthn.is_some(),
             max_recoveries: self.handoff.max_recoveries,
             txn_per_ip_per_minute: self.txn.per_ip_per_minute,
             txn_max_rows: self.txn.max_rows,
@@ -1781,6 +1795,7 @@ impl Config {
             && self.admin.require_aal == Some(2)
             && self.totp_keyring.is_none()
             && self.external_verifiers.is_empty()
+            && self.webauthn.is_none()
         {
             w.push(
                 "admin.require_aal: no second factor exists yet; every console request will be refused"
@@ -1984,6 +1999,12 @@ pub fn check_env(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<S
     {
         out.push("totp_keyring: unavailable or invalid key material".into());
     }
+    if let Some(webauthn) = &cfg.webauthn
+        && let Err(error) =
+            crate::factor::webauthn::RelyingParty::compile(webauthn, &cfg.portal.public_url)
+    {
+        out.push(error);
+    }
     if let Some(config) = &cfg.authentication_gateway
         && let Err(error) = crate::auth_gateway::runtime::Runtime::compile(config, &lookup)
     {
@@ -2097,6 +2118,32 @@ mod tests {
             let error = with(&raw).unwrap_err().to_string();
             assert!(!error.contains("literal-key-with-hyphen"));
         }
+    }
+
+    #[test]
+    fn webauthn_is_off_by_default_and_validated_when_present() {
+        let base = with("{}").unwrap();
+        assert!(base.webauthn.is_none());
+        assert!(!base.verify_limits().stepup_enabled);
+        let on = with(r#"{"webauthn":{}}"#).unwrap();
+        assert!(on.webauthn.is_some());
+        assert!(on.verify_limits().stepup_enabled);
+        assert!(with(r#"{"webauthn":{"rp_id":"example.test","rp_name":"Example"}}"#).is_ok());
+        assert!(invalid(r#"{"webauthn":{"rp_id":"other.test"}}"#).contains("webauthn.rp_id"));
+        assert!(invalid(r#"{"webauthn":{"origin":"https://x.example.test"}}"#).contains("origin"));
+        assert!(invalid(r#"{"webauthn":{"rp_name":""}}"#).contains("rp_name"));
+        assert!(
+            invalid(
+                r#"{"webauthn":{"high_assurance":{"attestation_ca_files":[],"aaguids":["nope"]}}}"#
+            )
+            .contains("high_assurance")
+        );
+        let missing = with(r#"{"webauthn":{"high_assurance":{"attestation_ca_files":["/nonexistent/ca.pem"],"aaguids":["cb69481e-8ff7-4039-93ec-0a2729a154a8"]}}}"#).unwrap();
+        assert!(
+            check_env(&missing, |_| Some("x".into()))
+                .iter()
+                .any(|p| p.contains("cannot read"))
+        );
     }
 
     #[test]

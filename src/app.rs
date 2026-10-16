@@ -211,6 +211,7 @@ pub struct Services {
         Arc<std::sync::Mutex<crate::auth_gateway::projection_authority::Authority>>,
     pub external_verifiers: Arc<crate::factor::external_registry::Registry>,
     pub totp_keyring: Option<Arc<crate::factor::keyring::Keyring>>,
+    pub webauthn: Option<Arc<crate::factor::webauthn::RelyingParty>>,
     pub authentication_authority:
         Option<Arc<std::sync::Mutex<crate::auth_gateway::authority::Authority>>>,
     pub config: Arc<Config>,
@@ -412,12 +413,26 @@ pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
         services.clock.clone(),
         services.rng.clone(),
     );
-    let portal_state = PortalState::new(
+    let adapter = match &services.webauthn {
+        Some(rp) => adapter.with_webauthn(
+            Arc::new(services.store.clone()),
+            rp.clone(),
+            services.totp_keyring.clone(),
+            services.clock.clone(),
+            services.rng.clone(),
+        ),
+        None => adapter,
+    };
+    let adapter = Arc::new(adapter);
+    let mut portal_state = PortalState::new(
         PortalConfig::from_config(&services.config),
-        Arc::new(adapter),
+        adapter.clone(),
         services.clock.clone(),
         services.rng.clone(),
     );
+    if services.webauthn.is_some() {
+        portal_state = portal_state.with_settings(adapter.clone());
+    }
     Ok(Routers {
         portal: http::portal::router(portal_state),
         gateway: http::gateway_router(gateway_state),
@@ -575,6 +590,15 @@ async fn bind_environment(
             crate::factor::keyring::Keyring::compile(keys, &real_env)
                 .map(Arc::new)
                 .map_err(|_| anyhow::anyhow!("totp_keyring: unavailable or invalid key material"))
+        })
+        .transpose()?;
+    let webauthn = cfg
+        .webauthn
+        .as_ref()
+        .map(|w| {
+            crate::factor::webauthn::RelyingParty::compile(w, &cfg.portal.public_url)
+                .map(Arc::new)
+                .map_err(|e| anyhow::anyhow!("{e}"))
         })
         .transpose()?;
 
@@ -884,6 +908,7 @@ async fn bind_environment(
         projection_authority,
         external_verifiers,
         totp_keyring,
+        webauthn,
         authentication_authority,
 
         config: Arc::new(cfg.clone()),

@@ -654,6 +654,26 @@ impl Service {
         ctx: &RequestCtx,
         handle: Option<&Secret>,
     ) -> Result<crate::store::FactorActor, SessionError> {
+        self.actor(ctx, handle, true).await
+    }
+
+    /// The security pages' actor (ADR-0017): a live portal session of any
+    /// age; each operation applies the factor-management freshness rule
+    /// itself, inside its store transaction.
+    pub async fn security_actor(
+        &self,
+        ctx: &RequestCtx,
+        handle: Option<&Secret>,
+    ) -> Result<crate::store::FactorActor, SessionError> {
+        self.actor(ctx, handle, false).await
+    }
+
+    async fn actor(
+        &self,
+        ctx: &RequestCtx,
+        handle: Option<&Secret>,
+        fresh_primary: bool,
+    ) -> Result<crate::store::FactorActor, SessionError> {
         let view = self
             .portal_session(ctx, handle)
             .await?
@@ -662,7 +682,7 @@ impl Service {
         if view.session.aal < Aal::One
             || view.handle.issued_aal < Aal::One
             || view.session.auth_time > now
-            || now.since(view.session.auth_time) > Duration::from_secs(300)
+            || (fresh_primary && now.since(view.session.auth_time) > Duration::from_secs(300))
             || view.session.authz_version_at_auth != view.user.authz_version
         {
             return Err(SessionError::Refused(reasons::INVALID_STATE));
