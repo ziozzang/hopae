@@ -361,8 +361,7 @@ impl LdapProvider {
             .await
             .map_err(|_| CredentialError::Unavailable)?
             .success()
-            .map_err(|_| CredentialError::Unavailable)
-            .map(|(e, r)| (e, r))?;
+            .map_err(|_| CredentialError::Unavailable)?;
         if !result.refs.is_empty() || entries.len() > 1 {
             return Err(CredentialError::Unavailable);
         }
