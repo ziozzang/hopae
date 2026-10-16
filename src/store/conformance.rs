@@ -7,13 +7,13 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::core::{AdminStore, CoreStore, HandoffStore, NonceStore};
+use super::core::{AdminStore, ConsoleStore, CoreStore, HandoffStore, NonceStore};
 use super::passkeys::*;
 use super::types::*;
-use super::{Factors, Passkeys};
+use super::{Events, Factors, Passkeys};
 use super::{StoreError, StoreResult};
 use crate::crypto::{Clock, Digest, SeededRng, TestClock, Timestamp, random_id, random_token};
-use crate::event::types::{Event, EventBuilder, EventKind, Outcome, reasons};
+use crate::event::types::{Event, EventBuilder, EventId, EventKind, Outcome, reasons};
 use crate::identity::types::NormalizedEmail;
 use crate::policy::types::Host;
 use crate::provider::types::{ProviderId, ProviderKind};
@@ -28,6 +28,8 @@ pub(crate) struct Backend {
     pub nonces: Arc<dyn NonceStore>,
     pub factors: Arc<dyn Factors>,
     pub passkeys: Arc<dyn Passkeys>,
+    pub events: Arc<dyn Events>,
+    pub console: Arc<dyn ConsoleStore>,
     pub clock: Arc<TestClock>,
     pub rng: Arc<SeededRng>,
     _dir: Option<tempfile::TempDir>,
@@ -67,7 +69,9 @@ fn sqlite() -> Backend {
         admin: store.clone(),
         nonces: store.clone(),
         factors: store.clone(),
-        passkeys: store,
+        passkeys: store.clone(),
+        events: store.clone(),
+        console: store,
         clock,
         rng,
         _dir: Some(dir),
@@ -106,6 +110,8 @@ pub(crate) async fn postgres() -> Option<Backend> {
         nonces: store.clone(),
         factors: store.clone(),
         passkeys: store.clone(),
+        events: store.clone(),
+        console: store.clone(),
         store: store.clone(),
         clock,
         rng: Arc::new(SeededRng::new(42)),
@@ -2793,6 +2799,364 @@ async fn external_stepup(b: &Backend) {
 async fn s600_16_external_factor_stepup_agrees_on_both_backends() {
     for b in backends().await {
         external_stepup(&b).await;
+        b.cleanup().await;
+    }
+}
+
+// ---- slice 3a: the event relay and console listings -----------------------
+
+fn required(b: &Backend, user: Option<&User>) -> Event {
+    let mut e = EventBuilder::new(
+        b.clock.as_ref(),
+        b.rng.as_ref(),
+        EventKind::LoginFailed,
+        Outcome::Failure,
+        "req-relay",
+    )
+    .build();
+    e.user_id = user.map(|u| u.user_id.clone());
+    e
+}
+
+async fn event_relay(b: &Backend) {
+    let name = b.store.backend();
+    let ids: Vec<EventId> = {
+        let evs: Vec<Event> = (0..6).map(|_| required(b, None)).collect();
+        let ids = evs.iter().map(|e| e.event_id.clone()).collect();
+        b.events.append_required(evs).await.unwrap();
+        ids
+    };
+    // A diagnostic kind cannot be appended as required, nor a required one as diagnostic.
+    assert!(conflict(
+        b.events.append_diagnostic(required(b, None)).await
+    ));
+    let diag = EventBuilder::new(
+        b.clock.as_ref(),
+        b.rng.as_ref(),
+        EventKind::ProviderError,
+        Outcome::Failure,
+        "req-diag",
+    )
+    .build();
+    b.events.append_diagnostic(diag).await.unwrap();
+    // An expired deadline writes nothing.
+    let gone = Deadline(std::time::Instant::now() - Duration::from_millis(1));
+    assert!(
+        matches!(
+            b.events.append_required_within(vec![required(b, None)], gone).await,
+            Err(StoreError::Unavailable(ref m)) if m == "deadline"
+        ),
+        "{name}"
+    );
+    let (events, deliveries) = b.events.count_rows().await.unwrap();
+    assert_eq!(
+        (events, deliveries),
+        (7, 6),
+        "{name}: diagnostics have no delivery rows"
+    );
+    // Two relays claim concurrently: every delivery is handed out once.
+    let now = b.clock.now();
+    let (x, y) = (b.events.clone(), b.events.clone());
+    let (cx, cy) = tokio::join!(
+        async move { x.claim_deliveries("log", 4, now).await.unwrap() },
+        async move { y.claim_deliveries("log", 4, now).await.unwrap() }
+    );
+    let mut seen: Vec<String> = cx
+        .iter()
+        .chain(cy.iter())
+        .map(|d| d.event.event_id.to_string())
+        .collect();
+    seen.sort();
+    let before = seen.len();
+    seen.dedup();
+    assert_eq!((before, seen.len()), (6, 6), "{name}: no double claim");
+    assert!(cx.iter().chain(cy.iter()).all(|d| d.attempts == 1));
+    // Claimed rows are leased: nothing is due until the lease ends.
+    assert!(
+        b.events
+            .claim_deliveries("log", 10, now)
+            .await
+            .unwrap()
+            .is_empty(),
+        "{name}"
+    );
+    b.events.mark_delivered("log", &ids[0], now).await.unwrap();
+    b.events
+        .mark_failed("log", &ids[1], "http_503 remote said things", Some(now))
+        .await
+        .unwrap();
+    b.events
+        .mark_failed("log", &ids[2], "rejected", None)
+        .await
+        .unwrap();
+    let again = b.events.claim_deliveries("log", 10, now).await.unwrap();
+    assert_eq!(again.len(), 1, "{name}: the retried one only");
+    assert_eq!(
+        (again[0].event.event_id.clone(), again[0].attempts),
+        (ids[1].clone(), 2)
+    );
+    let lease_over = now.add(Duration::from_secs(61));
+    assert_eq!(
+        b.events
+            .claim_deliveries("log", 10, lease_over)
+            .await
+            .unwrap()
+            .len(),
+        4,
+        "{name}: expired leases return"
+    );
+    // History query and status.
+    let found = b
+        .events
+        .query(EventQuery {
+            kind: Some(EventKind::LoginFailed),
+            session_id: None,
+            user_id: None,
+            client_ip: None,
+            since: None,
+            limit: Some(3),
+        })
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 3, "{name}");
+    assert_eq!(found[0].event_id, ids[0], "{name}: oldest first");
+    let st = b.events.status(deadline()).await.unwrap();
+    assert_eq!((st.events, st.deliveries.len()), (7, 1), "{name}");
+    assert_eq!(st.deliveries[0], ("log".to_string(), 4, 1), "{name}");
+    assert!(st.schema_version > 0);
+    // Prune: the count bound takes the oldest; the backlog cap dead-letters.
+    let policy = EventRetention {
+        retention: Duration::from_secs(86_400),
+        max_rows: 5,
+        prune_every: 1,
+        max_pending_per_sink: 2,
+        terminal_retention: Duration::from_secs(86_400),
+    };
+    let report = b.events.prune(now, &policy).await.unwrap();
+    assert_eq!(report.events_deleted, 2, "{name}");
+    assert!(report.backlog_overflowed >= 1, "{name}");
+    let st = b.events.status(deadline()).await.unwrap();
+    assert_eq!(
+        st.last_prune_at.map(|t| t.secs()),
+        Some(now.secs()),
+        "{name}"
+    );
+    let overflow = b
+        .events
+        .query(EventQuery {
+            kind: Some(EventKind::SinkBacklogOverflow),
+            session_id: None,
+            user_id: None,
+            client_ip: None,
+            since: None,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(overflow.len(), 1, "{name}");
+    // Age: everything older than the retention goes.
+    b.clock.advance(Duration::from_secs(2 * 86_400));
+    let report = b.events.prune(b.clock.now(), &policy).await.unwrap();
+    assert!(report.events_deleted >= 5, "{name}");
+    assert_eq!(b.events.count_rows().await.unwrap().0, 0, "{name}");
+}
+
+async fn console_listings(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let mut users = Vec::new();
+    for n in 1..=5 {
+        users.push(user(b, n).await);
+        b.clock.advance(Duration::from_secs(1));
+    }
+    let q = |q: Option<&str>, limit, cursor| UsersQuery {
+        q: q.map(Into::into),
+        status: None,
+        limit,
+        cursor,
+    };
+    // Newest first, two per page, then a cursor page.
+    let p1 = b
+        .console
+        .list_users(q(None, 2, None), deadline())
+        .await
+        .unwrap();
+    let names: Vec<_> = p1
+        .items
+        .iter()
+        .map(|u| u.user.username.clone().unwrap())
+        .collect();
+    assert_eq!(names, ["user5", "user4"], "{name}");
+    assert_eq!(p1.examined, 5);
+    let p2 = b
+        .console
+        .list_users(q(None, 2, p1.next.clone()), deadline())
+        .await
+        .unwrap();
+    let names: Vec<_> = p2
+        .items
+        .iter()
+        .map(|u| u.user.username.clone().unwrap())
+        .collect();
+    assert_eq!(names, ["user3", "user2"], "{name}");
+    let p3 = b
+        .console
+        .list_users(q(None, 2, p2.next.clone()), deadline())
+        .await
+        .unwrap();
+    assert_eq!((p3.items.len(), p3.next.is_none()), (1, true), "{name}");
+    // Prefix search ignores ASCII case, as SQLite's LIKE does.
+    let found = b
+        .console
+        .list_users(q(Some("USER3"), 10, None), deadline())
+        .await
+        .unwrap();
+    assert_eq!(found.items.len(), 1, "{name}");
+    assert_eq!(found.items[0].user.user_id, users[2].user_id);
+    // Sessions: live only, per user or all, with hosts and the owner's address.
+    let (s1, _) = session(b, &users[0]).await;
+    b.clock.advance(Duration::from_secs(1));
+    let (s2, _) = session(b, &users[0]).await;
+    b.clock.advance(Duration::from_secs(1));
+    let (s3, _) = session(b, &users[1]).await;
+    b.store
+        .terminate_session(&s2.session_id, reasons::LOGOUT, b.clock.now(), vec![])
+        .await
+        .unwrap();
+    let sq = |user: Option<&User>| SessionsQuery {
+        user_id: user.map(|u| u.user_id.clone()),
+        limit: 10,
+        cursor: None,
+        now: b.clock.now(),
+    };
+    let all = b
+        .console
+        .list_live_sessions(sq(None), deadline())
+        .await
+        .unwrap();
+    let ids: Vec<_> = all
+        .items
+        .iter()
+        .map(|s| s.session.session_id.clone())
+        .collect();
+    assert_eq!(
+        ids,
+        [s3.session_id.clone(), s1.session_id.clone()],
+        "{name}"
+    );
+    assert_eq!(all.items[0].hosts, [Host::parse(PORTAL).unwrap()], "{name}");
+    assert_eq!(all.items[1].primary_email, users[0].primary_email);
+    let mine = b
+        .console
+        .list_live_sessions(sq(Some(&users[0])), deadline())
+        .await
+        .unwrap();
+    assert_eq!(mine.items.len(), 1, "{name}");
+    let summary = b.users_live(&users[0]).await;
+    assert_eq!(summary, 1, "{name}");
+    let detail = b
+        .console
+        .user_detail(&users[0].user_id, b.clock.now(), deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            detail.identities.len(),
+            detail.sessions_live.len(),
+            detail.sessions_live_total,
+            detail.sessions_terminated.len()
+        ),
+        (1, 1, 1, 1),
+        "{name}"
+    );
+    assert!(detail.grant.is_none());
+    let (one, handles) = b
+        .console
+        .session_summary(&s2.session_id, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(one.session.terminated_at.is_some());
+    assert_eq!(handles.len(), 1, "{name}");
+    assert!(
+        b.console
+            .session_summary(&SessionId::new("s_NONE"), deadline())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // Events listing: filters by user and kind, newest first, with a cursor.
+    for _ in 0..3 {
+        b.events
+            .append_required(vec![required(b, Some(&users[0]))])
+            .await
+            .unwrap();
+        b.clock.advance(Duration::from_millis(10));
+    }
+    let eq = |cursor| EventsQuery {
+        kind: Some(EventKind::LoginFailed),
+        user_id: Some(users[0].user_id.clone()),
+        limit: 2,
+        cursor,
+        ..Default::default()
+    };
+    let e1 = b.events.query_page(eq(None), deadline()).await.unwrap();
+    assert_eq!(e1.items.len(), 2, "{name}");
+    assert!(e1.items[0].at > e1.items[1].at, "{name}: newest first");
+    let e2 = b
+        .events
+        .query_page(eq(e1.next.clone()), deadline())
+        .await
+        .unwrap();
+    assert_eq!(e2.items.len(), 1, "{name}");
+    assert!(e2.next.is_none(), "{name}");
+    // An expired deadline answers `deadline`, never a partial page.
+    let gone = Deadline(std::time::Instant::now() - Duration::from_millis(1));
+    assert!(
+        matches!(b.console.list_users(q(None, 2, None), gone).await, Err(StoreError::Unavailable(ref m)) if m == "deadline"),
+        "{name}"
+    );
+}
+
+impl Backend {
+    async fn users_live(&self, u: &User) -> u32 {
+        let page = self
+            .console
+            .list_users(
+                UsersQuery {
+                    q: u.username.clone(),
+                    status: None,
+                    limit: 10,
+                    cursor: None,
+                },
+                deadline(),
+            )
+            .await
+            .unwrap();
+        page.items
+            .iter()
+            .find(|s| s.user.user_id == u.user_id)
+            .unwrap()
+            .live_sessions
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_17_event_relay_agrees_on_both_backends() {
+    for b in backends().await {
+        event_relay(&b).await;
+        b.cleanup().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_18_console_listings_agree_on_both_backends() {
+    for b in backends().await {
+        console_listings(&b).await;
         b.cleanup().await;
     }
 }

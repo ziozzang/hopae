@@ -222,3 +222,28 @@ pub fn nonce_key_ok(scope: &str, nonce: &str) -> bool {
     };
     ok(scope, 64) && ok(nonce, 256)
 }
+
+/// Slice 3 (ADR-0020, ADR-0016): bounded console listings. Every listing
+/// examines at most [`CANDIDATE_WINDOW`] rows of one index window and
+/// answers within its deadline (`Unavailable("deadline")` otherwise).
+#[async_trait]
+pub trait ConsoleStore: Send + Sync {
+    async fn list_users(&self, q: UsersQuery, deadline: Deadline)
+    -> StoreResult<Page<UserSummary>>;
+    async fn user_detail(
+        &self,
+        user: &UserId,
+        now: Timestamp,
+        deadline: Deadline,
+    ) -> StoreResult<Option<UserDetail>>;
+    async fn list_live_sessions(
+        &self,
+        q: SessionsQuery,
+        deadline: Deadline,
+    ) -> StoreResult<Page<SessionSummary>>;
+    async fn session_summary(
+        &self,
+        id: &SessionId,
+        deadline: Deadline,
+    ) -> StoreResult<Option<(SessionSummary, Vec<HandleRow>)>>;
+}

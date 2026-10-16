@@ -21,11 +21,11 @@ use crate::store::core::{AdminStore, NonceStore, nonce_key_ok};
 use crate::store::types::*;
 use crate::store::{Deadline, StoreError, StoreResult};
 
-const GRANT_COLS: &str =
+pub(super) const GRANT_COLS: &str =
     "user_id, role, managed_by, source_email, granted_at, granted_by, revoked_at, revoked_by, note";
 const SESSION_COLS: &str = "s.session_id, s.user_id, s.provider_id, s.auth_time, s.factors, s.aal, s.authz_version, s.cred_gen, s.snapshot, s.bound_ip, s.bound_ua_sha256, s.created_at, s.last_seen_at, s.absolute_expires_at, s.terminated_at, s.terminated_reason, s.authz_version_at_auth, s.auth_time_source, s.bound_ua_prefix";
 
-fn grant(r: &Row) -> StoreResult<AdminGrant> {
+pub(super) fn grant(r: &Row) -> StoreResult<AdminGrant> {
     Ok(AdminGrant {
         user_id: UserId::new(r.get::<_, String>(0)),
         role: AdminRole::parse(&r.get::<_, String>(1))
@@ -157,7 +157,7 @@ pub(super) async fn terminate_in(
 
 /// A statement cancelled by the deadline-derived `statement_timeout`
 /// (SQLSTATE 57014) is the deadline, as SQLite reports it.
-fn deadline_err(e: StoreError) -> StoreError {
+pub(super) fn deadline_err(e: StoreError) -> StoreError {
     match e {
         StoreError::Unavailable(m) if m == "postgres sqlstate 57014" => {
             StoreError::Unavailable("deadline".into())
@@ -166,7 +166,7 @@ fn deadline_err(e: StoreError) -> StoreError {
     }
 }
 
-fn deadline_ms(d: Deadline) -> u64 {
+pub(super) fn deadline_ms(d: Deadline) -> u64 {
     d.0.saturating_duration_since(std::time::Instant::now())
         .as_millis()
         .clamp(1, 600_000) as u64
@@ -174,7 +174,7 @@ fn deadline_ms(d: Deadline) -> u64 {
 
 impl PgStore {
     /// A fenced write: the statement timeout follows the caller's deadline.
-    async fn begin_fenced<'a>(
+    pub(super) async fn begin_fenced<'a>(
         &self,
         client: &'a mut deadpool_postgres::Object,
         actor: &Actor,
@@ -193,7 +193,7 @@ impl PgStore {
     }
 }
 
-fn check_deadline(deadline: Deadline) -> StoreResult<()> {
+pub(super) fn check_deadline(deadline: Deadline) -> StoreResult<()> {
     if std::time::Instant::now() >= deadline.0 {
         return Err(StoreError::Unavailable("deadline".into()));
     }

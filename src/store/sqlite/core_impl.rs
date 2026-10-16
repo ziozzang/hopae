@@ -10,7 +10,9 @@ use crate::identity::types::{NormalizedEmail, UserId};
 use crate::policy::types::Host;
 use crate::provider::types::ProviderId;
 use crate::session::types::SessionId;
-use crate::store::core::{AdminStore, CoreStore, HandoffStore, NonceStore, nonce_key_ok};
+use crate::store::core::{
+    AdminStore, ConsoleStore, CoreStore, HandoffStore, NonceStore, nonce_key_ok,
+};
 use crate::store::types::*;
 use crate::store::{Deadline, Directory, Events, Sessions, StoreError, StoreResult};
 
@@ -323,5 +325,38 @@ impl NonceStore for Store {
             Ok(n == 1)
         })
         .await
+    }
+}
+
+#[async_trait]
+impl ConsoleStore for Store {
+    async fn list_users(
+        &self,
+        q: UsersQuery,
+        deadline: Deadline,
+    ) -> StoreResult<Page<UserSummary>> {
+        Directory::list_users(self, q, deadline).await
+    }
+    async fn user_detail(
+        &self,
+        user: &UserId,
+        now: Timestamp,
+        deadline: Deadline,
+    ) -> StoreResult<Option<UserDetail>> {
+        Directory::user_detail(self, user, now, deadline).await
+    }
+    async fn list_live_sessions(
+        &self,
+        q: SessionsQuery,
+        deadline: Deadline,
+    ) -> StoreResult<Page<SessionSummary>> {
+        Sessions::list_live_sessions(self, q, deadline).await
+    }
+    async fn session_summary(
+        &self,
+        id: &SessionId,
+        deadline: Deadline,
+    ) -> StoreResult<Option<(SessionSummary, Vec<HandleRow>)>> {
+        Sessions::session_summary(self, id, deadline).await
     }
 }

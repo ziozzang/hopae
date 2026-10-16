@@ -6,6 +6,7 @@
 //! constraints, so several replicas behave like the single SQLite writer.
 //! Times come from the application clock, never from `now()`.
 mod admin;
+mod events;
 mod factors;
 mod handoff;
 mod passkeys;
@@ -46,6 +47,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0004_slice2c_factors",
         include_str!("migrations/0004_slice2c_factors.sql"),
     ),
+    (
+        5,
+        "0005_slice3_groups_feeds",
+        include_str!("migrations/0005_slice3_groups_feeds.sql"),
+    ),
 ];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 /// `pg_advisory_xact_lock` key of the migration runner ("hopae-mi").
@@ -85,6 +91,8 @@ pub struct PgStore {
     rng: Arc<dyn Rng>,
     sinks: Arc<Vec<String>>,
     statement_timeout_ms: u64,
+    /// Bounds the diagnostic writes in flight (SQLite's queue capacity).
+    diag: Arc<tokio::sync::Semaphore>,
 }
 
 /// Map a driver error to the store's error classes; never echo values.
@@ -198,6 +206,9 @@ impl PgStore {
             rng,
             sinks: Arc::new(sinks),
             statement_timeout_ms: options.statement_timeout.as_millis().clamp(1, 600_000) as u64,
+            diag: Arc::new(tokio::sync::Semaphore::new(
+                crate::store::sqlite::DIAGNOSTIC_QUEUE_CAP,
+            )),
         };
         if let Some(schema) = &options.search_path {
             let client = store.pool.get().await.map_err(pool_err)?;
@@ -318,6 +329,18 @@ impl PgStore {
             )
             .await
             .map_err(pg)?;
+            if events::in_feed(ev.kind) {
+                // Feed positions in commit order: only these writes take the lock.
+                tx.execute("SELECT pg_advisory_xact_lock($1)", &[&events::FEED_LOCK])
+                    .await
+                    .map_err(pg)?;
+                tx.execute(
+                    "INSERT INTO outbox_feed (event_id) VALUES ($1)",
+                    &[&ev.event_id.as_str()],
+                )
+                .await
+                .map_err(pg)?;
+            }
             if ev.kind.is_required() {
                 for sink in self.sinks.iter() {
                     tx.execute(
