@@ -216,7 +216,7 @@ pub(crate) fn fence(
 /// Open the write transaction of a fenced mutation: the `admin_mutation` gate
 /// (test hook), `BEGIN IMMEDIATE`, the deadline check (the lock may have been
 /// waited for), then the fence as the first statement.
-fn begin_fenced<'a>(
+pub(super) fn begin_fenced<'a>(
     env: &'a mut WriterEnv,
     check: &Check,
     actor: &Actor,
@@ -234,7 +234,7 @@ fn begin_fenced<'a>(
 
 /// Just before COMMIT: the `admin_precommit` gate (test hook), then the
 /// deadline check, so a job that reaches its deadline never commits late.
-fn before_commit(shared: &Shared, check: &Check) -> StoreResult<()> {
+pub(super) fn before_commit(shared: &Shared, check: &Check) -> StoreResult<()> {
     if let Some(h) = &shared.hooks {
         h.pass_gate("admin_precommit");
     }

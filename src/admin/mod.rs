@@ -141,6 +141,8 @@ pub struct AdminState {
     pub verify: VerifyContext,
     /// The configured providers' cached state (health) — never contacted.
     pub registry: Arc<Registry>,
+    /// Groups and the membership projection (ADR-0018).
+    pub groups: Arc<crate::groups::sync::GroupService>,
     /// Process-wide MAC key for form tokens and cursors (random per process).
     pub key: [u8; 32],
     pub started_at: Timestamp,

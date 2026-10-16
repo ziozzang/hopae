@@ -64,6 +64,15 @@ pub trait CredentialProvider: Send + Sync {
         &self,
         input: PasswordInput<'_>,
     ) -> Result<ProviderIdentity, CredentialError>;
+    /// The current groups of the person whose stored subject is `subject`,
+    /// for the periodic group sync. `Ok(None)`: this provider does not sync
+    /// groups (or cannot look the subject up).
+    async fn directory_groups(
+        &self,
+        _subject: &str,
+    ) -> Result<Option<Vec<super::types::RawGroup>>, CredentialError> {
+        Ok(None)
+    }
 }
 /// Verified direct authentication; assurance and freshness provenance are fixed.
 pub struct PasswordAuthentication {
@@ -180,6 +189,7 @@ mod tests {
                 picture: None,
                 raw_claims: self.raw_claims.clone(),
                 auth_time: self.claim.then(|| serde_json::json!(9999)),
+                groups: None,
             })
         }
     }

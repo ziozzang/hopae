@@ -754,6 +754,7 @@ async fn direct_password_challenge_binds_once_without_oauth_fields() {
                 picture: None,
                 raw_claims: serde_json::json!({}),
                 auth_time: None,
+                groups: None,
             })
         }
     }

@@ -211,6 +211,8 @@ pub struct ProviderConfig {
     pub enabled: bool,
     pub client_id: String,
     pub ldap: Option<crate::provider::ldap::Config>,
+    /// `providers[].groups` (ADR-0018).
+    pub groups: Option<crate::groups::ProviderGroups>,
     /// Environment variable *name*; the value is never held here.
     pub client_secret_env: Option<String>,
     pub issuer: Option<String>,

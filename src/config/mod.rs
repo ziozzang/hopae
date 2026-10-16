@@ -82,6 +82,9 @@ pub struct Config {
     /// The management console (ADR-0016); enabled by `admin.public_url`.
     #[serde(default)]
     pub admin: AdminCfg,
+    /// Groups and the signed membership projection (ADR-0018).
+    #[serde(default)]
+    pub groups: Option<crate::groups::GroupsConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -540,6 +543,9 @@ pub struct ProviderEntry {
     pub auto_link: bool,
     #[serde(default)]
     pub trust_email: bool,
+    /// Group sync rules (ADR-0018); absent: the provider syncs no groups.
+    #[serde(default)]
+    pub groups: Option<crate::groups::ProviderGroups>,
 }
 
 fn default_scope() -> String {
@@ -1367,8 +1373,14 @@ impl Config {
 
     fn validate_providers(&self, errs: &mut Vec<String>) {
         let mut ids = HashSet::new();
+        if let Some(g) = &self.groups {
+            g.validate(errs);
+        }
         for (i, p) in self.providers.iter().enumerate() {
             let at = format!("providers[{i}]");
+            if let Some(g) = &p.groups {
+                g.validate(&i.to_string(), p.kind == ProviderKind::Ldap, errs);
+            }
             if !valid_slug(&p.provider_id) {
                 errs.push(format!(
                     "{at}.provider_id must match [a-z0-9][a-z0-9_-]{{0,31}}"
@@ -1710,6 +1722,7 @@ impl Config {
                 enabled: p.enabled,
                 client_id: p.client_id.clone(),
                 ldap: p.ldap.clone(),
+                groups: p.groups.clone(),
                 client_secret_env: p.client_secret_env.clone(),
                 issuer: p.issuer.clone(),
                 scope: p.scope.clone(),

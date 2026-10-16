@@ -1023,6 +1023,7 @@ dependencies = [
  "pumgye-grpc",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
+ "regex",
  "reqwest",
  "rsa",
  "rusqlite",

@@ -109,14 +109,14 @@ impl PruneTrigger {
 /// "Has `period` passed on the process clock or on the wall clock?" The
 /// process clock is the test clock under `test-hooks`, which a test moves in
 /// jumps; the wall clock keeps production honest if it is wrong.
-struct Every {
+pub(crate) struct Every {
     period: Duration,
     clock_at: crate::crypto::Timestamp,
     real_at: Instant,
 }
 
 impl Every {
-    fn new(period: Duration, clock: &dyn Clock) -> Self {
+    pub(crate) fn new(period: Duration, clock: &dyn Clock) -> Self {
         Every {
             period,
             clock_at: clock.now(),
@@ -124,11 +124,11 @@ impl Every {
         }
     }
 
-    fn due(&self, clock: &dyn Clock) -> bool {
+    pub(crate) fn due(&self, clock: &dyn Clock) -> bool {
         clock.now().since(self.clock_at) >= self.period || self.real_at.elapsed() >= self.period
     }
 
-    fn reset(&mut self, clock: &dyn Clock) {
+    pub(crate) fn reset(&mut self, clock: &dyn Clock) {
         self.clock_at = clock.now();
         self.real_at = Instant::now();
     }

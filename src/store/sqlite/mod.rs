@@ -9,6 +9,7 @@ mod admin;
 mod directory;
 mod events;
 mod factors;
+pub(crate) mod groups;
 pub(crate) mod human_owner;
 mod human_subject;
 mod identity_owner;
@@ -46,8 +47,9 @@ use super::{Deadline, Directory, Events, Sessions, StoreError, StoreResult};
 use crate::crypto::{Clock, OsRng, Rng};
 use crate::event::types::Event;
 
-/// Embedded migrations in order. The version is the position + 1 and must
-/// match the numeric prefix of the file name.
+/// Embedded migrations in order. The version must match the numeric prefix of
+/// the file name; it is the position + 1 except where a number is reserved by
+/// a branch that merges first (0011-0013).
 const MIGRATIONS: &[(u32, &str, &str)] = &[
     (1, "0001_meta", include_str!("../migrations/0001_meta.sql")),
     (
@@ -94,6 +96,13 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         10,
         "0010_human_identity_owners",
         include_str!("../migrations/0010_human_identity_owners.sql"),
+    ),
+    // 0011-0013 belong to the WebAuthn/passkey branch, which merges first
+    // (ADR-0018, "Migration"): the version stays the file's number.
+    (
+        14,
+        "0014_groups",
+        include_str!("../migrations/0014_groups.sql"),
     ),
 ];
 
@@ -888,6 +897,18 @@ pub fn validate_foundation(conn: &Connection, version: u32) -> Result<(), StoreE
     }
     if version >= 10 {
         identity_owner::validate_foundation(conn)?;
+    }
+    if version >= 14 {
+        for t in [
+            "directory_groups",
+            "group_members",
+            "group_changes",
+            "group_sync_state",
+        ] {
+            if !table(t)? {
+                return Err(StoreError::Corrupt(format!("missing table {t}")));
+            }
+        }
     }
     Ok(())
 }
