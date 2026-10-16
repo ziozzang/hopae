@@ -39,6 +39,7 @@ pub(super) fn derive(issuer: &str, realm: &str, user: &str) -> StoreResult<Strin
 impl super::Store {
     /// Admin-only metadata lookup. Existing user and historical reservation must
     /// belong to the actual Store realm; no session, AAL or grant is created.
+    #[cfg(test)]
     pub(crate) async fn admin_human_subject(
         &self,
         issuer: String,

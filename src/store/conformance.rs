@@ -39,6 +39,8 @@ pub(crate) struct Backend {
     pub directory: Arc<dyn SubjectDirectoryStore>,
     pub dir: Arc<dyn super::Directory>,
     pub sess: Arc<dyn super::Sessions>,
+    /// The application's handle over the same store.
+    pub app: super::Store,
     pub clock: Arc<TestClock>,
     pub rng: Arc<SeededRng>,
     _dir: Option<tempfile::TempDir>,
@@ -84,7 +86,8 @@ fn sqlite() -> Backend {
         groups: store.clone(),
         directory: store.clone(),
         dir: store.clone(),
-        sess: store,
+        sess: store.clone(),
+        app: super::Store::Sqlite((*store).clone()),
         clock,
         rng,
         _dir: Some(dir),
@@ -139,6 +142,7 @@ pub(crate) async fn postgres_with(realm: bool) -> Option<Backend> {
         directory: store.clone(),
         dir: store.clone(),
         sess: store.clone(),
+        app: super::Store::Postgres(store.clone()),
         store: store.clone(),
         clock,
         rng: Arc::new(SeededRng::new(42)),
@@ -4842,6 +4846,69 @@ async fn s600_25_directory_trait_agrees_on_both_backends() {
 async fn s600_26_sessions_trait_agrees_on_both_backends() {
     for b in backends().await {
         sessions_parity(&b).await;
+        b.cleanup().await;
+    }
+}
+
+// ---- slice 5 step 2: the application store handle ------------------------
+
+async fn app_store_dispatch(b: &Backend) {
+    use super::{Directory, Events, Sessions};
+    let name = b.store.backend();
+    assert_eq!(b.app.backend(), name);
+    b.app
+        .import_providers(vec![provider("mock", true)], None, vec![])
+        .await
+        .unwrap();
+    let u = user(b, 1).await;
+    assert_eq!(
+        Directory::user(&b.app, &u.user_id)
+            .await
+            .unwrap()
+            .map(|x| x.user_id),
+        Some(u.user_id.clone()),
+        "{name}"
+    );
+    let (row, h) = session(b, &u).await;
+    let v = b
+        .app
+        .lookup_handle(&h.handle_sha256, &Host::parse(PORTAL).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v.session.session_id, row.session_id);
+    b.app
+        .append_required(vec![required(b, Some(&u))])
+        .await
+        .unwrap();
+    assert!(b.app.count_rows().await.unwrap().0 >= 1);
+    b.app.barrier().await.unwrap();
+    assert!(b.app.schema_version().unwrap() > 0);
+    // The trait objects the application hands around reach the same rows.
+    assert!(b.app.directory().user(&u.user_id).await.unwrap().is_some());
+    assert!(
+        b.app
+            .sessions()
+            .session(&row.session_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(b.app.events().count_rows().await.unwrap().0 >= 1);
+    // A subsystem not ported yet refuses by name on PostgreSQL, never falls back.
+    let out = b.app.prepare_registry_providers(1, deadline()).await;
+    if name == "postgres" {
+        assert!(
+            matches!(out, Err(StoreError::Unavailable(ref m)) if m.contains("PostgreSQL")),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_27_the_application_store_handle_dispatches_on_both_backends() {
+    for b in backends().await {
+        app_store_dispatch(&b).await;
         b.cleanup().await;
     }
 }

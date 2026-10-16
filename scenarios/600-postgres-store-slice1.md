@@ -172,6 +172,12 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - When: a handle is minted replacing another, and with a handle of another session; a snapshot is refreshed forward then backward; switch, logout and login transactions are bound, retry-bound, consumed for a disabled then a live provider; a logout ticket ends its session twice; a session is reauthenticated with the wrong provider, then right, then again on the spent transaction; an administrator ends a user's sessions twice; transactions are evicted and the store swept.
 - Then: the old handle revoked as `replaced` and the new one capped at the session level, the foreign one refused; only the forward refresh applies; each binding once, the wrong purpose refused, the retry bind once; `ProviderDisabled`, then consumed once; the ticket and its session end once; `provider_mismatch`, then one handle event, `provider_claim` and a new factor, then `Conflict`; 2 then 0; the oldest rows evicted and expired rows swept.
 
+### S600-27 The application store handle dispatches (slice 5)
+
+- Given: the application's `Store` handle over either backend.
+- When: providers are imported, a user and a session are read, an event is appended and counted through the handle and through the trait objects it hands out; a native owner operation not yet ported is asked for.
+- Then: every answer comes from the backend it wraps; on PostgreSQL the unported operation is refused by name (no fallback).
+
 ### S600-5 PostgreSQL ledger, migrations and newer schema
 
 - Given: a PostgreSQL store.
@@ -232,6 +238,7 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-24 | `s600_24_sqlite_store_migrates_to_an_empty_postgres_store` | `src/store/conformance.rs` | unit | passing |
 | S600-25 | `s600_25_directory_trait_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-26 | `s600_26_sessions_trait_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-27 | `s600_27_the_application_store_handle_dispatches_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
 | S600-6 | `s600_6_serving_refuses_the_incomplete_postgres_backend` | `src/app.rs` | unit | passing |

@@ -6,6 +6,7 @@
 //! takes `events: Vec<Event>` writes the rows and one `event_deliveries`
 //! `pending` row per configured sink in the same transaction.
 
+pub mod app_store;
 #[cfg(test)]
 pub mod conformance;
 pub mod core;
@@ -27,11 +28,11 @@ use crate::policy::types::Host;
 use crate::provider::types::ProviderId;
 use crate::session::types::SessionId;
 
+pub use app_store::AppStore as Store;
 pub use hooks::StoreHooks;
 pub use passkeys::Passkeys;
 pub use sqlite::{
-    LATEST_SCHEMA_VERSION, Shape as WindowShape, Store, earliest_present, precheck,
-    validate_foundation,
+    LATEST_SCHEMA_VERSION, Shape as WindowShape, earliest_present, precheck, validate_foundation,
 };
 pub use types::*;
 

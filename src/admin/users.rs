@@ -7,6 +7,8 @@
 //! helpers the three W1-B handler files share.
 
 // A refusal is a small value (`Fail`), rendered at the handler's edge.
+#[allow(unused_imports)]
+use crate::store::core::{GroupStore as _, SubjectDirectoryStore as _};
 use std::sync::Arc;
 
 use askama::Template;

@@ -125,7 +125,7 @@ pub struct AdminState {
     pub projection_authority: Arc<Mutex<crate::auth_gateway::projection_authority::Authority>>,
     pub profile_authority: Option<Arc<Mutex<crate::auth_gateway::authority::Authority>>>,
     pub profile_config: Arc<crate::config::Config>,
-    pub profile_store: crate::store::sqlite::Store,
+    pub profile_store: crate::store::Store,
     pub profile_workers: Arc<Semaphore>,
     pub cfg: AdminConfig,
     pub directory: Arc<dyn Directory>,

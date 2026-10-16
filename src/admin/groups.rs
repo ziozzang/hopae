@@ -17,6 +17,8 @@
 //! Only local groups are written here; a provider group answers
 //! `409 group_not_local` (its provider's sync is its only writer).
 
+#[allow(unused_imports)]
+use crate::store::core::{GroupStore as _, SubjectDirectoryStore as _};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 

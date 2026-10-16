@@ -80,7 +80,7 @@ impl VerifiedPrimary {
     }
     pub(crate) fn write(
         &self,
-        store: &crate::store::Store,
+        store: &crate::store::sqlite::Store,
         tx: &rusqlite::Transaction<'_>,
         session: &SessionRow,
         index: usize,

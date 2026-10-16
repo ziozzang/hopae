@@ -1252,3 +1252,57 @@ impl PgStore {
         .map_err(deadline_err)
     }
 }
+
+impl PgStore {
+    /// Mirror the configured applications into `apps` (informational: verify
+    /// reads the in-memory snapshot), as SQLite's `mirror_apps`.
+    pub async fn mirror_apps(&self, apps: &[crate::policy::types::AppPolicy]) -> StoreResult<()> {
+        super::retry(|| async {
+            let mut client = self.client().await?;
+            let tx = self.begin(&mut client).await?;
+            let now = self.now().secs();
+            let keep: Vec<String> = apps.iter().map(|a| a.app_id.to_string()).collect();
+            for a in apps {
+                let hosts: Vec<&str> = a.hosts.iter().map(|h| h.as_str()).collect();
+                let session = serde_json::json!({"idle_secs": a.session.idle.as_secs(), "absolute_secs": a.session.absolute.as_secs()});
+                let binding = serde_json::json!({
+                    "ip": format!("{:?}", a.binding.ip),
+                    "ua": format!("{:?}", a.binding.ua),
+                    "on_mismatch": format!("{:?}", a.binding.on_mismatch),
+                });
+                let step_up: Vec<serde_json::Value> = a
+                    .step_up
+                    .iter()
+                    .map(|r| serde_json::json!({"path_prefix": r.path_prefix, "aal": r.aal.as_i64(), "max_age_secs": r.max_age.map(|d| d.as_secs())}))
+                    .collect();
+                let change = match a.on_authz_change {
+                    crate::policy::types::AuthzChange::Refresh => "refresh",
+                    crate::policy::types::AuthzChange::Terminate => "terminate",
+                };
+                tx.execute(
+                    "INSERT INTO apps (app_id, display_name, hosts, ports, enabled, session_policy, binding_policy, step_up, on_authz_change, created_at, updated_at) \
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10) ON CONFLICT (app_id) DO UPDATE SET display_name=excluded.display_name, hosts=excluded.hosts, \
+                     ports=excluded.ports, enabled=excluded.enabled, session_policy=excluded.session_policy, binding_policy=excluded.binding_policy, \
+                     step_up=excluded.step_up, on_authz_change=excluded.on_authz_change, updated_at=excluded.updated_at",
+                    &[
+                        &a.app_id.as_str(),
+                        &a.display_name,
+                        &serde_json::to_string(&hosts).map_err(|_| corrupt("apps.hosts"))?,
+                        &serde_json::to_string(&a.ports).map_err(|_| corrupt("apps.ports"))?,
+                        &a.enabled,
+                        &session.to_string(),
+                        &binding.to_string(),
+                        &serde_json::to_string(&step_up).map_err(|_| corrupt("apps.step_up"))?,
+                        &change,
+                        &now,
+                    ],
+                )
+                .await
+                .map_err(pg)?;
+            }
+            tx.execute("DELETE FROM apps WHERE NOT (app_id = ANY($1))", &[&keep]).await.map_err(pg)?;
+            tx.commit().await.map_err(pg)
+        })
+        .await
+    }
+}
