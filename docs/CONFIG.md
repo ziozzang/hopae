@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 41 -->
+<!-- doc-rev: 42 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -420,6 +420,10 @@ remain implementation work.
 authentication profiles and the credential projection plan; in `config` mode
 every start reconciles the store to the file and console edits are refused
 ([configuration-authoritative mode](AUTH_PROFILE_PUBLICATION.md#configuration-authoritative-mode)).
+`authentication.reload_interval_ms` (default `1000`; `0` off; otherwise 200 to
+60000) is how often a running Hopae polls the file in `config` mode and
+reconciles a changed profile or projection plan without a restart
+([live reconciliation](AUTH_PROFILE_PUBLICATION.md#live-reconciliation)).
 In the default `store` mode, `authentication_gateway` in the startup JSON bootstraps an empty authority only.
 Once the DB contains an authentication-profile document (including a disable
 tombstone), the DB/PAP document takes precedence. Editing startup JSON and
@@ -518,6 +522,15 @@ The Hangang module UI and gateway projection transport still need integration.
 ### gRPC verification listener
 
 `listen.grpc_gateway` is an optional literal socket address. It requires `listen.native_gateway_tls` and authenticated gateway callers, even on loopback. HOP1 may be disabled. See [gRPC verification](GRPC.md).
+
+### TLS material reload
+
+`reload.tls_interval_secs` (default `10`; `0` off; at most 3600) is how often
+Hopae re-reads the certificate, key and CA files of `listen.admin_tls`,
+`listen.native_gateway_tls` (native and gRPC gateways) and
+`projection_receiver.authority` (outbound mTLS). A renewed, valid set is used
+for every new handshake without a restart; an invalid one keeps the current
+material ([operations](OPERATIONS.md#tls-certificate-renewal)).
 
 ### Administrator listener mTLS
 

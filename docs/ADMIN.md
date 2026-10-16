@@ -1,6 +1,6 @@
 # Administration
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/ADMIN.md)
 
@@ -381,6 +381,7 @@ Reads are not audited, except the [subject directory](SUBJECT_DIRECTORY.md) and
 | `store` | `kind`, `schema_version`, `users`, `live_sessions`, `events`, `deliveries` per sink (`pending`, `failed`), `last_prune_at` |
 | `build` | `version`, `contract` (`1.1`), `started_at` |
 | `config` | `generation`, `digest`, `insecure_mode`, `unauthenticated_caller`, `listeners` |
+| `reload` | `tls[]`: per listener or client `name`, leaf `fingerprint`, `reloads`, `last_reload_at`, `failing`, `error`; `config` (`authentication.source = config` only): `failing`, `error`, `restart_required`, `profiles_revision`, `projections_revision`, `last_reconciled_at` ([operations](OPERATIONS.md#tls-certificate-renewal)) |
 
 Runtime changes to providers and applications are not part of M4-min. When
 they are added, a provider changed through the API becomes `managed_by = api`

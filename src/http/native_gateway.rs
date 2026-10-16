@@ -121,15 +121,46 @@ pub async fn serve(
     keys: Arc<CallerKeys>,
     stop: watch::Receiver<bool>,
 ) -> io::Result<()> {
-    serve_with_tls(listener, router, keys, stop, None).await
+    serve_with_tls(listener, router, keys, stop, None::<NativeTls>).await
 }
-pub async fn serve_with_tls(
+
+/// The native gateway's TLS: fixed, or following its files (live reload).
+#[derive(Clone)]
+pub enum NativeTls {
+    Fixed(tokio_rustls::TlsAcceptor),
+    Reloading(Arc<crate::reload::ServerTls>),
+}
+
+impl NativeTls {
+    /// The acceptor of the next handshake (the current material).
+    fn acceptor(&self) -> tokio_rustls::TlsAcceptor {
+        match self {
+            NativeTls::Fixed(a) => a.clone(),
+            NativeTls::Reloading(t) => t.acceptor(),
+        }
+    }
+}
+
+impl From<tokio_rustls::TlsAcceptor> for NativeTls {
+    fn from(a: tokio_rustls::TlsAcceptor) -> Self {
+        NativeTls::Fixed(a)
+    }
+}
+
+impl From<Arc<crate::reload::ServerTls>> for NativeTls {
+    fn from(t: Arc<crate::reload::ServerTls>) -> Self {
+        NativeTls::Reloading(t)
+    }
+}
+
+pub async fn serve_with_tls<T: Into<NativeTls>>(
     listener: TcpListener,
     router: Router,
     keys: Arc<CallerKeys>,
     mut stop: watch::Receiver<bool>,
-    tls: Option<tokio_rustls::TlsAcceptor>,
+    tls: Option<T>,
 ) -> io::Result<()> {
+    let tls: Option<NativeTls> = tls.map(Into::into);
     if tls.is_none() && !listener.local_addr()?.ip().is_loopback() {
         return Err(invalid());
     }
@@ -146,7 +177,8 @@ pub async fn serve_with_tls(
             async move {
                 if let Some(tls) = tls {
                     if let Ok(Ok(stream)) =
-                        tokio::time::timeout(Duration::from_secs(3), tls.accept(stream)).await
+                        tokio::time::timeout(Duration::from_secs(3), tls.acceptor().accept(stream))
+                            .await
                     {
                         if stream.get_ref().1.alpn_protocol() != Some(b"hop1".as_slice()) {
                             return;

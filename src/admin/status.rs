@@ -321,6 +321,7 @@ pub async fn collect(st: &AdminState) -> Result<StatusData, StoreError> {
             "contract": CONTRACT,
             "started_at": st.started_at.secs(),
         },
+        "reload": st.reload.to_json(),
         "config": {
             "generation": snap.generation,
             "digest": st.config_digest,

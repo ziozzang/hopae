@@ -1,6 +1,6 @@
 # 관리
 
-<!-- translation-status: source=../ADMIN.md source-rev=7 status=current -->
+<!-- translation-status: source=../ADMIN.md source-rev=8 status=current -->
 
 [문서 목차](README.md) · [English](../ADMIN.md)
 
@@ -374,6 +374,7 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'`을 가집니다. 어
 | `store` | `kind`, `schema_version`, `users`, `live_sessions`, `events`, 싱크별 `deliveries`(`pending`, `failed`), `last_prune_at` |
 | `build` | `version`, `contract`(`1.1`), `started_at` |
 | `config` | `generation`, `digest`, `insecure_mode`, `unauthenticated_caller`, `listeners` |
+| `reload` | `tls[]`: 리스너나 클라이언트별 `name`, 리프 `fingerprint`, `reloads`, `last_reload_at`, `failing`, `error`. `config`(`authentication.source = config`일 때만): `failing`, `error`, `restart_required`, `profiles_revision`, `projections_revision`, `last_reconciled_at`([운영](OPERATIONS.md#tls-인증서-갱신)) |
 
 제공자와 애플리케이션의 실행 중 변경은 M4-min에 포함되지 않습니다. 추가될 때
 API로 바뀐 제공자는 `managed_by = api`가

@@ -8,6 +8,7 @@ pub(crate) mod human_request;
 pub(crate) mod human_source;
 pub mod kubernetes;
 pub mod lua;
+pub(crate) mod mtls_channel;
 pub mod permission_live;
 pub mod projection;
 pub mod projection_admission;

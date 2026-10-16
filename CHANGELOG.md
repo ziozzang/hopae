@@ -10,6 +10,23 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- Live reload without a restart (scenario 320,
+  [operations](docs/OPERATIONS.md#tls-certificate-renewal)):
+  - TLS: the administrator listener, the native and gRPC gateways and the
+    projection receiver's outbound mTLS clients re-read their certificate, key
+    and CA every `reload.tls_interval_secs` (default 10 s; polling by content
+    digest, no inotify) and swap a valid set atomically for new handshakes; an
+    invalid set keeps the current one (`hopae_tls_reload_failing`), each load
+    logs the leaf fingerprint, `GET /v1/status` reports `reload.tls`.
+  - `authentication.source = config`: the configuration file is polled every
+    `authentication.reload_interval_ms` (default 1 s) and a changed profile or
+    projection plan is validated, compiled and reconciled through the CAS
+    publication live (`authentication.reconciled`, `cause: reload`); an invalid
+    file keeps the current profiles and is reported; other keys need a restart.
+- `EventKind::ALL` is a slice and the kind tests derive their counts from the
+  exhaustive `name()` match, so branches adding event kinds no longer collide on
+  hand-kept numbers.
+
 - WebAuthn passkeys behind the new, default-off `webauthn` configuration
   ([ADR-0017](docs/adr/0017-webauthn-passkeys.md), [WebAuthn passkeys](docs/WEBAUTHN.md)):
   portal security overview, passkey registration, list, rename and removal,

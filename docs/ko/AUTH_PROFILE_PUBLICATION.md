@@ -1,6 +1,6 @@
 # 인증 프로필 게시
 
-<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=11 status=current -->
+<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=12 status=current -->
 
 [문서](README.md) · [English](../AUTH_PROFILE_PUBLICATION.md)
 
@@ -154,8 +154,38 @@ credential digest를 포함하므로 비밀이나 보안 옵션이 바뀌면 재
 plans를 비교하고 파일의 plans를 저장소의 다음 리비전으로 게시합니다(이 모드에서는 파일의
 `revision`을 무시합니다). `GET /v1/authentication/profiles`는 `source`를 알려 줍니다.
 
-Kubernetes 패키지가 필요로 하는 선언적 모드입니다. Helm values가 파일을 바꾸고
-롤아웃이 파드를 재시작하면 저장소가 따라갑니다.
+Kubernetes 패키지가 필요로 하는 선언적 모드입니다. Helm values가 파일을 바꾸면 재시작
+없이도 저장소가 따라갑니다(아래).
+
+### 실행 중 맞춤
+
+`config` 모드에서 Hopae는 실행 중에도 설정 파일을 주기적으로 확인합니다
+(`authentication.reload_interval_ms`, 기본 1000, `0`이면 끄며 시작할 때만 맞춥니다).
+파일 내용의 다이제스트를 비교하며 파일 시스템 알림은 쓰지 않습니다. ConfigMap 볼륨은
+심볼릭 링크(`..data`)를 바꾸는데 파일에 건 inotify 감시는 이를 놓치기 때문입니다. 바뀐
+파일은 시작과 똑같은 과정(크기 한도, 파싱, 설정 전체 검증, 참조한 환경 변수 확인, 프로필
+컴파일)을 모두 거친 뒤에야 같은 CAS 게시(다음 리비전, actor가 `config`인 감사 행)로
+저장소에 반영되고 실행 중 스냅숏이 교체됩니다. 기록은 `attrs.cause = reload`인
+`authentication.reconciled`입니다. 폐기한 API 키나 제거한 프로필은 교체 직후 요청부터
+인증되지 않습니다.
+
+| 바뀐 파일 | 결과 |
+| --- | --- |
+| 유효하고 프로필이나 투영 계획이 다름 | 실행 중 반영: 새 리비전, 기록, `hopae_config_reloads_total{result="reconciled"}` |
+| 유효하고 프로필과 계획이 같음 | 아무것도 쓰지 않음 |
+| 잘못됨(파싱 불가, 잘못된 프로필, 없는 변수 등) | 아무것도 바뀌지 않음: 현재 프로필이 유지되고, 유효한 파일이 올 때까지 `hopae_config_reload_failing` = `1`, 경고, `GET /v1/status`의 `reload.config.failing`과 `error` |
+| 다른 키가 바뀜(리스너, 제공자, `authentication.source` 등) | 적용하지 않음: `reload.config.restart_required = true`, `result="restart_required"`, 경고. 다음 시작에서 적용 |
+| 프로필 없이 시작했는데 프로필이 생김 | 잘못됨으로 보고: 인증 게이트웨이를 시작하려면 재시작이 필요 |
+
+**시간.** 기본 1초 주기에서 폐기는 컨테이너 안의 파일이 바뀐 뒤 약 1초 안에(확인 주기와
+검증, 저장소 트랜잭션 한 번) 적용됩니다. ConfigMap 객체를 고친 뒤 파일이 바뀌기까지의
+시간은 Hopae 밖의 일입니다. kubelet은 동기화 주기와 캐시 TTL에 따라(기본 최대 약 1분)
+ConfigMap 볼륨을 갱신하며 `subPath` 마운트는 갱신하지 않습니다. 더 빠른 폐기가 필요하면
+ConfigMap을 디렉터리째(`subPath` 아님) 마운트하고, kubelet의
+`configMapAndSecretChangeDetectionStrategy`나 동기화 주기를 낮추거나, API를 지켜보며
+파일을 직접 쓰는 사이드카(config-reloader 등)가 채우는 projected 볼륨을 쓰거나, `store`
+모드에서 콘솔로 폐기하세요. Hopae 쪽 지연은 `authentication.reload_interval_ms`로
+제한됩니다.
 
 이전 절차:
 

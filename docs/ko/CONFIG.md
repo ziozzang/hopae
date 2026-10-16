@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=41 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=42 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -404,6 +404,9 @@ true도 인증된 HTTPS proof 검증과 네이티브 소유자의 원자적 완�
 `authentication.source`(`store` 기본값, `config`)가 인증 프로필과 자격 증명 투영
 계획의 소유자를 정합니다. `config` 모드에서는 시작할 때마다 저장소를 파일에 맞추고
 콘솔 편집을 거부합니다([설정 권위 모드](AUTH_PROFILE_PUBLICATION.md#설정-권위-모드)).
+`authentication.reload_interval_ms`(기본 `1000`, `0`은 끔, 그 밖에는 200–60000)는
+`config` 모드에서 실행 중인 Hopae가 파일을 확인하는 주기이며, 바뀐 프로필이나 투영 계획을
+재시작 없이 반영합니다([실행 중 맞춤](AUTH_PROFILE_PUBLICATION.md#실행-중-맞춤)).
 기본 `store` 모드에서는 시작 JSON의 `authentication_gateway`는 비어 있는 authority만 초기화합니다. DB에
 인증 profile 문서(비활성 tombstone 포함)가 있으면 DB·PAP 문서가 우선하며 시작 JSON을
 고치고 재시작해도 덮어쓰지 않습니다. 인증된 소유자 API로 변경을 게시하세요. 오프라인
@@ -489,6 +492,14 @@ no-store를 제공합니다. `PUT /v1/authentication/projections`는 기존 관�
 ### gRPC 인증 확인 리스너
 
 선택 설정 `listen.grpc_gateway`는 리터럴 소켓 주소이며 루프백에서도 `listen.native_gateway_tls`와 게이트웨이 인증 자격이 필수다. HOP1은 비활성화할 수 있다. [gRPC 인증](GRPC.md) 참조.
+
+### TLS 자료 다시 읽기
+
+`reload.tls_interval_secs`(기본 `10`, `0`은 끔, 최대 3600)는 Hopae가
+`listen.admin_tls`, `listen.native_gateway_tls`(네이티브와 gRPC 게이트웨이),
+`projection_receiver.authority`(나가는 mTLS)의 인증서·키·CA 파일을 다시 읽는 주기입니다.
+갱신된 유효한 자료는 재시작 없이 새 핸드셰이크부터 쓰이고, 잘못된 자료는 현재 자료를
+유지합니다([운영](OPERATIONS.md#tls-인증서-갱신)).
 
 ### 관리자 리스너 mTLS
 

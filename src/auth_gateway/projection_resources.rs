@@ -271,6 +271,20 @@ impl Configuration {
     }
 }
 impl Prepared {
+    /// Use new mTLS material (CA, client certificate, key) for every later
+    /// call of every projection authority client ([`crate::reload`]).
+    pub fn reload_tls(&self, ca: &[u8], certificate: &[u8], key: &[u8]) -> Result<(), Refused> {
+        self.client
+            .reload_tls(ca, certificate, key)
+            .map_err(|_| Refused)?;
+        if let Some(c) = &self.workload_client {
+            c.reload_tls(ca, certificate, key).map_err(|_| Refused)?;
+        }
+        if let Some(c) = &self.human_client {
+            c.reload_tls(ca, certificate, key).map_err(|_| Refused)?;
+        }
+        Ok(())
+    }
     pub(crate) fn permits_workload(&self, service: &str, audience: &str) -> bool {
         self.workload_scopes
             .iter()
