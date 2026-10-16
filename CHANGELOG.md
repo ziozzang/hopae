@@ -10,6 +10,12 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- `hopae-grpc` (`native-client`): reloadable client TLS. The observed clients
+  also accept `ReloadableEndpointConfig`, whose
+  `tls: Arc<dyn Fn() -> Arc<rustls::ClientConfig>>` is read for each new
+  connection, so callers rotate client certificates and CAs without
+  rebuilding or restarting. The `EndpointConfig` (PEM bytes) constructors are
+  unchanged ([native client](docs/HANGANG_NATIVE.md#reloadable-client-tls-unreleased)).
 - Live reload without a restart (scenario 320,
   [operations](docs/OPERATIONS.md#tls-certificate-renewal)):
   - TLS: the administrator listener, the native and gRPC gateways and the

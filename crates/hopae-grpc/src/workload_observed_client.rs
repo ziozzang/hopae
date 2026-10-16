@@ -16,7 +16,7 @@ use std::{
 use tokio::sync::Semaphore;
 use tonic::{
     metadata::{Ascii, MetadataValue},
-    transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity},
+    transport::Channel,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -71,7 +71,9 @@ impl WorkloadTrustPolicy {
     }
 }
 /// Shared startup-only authenticated transport and operation bounds.
-pub use crate::observed_client::{EndpointConfig, Limits};
+pub use crate::observed_client::{
+    ClientConfigSource, ClientEndpoint, EndpointConfig, Limits, ReloadableEndpointConfig,
+};
 /// Opaque immutable request, bound to its creating client instance.
 pub struct PreparedRequest {
     owner: Arc<()>,
@@ -183,8 +185,8 @@ impl Client {
             Err(Refused)
         }
     }
-    pub fn new_workload(
-        config: EndpointConfig<'_>,
+    pub fn new_workload<'a>(
+        config: impl Into<ClientEndpoint<'a>>,
         policy: WorkloadTrustPolicy,
         clock: Arc<ReceiverClock>,
         rates: receipt_time::ClockRates,
@@ -225,36 +227,16 @@ impl Client {
             };
             binding(&c)?;
         }
-        Self::connect(config, policy, clock, rates, limits)
+        Self::connect(config.into(), policy, clock, rates, limits)
     }
     fn connect(
-        config: EndpointConfig<'_>,
+        config: ClientEndpoint<'_>,
         trust: WorkloadTrustPolicy,
         clock: Arc<ReceiverClock>,
         rates: receipt_time::ClockRates,
         limits: Limits,
     ) -> Result<Self, Refused> {
-        let uri: tonic::codegen::http::Uri = config.address.parse().map_err(|_| Refused)?;
-        if config.address.len() > 256
-            || uri.scheme_str() != Some("https")
-            || uri.authority().is_none_or(|a| a.as_str().contains('@'))
-            || uri.path_and_query().is_some_and(|p| p.as_str() != "/")
-            || uri.port_u16() == Some(0)
-            || config.server_name.is_empty()
-            || config.server_name.len() > 253
-            || !config
-                .server_name
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
-            || [config.ca, config.certificate, config.private_key]
-                .iter()
-                .any(|b| b.is_empty() || b.len() > 128 * 1024)
-            || !(32..=256).contains(&config.caller_key.len())
-            || !config.caller_key.bytes().all(|b| b.is_ascii_graphic())
-            || !(1..=1024).contains(&limits.concurrent)
-            || limits.timeout < Duration::from_millis(1)
-            || limits.timeout > Duration::from_secs(1)
-        {
+        if !config.valid(limits.concurrent, limits.timeout) {
             return Err(Refused);
         }
         let floor = trust.minimum_key_registry_revision;
@@ -262,17 +244,7 @@ impl Client {
             .parse()
             .map_err(|_| Refused)?;
         credential.set_sensitive(true);
-        let tls = ClientTlsConfig::new()
-            .domain_name(config.server_name)
-            .ca_certificate(Certificate::from_pem(config.ca))
-            .identity(Identity::from_pem(config.certificate, config.private_key));
-        let channel = Endpoint::from_shared(config.address.to_owned())
-            .map_err(|_| Refused)?
-            .connect_timeout(limits.timeout)
-            .timeout(limits.timeout)
-            .tls_config(tls)
-            .map_err(|_| Refused)?
-            .connect_lazy();
+        let channel = config.channel(limits.timeout).map_err(|_| Refused)?;
         Ok(Self {
             rpc: v1::workload_authentication_receipts_client::WorkloadAuthenticationReceiptsClient::new(channel)
                 .max_encoding_message_size(16384)

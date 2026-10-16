@@ -579,6 +579,48 @@ modified digest/domain/generations/cache policy, timeout/cancellation and retire
 during issue/refresh. This fixture is not the actual deployed Hopae owner.
 
 
+### Reloadable client TLS (unreleased)
+
+Constructors take `impl Into<ClientEndpoint>`, so existing callers that pass
+`EndpointConfig` (fixed PEM bytes) compile and behave exactly as before. These
+are `Client::new`, `Client::new_service`, `Client::new_workload` and
+`Client::new_human`.
+
+Callers that rotate certificates (cert-manager) can pass
+`ReloadableEndpointConfig` instead. Its `tls: ClientConfigSource` is an
+`Arc<dyn Fn() -> Arc<rustls::ClientConfig>>`. The SDK calls it for every new
+connection. It is not called per request, and it must be cheap, for example an
+`ArcSwap` load:
+
+```rust
+let tls = reloading.clone(); // the caller's reloading holder
+let client = Client::new_service(
+    ReloadableEndpointConfig {
+        address: "https://hopae:9443",
+        server_name: "hopae.internal",
+        tls: Arc::new(move || tls.current()),
+        caller_key: &token,
+    },
+    policy, clock, rates, limits,
+)?;
+```
+
+- The SDK verifies the configured `server_name`, enforces the `h2` ALPN protocol
+  even if the configuration doesn't set it, and requires that the server
+  selects it.
+- The address, server name, caller key and limit bounds are the same as for
+  the PEM path.
+- After rotation, a new connection presents the new client certificate and
+  trusts the new CA. Established HTTP/2 connections keep their configuration
+  until they close (server connection age, GOAWAY or a network error). There is
+  no new client to build, no retirement and no restart.
+- Validation of the new material is the caller's job. A failed rebuild should
+  keep returning the previous configuration.
+
+`tests/reloadable_tls.rs` rotates the client certificate behind one client
+against an mTLS server with a short connection age. It checks that the server
+sees the new certificate without the client being rebuilt.
+
 ### Stable native trust and digest preparation
 
 `Client::new_service` adds a server-compiled `ServiceTrustPolicy` beside the exact
