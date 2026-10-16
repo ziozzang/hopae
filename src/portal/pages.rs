@@ -568,4 +568,15 @@ pub struct StepUpPasskeyPage<'a> {
     pub totp: bool,
     pub choices: &'a [ExternalChoice],
     pub integrity: &'a str,
+    /// The page needs a high-assurance security key (an AAL 3 rule,
+    /// ADR-0018): only such keys are offered and no other method is listed.
+    pub high_assurance: bool,
+}
+
+/// An AAL 3 step-up for a user without a qualifying security key.
+#[derive(Template)]
+#[template(path = "stepup_high_assurance.html")]
+pub struct StepUpHighAssurancePage<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
 }

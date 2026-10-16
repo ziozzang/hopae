@@ -79,4 +79,4 @@ An application with `max_emitted_aal = 3` sees AAL 3 after a step-up with an att
 
 ## Open questions
 
-- Requiring AAL 3 in step-up rules and Pumgye plans (ADR-0018 decision 6).
+- Requiring AAL 3 in step-up rules is scenario 489; Pumgye plans of `minimum_aal: 3` remain open (ADR-0018 decision 11).

@@ -268,10 +268,15 @@ impl SnapshotCheck {
         } else {
             vec![]
         };
+        // AAL 3 evidence (ADR-0018): the current elevation is a
+        // high-assurance passkey that is still active (checked above).
+        let aal3 =
+            matches!(&establishing, Some(Establishing::Webauthn(f)) if f.assurance == "aal3");
         if step_up::evaluate(
             &app.step_up,
             &self.path,
             current.handle.issued_aal,
+            aal3,
             current.session.auth_time,
             &factors,
             now,
@@ -291,7 +296,7 @@ impl SnapshotCheck {
             .filter(|rule| step_up::rule_matches(rule, &self.path))
         {
             if let Some(age) = rule.max_age {
-                let at = if rule.aal == Aal::Two {
+                let at = if rule.aal >= Aal::Two {
                     Timestamp(establishing.as_ref().ok_or_else(refused)?.at_ms())
                 } else {
                     current.session.auth_time

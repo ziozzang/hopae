@@ -1,6 +1,6 @@
 # WebAuthn passkeys
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [Documentation](README.md) · [한국어](ko/WEBAUTHN.md)
 
@@ -113,6 +113,14 @@ application, and the stored level, stay at 2 ([ADR-0018](adr/0018-aal3-emission.
 with the peer changes it lists).
 A recovery entry never satisfies an AAL 2 step-up rule.
 
+A step-up rule (`apps[].step_up[].require.aal`) or `admin.require_aal` of `3`
+is met only by that same evidence, refreshed only by a passkey use. For such a
+rule the step-up page offers only the user's high-assurance, device-bound keys
+and no other method; a user without one is told that a high-assurance security
+key is required and sent to Security settings (`403`), and the authenticator-app
+and external-factor routes refuse the transaction. Requiring 3 does not present
+3: that stays `max_emitted_aal`'s decision ([ADR-0018](adr/0018-aal3-emission.md#aal-3-requirements)).
+
 ## Passwordless sign-in
 
 With `webauthn.passwordless = true` the sign-in page offers a passkey beside the
@@ -162,6 +170,12 @@ hopae admin factors reset <user-id-or-email>
 `reset` revokes every passkey, TOTP enrollment and unused recovery code of the
 user, terminates every session and records `admin.factor_reset`. The user enrolls
 again after a fresh sign-in.
+
+The console lists a user's factors (`GET /v1/users/{id}/factors`: passkeys by
+`pk_` id with the authenticator's name from its AAGUID, backup state and last
+use; the authenticator app; recovery codes left) and resets all of them, one
+passkey, the authenticator app or the recovery codes, ending the sessions the
+removed factor vouched for ([administration](ADMIN.md#factor-management)).
 
 ## Events
 

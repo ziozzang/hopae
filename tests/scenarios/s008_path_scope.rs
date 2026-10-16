@@ -462,6 +462,7 @@ mod gateway_layer {
                 &[rule],
                 canon.as_str(),
                 hopae::session::Aal::One,
+                false,
                 hopae::crypto::Timestamp(0),
                 &[],
                 hopae::crypto::Timestamp(1000),

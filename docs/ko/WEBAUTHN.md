@@ -1,6 +1,6 @@
 # WebAuthn 패스키
 
-<!-- translation-status: source=../WEBAUTHN.md source-rev=6 status=current -->
+<!-- translation-status: source=../WEBAUTHN.md source-rev=7 status=current -->
 
 [문서 목차](README.md) · [English](../WEBAUTHN.md)
 
@@ -110,6 +110,13 @@ AAL 3은 `apps[].max_emitted_aal = 3`인 애플리케이션에만, 세션의 현
 ([ADR-0018](../adr/0018-aal3-emission.md)과 그 문서의 피어 변경 목록). 복구 항목은
 AAL 2 단계 상승 규칙을 결코 충족하지 않습니다.
 
+`3`인 단계 상승 규칙(`apps[].step_up[].require.aal`)이나 `admin.require_aal`은 같은
+근거로만 충족되며 패스키 사용으로만 갱신됩니다. 그런 규칙에서 단계 상승 페이지는
+사용자의 기기에 묶인 고보증 키만 제시하고 다른 방법은 보여 주지 않습니다. 그런 키가
+없는 사용자에게는 고보증 보안 키가 필요하다고 알리고 보안 설정으로 안내하며(`403`),
+인증 앱과 외부 요소 경로는 트랜잭션을 거부합니다. 3을 요구한다고 3이 제시되지는
+않습니다. 제시는 여전히 `max_emitted_aal`이 정합니다([ADR-0018](../adr/0018-aal3-emission.md#aal-3-requirements)).
+
 ## 비밀번호 없는 로그인
 
 `webauthn.passwordless = true`이면 로그인 페이지가 제공자 옆에 패스키를 제시합니다
@@ -157,6 +164,11 @@ hopae admin factors reset <user-id-or-email>
 `reset`은 사용자의 모든 패스키, TOTP 등록, 사용하지 않은 복구 코드를 폐기하고 모든
 세션을 종료하며 `admin.factor_reset`을 기록합니다. 사용자는 새로 로그인한 뒤 다시
 등록합니다.
+
+콘솔은 사용자의 인증 요소를 나열하고(`GET /v1/users/{id}/factors`: AAGUID에서 얻은
+인증기 이름, 백업 상태, 마지막 사용 시각과 함께 `pk_` ID로 보이는 패스키, 인증 앱,
+남은 복구 코드), 전부·패스키 하나·인증 앱·복구 코드를 초기화하며 제거한 요소가 보증한
+세션을 끝냅니다([관리](ADMIN.md#인증-요소-관리)).
 
 ## 이벤트
 

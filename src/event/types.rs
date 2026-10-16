@@ -127,8 +127,13 @@ pub enum EventKind {
     AdminSessionTerminate,
     AdminSessionsTerminate,
     AdminDenied,
-    /// `hopae admin factors reset` (ADR-0017, required).
+    /// `hopae admin factors reset` and the console's factor reset (ADR-0017,
+    /// required; `attrs.scope` names what was reset).
     AdminFactorReset,
+    /// A console publication of the service authentication profiles or the
+    /// credential projection plans (required; in the publication's transaction).
+    AdminProfilesPublish,
+    AdminProjectionsPublish,
     /// An audited administrative read of the subject directory or the
     /// authentication explain API (required; travels alone).
     AdminRead,
@@ -148,7 +153,7 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 51] = [
+    pub const ALL: [EventKind; 53] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -191,6 +196,8 @@ impl EventKind {
         EventKind::AdminSessionsTerminate,
         EventKind::AdminDenied,
         EventKind::AdminFactorReset,
+        EventKind::AdminProfilesPublish,
+        EventKind::AdminProjectionsPublish,
         EventKind::AdminRead,
         EventKind::GroupCreated,
         EventKind::GroupUpdated,
@@ -261,6 +268,8 @@ impl EventKind {
             EventKind::AdminSessionsTerminate => "admin.sessions_terminate",
             EventKind::AdminDenied => "admin.denied",
             EventKind::AdminFactorReset => "admin.factor_reset",
+            EventKind::AdminProfilesPublish => "admin.profiles_publish",
+            EventKind::AdminProjectionsPublish => "admin.projections_publish",
             EventKind::AdminRead => "admin.read",
             EventKind::GroupCreated => "group.created",
             EventKind::GroupUpdated => "group.updated",
@@ -443,6 +452,7 @@ pub mod reasons {
         COUNTER_REGRESSION = "counter_regression",
         COUNTER_STALE = "counter_stale",
         FACTOR_RESET = "factor_reset",
+        HIGH_ASSURANCE_REQUIRED = "high_assurance_required",
         PASSKEY_REMOVED = "passkey_removed",
         CEREMONY_INVALID = "ceremony_invalid",
         CEREMONY_EXPIRED = "ceremony_expired",
@@ -483,6 +493,7 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "change",
     "auth_time_source",
     "bound_ip",
+    "bulk_operation",
     "cause",
     "client_request_id",
     "config_digest",
@@ -522,6 +533,7 @@ pub const ATTR_ALLOWLIST: &[&str] = &[
     "role",
     "route_id",
     "sampled_count",
+    "scope",
     "sink",
     "source",
     "sso",
@@ -683,14 +695,14 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 45);
+        assert_eq!(required, 47);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 51);
+        assert_eq!(EventKind::ALL.len(), 53);
         for (kind, name) in [
             (
                 EventKind::FactorExternalConsumed,

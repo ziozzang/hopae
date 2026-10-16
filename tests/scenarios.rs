@@ -65,6 +65,8 @@ mod scenarios {
     mod s309_authentication_explain;
     #[path = "s310_groups.rs"]
     mod s310_groups;
+    #[path = "s314_admin_api_gaps.rs"]
+    mod s314_admin_api_gaps;
     #[path = "s480_passkeys.rs"]
     mod s480_passkeys;
 }

@@ -50,6 +50,10 @@ pub fn router(state: Arc<AdminState>) -> Router {
             "/v1/authentication/projections",
             get(crate::admin::projections::get).put(crate::admin::projections::put),
         )
+        .route(
+            "/v1/authentication/profiles/validate",
+            post(crate::admin::profiles::validate_api),
+        )
         .route("/v1/me", get(me::get))
         .route("/assets/admin.css", get(stylesheet))
         .route("/users", get(users::list_page))
@@ -60,6 +64,15 @@ pub fn router(state: Arc<AdminState>) -> Router {
         .route("/v1/users/{id}/disable", post(users::disable_api))
         .route("/users/{id}/enable", post(users::enable_page))
         .route("/v1/users/{id}/enable", post(users::enable_api))
+        .route(
+            "/v1/users/{id}/factors",
+            get(crate::admin::factors::list_api),
+        )
+        .route(
+            "/v1/users/{id}/factors/reset",
+            post(crate::admin::factors::reset_api),
+        )
+        .route("/v1/users/bulk/disable", post(users::bulk_disable_api))
         .route(
             "/users/{id}/sessions/terminate",
             post(users::terminate_sessions_page),

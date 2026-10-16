@@ -1,7 +1,7 @@
 {
   "id": "hopae",
   "name": "Hopae",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "api_version": 1,
   "entry": "index.js",
   "assets": {
@@ -136,6 +136,31 @@
     },
     {
       "path": "groups/members/remove",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "users/get",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "users/factors",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "authentication/profiles/validate",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "users/factors/reset",
+      "method": "POST",
+      "mutation": true
+    },
+    {
+      "path": "users/bulk-disable",
       "method": "POST",
       "mutation": true
     }

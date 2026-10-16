@@ -1,6 +1,6 @@
 # 인증 프로필 게시
 
-<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=10 status=current -->
+<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=11 status=current -->
 
 [문서](README.md) · [English](../AUTH_PROFILE_PUBLICATION.md)
 
@@ -49,6 +49,32 @@ PUT은 If-Match를 요구하며 충돌은 409, 잘못된 후보는 422, 저장 �
 동시 CAS·commit 전후 취소·영속화 실패·스냅샷 설치 실패·열린 stream 회수를 검증합니다.
 실제 호패/Hangang 프로세스로 기존 provider 세션 보존도 확인합니다. DB 분산 follower의
 서명/revision 스냅샷 lease는 별도 설계이며 이 단일 소유자 계약에서 구현하지 않습니다.
+
+콘솔 게시는 게시 자신의 트랜잭션 안에서 `admin.profiles_publish`(`revision`,
+`enabled` 또는 `disabled`인 `status`, `note`로 남는 선택적 `reason`, 행위자)를
+씁니다. 따라서 거부되거나 충돌한 게시는 아무것도 기록하지 않습니다([관리](ADMIN.md#감사-이벤트)).
+
+## 게시 없는 검증
+
+`{"configuration": …}`을 담은 `POST /v1/authentication/profiles/validate`는 게시가
+실행할 검사를 실행하되 아무것도 게시하지 않습니다. 응답은 `200`과
+`{"valid": bool, "errors": [{"path", "code", "message"}]}`입니다. `path`는 보낸 설정
+안의 위치(`profiles[0].ports[1]`, 문서 전체는 `""`)를 가리킵니다. 검사가 실행되는
+순서대로 코드는 다음과 같습니다.
+
+| 코드 | 의미 |
+| --- | --- |
+| `invalid_document` | 형태가 틀림(알 수 없는 필드, 잘못된 타입, 빠진 필드). 첫 불일치만 보고 |
+| `undeclared_reference` | 설정 파일이 선언하지 않은 API 키 변수, 또는 검증 키·CA 파일·사설 엔드포인트가 있는 릴레이 |
+| `invalid_profile` | 프로필이 런타임 규칙(식별자, 한도, 커넥터, 네트워크)을 어김 |
+| `configuration_rule` | 설정 전체의 규칙. 예를 들어 어떤 애플리케이션 호스트와 포트에도 맞지 않는 프로필 |
+| `invalid_configuration` | 어느 한 프로필로 설명되지 않는 규칙(프로필 사이의 중복) |
+| `compile_failed` | 프로필을 컴파일할 수 없음. 예를 들어 참조한 변수가 환경에 없음 |
+
+`null`(게이트웨이 비활성화)은 언제나 유효합니다. 부여가 있으면 누구나 검증할 수 있고,
+요청은 콘솔의 JSON API 규칙을 따르며 행위자별로 속도가 제한되고(30회, 2초마다 1회
+보충) 응답 전에 `admin.read`(목적 `profiles.validate`, 본문 다이제스트, 발견 수)를
+씁니다. 메시지에는 비밀 값이 절대 들어가지 않습니다.
 
 ## 구현된 저장 기초 계층
 

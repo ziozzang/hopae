@@ -72,11 +72,38 @@ pub async fn put(
     #[serde(deny_unknown_fields)]
     struct Input {
         configuration: serde_json::Value,
+        // Read by `reason_of`.
+        #[serde(default)]
+        #[allow(dead_code)]
+        reason: Option<serde_json::Value>,
     }
     let input = match serde_json::from_slice::<Input>(&mutation.body) {
         Ok(input) => input,
         Err(_) => return api::json_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_projections"),
     };
+    let reason = match super::users::common::reason_of(&mutation) {
+        Ok(r) => r,
+        Err(f) => return f.respond(&state, &context),
+    };
+    let event = super::users::with_note(
+        super::users::common::admin_event(
+            &state,
+            &context,
+            crate::event::types::EventKind::AdminProjectionsPublish,
+            crate::event::types::Outcome::Success,
+        ),
+        reason.as_deref(),
+    )
+    .attr("revision", expected.saturating_add(1))
+    .attr(
+        "status",
+        if input.configuration.is_null() {
+            "disabled"
+        } else {
+            "enabled"
+        },
+    )
+    .build();
     let configuration: Option<crate::auth_gateway::projection::Configuration> =
         match serde_json::from_value(input.configuration) {
             Ok(configuration) => configuration,
@@ -118,6 +145,9 @@ pub async fn put(
             return Err(StatusCode::CONFLICT);
         }
         let denied = std::cell::Cell::new(false);
+        // Inside the publication's transaction (before and after its
+        // writes): the fence both times, the `admin.*` record once.
+        let recorded = std::cell::Cell::new(false);
         let guard = |db: &rusqlite::Connection| {
             state
                 .profile_store
@@ -127,7 +157,15 @@ pub async fn put(
                         denied.set(true);
                     }
                     crate::auth_gateway::receipt_keys::Refused
-                })
+                })?;
+            if !recorded.get() {
+                state
+                    .profile_store
+                    .record_in(db, std::slice::from_ref(&event))
+                    .map_err(|_| crate::auth_gateway::receipt_keys::Refused)?;
+                recorded.set(true);
+            }
+            Ok(())
         };
         owner
             .publish(
@@ -146,10 +184,16 @@ pub async fn put(
             })
     });
     match task.await {
-        Ok(Ok(d)) => api::json(
-            StatusCode::OK,
-            &serde_json::json!({"revision":d.revision,"digest":d.digest}),
-        ),
+        Ok(Ok(d)) => {
+            super::users::common::count_event(
+                crate::event::types::EventKind::AdminProjectionsPublish,
+                crate::event::types::Outcome::Success,
+            );
+            api::json(
+                StatusCode::OK,
+                &serde_json::json!({"revision":d.revision,"digest":d.digest}),
+            )
+        }
         Ok(Err(StatusCode::CONFLICT)) => api::json_error(StatusCode::CONFLICT, "revision_conflict"),
         Ok(Err(StatusCode::FORBIDDEN)) => api::json_error(StatusCode::FORBIDDEN, "actor_revoked"),
         _ => api::json_error(StatusCode::SERVICE_UNAVAILABLE, "projections_unavailable"),

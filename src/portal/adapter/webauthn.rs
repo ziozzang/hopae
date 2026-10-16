@@ -960,22 +960,32 @@ impl SecurityServices for Adapter {
             .stepup_context(&Self::sctx(ctx), transaction, cookies.handle.as_ref())
             .await
             .map_err(|e| Refusal::Failure(Self::factor_session_error(e)))?;
+        let high_assurance = self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three;
         let summary = deps
             .store
             .factor_summary(actor.user())
             .await
             .map_err(|_| unavailable())?;
-        let totp = deps.keys.is_some() && summary.totp_active;
+        let totp = !high_assurance && deps.keys.is_some() && summary.totp_active;
         let form_origin = row.return_target.origin();
-        if summary.passkeys.is_empty() {
+        // An AAL 3 rule: only the user's high-assurance, device-bound keys.
+        let offered: Vec<_> = summary
+            .passkeys
+            .iter()
+            .filter(|p| {
+                !high_assurance
+                    || (p.assurance == Assurance::Aal3 && !p.backup_eligible && !p.backup_state)
+            })
+            .collect();
+        if offered.is_empty() {
             return Ok(StepUpCeremony {
                 page: None,
                 form_origin,
                 totp,
+                high_assurance,
             });
         }
-        let stored: Vec<_> = summary
-            .passkeys
+        let stored: Vec<_> = offered
             .iter()
             .map(|p| StoredCredential {
                 credential: &p.passkey,
@@ -1000,6 +1010,7 @@ impl SecurityServices for Adapter {
             page: Some(CeremonyPage { ceremony, options }),
             form_origin,
             totp,
+            high_assurance,
         })
     }
 
@@ -1211,6 +1222,14 @@ impl SecurityServices for Adapter {
         let used = deps
             .assert(&actor, ceremony, &state, response, CeremonyPurpose::StepUp)
             .await?;
+        // An AAL 3 rule is met only by an assertion that qualified as AAL 3
+        // (the key is offered only when it can; its flags are re-checked).
+        if self.svc.stepup_requirement(&row) == crate::session::types::Aal::Three
+            && used.assurance != Assurance::Aal3
+        {
+            let _ = deps.store.fail_ceremony(&ceremony.digest(), vec![]).await;
+            return Err(Refusal::HighAssuranceRequired);
+        }
         let PreparedCredentials {
             now,
             handle,

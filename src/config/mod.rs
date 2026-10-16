@@ -1210,6 +1210,10 @@ impl Config {
     }
 
     fn validate_apps(&self, errs: &mut Vec<String>) {
+        let high_assurance = self
+            .webauthn
+            .as_ref()
+            .is_some_and(|w| w.high_assurance.is_some());
         let mut ids = HashSet::new();
         let mut hosts: HashMap<String, String> = HashMap::new();
         for (i, a) in self.apps.iter().enumerate() {
@@ -1277,8 +1281,13 @@ impl Config {
                 }
             }
             for (k, rule) in a.step_up.iter().enumerate() {
-                if !(1..=2).contains(&rule.require.aal) {
-                    errs.push(format!("{at}.step_up[{k}].require.aal must be 1 or 2"));
+                match rule.require.aal {
+                    1 | 2 => {}
+                    3 if high_assurance => {}
+                    3 => errs.push(format!(
+                        "{at}.step_up[{k}].require.aal 3 needs webauthn.high_assurance (only an attested, allowlisted security key yields AAL 3)"
+                    )),
+                    _ => errs.push(format!("{at}.step_up[{k}].require.aal must be 1, 2 or 3")),
                 }
                 if let Some(p) = &rule.path_prefix
                     && !p.starts_with('/')
@@ -1347,10 +1356,14 @@ impl Config {
         {
             errs.push("admin.max_auth_age must be at least 30m".to_string());
         }
-        if let Some(n) = a.require_aal
-            && !(1..=2).contains(&n)
-        {
-            errs.push("admin.require_aal must be 1 or 2".to_string());
+        match a.require_aal {
+            None | Some(1 | 2) => {}
+            Some(3) if self.webauthn.as_ref().is_some_and(|w| w.high_assurance.is_some()) => {}
+            Some(3) => errs.push(
+                "admin.require_aal 3 needs webauthn.high_assurance (only an attested, allowlisted security key yields AAL 3)"
+                    .to_string(),
+            ),
+            Some(_) => errs.push("admin.require_aal must be 1, 2 or 3".to_string()),
         }
         if let Some(ms) = a.query_budget_ms
             && !(100..=30_000).contains(&ms)
@@ -1623,10 +1636,7 @@ impl Config {
         let a = &self.admin;
         Some(AdminLimits {
             max_auth_age: a.max_auth_age.map_or(ADMIN_MAX_AUTH_AGE_DEFAULT, |d| d.0),
-            require_aal: a
-                .require_aal
-                .and_then(|n| Aal::from_i64(i64::from(n)))
-                .unwrap_or(Aal::One),
+            require_aal: a.require_aal.and_then(aal_requirement).unwrap_or(Aal::One),
             untrusted_peers: a.untrusted_peers.unwrap_or_default(),
             query_budget: Duration::from_millis(a.query_budget_ms.unwrap_or(2000)),
             directory_privacy: a.directory_privacy.unwrap_or_default(),
@@ -1664,10 +1674,10 @@ impl Config {
             on_authz_change: AuthzChange::Terminate,
             verify_cache_seconds: 0,
             logout_confirm: true,
-            step_up: if limits.require_aal == Aal::Two {
+            step_up: if limits.require_aal >= Aal::Two {
                 vec![StepUpRule {
                     path_prefix: Some("/".into()),
-                    aal: Aal::Two,
+                    aal: limits.require_aal,
                     max_age: None,
                 }]
             } else {
@@ -1920,7 +1930,7 @@ fn resolve_app(entry: Option<&AppEntry>, base: &AppPolicy, cfg: &Config, id: &st
             .filter_map(|r| {
                 Some(StepUpRule {
                     path_prefix: r.path_prefix.clone(),
-                    aal: Aal::from_i64(i64::from(r.require.aal))?,
+                    aal: aal_requirement(r.require.aal)?,
                     max_age: r.require.max_age.map(Duration::from_secs),
                 })
             })
@@ -2088,6 +2098,15 @@ pub fn env_warnings(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Ve
                 .then(|| format!("provider {} disabled: {name} unset", p.provider_id))
         })
         .collect()
+}
+
+/// A configured requirement level: 1, 2, or 3 (AAL 3 is a requirement and a
+/// presentation, never a stored level; ADR-0018).
+fn aal_requirement(n: u8) -> Option<Aal> {
+    match n {
+        3 => Some(Aal::Three),
+        n => Aal::from_i64(i64::from(n)),
+    }
 }
 
 #[cfg(test)]
@@ -2619,6 +2638,21 @@ mod tests {
                 .iter()
                 .all(|w| !w.contains("require_aal"))
         );
+    }
+
+    #[test]
+    fn aal3_requirements_need_high_assurance_and_map_to_aal3_rules() {
+        let ha = r#""webauthn": {"high_assurance": {"attestation_ca_files": ["/x.pem"], "aaguids": ["cb69481e-8ff7-4039-93ec-0a2729a154a8"]}}"#;
+        let c = admin_with(&format!(r#"{{"admin": {{"require_aal": 3}}, {ha}}}"#)).unwrap();
+        assert_eq!(c.admin_limits().unwrap().require_aal, Aal::Three);
+        assert_eq!(c.admin_policy().unwrap().step_up[0].aal, Aal::Three);
+        assert_eq!(c.admin_policy().unwrap().max_emitted_aal, Aal::Two);
+        let refused = admin_invalid(r#"{"admin": {"require_aal": 3}}"#);
+        assert!(
+            refused.contains("admin.require_aal 3 needs webauthn.high_assurance"),
+            "{refused}"
+        );
+        assert!(admin_invalid(r#"{"admin": {"require_aal": 4}}"#).contains("must be 1, 2 or 3"));
     }
 
     #[test]
