@@ -912,7 +912,11 @@ impl Connector {
         }
         let audiences: Vec<&str> = match obj.get("aud") {
             Some(Value::String(a)) => vec![a.as_str()],
-            Some(Value::Array(a)) if a.len() <= 16 => a.iter().filter_map(Value::as_str).collect(),
+            Some(Value::Array(a)) if !a.is_empty() && a.len() <= 16 => a
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()
+                .ok_or(Refused::Audience)?,
             _ => return Err(Refused::Audience),
         };
         if !audiences.contains(&p.audience.as_str())

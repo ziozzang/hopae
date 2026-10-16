@@ -162,6 +162,11 @@ async fn s900_2_claims_signature_and_binding_rules_refuse() {
             Error::Invalid,
         ),
         (
+            "non-string audience",
+            Box::new(|c| c["aud"] = json!([AUDIENCE, 7])),
+            Error::Invalid,
+        ),
+        (
             "extra audience",
             Box::new(|c| c["aud"] = json!([AUDIENCE, "https://kubernetes.default.svc"])),
             Error::Invalid,
