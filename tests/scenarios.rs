@@ -67,4 +67,6 @@ mod scenarios {
     mod s310_groups;
     #[path = "s480_passkeys.rs"]
     mod s480_passkeys;
+    #[path = "s500_kubernetes_workload.rs"]
+    mod s500_kubernetes_workload;
 }

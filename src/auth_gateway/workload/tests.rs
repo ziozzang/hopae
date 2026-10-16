@@ -741,3 +741,193 @@ async fn s500_8_static_jwks_needs_no_network() {
     );
     assert!(c.status().keys.fresh);
 }
+
+fn runtime_config(
+    jwks: &str,
+) -> (
+    crate::auth_gateway::runtime::Config,
+    impl Fn(&str) -> Option<String> + use<>,
+) {
+    let config: crate::auth_gateway::runtime::Config = serde_json::from_value(json!({
+        "authority_id": "owned",
+        "profiles": [{
+            "service_id": "orders", "host": "orders.example.test", "ports": [443],
+            "realm": "example-cluster", "networks": ["192.0.2.0/24"],
+            "api_keys": [{"token_env": "OWNED_LOCAL_KEY", "subject": "batch"}],
+            "kubernetes_workload": {
+                "issuer": "https://kubernetes.default.svc.cluster.local",
+                "cluster_id": "example-cluster",
+                "trust_domain": "cluster.example.test",
+                "audience": AUDIENCE,
+                "namespaces": ["blue"],
+                "keys": {"source": "static", "jwks_env": "OWNED_JWKS"},
+                "token_prefix": "k8s:"
+            }
+        }]
+    }))
+    .unwrap();
+    let jwks = jwks.to_owned();
+    (config, move |name: &str| match name {
+        "OWNED_JWKS" => Some(jwks.clone()),
+        "OWNED_LOCAL_KEY" => Some("owned-local-service-key-of-sufficient-length".into()),
+        _ => None,
+    })
+}
+
+/// S500-10: profile routing, network gate, status and explain through the
+/// compiled runtime.
+#[tokio::test]
+async fn s500_10_runtime_routing_status_and_explain() {
+    use crate::auth_gateway::runtime::{Runtime, WorkloadVerdict};
+    let key = fixture::ec_key("static-1");
+    let jwks = fixture::jwks(&[&key]);
+    let (config, env) = runtime_config(&jwks);
+    let runtime = Runtime::compile(&config, &env).unwrap();
+    runtime.activate(None);
+    let t = fixture::mint(
+        &key,
+        &fixture::claims(
+            "https://kubernetes.default.svc.cluster.local",
+            now_s(),
+            "worker-pod",
+            "pod-uid-1",
+        ),
+    );
+    let inside: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+    let outside: std::net::IpAddr = "198.51.100.7".parse().unwrap();
+    let e = runtime
+        .authenticate_async(
+            "orders.example.test",
+            443,
+            Some(&format!("k8s:{t}")),
+            inside,
+            now_ms(),
+        )
+        .await
+        .unwrap();
+    assert!(e.subject().subject.starts_with("wk2:"));
+    assert_eq!(e.service(), Some("orders"));
+    assert_eq!(
+        runtime
+            .authenticate_async(
+                "orders.example.test",
+                443,
+                Some(&format!("k8s:{t}")),
+                outside,
+                now_ms()
+            )
+            .await
+            .unwrap_err(),
+        Error::NetworkDenied
+    );
+    // Unprefixed credentials never reach the workload verifier.
+    assert_eq!(
+        runtime
+            .authenticate_async("orders.example.test", 443, Some(&t), inside, now_ms())
+            .await
+            .unwrap_err(),
+        Error::Invalid
+    );
+    let local = runtime
+        .authenticate_async(
+            "orders.example.test",
+            443,
+            Some("owned-local-service-key-of-sufficient-length"),
+            inside,
+            now_ms(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        local.subject().kind,
+        crate::auth_gateway::PrincipalKind::Service
+    );
+    let status = runtime.connector_status();
+    let row = status
+        .iter()
+        .find(|r| r.connector == "kubernetes-workload")
+        .unwrap();
+    assert_eq!(row.circuit, "closed");
+    assert!(row.workload.as_ref().unwrap().keys.fresh);
+    let json = serde_json::to_string(&status).unwrap();
+    assert!(
+        !json.contains("\"x\"") && !json.contains("OWNED_"),
+        "no key material or references"
+    );
+
+    let explain = |subject: &str, ip: Option<std::net::IpAddr>| {
+        runtime.admin_explain_workload("orders.example.test", 443, subject, ip, now_ms())
+    };
+    match explain(
+        "spiffe://cluster.example.test/ns/blue/sa/worker",
+        Some(inside),
+    ) {
+        WorkloadVerdict::Allowed {
+            verification,
+            network_evaluated,
+            revocation_evaluated,
+            spiffe_id,
+            principal,
+            ..
+        } => {
+            assert_eq!(verification, "offline_jwks");
+            assert!(network_evaluated && !revocation_evaluated);
+            assert_eq!(
+                spiffe_id.as_deref(),
+                Some("spiffe://cluster.example.test/ns/blue/sa/worker")
+            );
+            assert_eq!(principal, None, "UID unknown without a revocation index");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        explain("system:serviceaccount:blue:worker", None),
+        WorkloadVerdict::Allowed {
+            network_evaluated: false,
+            ..
+        }
+    ));
+    assert_eq!(
+        explain("spiffe://cluster.example.test/ns/red/sa/worker", None),
+        WorkloadVerdict::NamespaceNotAllowed
+    );
+    assert_eq!(
+        explain("spiffe://other.example.test/ns/blue/sa/worker", None),
+        WorkloadVerdict::SubjectInvalid
+    );
+    assert_eq!(
+        explain(
+            "spiffe://cluster.example.test/ns/blue/sa/worker",
+            Some(outside)
+        ),
+        WorkloadVerdict::NetworkDenied
+    );
+    assert_eq!(
+        runtime.admin_explain_workload(
+            "other.example.test",
+            443,
+            "system:serviceaccount:blue:worker",
+            None,
+            now_ms()
+        ),
+        WorkloadVerdict::NoProfile
+    );
+    // Republication with identical material keeps the connector (cache, keys, tasks).
+    let resumed = Runtime::compile_resuming(&config, &env, Some(&runtime)).unwrap();
+    let again = resumed
+        .authenticate_async(
+            "orders.example.test",
+            443,
+            Some(&format!("k8s:{t}")),
+            inside,
+            now_ms(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.subject(), e.subject());
+    // A profile cannot combine the offline connector with the deprecated one.
+    let mut both = serde_json::to_value(&config).unwrap();
+    both["profiles"][0]["kubernetes_tokenreview"] = json!({"connection":{"api_origin":"https://kubernetes.example.test/","issuer":"https://kubernetes.default.svc.cluster.local","cluster_id":"example-cluster","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_CA","reviewer_token_env":"OWNED_REVIEWER","token_prefix":"tr:"});
+    let both: crate::auth_gateway::runtime::Config = serde_json::from_value(both).unwrap();
+    assert!(both.validate().is_err());
+}

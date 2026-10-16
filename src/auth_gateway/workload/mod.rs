@@ -25,6 +25,6 @@ pub use identity::{SubjectMode, WorkloadAttributes};
 pub use verify::{Connector, Profile};
 
 #[cfg(test)]
-mod fixture;
+pub(crate) mod fixture;
 #[cfg(test)]
 mod tests;
