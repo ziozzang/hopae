@@ -1,6 +1,6 @@
 # Administration
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/ADMIN.md)
 
@@ -115,6 +115,7 @@ list --config /etc/hopae/hopae.json` (the image entry point is `hopae`).
 | `hopae admin import [--force <user_id or email>] --config <path>` | Apply `admin.users[]` of the file to the store by the [seeding rule](#grants-in-the-configuration-file) (the same import runs at start) and print what was inserted, updated, revoked, unchanged, forced and skipped with the reason; `--force` selects the existing row by the same key rule (an email selects the row bound through `source_email` before any resolution) and reasserts the file entry over an `api`-managed or revoked row. Records `admin.grant` / `admin.revoke` with `attrs.actor = file`. |
 | `hopae admin factors list <user_id or email> --config <path>` | Print the user's second factors (authenticator app, unused recovery codes, passkeys by hashed id, label, kind, class and times); never key material. See [WebAuthn passkeys](WEBAUTHN.md#administration). |
 | `hopae admin factors reset <user_id or email> --config <path>` | Revoke every passkey, authenticator app and recovery code of the user and end every session; records `admin.factor_reset` with `attrs.actor = cli`. |
+| `hopae admin service-credentials create\|rotate\|promote\|revoke\|list …` | Route-scoped, read-only, mTLS-bound credentials for machine callers (Pumgye policy v2); the token is printed once and only its digest is stored. See [service credentials](SERVICE_CREDENTIALS.md). |
 
 Output, on stdout unless stated (timestamps are UTC, `-` stands for an absent
 value, control characters of provider-supplied text print as `?`).

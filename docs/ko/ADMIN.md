@@ -1,6 +1,6 @@
 # 관리
 
-<!-- translation-status: source=../ADMIN.md source-rev=7 status=current -->
+<!-- translation-status: source=../ADMIN.md source-rev=8 status=current -->
 
 [문서 목차](README.md) · [English](../ADMIN.md)
 
@@ -109,6 +109,7 @@ version N is older than this binary (M): start the instance once to migrate`), �
 | `hopae admin import [--force <user_id 또는 email>] --config <path>` | 파일의 `admin.users[]`를 [심기 규칙](#설정-파일의-부여)으로 저장소에 적용하고(같은 가져오기가 시작 시에도 실행됨) 삽입·갱신·취소·변경 없음·강제·건너뜀을 사유와 함께 출력합니다. `--force`는 같은 키 규칙으로 기존 행을 고르고(이메일은 어떤 해결보다 먼저 `source_email`로 묶인 행을 고름) 파일 항목을 `api` 관리 행이나 취소된 행 위에 다시 적용합니다. `attrs.actor = file`인 `admin.grant` / `admin.revoke`를 기록합니다. |
 | `hopae admin factors list <user_id 또는 email> --config <path>` | 사용자의 2차 인증 요소(인증 앱, 사용하지 않은 복구 코드, 해시 ID·이름·종류·등급·시각이 있는 패스키)를 출력합니다. 키 자료는 출력하지 않습니다. [WebAuthn 패스키](WEBAUTHN.md#관리)를 보십시오. |
 | `hopae admin factors reset <user_id 또는 email> --config <path>` | 사용자의 모든 패스키, 인증 앱, 복구 코드를 폐기하고 모든 세션을 종료합니다. `attrs.actor = cli`인 `admin.factor_reset`을 기록합니다. |
+| `hopae admin service-credentials create\|rotate\|promote\|revoke\|list …` | 기계 호출자(Pumgye 정책 v2)를 위한 경로 범위·읽기 전용·mTLS 바인딩 자격 증명입니다. 토큰은 한 번만 출력되고 digest만 저장됩니다. [서비스 자격 증명](SERVICE_CREDENTIALS.md)을 참고하십시오. |
 
 출력은 따로 밝히지 않으면 stdout입니다(시각은 UTC, `-`는 없는 값, 제공자가 준 텍스트의
 제어 문자는 `?`로 출력됨). `hopae admin grant`는 해결 블록을 먼저 출력하고 결과를 냅니다.
