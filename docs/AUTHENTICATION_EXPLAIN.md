@@ -1,6 +1,6 @@
 # Authentication explain API
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/AUTHENTICATION_EXPLAIN.md)
 

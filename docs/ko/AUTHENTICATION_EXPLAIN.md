@@ -1,6 +1,6 @@
 # 인증 설명 API
 
-<!-- translation-status: source=../AUTHENTICATION_EXPLAIN.md source-rev=1 status=current -->
+<!-- translation-status: source=../AUTHENTICATION_EXPLAIN.md source-rev=2 status=current -->
 
 [문서 목차](README.md) · [English](../AUTHENTICATION_EXPLAIN.md)
 

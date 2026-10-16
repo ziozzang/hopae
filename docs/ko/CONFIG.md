@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=35 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=36 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -194,6 +194,35 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `events.prune_every` | 정수, 1 이상 | `1000` | 정리 패스 사이에 삽입되는 행 수(패스는 최소 60초마다도 실행됩니다). |
 | `events.max_pending_per_sink` | 정수, 1 이상 | `10000` | 싱크마다 보관하는 미전달 행 수. 넘으면 가장 오래된 대기 행이 `backlog_overflow`로 `failed`가 됩니다. |
 | `events.delivery_terminal_retention_days` | 정수, 1 이상 | `7` | 전달 완료 또는 실패한 전달 행을 보관하는 기간. |
+
+#### 그룹
+
+그룹, 제공자 그룹 동기화, 서명된 멤버십 투영([그룹](GROUPS.md), [ADR-0018](../adr/0018-groups-and-membership-projection.md)). 모든 키는 선택입니다.
+
+| 키 | 타입 | 기본값 | 제약과 의미 |
+| --- | --- | --- | --- |
+| `groups.max_groups_per_user` | 정수, 1부터 1024 | `256` | 한 사람이 속할 수 있는 최대 그룹 수(모든 원천 합). 넘게 되는 동기화나 쓰기는 거부되며 아무것도 바꾸지 않음. |
+| `groups.change_retention_days` | 정수, 1부터 3650 | `30` | 투영 저널 행을 정리하는 기간(가장 새 행은 남김). 더 오래된 투영 커서는 `410 cursor_expired`. |
+| `groups.maintenance_interval_secs` | 정수, 10부터 86400 | `300` | 유지 관리 단계 간격: 로컬 만료, 제거 유예, 삭제된 제공자, 오래된 제공자 그룹, 저널 보존, 주기 LDAP 동기화. |
+| `groups.stale_group_days` | 정수, 1부터 3650 | `30` | 구성원이 없고 이 기간 동안 동기화 보고가 없는 제공자 그룹은 삭제(묘비). |
+| `groups.gateway_header` | 불리언 | `false` | 그룹 참조를 최대 32개까지 `users.groups`에 반영해 `x-forwarded-groups`가 싣게 함. 변경은 `authz_version`을 올림. |
+| `groups.projection.issuer_ref` | 문자열, `[A-Za-z0-9_.:-]` 1–128자 | 없음 | 모든 투영 봉투와 페이로드의 키 정체. `groups.projection`이 없으면 투영 엔드포인트는 `503 projection_unavailable`. |
+| `groups.projection.key_epoch` | 정수, 1 이상 | 없음 | 키 에포크. 키를 바꾸면 올림. |
+| `groups.projection.public_key` | base64 Ed25519 공개 키 | 없음 | 시드와 맞아야 하고 `receipt_issuer.public_key`와 달라야 하며, 아니면 시작 실패. |
+| `groups.projection.seed_env` | 환경 변수 이름 | 없음 | base64 32바이트 Ed25519 시드를 담은 변수(시드 자체가 아님). |
+| `groups.projection.audience` | 문자열, `[A-Za-z0-9_.:-]` 1–128자 | 없음 | 투영이 묶이는 소비자(Pumgye 식별자). |
+| `providers[].groups` | 객체 | 없음 | 제공자가 그룹을 동기화함. 없으면 동기화하지 않음. |
+| `providers[].groups.claim` | 점 경로, 최대 4단계 | `groups` | OIDC 전용: 문자열 배열을 담은 클레임(ID 토큰, 없으면 사용자 정보). |
+| `providers[].groups.ldap.mode` | `member_of`, `search` | `member_of` | LDAP 전용: 항목의 `memberOf`를 읽거나, 구성원 속성에 그 사람의 DN이 있는 그룹 항목을 검색. |
+| `providers[].groups.ldap.member_of_attribute` | LDAP 속성 | `memberOf` | `member_of` 방식의 속성. |
+| `providers[].groups.ldap.search_base_dn` | DN | 제공자의 `base_dn` | `search` 방식의 기준. |
+| `providers[].groups.ldap.object_class`, `member_attribute`, `name_attribute` | LDAP 속성 | `groupOfNames`, `member`, `cn` | `search` 방식 필터 `(&(objectClass=…)(member=<이스케이프된 DN>))`와 그룹 이름. |
+| `providers[].groups.include`, `exclude` | 정규식, 512바이트 이하 | 없음 | `include`와 일치하는 원천 키(클레임 값, 그룹 DN)만 남기고 `exclude`와 일치하는 것을 버림. 선형 시간 매칭. |
+| `providers[].groups.rewrite` | `{pattern, replacement}` | 없음 | 표시 이름을 바꿈(`$1` 그룹). 키는 바뀌지 않음. |
+| `providers[].groups.max_groups` | 정수, 1부터 1024 | `100` | 거른 뒤 이 제공자에서 받는 사람당 최대 그룹 수. 넘으면 단언을 거부. |
+| `providers[].groups.removal_grace_secs` | 정수, 0부터 604800 | `0` | 제공자가 더 이상 단언하지 않는 멤버십을 지우기 전까지 남겨 두는 시간. |
+| `providers[].groups.sync_interval_secs` | 정수, 300부터 604800 | 없음 | LDAP 전용: 연결된 사람을 주기적으로 갱신. 한 바퀴는 이 간격당 최대 한 번 시작. 없으면 로그인 시에만. |
+| `providers[].groups.sync_batch` | 정수, 1부터 1000 | `200` | LDAP 전용: 유지 관리 단계당 갱신하는 사람 수. |
 
 ### 결정되어 예정된 키
 

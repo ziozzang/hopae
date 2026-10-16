@@ -1,6 +1,6 @@
 # 관리
 
-<!-- translation-status: source=../ADMIN.md source-rev=6 status=current -->
+<!-- translation-status: source=../ADMIN.md source-rev=7 status=current -->
 
 [문서 목차](README.md) · [English](../ADMIN.md)
 
@@ -314,6 +314,9 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'`을 가집니다. 어
 | `POST /v1/subjects/lifecycle` | viewer | 지속 커서 이후의 주체 생성과 상태 변경. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
 | `POST /v1/subjects/lifecycle/snapshot` | viewer | 예약된 모든 주체와 상태, 피드 워터마크. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
 | `POST /v1/explain/authentication` | viewer | 인증 검사가 무엇을 왜 답할지. [인증 설명](AUTHENTICATION_EXPLAIN.md) 참조 |
+| `POST /v1/groups/search`, `/v1/groups/get`, `/v1/subjects/groups` | viewer | 그룹, 그룹 구성원, 사람의 그룹. [그룹](GROUPS.md) 참조 |
+| `POST /v1/groups/create`, `/update`, `/delete`, `/members/add`, `/members/remove` | admin | 사유와 `expected_revision`을 붙인 로컬 그룹 쓰기. [그룹](GROUPS.md) 참조 |
+| `POST /v1/groups/projection/snapshot`, `/changes` | viewer | Pumgye를 위한 서명된 멤버십 투영. [그룹](GROUPS.md) 참조 |
 
 오류 본문은 거부 표의 코드를 담은 `{"error": "<code>"}`입니다.
 

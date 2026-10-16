@@ -1,6 +1,6 @@
 # 주체 디렉터리 API
 
-<!-- translation-status: source=../SUBJECT_DIRECTORY.md source-rev=1 status=current -->
+<!-- translation-status: source=../SUBJECT_DIRECTORY.md source-rev=2 status=current -->
 
 [문서 목차](README.md) · [English](../SUBJECT_DIRECTORY.md)
 
@@ -181,8 +181,11 @@ Hopae에는 사용자 삭제나 계정 병합 작업이 없습니다. 다른 방
 
 ## 제한과 호환성
 
-- Hangang ADR 0021이 Hopae에 함께 맡긴 그룹, 그룹 생명주기, 멤버십 투영은 구현하지
-  않았습니다. Hopae에는 그룹이 없습니다.
+- 그룹, 그 생명주기, 서명된 멤버십 투영은 [그룹](GROUPS.md)에서 설명합니다.
+  `include_groups: true`이면 해석은 사람마다 그룹을 최대 20개 붙이고, 생명주기 피드는
+  `group_created`, `group_updated`, `group_deleted`, `member_added`, `member_removed`
+  변경도 알립니다(`group_id` 포함. 그룹 자체의 변경은 `user_id: null`이며 `status`는
+  그룹의 상태). 이것이 없으면 두 응답 모두 바뀌지 않습니다.
 - 서비스 주체의 생명주기는 이 피드가 아니라 프로필 게시(프로필 리비전)를 따릅니다.
 - 검색 커서는 다른 콘솔 목록 커서처럼 프로세스에 묶여 있습니다. 생명주기와 스냅숏
   커서는 지속됩니다.

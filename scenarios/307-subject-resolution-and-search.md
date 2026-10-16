@@ -114,6 +114,7 @@ never leaves and no read goes unrecorded or unbounded.
 | S307-3 | `s307_3_search_people_and_service_principals_with_cursor` | `tests/scenarios/s307_subject_directory.rs` | integration | passing |
 | S307-4 | `s307_4_every_read_is_audited_without_identifiers` | `tests/scenarios/s307_subject_directory.rs` | integration | passing |
 | S307-5 | `s307_5_delegated_console_actor_resolves` | `tests/scenarios/s307_subject_directory.rs` | integration | passing |
+| S307-6 | `s307_6_operator_privacy_floor_cannot_be_lowered_by_a_request` | `tests/scenarios/s307_subject_directory.rs` | integration | passing |
 | S307-A1 | `s307_a1_batch_and_reference_bounds` | `tests/scenarios/s307_subject_directory.rs` | integration | passing |
 | S307-A2 | `s307_a2_reads_require_the_json_api_rule` | `tests/scenarios/s307_subject_directory.rs` | integration | passing |
 | S307-A3 | `s307_a3_per_actor_rate_limit` | `tests/scenarios/s307_subject_directory.rs` | integration | passing |
@@ -132,7 +133,7 @@ issuer.
 
 ## Open questions
 
-- Should an operator be able to set a minimum privacy profile (for example `strict` only) in the configuration rather than per request?
+- None. (An operator floor for the privacy profile is `admin.directory_privacy`, case 307-6.)
 
 ## 한국어 요약
 

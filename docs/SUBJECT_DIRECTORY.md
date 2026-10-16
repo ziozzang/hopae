@@ -1,6 +1,6 @@
 # Subject directory API
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/SUBJECT_DIRECTORY.md)
 
@@ -200,8 +200,13 @@ not recorded. Refused requests are not reads and are not recorded as such.
 
 ## Limitations and compatibility
 
-- Groups, group lifecycle and the membership projection that Hangang ADR 0021
-  also assigns to Hopae are not implemented: Hopae has no groups.
+- Groups, their lifecycle and the signed membership projection are described
+  in [groups](GROUPS.md). With `include_groups: true` a resolution attaches up
+  to 20 groups to each person and the lifecycle feed also reports
+  `group_created`, `group_updated`, `group_deleted`, `member_added` and
+  `member_removed` changes (with `group_id`; a group's own change has
+  `user_id: null` and the group's state as `status`); without it both answers
+  are unchanged.
 - Service principals' lifecycle follows profile publication (the profile
   revision), not this feed.
 - The search cursor is bound to the process like every console listing
