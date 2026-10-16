@@ -21,6 +21,8 @@ use crate::store::{Directory, Events, Sessions, StoreError, StoreHooks};
 
 #[path = "tests_admin.rs"]
 mod admin_tests;
+#[path = "webauthn_tests.rs"]
+mod webauthn_tests;
 
 const T0: i64 = 1_700_000_000_000;
 const APP_HOST: &str = "app.example.test";

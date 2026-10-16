@@ -5,6 +5,8 @@ pub mod external_registry;
 pub mod external_service;
 pub mod external_transport;
 pub mod keyring;
+pub mod recovery;
 pub mod seed_cipher;
 pub mod service;
 pub mod totp;
+pub mod webauthn;

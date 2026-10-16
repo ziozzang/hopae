@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=35 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=39 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -30,6 +30,8 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `hopae admin revoke <user_id 또는 email> --config <path>` | 부여를 철회합니다. 행은 묘비로 남습니다. `admin.revoke`를 기록합니다. |
 | `hopae admin list [--all] --config <path>` | 유효한 부여를 출력합니다. `--all`은 철회된 행도 더합니다. |
 | `hopae admin import [--force <user_id 또는 email>] --config <path>` | 파일의 `admin.users[]`를 저장소에 적용하고(시작할 때도 같은 가져오기가 실행됩니다) 삽입, 갱신, 철회, 변경 없음, 강제, 건너뛴 항목을 출력합니다. |
+| `hopae admin factors list <user_id 또는 email> --config <path>` | 사용자의 2차 인증 요소를 출력합니다: 인증 앱 상태, 사용하지 않은 복구 코드(사용한 코드 때문에 재등록이 필요한지 포함), 그리고 모든 활성 패스키의 해시 ID(`pk_…`), 이름, 종류(동기화 또는 기기 귀속), 기록 등급(`aal2` 또는 `aal3`), 생성·마지막 사용 시각. 키 자료는 출력하지 않습니다([WebAuthn 패스키](WEBAUTHN.md#관리)). |
+| `hopae admin factors reset <user_id 또는 email> --config <path>` | 사용자의 모든 패스키, 인증 앱, 복구 코드를 폐기하고 사용자의 모든 세션을 종료하며 `admin.factor_reset`을 기록합니다. 사용자는 새로 로그인한 뒤 다시 등록합니다. |
 | `hopae --version` | 버전을 출력하고 `0`으로 종료합니다. 설정이 필요 없습니다. |
 
 종료 상태: `0` 성공. `2` 유효하지 않거나 안전하지 않은 설정(호출자 키 변수가 없거나
@@ -124,6 +126,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `apps[].on_authz_change` | `refresh`, `terminate` | `refresh` | 인가 데이터가 바뀔 때 살아 있는 세션에 일어나는 일. |
 | `apps[].verify_cache_seconds` | 정수 | `0` | 게이트웨이가 허용을 캐시할 수 있는 최대 시간. 최대 `30`. `hopae --check`는 애플리케이션마다 값을 출력하고 **`false`이면 경고합니다**: `sec-fetch-site: same-origin`은 애플리케이션 자신의 출처 문서가 탐색을 시작했음을 증명할 뿐이므로, 애플리케이션 안의 탐색 가젯(자신의 쿼리에서 가져온 URL을 `location`에 대입하는 페이지, 예: `/continue?next=/_hopae/logout`)이 클릭 없이 사용자의 세션을 끝낼 수 있습니다. 이를 받아들이는 경우가 아니면 `true`를 유지하십시오. |
 | `apps[].logout_confirm` | 불리언 | `true`(`default` 애플리케이션이 설정했다면 그 값을 상속) | `true`: 애플리케이션 호스트의 `/_hopae/logout`은 포털의 확인 페이지로 리디렉션합니다. `false`: 유효한 핸들을 제시한 `sec-fetch-site: same-origin` 문서 탐색은 즉시 세션을 끝내고 포털의 로그아웃 완료 페이지로 리디렉션되며, 그 밖의 모든 요청은 여전히 확인을 거칩니다. 어느 쪽이든 포털은 보호된 대상으로 리디렉션하는 대신 "다시 로그인" 링크를 표시합니다([ADR-0015](../adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md), [게이트웨이 계약](GATEWAY_CONTRACT.md#애플리케이션-호스트-진입점)). `--check`가 보고합니다. |
+| `apps[].max_emitted_aal` | 정수 | `2`(`default` 애플리케이션 값을 상속하지 않음) | 이 애플리케이션에 `x-hopae-aal`로 제시하고 영수증에 봉인하는 최고 수준: `2` 또는 `3`. `3`에는 `webauthn.high_assurance`가 필요하며 세션의 현재 상승이 고보증 패스키일 때만 제시합니다([ADR-0018](../adr/0018-aal3-emission.md)). 같은 세션이라도 다른 애플리케이션은 `2`를 봅니다. 애플리케이션과 피어가 `3`을 받을 때만 켜십시오. |
 | `apps[].step_up[]` | `{path_prefix, require: {aal, max_age}}` 배열 | 없음 | 실제 적용되는 세션 인증등급 규칙입니다(`aal`은 1 또는 2, `path_prefix`는 `/`로 시작, `max_age`는 양의 초). AAL 2는 실제 2차 인증 근거가 필요하며 근거 확인 시각으로 신선도를 검사합니다. `no-store`를 강제합니다. AAL 0 서비스 자격은 일치하는 규칙을 충족할 수 없습니다. TOTP keyring이 설정되면 문서 요청이 네이티브 OTP 단계 상승을 시작하고, 없으면 거절합니다. |
 
 #### 제공자
@@ -303,6 +306,29 @@ route는 404입니다. 등록만으로 AAL이 올라가지는 않습니다. 인�
 통해 portal을 노출해야 합니다.
 
 AAL 1의 1차 인증 신선도 규칙은 keyring 없이도 제공자 재인증으로 처리합니다.
+
+## WebAuthn 패스키
+
+선택 `webauthn`은 패스키를 켭니다([ADR-0017](../adr/0017-webauthn-passkeys.md),
+[WebAuthn 패스키](WEBAUTHN.md)). 없으면(기본값) 모든 패스키·보안 설정 경로가
+`404`로 응답하고 아무것도 바뀌지 않습니다. 예:
+
+```json
+{"webauthn":{"rp_id":"auth.example.test","rp_name":"Example sign-in","high_assurance":{"attestation_ca_files":["/etc/hopae/webauthn/vendor-root.pem"],"aaguids":["cb69481e-8ff7-4039-93ec-0a2729a154a8"]}}}
+```
+
+| 키 | 기본값 | 제약 |
+| --- | --- | --- |
+| `webauthn.rp_id` | `portal.public_url`의 호스트 | 포털 호스트이거나 레이블 경계에서 그 상위 도메인. IP 리터럴이나 단일 레이블은 안 됩니다. 바꾸면 등록된 모든 패스키를 쓸 수 없게 됩니다. |
+| `webauthn.rp_name` | `Hopae` | 출력 가능한 1–64자. |
+| `webauthn.passwordless` | `false` | 로그인 페이지에서 비밀번호 없는 패스키 로그인을 제시합니다([WebAuthn 패스키](WEBAUTHN.md#비밀번호-없는-로그인)). 세션은 예약 제공자 ID `hopae.passkey`를 씁니다. |
+| `webauthn.high_assurance.attestation_ca_files` | — | 읽을 수 있는 PEM 파일 1–64개. `aaguids`와 함께 필수. 시작할 때와 `hopae --check`에서 읽습니다. |
+| `webauthn.high_assurance.aaguids` | — | 0이 아닌 UUID 1–64개. `attestation_ca_files`와 함께 필수. |
+
+허용 origin은 정확히 포털 origin이며 설정할 수 없습니다. `webauthn`에는 `https`
+포털, `cookie.secure = true`, 인증된 게이트웨이 호출자가 필요합니다. 또한
+`totp_keyring`처럼 `step_up` 규칙이 있는 애플리케이션에 대해 브라우저 단계 상승
+흐름(`/stepup`)을 켭니다.
 
 ## 외부 verifier 시작 설정
 

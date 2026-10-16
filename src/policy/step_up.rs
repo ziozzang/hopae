@@ -52,12 +52,11 @@ pub fn evaluate(
     for rule in rules.iter().filter(|r| rule_matches(r, canonical_path)) {
         let satisfied_at = if rule.aal == Aal::Two {
             let second_factors = factors.iter().filter(|f| {
+                // A recovery code is AAL 1 evidence only: it never satisfies
+                // or refreshes an AAL 2 rule (ADR-0017 decision 9).
                 matches!(
                     f.kind,
-                    FactorKind::Totp
-                        | FactorKind::Webauthn
-                        | FactorKind::Recovery
-                        | FactorKind::External
+                    FactorKind::Totp | FactorKind::Webauthn | FactorKind::External
                 )
             });
             let mut latest = None;
@@ -150,5 +149,49 @@ mod tests {
         ));
         assert!(forces_no_store(&rules));
         assert!(!forces_no_store(&[]));
+    }
+
+    #[test]
+    fn recovery_codes_never_satisfy_or_refresh_aal2() {
+        let rules = [rule(Some("/admin"), Aal::Two, Some(600))];
+        let t0 = Timestamp(1_000_000);
+        let later = t0.add(Duration::from_secs(700));
+        let webauthn = FactorEntry {
+            kind: FactorKind::Webauthn,
+            provider: None,
+            at: t0,
+        };
+        let recovery = FactorEntry {
+            kind: FactorKind::Recovery,
+            provider: None,
+            at: later,
+        };
+        // An old passkey plus a fresh recovery code: still stale.
+        assert!(matches!(
+            evaluate(
+                &rules,
+                "/admin/x",
+                Aal::Two,
+                t0,
+                &[webauthn.clone(), recovery.clone()],
+                later
+            ),
+            StepUpVerdict::Required { .. }
+        ));
+        // A recovery code alone: no AAL 2 evidence at all.
+        assert!(matches!(
+            evaluate(&rules, "/admin/x", Aal::Two, t0, &[recovery], later),
+            StepUpVerdict::Required { .. }
+        ));
+        // A fresh passkey satisfies the rule.
+        let fresh = FactorEntry {
+            kind: FactorKind::Webauthn,
+            provider: None,
+            at: later,
+        };
+        assert_eq!(
+            evaluate(&rules, "/admin/x", Aal::Two, t0, &[webauthn, fresh], later),
+            StepUpVerdict::NotRequired
+        );
     }
 }

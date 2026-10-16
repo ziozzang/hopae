@@ -272,7 +272,8 @@ fn verification_headers(headers: &[v1::Header]) -> Result<(), Refused> {
 }
 fn binding(c: &v1::AuthenticationReceiptContext) -> Result<[u8; 32], Refused> {
     let i = c.identity.as_ref().ok_or(Refused)?;
-    if i.kind != 1 || !matches!(i.aal, 1 | 2) {
+    // AAL 3 only for applications that opted in (Hopae ADR-0018).
+    if i.kind != 1 || !(1..=3).contains(&i.aal) {
         return Err(Refused);
     }
     receipt_binding::digest(

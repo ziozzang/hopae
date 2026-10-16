@@ -15,10 +15,37 @@ use crate::{
     },
 };
 use rusqlite::{OptionalExtension, params};
+/// The exact establishing second factor of an AAL 2 handle.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum Establishing {
+    Totp(super::totp_owner::Facts),
+    /// ADR-0017 phase 2: a native passkey elevation.
+    Webauthn(super::webauthn_owner::Facts),
+}
+impl Establishing {
+    fn at_ms(&self) -> i64 {
+        match self {
+            Establishing::Totp(f) => f.at_ms,
+            Establishing::Webauthn(f) => f.at_ms,
+        }
+    }
+    fn kind(&self) -> crate::session::FactorKind {
+        match self {
+            Establishing::Totp(_) => crate::session::FactorKind::Totp,
+            Establishing::Webauthn(_) => crate::session::FactorKind::Webauthn,
+        }
+    }
+    fn owned_heap_bytes(&self) -> StoreResult<usize> {
+        match self {
+            Establishing::Totp(f) => f.owned_heap_bytes(),
+            Establishing::Webauthn(f) => f.owned_heap_bytes(),
+        }
+    }
+}
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Current {
     realm: String,
-    factor: Option<super::totp_owner::Facts>,
+    factor: Option<Establishing>,
     primary: super::primary_owner::Facts,
     pub(crate) expires: Timestamp,
 }
@@ -220,14 +247,21 @@ impl SnapshotCheck {
         )?;
         let mut establishing = None;
         let factors = if current.handle.issued_aal == Aal::Two {
-            let factor = super::totp_owner::current(tx, current.session.session_id.as_str())?;
-            if factor.at_ms > now.0 {
+            // Exactly one provenance row can match the session's current
+            // generation: the latest elevation's (TOTP or passkey).
+            let sid = current.session.session_id.as_str();
+            let factor = match super::totp_owner::current(tx, sid) {
+                Ok(f) => Establishing::Totp(f),
+                Err(_) => Establishing::Webauthn(super::webauthn_owner::current(tx, sid)?),
+            };
+            if factor.at_ms() > now.0 {
                 return Err(refused());
             }
-            let at = factor.at_ms;
+            let at = factor.at_ms();
+            let kind = factor.kind();
             establishing = Some(factor);
             vec![crate::session::FactorEntry {
-                kind: crate::session::FactorKind::Totp,
+                kind,
                 provider: None,
                 at: Timestamp(at),
             }]
@@ -258,7 +292,7 @@ impl SnapshotCheck {
         {
             if let Some(age) = rule.max_age {
                 let at = if rule.aal == Aal::Two {
-                    Timestamp(establishing.as_ref().ok_or_else(refused)?.at_ms)
+                    Timestamp(establishing.as_ref().ok_or_else(refused)?.at_ms())
                 } else {
                     current.session.auth_time
                 };
@@ -359,6 +393,11 @@ impl Store {
 }
 
 impl Current {
+    /// The current establishing factor is a high-assurance passkey (ADR-0018).
+    pub(crate) fn establishing_aal3(&self) -> bool {
+        matches!(&self.factor, Some(Establishing::Webauthn(f)) if f.assurance == "aal3")
+    }
+
     /// Stable account coordinate only; never a receipt or authentication grant.
     pub(crate) fn subject_for_witness(
         &self,

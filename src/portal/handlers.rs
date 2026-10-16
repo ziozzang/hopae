@@ -31,6 +31,9 @@ use crate::http::security;
 use crate::provider::types::{CallbackQuery, ProviderHealth, ProviderId};
 use url::Origin;
 
+#[path = "settings_handlers.rs"]
+pub(crate) mod settings_handlers;
+
 /// Longest accepted query string.
 const MAX_QUERY_BYTES: usize = 16 * 1024;
 /// Longest accepted `state`, `code` or provider error value.
@@ -370,10 +373,21 @@ pub(crate) async fn login_get(State(st): State<PortalState>, req: Request) -> Re
         LoginVisit::Chooser {
             providers,
             form_origins,
+            passkey,
         } => {
             let views: Vec<ChoiceView> = providers.iter().map(ChoiceView::from).collect();
             let csrf = token_for(&st, bind.expose(), Purpose::Login);
-            render_page_status(
+            let passkey_csrf = token_for(
+                &st,
+                &settings_handlers::login_binding(&txn, bind.expose()),
+                Purpose::PasskeyLogin,
+            );
+            let error = settings_handlers::login_error(query(&parts).as_ref());
+            let mut form_origins = form_origins;
+            if let Some(p) = &passkey {
+                form_origins.push(p.form_origin.clone());
+            }
+            let page = render_page_status(
                 &rq,
                 StatusCode::OK,
                 pages::Chooser {
@@ -382,10 +396,21 @@ pub(crate) async fn login_get(State(st): State<PortalState>, req: Request) -> Re
                     csrf: &csrf,
                     txn: &txn,
                     providers: &views,
+                    passkey: passkey
+                        .as_ref()
+                        .map(|p| (p.ceremony.expose(), p.options.as_str())),
+                    passkey_csrf: &passkey_csrf,
+                    passkey_error: error,
+                    integrity: pages::script_integrity(),
                 },
                 &planted,
                 &form_origins,
-            )
+            );
+            if passkey.is_some() {
+                settings_handlers::ceremony_page(page)
+            } else {
+                page
+            }
         }
         LoginVisit::Redirect(r) => redirect_response(&st, &rq, &r, &planted),
         LoginVisit::ConfirmNewHost { host, form_origin } => {
@@ -1213,6 +1238,24 @@ async fn totp_post(st: PortalState, req: Request, confirm: bool) -> Response {
     }
 }
 
+/// The external-factor links of a step-up page.
+fn external_choices(st: &PortalState, transaction: &str) -> Vec<pages::ExternalChoice> {
+    st.services
+        .external_factor_ids()
+        .into_iter()
+        .map(|id| {
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("txn", transaction)
+                .append_pair("factor", &id)
+                .finish();
+            pages::ExternalChoice {
+                label: id,
+                location: format!("/stepup/external?{query}"),
+            }
+        })
+        .collect()
+}
+
 fn stepup_csrf_binding(rq: &Rq, transaction: &str) -> Option<zeroize::Zeroizing<String>> {
     Some(zeroize::Zeroizing::new(format!(
         "{}:{}:{}",
@@ -1227,7 +1270,10 @@ pub(crate) async fn stepup_get(State(st): State<PortalState>, req: Request) -> R
         Ok(rq) => rq,
         Err(r) => return r,
     };
-    if !st.services.totp_enabled() && st.services.external_factor_ids().is_empty() {
+    if !st.services.totp_enabled()
+        && st.services.external_factor_ids().is_empty()
+        && st.settings.is_none()
+    {
         return error_response(rq.t(), rq.rid(), ErrorPage::NotFound);
     }
     if !rq.ctx.https || rq.presented.handle.is_none() {
@@ -1254,8 +1300,46 @@ pub(crate) async fn stepup_get(State(st): State<PortalState>, req: Request) -> R
     let factors: Vec<_> = url::form_urlencoded::parse(raw.as_bytes())
         .filter(|(k, _)| k == "factor")
         .collect();
-    if factors.len() > 1 || factors.first().is_some_and(|(_, v)| v != "totp") {
+    if factors.len() > 1
+        || factors
+            .first()
+            .is_some_and(|(_, v)| v != "totp" && v != "webauthn")
+    {
         return error_response(rq.t(), rq.rid(), ErrorPage::BadRequest);
+    }
+    let wants_totp = factors.first().is_some_and(|(_, v)| v == "totp");
+    if st.settings.is_some() && !wants_totp {
+        // A passkey first when the user has one (ADR-0017); otherwise the other methods.
+        let choices = external_choices(&st, &transaction);
+        if let Some(page) = settings_handlers::stepup_passkey_page(
+            &st,
+            &rq,
+            &cookies,
+            &transaction,
+            &choices,
+            &[portal_cookie_header(&st, &bind)],
+            None,
+        )
+        .await
+        {
+            return page;
+        }
+        if !st.services.totp_enabled() && choices.is_empty() {
+            return render_page_status(
+                &rq,
+                StatusCode::OK,
+                pages::StepUpPage {
+                    enrollment_required: true,
+                    setup_any: true,
+                    t: rq.t(),
+                    request_id: rq.rid(),
+                    transaction: &transaction,
+                    csrf: "",
+                },
+                &[portal_cookie_header(&st, &bind)],
+                &[],
+            );
+        }
     }
     let ids = st.services.external_factor_ids();
     if factors.is_empty() && !ids.is_empty() {
@@ -1308,6 +1392,7 @@ pub(crate) async fn stepup_get(State(st): State<PortalState>, req: Request) -> R
         StatusCode::OK,
         pages::StepUpPage {
             enrollment_required: !entry.enrolled,
+            setup_any: st.settings.is_some(),
             t: rq.t(),
             request_id: rq.rid(),
             transaction: &transaction,

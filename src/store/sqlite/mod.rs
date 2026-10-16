@@ -24,6 +24,8 @@ mod sessions;
 mod tests;
 #[allow(dead_code)]
 pub(crate) mod totp_owner;
+pub(crate) mod webauthn;
+mod webauthn_owner;
 mod window;
 
 use std::collections::VecDeque;
@@ -93,6 +95,21 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         10,
         "0010_human_identity_owners",
         include_str!("../migrations/0010_human_identity_owners.sql"),
+    ),
+    (
+        11,
+        "0011_webauthn",
+        include_str!("../migrations/0011_webauthn.sql"),
+    ),
+    (
+        12,
+        "0012_session_webauthn_provenance",
+        include_str!("../migrations/0012_session_webauthn_provenance.sql"),
+    ),
+    (
+        13,
+        "0013_webauthn_login_challenges",
+        include_str!("../migrations/0013_webauthn_login_challenges.sql"),
     ),
 ];
 
@@ -887,6 +904,15 @@ pub fn validate_foundation(conn: &Connection, version: u32) -> Result<(), StoreE
     }
     if version >= 10 {
         identity_owner::validate_foundation(conn)?;
+    }
+    if version >= 11 {
+        webauthn::validate_foundation(conn)?;
+    }
+    if version >= 12 {
+        webauthn_owner::validate_foundation(conn)?;
+    }
+    if version >= 13 {
+        webauthn::validate_login_foundation(conn)?;
     }
     Ok(())
 }

@@ -1,6 +1,6 @@
 # 문서
 
-<!-- translation-status: source=../README.md source-rev=11 status=current -->
+<!-- translation-status: source=../README.md source-rev=12 status=current -->
 
 [English](../README.md)
 
@@ -37,6 +37,8 @@
 - [LDAP 인증](LDAP_AUTHENTICATION.md) — 직접 자격 검증 provider와 수명주기 제안 계약.
 
 - [2차 인증 확장](SECOND_FACTOR_EXTENSIONS.md) — 네이티브 OTP와 외부 API·Lua 경계.
+
+- [WebAuthn 패스키](WEBAUTHN.md) — 포털 패스키 등록, 단계 상승, 관리, 복구 코드(기본값 꺼짐).
 
 - [Kubernetes 워크로드 인증](KUBERNETES_WORKLOAD.md) — 네이티브 Pod-bound TokenReview 연결기; 프로필·전송 연계 예정.
 

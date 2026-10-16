@@ -26,7 +26,7 @@ Canonical source epoch:
 `hobs1:<32lower-nonzero-process-nonce>:<authority<=40>:s:<source-scope-revision>:a:<application-generation>`.
 Revisions are positive safe-u64 canonical decimal. Authority uses existing ASCII
 identifier grammar. TimeReply field6 is **source_revision**, not a profile or user
-revision. Identity is kind1, actual AAL1 or2, `human1:`+64lowerhex. Identity revision
+revision. Identity is kind1, actual AAL1, 2 or 3 (3 only for applications that opted in, Hopae ADR-0018), `human1:`+64lowerhex. Identity revision
 and credential generation must each be positive safe-u64 but need not equal the
 source revision or each other. No global user floor is maintained: one user's
 change cannot retire unrelated users. Fixed source/app/key-registry floors are

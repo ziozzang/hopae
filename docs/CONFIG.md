@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 35 -->
+<!-- doc-rev: 39 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -31,6 +31,8 @@ main tables in the change that implements it.
 | `hopae admin revoke <user_id or email> --config <path>` | Revoke the grant; the row stays as a tombstone. Records `admin.revoke`. |
 | `hopae admin list [--all] --config <path>` | Print the live grants; `--all` adds revoked rows. |
 | `hopae admin import [--force <user_id or email>] --config <path>` | Apply `admin.users[]` of the file to the store (the same import runs at start) and print what was inserted, updated, revoked, unchanged, forced and skipped. |
+| `hopae admin factors list <user_id or email> --config <path>` | Print a user's second factors: authenticator app state, unused recovery codes (and whether a used code requires re-enrollment), and every active passkey with its hashed id (`pk_…`), label, kind (synced or device-bound), recorded class (`aal2` or `aal3`), creation and last use. Never prints key material ([WebAuthn passkeys](WEBAUTHN.md#administration)). |
+| `hopae admin factors reset <user_id or email> --config <path>` | Revoke every passkey, authenticator app and recovery code of the user, end every session of the user and record `admin.factor_reset`. The user enrolls again after a fresh sign-in. |
 | `hopae --version` | Print the version and exit `0`; needs no configuration. |
 
 Exit status: `0` success; `2` an invalid or unsafe configuration (including a
@@ -127,6 +129,7 @@ for. A host not listed is denied (`unknown_app`).
 | `apps[].on_authz_change` | `refresh`, `terminate` | `refresh` | What happens to live sessions when authorization data changes. |
 | `apps[].verify_cache_seconds` | integer | `0` | Staleness bound the gateway may cache an allow for; at most `30`. `hopae --check` prints the value per application and **warns when it is `false`**: `sec-fetch-site: same-origin` proves only that a document of the application's own origin started the navigation, so a navigation gadget in the application (a page that assigns a URL from its own query to `location`, such as `/continue?next=/_hopae/logout`) can end a user's session without a click. Keep `true` unless that is accepted. |
 | `apps[].logout_confirm` | boolean | `true` (inherited from the `default` application when it sets it) | `true`: `/_hopae/logout` on the application host redirects to the portal's confirmation page. `false`: a document navigation with `sec-fetch-site: same-origin` that presents a valid handle ends the session at once and is redirected to the portal's signed-out page; every other request still goes through the confirmation. After either, the portal shows a "Sign in again" link instead of redirecting to the protected target ([ADR-0015](adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md), [gateway contract](GATEWAY_CONTRACT.md#application-host-entry-points)). Reported by `--check`. |
+| `apps[].max_emitted_aal` | integer | `2` (never inherited from the `default` application) | Highest level presented in `x-hopae-aal` and sealed into receipts for this application: `2` or `3`. `3` needs `webauthn.high_assurance` and is presented only while the session's current elevation is a high-assurance passkey ([ADR-0018](adr/0018-aal3-emission.md)); every other application sees `2` for the same session. Opt in only when the application and its peers accept `3`. |
 | `apps[].step_up[]` | array of `{path_prefix, require: {aal, max_age}}` | none | Enforced session assurance rules (`aal` is 1 or 2, `path_prefix` starts with `/`, `max_age` is positive seconds). AAL 2 requires actual second-factor evidence; freshness uses its satisfaction time. Rules force `no-store`. An AAL 0 service credential cannot satisfy a matching rule. With a configured TOTP keyring, document requests start native OTP step-up; without one they fail closed. |
 
 #### Providers
@@ -310,6 +313,29 @@ With no keyring, these routes return 404. Enrollment alone does not raise AAL. A
 The deployment must expose the portal through its existing trusted HTTPS ingress.
 
 AAL 1 primary-freshness rules use provider reauthentication even without a keyring.
+
+## WebAuthn passkeys
+
+Optional `webauthn` enables passkeys ([ADR-0017](adr/0017-webauthn-passkeys.md),
+[WebAuthn passkeys](WEBAUTHN.md)). Absent (the default), every passkey and
+security-settings route answers `404` and nothing changes. Example:
+
+```json
+{"webauthn":{"rp_id":"auth.example.test","rp_name":"Example sign-in","high_assurance":{"attestation_ca_files":["/etc/hopae/webauthn/vendor-root.pem"],"aaguids":["cb69481e-8ff7-4039-93ec-0a2729a154a8"]}}}
+```
+
+| Key | Default | Constraint |
+| --- | --- | --- |
+| `webauthn.rp_id` | the host of `portal.public_url` | The portal host or a parent domain of it on a label boundary; not an IP literal or a single label. Changing it makes every registered passkey unusable. |
+| `webauthn.rp_name` | `Hopae` | 1–64 printable characters. |
+| `webauthn.passwordless` | `false` | Offer passwordless passkey sign-in on the sign-in page ([WebAuthn passkeys](WEBAUTHN.md#passwordless-sign-in)). Sessions use the reserved provider id `hopae.passkey`. |
+| `webauthn.high_assurance.attestation_ca_files` | — | 1–64 readable PEM files; required with `aaguids`. Read at start and by `hopae --check`. |
+| `webauthn.high_assurance.aaguids` | — | 1–64 non-zero UUIDs; required with `attestation_ca_files`. |
+
+The allowed origin is exactly the portal origin and cannot be configured.
+`webauthn` requires an `https` portal, `cookie.secure = true` and authenticated
+gateway callers. It also enables the browser step-up flow (`/stepup`) for
+applications with `step_up` rules, as `totp_keyring` does.
 
 ## External verifier startup configuration
 

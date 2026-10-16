@@ -8,6 +8,58 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- WebAuthn passkeys behind the new, default-off `webauthn` configuration
+  ([ADR-0017](docs/adr/0017-webauthn-passkeys.md), [WebAuthn passkeys](docs/WEBAUTHN.md)):
+  portal security overview, passkey registration, list, rename and removal,
+  security confirmation by passkey, authenticator code or recovery code,
+  passkey step-up for applications with `step_up` rules (AAL 2), and an
+  optional high-assurance registration for attested, allowlisted,
+  non-synchronized security keys (classified AAL 3, recorded only).
+- Recovery codes (ten, Argon2id-hashed, single use) that yield AAL 1 and
+  require enrolling a new factor.
+- `hopae admin factors list|reset` for support and administrator reset.
+- Passwordless passkey sign-in with conditional UI (`webauthn.passwordless`),
+  sessions at AAL 2 with the reserved provider id `hopae.passkey`;
+  schema migration 13 (`webauthn_login_challenges`).
+- Passkey-elevated AAL 2 sessions on the native Human owner path through
+  `session_webauthn_provenance` (schema migration 12).
+- Schema migration 11 (`webauthn_credentials`, `webauthn_challenges`,
+  `recovery_codes`, `session_webauthn_elevations`, two nullable `users`
+  columns). Roll back by restoring the pre-migration backup.
+
+- `apps[].max_emitted_aal = 3` presents AAL 3 (`x-hopae-aal`, receipts) to an
+  opted-in application while the session's current elevation is a
+  high-assurance passkey (ADR-0018); the stored level stays 2. Hopae's Human
+  gRPC server, Human permission parser and the `hopae-grpc` Human observed
+  client accept AAL 3.
+
+### Changed
+
+- A recovery factor entry no longer counts as AAL 2 evidence in step-up
+  evaluation (no such entry existed before).
+- With a passkey enrolled, adding an authenticator app needs a second factor
+  verified in the last five minutes.
+
+### Security
+
+- Passkey ceremonies run only on the portal with the origin pinned and
+  server-side, single-use, session- and browser-bound state; a
+  signature-verified sign-count regression revokes the credential and ends
+  the sessions it elevated; the last second factor cannot be removed. The
+  portal's only script is a static same-origin file with Subresource
+  Integrity, served with Trusted Types and only on ceremony pages.
+- Adversarial review pass 1 fixes: recovery codes are minted only after a
+  possession factor (or by the session that enrolled the first factor); a
+  slower passwordless tab is no longer taken for a cloned passkey; a
+  passwordless session ends with its own passkey; refused verified
+  ceremonies are consumed and recorded; passkey sign-in ceremonies are
+  limited per IPv6 /64; passkey sessions end at start when passwordless
+  sign-in is not configured; AAL 3 decisions are never cached.
+- New dependencies: `webauthn-rs` 0.5.5 (MPL-2.0) with OpenSSL vendored
+  into the binary, `argon2` 0.5, `serde_cbor_2` 0.13.
+
 ## 0.0.8 — 2026-10-15
 
 ### Added

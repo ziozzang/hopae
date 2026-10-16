@@ -37,6 +37,7 @@ const APP: Node = Obj(&[
     ("on_authz_change", Leaf),
     ("verify_cache_seconds", Leaf),
     ("logout_confirm", Leaf),
+    ("max_emitted_aal", Leaf),
     ("step_up", Arr(&STEP_UP)),
 ]);
 
@@ -145,6 +146,21 @@ pub(super) const ROOT: Node = Obj(&[
         Obj(&[
             ("active_key", Leaf),
             ("keys", Arr(&Obj(&[("id", Leaf), ("key_env", Leaf)]))),
+        ]),
+    ),
+    (
+        "webauthn",
+        Obj(&[
+            ("rp_id", Leaf),
+            ("rp_name", Leaf),
+            ("passwordless", Leaf),
+            (
+                "high_assurance",
+                Obj(&[
+                    ("attestation_ca_files", Arr(&Leaf)),
+                    ("aaguids", Arr(&Leaf)),
+                ]),
+            ),
         ]),
     ),
     (

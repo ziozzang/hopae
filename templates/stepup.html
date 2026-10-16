@@ -3,8 +3,9 @@
 {% block content %}
 <h1>{{ t.get("stepup.title") }}</h1>
 {% if enrollment_required %}
-<p>{{ t.get("stepup.enrollment") }}</p>
-<p><a href="/security/totp">{{ t.get("stepup.setup") }}</a></p>
+{% if setup_any %}<p>{{ t.get("stepup.enrollment_any") }}</p>
+<p><a href="/security">{{ t.get("stepup.setup_any") }}</a></p>{% else %}<p>{{ t.get("stepup.enrollment") }}</p>
+<p><a href="/security/totp">{{ t.get("stepup.setup") }}</a></p>{% endif %}
 <p><a href="/stepup?txn={{ transaction }}">{{ t.get("stepup.continue") }}</a></p>
 {% else %}
 <p>{{ t.get("stepup.intro") }}</p>

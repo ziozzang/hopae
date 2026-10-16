@@ -654,6 +654,26 @@ impl Service {
         ctx: &RequestCtx,
         handle: Option<&Secret>,
     ) -> Result<crate::store::FactorActor, SessionError> {
+        self.actor(ctx, handle, true).await
+    }
+
+    /// The security pages' actor (ADR-0017): a live portal session of any
+    /// age; each operation applies the factor-management freshness rule
+    /// itself, inside its store transaction.
+    pub async fn security_actor(
+        &self,
+        ctx: &RequestCtx,
+        handle: Option<&Secret>,
+    ) -> Result<crate::store::FactorActor, SessionError> {
+        self.actor(ctx, handle, false).await
+    }
+
+    async fn actor(
+        &self,
+        ctx: &RequestCtx,
+        handle: Option<&Secret>,
+        fresh_primary: bool,
+    ) -> Result<crate::store::FactorActor, SessionError> {
         let view = self
             .portal_session(ctx, handle)
             .await?
@@ -662,26 +682,34 @@ impl Service {
         if view.session.aal < Aal::One
             || view.handle.issued_aal < Aal::One
             || view.session.auth_time > now
-            || now.since(view.session.auth_time) > Duration::from_secs(300)
+            || (fresh_primary && now.since(view.session.auth_time) > Duration::from_secs(300))
             || view.session.authz_version_at_auth != view.user.authz_version
         {
             return Err(SessionError::Refused(reasons::INVALID_STATE));
         }
-        let provider = self
-            .directory
-            .providers()
-            .await?
-            .into_iter()
-            .find(|row| {
-                row.provider_id == view.session.provider_id
-                    && row.enabled
-                    && row.deleted_at.is_none()
-            })
-            .ok_or(SessionError::Refused(reasons::INVALID_STATE))?;
+        // A passwordless passkey session has no provider row (ADR-0017
+        // decision 16); the store re-checks it by its reserved id instead.
+        let provider_configuration =
+            if view.session.provider_id.as_str() == crate::provider::types::PASSKEY_PROVIDER {
+                (ProviderKind::Oidc, serde_json::Value::Null)
+            } else {
+                let provider = self
+                    .directory
+                    .providers()
+                    .await?
+                    .into_iter()
+                    .find(|row| {
+                        row.provider_id == view.session.provider_id
+                            && row.enabled
+                            && row.deleted_at.is_none()
+                    })
+                    .ok_or(SessionError::Refused(reasons::INVALID_STATE))?;
+                (provider.kind, provider.config)
+            };
         let snapshot = self.snapshot.load_full();
         Ok(crate::store::FactorActor {
             request_id: ctx.request_id.clone(),
-            provider_configuration: (provider.kind, provider.config),
+            provider_configuration,
             client_ip: ctx.client_ip,
             view,
             authorized_at: now,
@@ -2402,6 +2430,9 @@ pub(crate) fn ip_matches(mode: IpBinding, recorded: IpAddr, observed: IpAddr) ->
         }
     }
 }
+
+#[path = "passkey_login.rs"]
+mod passkey_login;
 
 #[cfg(test)]
 mod tests {

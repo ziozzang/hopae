@@ -57,4 +57,6 @@ mod scenarios {
     mod s305_admin_grants;
     #[path = "s306_delegation.rs"]
     mod s306_delegation;
+    #[path = "s480_passkeys.rs"]
+    mod s480_passkeys;
 }
