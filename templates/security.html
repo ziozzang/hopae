@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("security.title") }}{% endblock %}
+{% block content %}
+<h1>{{ t.get("security.title") }}</h1>
+<p>{{ t.get("security.intro") }}</p>
+{% include "_messages.html" %}
+{% if view.recovery_required %}<p class="banner" role="alert">{{ t.get("security.recovery_required") }}</p>{% endif %}
+<section aria-labelledby="sec-passkeys">
+<h2 id="sec-passkeys">{{ t.get("security.passkeys.title") }}</h2>
+{% if view.passkeys.is_empty() %}
+<p>{{ t.get("security.passkeys.none") }}</p>
+{% if !view.needs_fresh_sign_in %}<p><a class="button" href="/security/passkeys/new">{{ t.get("security.passkeys.add") }}</a></p>{% endif %}
+{% else %}
+<p>{{ t.fmt("security.passkeys.count", "count", passkey_count) }}</p>
+<p><a class="button" href="/security/passkeys">{{ t.get("security.passkeys.manage") }}</a></p>
+{% endif %}
+</section>
+{% if view.totp_available %}
+<section aria-labelledby="sec-totp">
+<h2 id="sec-totp">{{ t.get("security.totp.title") }}</h2>
+{% if view.totp_active %}<p class="state on">{{ t.get("security.totp.on") }}</p>{% else %}<p class="state">{{ t.get("security.totp.off") }}</p>
+<p><a href="/security/totp">{{ t.get("security.totp.setup") }}</a></p>{% endif %}
+</section>
+{% endif %}
+<section aria-labelledby="sec-recovery">
+<h2 id="sec-recovery">{{ t.get("security.recovery.title") }}</h2>
+{% if view.recovery_generated %}<p>{{ t.fmt("security.recovery.unused", "count", recovery_count) }}</p>{% else %}<p>{{ t.get("security.recovery.none") }}</p>{% endif %}
+{% if has_factor %}<p><a href="/security/recovery-codes">{{ t.get("security.recovery.manage") }}</a></p>{% endif %}
+</section>
+<section aria-labelledby="sec-verify">
+{% if view.can_manage %}<p class="muted" id="sec-verify">{{ t.get("security.verify.ok") }}</p>
+{% else if view.needs_fresh_sign_in %}<p id="sec-verify">{{ t.get("security.fresh_signin") }}</p>
+<p><a href="/logout">{{ t.get("security.signout") }}</a></p>
+{% else %}<p id="sec-verify">{{ t.get("security.verify.needed") }}</p>
+<p><a class="button" href="/security/verify?next=security">{{ t.get("security.verify.link") }}</a></p>{% endif %}
+</section>
+{% endblock %}

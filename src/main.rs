@@ -91,6 +91,26 @@ enum AdminAction {
         #[arg(long, value_name = "USER_ID_OR_EMAIL")]
         force: Option<String>,
     },
+    /// A user's second factors (passkeys, authenticator app, recovery codes).
+    Factors {
+        #[command(subcommand)]
+        action: FactorsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum FactorsAction {
+    /// Show a user's factors: labels, kinds, classes and times, never key material.
+    List {
+        #[arg(value_name = "TARGET")]
+        target: String,
+    },
+    /// Revoke every passkey, authenticator app and recovery code of a user and
+    /// end every session; the user enrolls again after a fresh sign-in.
+    Reset {
+        #[arg(value_name = "TARGET")]
+        target: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -285,6 +305,12 @@ fn admin(cfg: &Config, action: AdminAction) -> ExitCode {
         AdminAction::Revoke { target } => app::AdminCommand::Revoke { target },
         AdminAction::List { all } => app::AdminCommand::List { all },
         AdminAction::Import { force } => app::AdminCommand::Import { force },
+        AdminAction::Factors {
+            action: FactorsAction::List { target },
+        } => app::AdminCommand::FactorsList { target },
+        AdminAction::Factors {
+            action: FactorsAction::Reset { target },
+        } => app::AdminCommand::FactorsReset { target },
     };
     let result = runtime()
         .map_err(anyhow::Error::from)

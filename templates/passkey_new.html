@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("passkey_new.title") }}{% endblock %}
+{% block head %}{% include "_ceremony_head.html" %}{% endblock %}
+{% block content %}
+<h1>{{ t.get("passkey_new.title") }}</h1>
+{% if high_assurance %}<p>{{ t.get("passkey_new.high_assurance_intro") }}</p>{% else %}<p>{{ t.get("passkey_new.intro") }}</p>{% endif %}
+{% include "_messages.html" %}
+<form method="post" action="/security/passkeys/new">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="ceremony" value="{{ ceremony }}">
+<input type="hidden" name="kind" value="{% if high_assurance %}high_assurance{% else %}passkey{% endif %}">
+<input type="hidden" name="credential" value="">
+<label for="passkey-label">{{ t.get("passkey_new.label") }}</label>
+<input id="passkey-label" name="label" type="text" maxlength="64" autocomplete="off" aria-describedby="passkey-label-hint">
+<p id="passkey-label-hint" class="hint">{{ t.get("passkey_new.label_hint") }}</p>
+<button type="button" hidden disabled data-webauthn="create" data-status="webauthn-status" data-options="{{ options }}">{{ t.get("passkey_new.create") }}</button>
+</form>
+{% include "_ceremony_status.html" %}
+<p><a href="/security">{{ t.get("security.back") }}</a></p>
+{% endblock %}

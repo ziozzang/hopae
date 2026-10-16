@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}{{ t.get("verify.title") }}{% endblock %}
+{% block head %}{% if passkey.is_some() %}{% include "_ceremony_head.html" %}{% endif %}{% endblock %}
+{% block content %}
+<h1>{{ t.get("verify.title") }}</h1>
+<p>{{ t.get("verify.intro") }}</p>
+{% include "_messages.html" %}
+{% if let Some((ceremony, options)) = passkey %}
+<section aria-labelledby="v-passkey">
+<h2 id="v-passkey">{{ t.get("verify.passkey") }}</h2>
+<form method="post" action="/security/verify/passkey">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="next" value="{{ next }}">
+<input type="hidden" name="ceremony" value="{{ ceremony }}">
+<input type="hidden" name="credential" value="">
+<button type="button" hidden disabled data-webauthn="get" data-status="webauthn-status" data-options="{{ options }}">{{ t.get("verify.passkey_button") }}</button>
+</form>
+{% include "_ceremony_status.html" %}
+</section>
+{% endif %}
+{% if totp %}
+<section aria-labelledby="v-totp">
+<h2 id="v-totp">{{ t.get("verify.totp") }}</h2>
+<form method="post" action="/security/verify/totp">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="next" value="{{ next }}">
+<label for="v-totp-code">{{ t.get("verify.totp_code") }}</label>
+<input id="v-totp-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+<button type="submit">{{ t.get("verify.totp_submit") }}</button>
+</form>
+</section>
+{% endif %}
+{% if recovery %}
+<details{% if !totp && passkey.is_none() %} open{% endif %}>
+<summary>{{ t.get("verify.recovery") }}</summary>
+<p class="hint">{{ t.get("verify.recovery_hint") }}</p>
+<form method="post" action="/security/verify/recovery">
+<input type="hidden" name="csrf" value="{{ csrf }}">
+<input type="hidden" name="next" value="{{ next }}">
+<label for="v-recovery-code">{{ t.get("verify.recovery_code") }}</label>
+<input id="v-recovery-code" name="code" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="32" required>
+<button type="submit" class="secondary">{{ t.get("verify.recovery_submit") }}</button>
+</form>
+</details>
+{% endif %}
+{% if passkey.is_none() && !totp && !recovery %}<p>{{ t.get("verify.none") }}</p>{% endif %}
+<p><a href="/security">{{ t.get("security.back") }}</a></p>
+{% endblock %}

@@ -34,6 +34,10 @@ pub enum Purpose {
     Logout,
     /// A console form (ADR-0016), bound to the handle value.
     Admin,
+    /// A security-settings form (ADR-0017), bound to the action, binding cookie and handle.
+    Security,
+    /// The passkey step-up form, bound to the transaction, binding cookie and handle.
+    PasskeyStepUp,
 }
 
 impl Purpose {
@@ -49,6 +53,8 @@ impl Purpose {
             Purpose::Continue => "continue",
             Purpose::Logout => "logout",
             Purpose::Admin => "admin",
+            Purpose::Security => "security",
+            Purpose::PasskeyStepUp => "passkey_stepup",
         }
     }
 }

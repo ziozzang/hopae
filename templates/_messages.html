@@ -1,0 +1,2 @@
+{% if let Some(n) = notice %}<p class="notice" role="status">{{ t.get(n) }}</p>{% endif %}
+{% if let Some(e) = error %}<p class="error" role="alert">{{ t.get(e) }}</p>{% endif %}

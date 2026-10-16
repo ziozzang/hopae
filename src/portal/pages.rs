@@ -286,6 +286,96 @@ mod tests {
     }
 
     #[test]
+    fn security_pages_render_in_both_languages_and_escape_user_text() {
+        use super::super::settings::{PasskeyView, SecurityView};
+        let view = SecurityView {
+            passkeys: vec![PasskeyView {
+                id: "AAAA".into(),
+                label: "<b>mine</b>".into(),
+                synced: true,
+                high_assurance: false,
+                created_at: crate::crypto::Timestamp::from_secs(0),
+                last_used_at: None,
+            }],
+            recovery_required: true,
+            can_verify: true,
+            ..SecurityView::default()
+        };
+        for lang in [Lang::En, Lang::Ko] {
+            let t = strings(lang);
+            let overview = SecurityPage {
+                t,
+                request_id: "r_1",
+                notice: Some("notice.added"),
+                error: None,
+                view: &view,
+                passkey_count: "1".into(),
+                recovery_count: "0".into(),
+                has_factor: true,
+            }
+            .render()
+            .unwrap();
+            assert!(overview.contains("role=\"alert\"") && !overview.contains("<script"));
+            let list = PasskeysPage {
+                t,
+                request_id: "r_1",
+                notice: None,
+                error: Some("passkeys.last_factor"),
+                passkeys: vec![PasskeyRow {
+                    id: "AAAA".into(),
+                    label: "<b>mine</b>".into(),
+                    kind: "passkeys.synced",
+                    created: "2026-10-16 09:00 UTC".into(),
+                    last_used: None,
+                }],
+                csrf_rename: "c1",
+                csrf_remove: "c2",
+                only_factor: true,
+                high_assurance: false,
+            }
+            .render()
+            .unwrap();
+            assert!(!list.contains("<b>mine</b>") && list.contains("&#60;b&#62;mine"));
+            assert!(
+                !list.contains("action=\"/security/passkeys/remove\""),
+                "the only factor has no remove form"
+            );
+            let new = PasskeyNewPage {
+                t,
+                request_id: "r_1",
+                notice: None,
+                error: None,
+                csrf: "c",
+                ceremony: "x",
+                options: "{\"publicKey\":{\"x\":\"</script><script>\"}}",
+                high_assurance: false,
+                integrity: script_integrity(),
+            }
+            .render()
+            .unwrap();
+            assert!(new.contains("<script src=\"/assets/webauthn.js\" integrity=\"sha384-"));
+            assert_eq!(new.matches("<script").count(), 1, "only the static script");
+            assert!(new.contains("<noscript>") && new.contains("data-msg-cancelled"));
+            for html in [&overview, &list, &new] {
+                let html = html.replace("/assets/webauthn.js", "");
+                for prefix in [
+                    "security.",
+                    "passkeys.",
+                    "passkey_new.",
+                    "webauthn.",
+                    "notice.",
+                    "refusal.",
+                ] {
+                    let leaked = html.match_indices(prefix).any(|(i, _)| {
+                        html[i + prefix.len()..].starts_with(|c: char| c.is_ascii_lowercase())
+                    });
+                    assert!(!leaked, "{lang:?}: untranslated {prefix} key in {html}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn stylesheet_has_no_remote_references() {
         assert!(!STYLESHEET.contains("url(") && !STYLESHEET.contains("@import"));
     }
@@ -306,6 +396,8 @@ pub struct TotpPage<'a> {
 #[template(path = "stepup.html")]
 pub struct StepUpPage<'a> {
     pub enrollment_required: bool,
+    /// Passkeys are configured: the setup link goes to the security overview.
+    pub setup_any: bool,
     pub t: &'a Strings,
     pub request_id: &'a str,
     pub transaction: &'a str,
@@ -333,4 +425,142 @@ pub struct ExternalStepUpPage<'a> {
     pub transaction: &'a str,
     pub factor: &'a str,
     pub csrf: &'a str,
+}
+
+// ---- Security settings and passkeys (ADR-0017) ---------------------------
+
+/// The only portal script (ADR-0017 decision 3).
+pub const CEREMONY_SCRIPT: &str = include_str!("../../templates/static/webauthn.js");
+
+/// `sha384-…` Subresource Integrity value of [`CEREMONY_SCRIPT`].
+pub fn script_integrity() -> &'static str {
+    static SRI: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SRI.get_or_init(|| {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let digest = sha2::Sha384::digest(CEREMONY_SCRIPT.as_bytes());
+        format!(
+            "sha384-{}",
+            base64::engine::general_purpose::STANDARD.encode(digest)
+        )
+    })
+}
+
+#[derive(Template)]
+#[template(path = "security_signin.html")]
+pub struct SecuritySignInPage<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub title_key: &'a str,
+    pub body_key: &'a str,
+    pub alert: bool,
+}
+
+#[derive(Template)]
+#[template(path = "security.html")]
+pub struct SecurityPage<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub notice: Option<&'static str>,
+    pub error: Option<&'static str>,
+    pub view: &'a super::settings::SecurityView,
+    pub passkey_count: String,
+    pub recovery_count: String,
+    pub has_factor: bool,
+}
+
+/// One row of the passkey list.
+pub struct PasskeyRow {
+    pub id: String,
+    pub label: String,
+    /// i18n key of the kind badge.
+    pub kind: &'static str,
+    pub created: String,
+    pub last_used: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "passkeys.html")]
+pub struct PasskeysPage<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub notice: Option<&'static str>,
+    pub error: Option<&'static str>,
+    pub passkeys: Vec<PasskeyRow>,
+    pub csrf_rename: &'a str,
+    pub csrf_remove: &'a str,
+    pub only_factor: bool,
+    pub high_assurance: bool,
+}
+
+#[derive(Template)]
+#[template(path = "passkey_remove.html")]
+pub struct PasskeyRemovePage<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub csrf: &'a str,
+    pub id: &'a str,
+    pub label: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "passkey_new.html")]
+pub struct PasskeyNewPage<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub notice: Option<&'static str>,
+    pub error: Option<&'static str>,
+    pub csrf: &'a str,
+    pub ceremony: &'a str,
+    pub options: &'a str,
+    pub high_assurance: bool,
+    pub integrity: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "security_verify.html")]
+pub struct VerifyPage<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub notice: Option<&'static str>,
+    pub error: Option<&'static str>,
+    pub csrf: &'a str,
+    pub next: &'a str,
+    /// (ceremony bearer, options JSON)
+    pub passkey: Option<(String, String)>,
+    pub totp: bool,
+    pub recovery: bool,
+    pub integrity: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "recovery_codes.html")]
+pub struct RecoveryPage<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub notice: Option<&'static str>,
+    pub error: Option<&'static str>,
+    pub csrf: &'a str,
+    /// Shown once, right after generation.
+    pub codes: Vec<String>,
+    pub first: bool,
+    pub generated: bool,
+    pub unused: String,
+    pub has_factor: bool,
+}
+
+#[derive(Template)]
+#[template(path = "stepup_passkey.html")]
+pub struct StepUpPasskeyPage<'a> {
+    pub t: &'a Strings,
+    pub request_id: &'a str,
+    pub notice: Option<&'static str>,
+    pub error: Option<&'static str>,
+    pub csrf: &'a str,
+    pub transaction: &'a str,
+    pub ceremony: &'a str,
+    pub options: &'a str,
+    pub totp: bool,
+    pub choices: &'a [ExternalChoice],
+    pub integrity: &'a str,
 }

@@ -1499,6 +1499,14 @@ pub enum AdminCommand {
     Import {
         force: Option<String>,
     },
+    /// `hopae admin factors list <target>` (ADR-0017).
+    FactorsList {
+        target: String,
+    },
+    /// `hopae admin factors reset <target>` (ADR-0017).
+    FactorsReset {
+        target: String,
+    },
 }
 
 /// Operator-facing text for a store failure; a database error is never echoed.
@@ -1645,12 +1653,13 @@ pub async fn admin_cli_with(
     };
     // Validation first.
     let parsed_target = match &cmd {
-        AdminCommand::Grant { target, .. } | AdminCommand::Revoke { target } => {
-            match parse_target(target) {
-                Ok(t) => Some(t),
-                Err(m) => return Ok(out.refuse(m)),
-            }
-        }
+        AdminCommand::Grant { target, .. }
+        | AdminCommand::Revoke { target }
+        | AdminCommand::FactorsList { target }
+        | AdminCommand::FactorsReset { target } => match parse_target(target) {
+            Ok(t) => Some(t),
+            Err(m) => return Ok(out.refuse(m)),
+        },
         _ => None,
     };
     if let AdminCommand::Grant { note, confirm, .. } = &cmd {
@@ -1867,6 +1876,64 @@ pub async fn admin_cli_with(
                         ));
                     }
                     out.out(line);
+                }
+            }
+            AdminCommand::FactorsList { .. } | AdminCommand::FactorsReset { .. } => {
+                use crate::store::Passkeys;
+                let reset = matches!(cmd, AdminCommand::FactorsReset { .. });
+                let target = parsed_target.expect("validated");
+                let Some((user, _)) = dir.resolve_grant_target(&target, dl()).await? else {
+                    out.stderr.push_str("error: no such user\n");
+                    out.code = EXIT_CONFIG;
+                    return Ok(());
+                };
+                let summary = store.factor_summary(&user.user_id).await?;
+                if reset {
+                    let ev = crate::event::types::EventBuilder::new(
+                        &*env.clock,
+                        &*env.rng,
+                        EventKind::AdminFactorReset,
+                        Outcome::Success,
+                        "admin-cli",
+                    )
+                    .reason(reasons::FACTOR_RESET)
+                    .user(&user.user_id)
+                    .attr("actor", "cli")
+                    .build();
+                    let report = store.reset_factors(&user.user_id, "admin-cli", vec![ev]).await?;
+                    out.out(format!(
+                        "reset {}: {} passkey(s), {} authenticator app(s), {} recovery code(s) revoked; {} session(s) ended",
+                        user.user_id, report.passkeys, report.totp, report.recovery_codes, report.sessions
+                    ));
+                } else {
+                    out.out(format!("user_id {}", user.user_id));
+                    out.out(format!(
+                        "authenticator_app {}",
+                        if summary.totp_active { "active" } else { "-" }
+                    ));
+                    out.out(format!(
+                        "recovery_codes {} unused{}",
+                        summary.recovery_unused,
+                        if summary.recovery_required_at.is_some() {
+                            " (a code was used: re-enrollment required)"
+                        } else {
+                            ""
+                        }
+                    ));
+                    out.out("PASSKEY_ID  LABEL  KIND  CLASS  CREATED_AT  LAST_USED_AT");
+                    for p in &summary.passkeys {
+                        out.out(format!(
+                            "{}  {}  {}  {}  {}  {}",
+                            crate::store::sqlite::webauthn::factor_id(&p.credential_id),
+                            plain(&p.label),
+                            if p.backup_eligible { "synced" } else { "device-bound" },
+                            p.assurance.as_str(),
+                            preflight::iso_datetime(p.created_at.secs()),
+                            p.last_used_at
+                                .map(|t| preflight::iso_datetime(t.secs()))
+                                .unwrap_or_else(|| "-".into()),
+                        ));
+                    }
                 }
             }
             AdminCommand::Import { .. } => {
