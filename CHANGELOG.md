@@ -50,6 +50,13 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   the sessions it elevated; the last second factor cannot be removed. The
   portal's only script is a static same-origin file with Subresource
   Integrity, served with Trusted Types and only on ceremony pages.
+- Adversarial review pass 1 fixes: recovery codes are minted only after a
+  possession factor (or by the session that enrolled the first factor); a
+  slower passwordless tab is no longer taken for a cloned passkey; a
+  passwordless session ends with its own passkey; refused verified
+  ceremonies are consumed and recorded; passkey sign-in ceremonies are
+  limited per IPv6 /64; passkey sessions end at start when passwordless
+  sign-in is not configured; AAL 3 decisions are never cached.
 - New dependencies: `webauthn-rs` 0.5.5 (MPL-2.0) with OpenSSL vendored
   into the binary, `argon2` 0.5, `serde_cbor_2` 0.13.
 

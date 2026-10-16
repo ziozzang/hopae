@@ -17,7 +17,7 @@
 
 1. **No stored level 3.** The stored `aal` columns keep `CHECK (aal IN (1, 2))`; no table is rebuilt. Rebuilding `sessions` would cascade through every table that references it (an SQLite `DROP TABLE` with foreign keys enabled deletes children), and a rolled-back binary would read an unknown level. A session elevated with a high-assurance passkey stays `aal = 2`; AAL 3 is a **presentation** of that evidence.
 2. **Evidence.** A request qualifies for 3 when its handle was issued at 2 and the session's **current** elevation (the provenance row of its current credential generation) is a passkey use classed `aal3`, the credential is still active, classed `aal3`, not backup-eligible and not backed up. Elevation revokes every earlier handle and consumes every outstanding code (ADR-0008), so every live AAL 2 handle of that generation post-dates the evidence; any later elevation (an authenticator code, an AAL 2 passkey, a recovery code) changes the generation and ends the qualification. A passwordless sign-in with a high-assurance key records the same row.
-3. **Opt-in per application.** `apps[].max_emitted_aal` is `2` (default) or `3`; `3` requires `webauthn.high_assurance` (preflight refuses otherwise). Only an application with `3` sees `x-hopae-aal: 3` and only its receipts seal 3; for every other application the same session presents 2. The console never presents 3. Hopae reads the evidence only for opted-in applications; a store failure presents the stored level, never more.
+3. **Opt-in per application.** `apps[].max_emitted_aal` is `2` (default, never inherited from the `default` application) or `3`; `3` requires `webauthn.high_assurance` (preflight refuses otherwise). Only an application with `3` sees `x-hopae-aal: 3` and only its receipts seal 3; for every other application the same session presents 2. The console never presents 3. Hopae reads the evidence only for opted-in applications; a store failure presents the stored level, never more. A decision presenting 3 is never cached (`no-store`): the evidence can end without a generation change (a passkey removed by the session it elevated).
 4. **Native Human path.** The native owner presents 3 only when the application opted in and its exact current establishing factor (ADR-0017 decision 15) is a high-assurance passkey; otherwise its existing level.
 5. **Readers in this repository** accept 1–3 for Human identities: Hopae's Human gRPC server, the Human permission parser, and the `hopae-grpc` Human observed client (a new revision for peers). Receipt binding already did. Peers on an older `hopae-grpc` revision refuse 3 and fail closed for opted-in applications only.
 6. **Not changed:** step-up rules (`require.aal`), `admin.require_aal` and Human projection plans (`minimum_aal`) still validate 1 or 2. Requiring 3 needs a step-up page that offers only high-assurance keys and a transaction that records the required level; Pumgye plans of 3 need Pumgye to evaluate them. These are follow-ups; they are not needed for emission.
@@ -56,7 +56,12 @@
 
 ## Adversarial review
 
-Not yet reviewed (G2 pending). Questions: can a handle issued before a high-assurance elevation present 3 (decision 2 relies on ADR-0008 revocation); can a cached allow present 3 after a later AAL 2 elevation (the cache key includes the credential generation through `x-hopae-gen`).
+| Pass | Date | S1 | S2 | S3 | S4 | Outcome |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 2026-10-16 | 0 | 0 | 0 | 2 | F10, F11 fixed; reviewed together with ADR-0017. A confirmation pass is pending. |
+
+- F10 (S4): a cached allow could present 3 for up to 30 s after the evidence ended. FIX: decisions presenting 3 are `no-store`.
+- F11 (S4): `max_emitted_aal` was inherited from the `default` application. FIX: never inherited; configuration test `max_emitted_aal_is_per_application_and_never_inherited`.
 
 ## References
 

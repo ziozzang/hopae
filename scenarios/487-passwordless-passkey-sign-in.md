@@ -75,6 +75,18 @@ With passwordless sign-in configured, a user with a discoverable passkey signs i
 - When: an administrator resets the user's factors (the same path as removal and clone revocation).
 - Then: no live `hopae.passkey` session remains.
 
+### S487-A6 A slower tab is stale, not a clone
+
+- Given: two sign-in tabs; the assertion signed first is posted last.
+- When: the late assertion arrives after the other tab signed in.
+- Then: the same refusal; the passkey stays active and the other session lives.
+
+### S487-A7 Removing the establishing passkey ends the acting session
+
+- Given: a passwordless session and a second passkey.
+- When: that session removes the passkey it was established with.
+- Then: no live passwordless session remains.
+
 ## Observability expectations
 
 - Audit: `login.succeeded` and `session.created` (`aal = 2`) with `kind = webauthn`, `factor.webauthn_used` (`purpose = login`); `login.failed` (`ceremony_invalid`, `cause`) for refusals; `factor.webauthn_clone_suspected` for a counter regression.
@@ -91,6 +103,8 @@ With passwordless sign-in configured, a user with a discoverable passkey signs i
 | S487-A3 | `s487_a3_another_browser_cannot_complete_the_ceremony` | `tests/scenarios/s480_passkeys.rs` | integration | passing |
 | S487-A4 | `s487_a4_ceremonies_per_address_are_bounded` | `tests/scenarios/s480_passkeys.rs` | integration | passing |
 | S487-A5 | `s487_a5_removing_the_passkey_ends_its_passwordless_sessions` | `tests/scenarios/s480_passkeys.rs` | integration | passing |
+| S487-A6 | `s487_a6_a_slower_tab_is_stale_not_a_clone` | `tests/scenarios/s480_passkeys.rs` | integration | passing |
+| S487-A7 | `s487_a7_removing_the_establishing_passkey_ends_the_acting_session` | `tests/scenarios/s480_passkeys.rs` | integration | passing |
 
 ## Live verification
 

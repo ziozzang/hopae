@@ -117,6 +117,14 @@ impl Pk {
         assert_eq!(back.status, 302, "{back:?}");
         let redeem = pk.verify(back.location().unwrap());
         assert_eq!(redeem.status, 302, "{redeem:?}");
+        // The test-hook clock is frozen at spawn while the mock provider's
+        // `auth_time` is wall time: under load the session would look
+        // authenticated in the future. Move Hopae's clock past it.
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        pk.h.set_clock_ms(wall.max(pk.h.hooks.now_ms()) + 1000);
         pk
     }
 
@@ -1492,4 +1500,73 @@ fn s488_a2_aal3_needs_high_assurance_configuration() {
             String::from_utf8_lossy(&out.stdout)
         );
     }
+}
+
+#[test]
+fn s487_a6_a_slower_tab_is_stale_not_a_clone() {
+    // Review F2: two sign-in tabs; the assertion signed first arrives last.
+    let mut p = Pk::start(passwordless());
+    assert_eq!(p.register("Laptop").status, 303);
+    let handle = p.user_handle("");
+    let first = p.fresh();
+    let second = p.fresh();
+    let (_, early) = p.passwordless_form(&first, &handle);
+    let (_, late) = p.passwordless_form(&second, &handle);
+    assert_eq!(p.post_in(&second, "/login/passkey", &late).status, 302);
+    let r = p.post_in(&first, "/login/passkey", &early);
+    assert_eq!(r.status, 303, "{r:?}");
+    assert!(r.location().unwrap().contains("passkey_error=rejected"));
+    assert_eq!(
+        p.sql("SELECT COUNT(*) FROM webauthn_credentials WHERE state='active'"),
+        1,
+        "not revoked"
+    );
+    assert_eq!(p.sql("SELECT COUNT(*) FROM sessions WHERE provider_id='hopae.passkey' AND terminated_at IS NULL"), 1);
+}
+
+#[test]
+fn s487_a7_removing_the_establishing_passkey_ends_the_acting_session() {
+    // Review F3: a passwordless session removes the passkey it was established with.
+    let mut p = Pk::start(passwordless());
+    assert_eq!(p.register("Laptop").status, 303);
+    let handle = p.user_handle("");
+    // A second passkey on another authenticator, so the first is not the last factor.
+    assert_eq!(p.verify_portal(PORTAL).status, 303);
+    let first_key = std::mem::replace(
+        &mut p.key,
+        WebauthnAuthenticator::new(SoftPasskey::new(true)),
+    );
+    assert_eq!(p.register("Phone").status, 303);
+    p.key = first_key;
+    let b = p.fresh();
+    let (_, form) = p.passwordless_form(&b, &handle);
+    assert_eq!(p.post_in(&b, "/login/passkey", &form).status, 302);
+    let list = b.portal.get("/security/passkeys");
+    let first_id = {
+        use base64::Engine as _;
+        let c = rusqlite::Connection::open(p.h.state_dir.path().join("state").join("hopae.db"))
+            .unwrap();
+        let v: Vec<u8> = c
+            .query_row(
+                "SELECT credential_id FROM webauthn_credentials WHERE label='Laptop'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v)
+    };
+    let gone = p.post_in(
+        &b,
+        "/security/passkeys/remove",
+        &[
+            (
+                "csrf".into(),
+                field(&list.body, "/security/passkeys/remove", "csrf"),
+            ),
+            ("credential".into(), first_id),
+            ("confirm".into(), "1".into()),
+        ],
+    );
+    assert_eq!(gone.status, 303, "{gone:?}");
+    assert_eq!(p.sql("SELECT COUNT(*) FROM sessions WHERE provider_id='hopae.passkey' AND terminated_at IS NULL"), 0);
 }

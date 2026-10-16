@@ -1887,10 +1887,10 @@ fn resolve_app(entry: Option<&AppEntry>, base: &AppPolicy, cfg: &Config, id: &st
             })
             .collect(),
         max_auth_age: None,
+        // Never inherited from `default`: AAL 3 is opted in per application (review F11).
         max_emitted_aal: match a.max_emitted_aal {
             Some(3) => Aal::Three,
-            Some(_) => Aal::Two,
-            None => base.max_emitted_aal,
+            _ => Aal::Two,
         },
     }
 }
@@ -2137,6 +2137,21 @@ mod tests {
             let error = with(&raw).unwrap_err().to_string();
             assert!(!error.contains("literal-key-with-hyphen"));
         }
+    }
+
+    #[test]
+    fn max_emitted_aal_is_per_application_and_never_inherited() {
+        let cfg = with(r#"{"webauthn":{"high_assurance":{"attestation_ca_files":["/x.pem"],"aaguids":["cb69481e-8ff7-4039-93ec-0a2729a154a8"]}},"apps":[{"app_id":"default","max_emitted_aal":3},{"app_id":"a","hosts":["a.example.test"]},{"app_id":"b","hosts":["b.example.test"],"max_emitted_aal":3}]}"#).unwrap();
+        let snap = cfg.snapshot(1);
+        let get = |id: &str| {
+            snap.apps
+                .iter()
+                .find(|a| a.app_id.as_str() == id)
+                .unwrap()
+                .max_emitted_aal
+        };
+        assert_eq!(get("a"), Aal::Two);
+        assert_eq!(get("b"), Aal::Three);
     }
 
     #[test]

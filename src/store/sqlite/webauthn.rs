@@ -77,6 +77,18 @@ pub(crate) fn recent_second_factor(factors: &[FactorEntry], now: Timestamp) -> b
     })
 }
 
+/// A possession factor (not a recovery code) at most [`MANAGEMENT_WINDOW`] old:
+/// what minting recovery codes requires (review F1, F5).
+pub(crate) fn recent_possession_factor(factors: &[FactorEntry], now: Timestamp) -> bool {
+    factors.iter().any(|f| {
+        matches!(
+            f.kind,
+            FactorKind::Webauthn | FactorKind::Totp | FactorKind::External
+        ) && f.at <= now
+            && now.since(f.at) <= MANAGEMENT_WINDOW
+    })
+}
+
 /// ADR-0017 decision 10: a recent second factor, or — for a user without
 /// one — a primary sign-in at most five minutes old.
 pub(crate) fn management_allowed(
@@ -981,7 +993,16 @@ impl Passkeys for Store {
                 "UPDATE webauthn_credentials SET state='revoked',revoked_at=?3,revoked_reason='removed',revision=revision+1 WHERE credential_id=?1 AND user_id=?2 AND state='active'",
                 params![credential_id, user.as_str(), now.secs()],
             )?;
-            end_elevated_sessions(&tx, &shared, user, &credential_id, Some(&actor.view.session.session_id), reasons::PASSKEY_REMOVED, &actor.request_id)?;
+            // The acting session continues, unless this passkey established it
+            // (passwordless): such a session ends with its passkey (review F3).
+            let established_here = actor.view.session.provider_id.as_str() == crate::provider::types::PASSKEY_PROVIDER
+                && tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_webauthn_elevations WHERE session_id=?1 AND credential_id=?2)",
+                    params![actor.view.session.session_id.as_str(), credential_id],
+                    |r| r.get::<_, bool>(0),
+                )?;
+            let keep = (!established_here).then_some(&actor.view.session.session_id);
+            end_elevated_sessions(&tx, &shared, user, &credential_id, keep, reasons::PASSKEY_REMOVED, &actor.request_id)?;
             insert_events(&tx, &shared, &[
                 event(&shared, EventKind::FactorWebauthnRevoked, Outcome::Success, &actor.request_id)
                     .user(user)
@@ -1028,12 +1049,22 @@ impl Passkeys for Store {
                 [user.as_str()],
                 |r| r.get(0),
             )?;
-            // The first set needs the enrollment freshness; replacing live codes needs a recent second factor.
-            let allowed = if unused == 0 {
-                management_allowed(&view.session.factors, view.session.auth_time, false, now)
-            } else {
-                recent_second_factor(&view.session.factors, now)
+            // Codes are minted only after a recent possession factor (never a
+            // recovery code). The one exception is the first set, right after
+            // this very session enrolled the user's only factor with a fresh
+            // primary sign-in: no factor existed to verify with (review F1).
+            let first_enrollment = {
+                let ever: i64 = tx.query_row("SELECT COUNT(*) FROM recovery_codes WHERE user_id=?1", [user.as_str()], |r| r.get(0))?;
+                let only_factor = second_factor_count(&tx, user.as_str())? == 1;
+                let enrolled_here: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM events WHERE kind='factor.webauthn_registered' AND user_id=?1 AND session_id=?2 AND at>=?3)",
+                    params![user.as_str(), view.session.session_id.as_str(), (now.0 - MANAGEMENT_WINDOW.as_millis() as i64) as f64 / 1000.0],
+                    |r| r.get(0),
+                )?;
+                ever == 0 && unused == 0 && only_factor && enrolled_here
+                    && management_allowed(&view.session.factors, view.session.auth_time, false, now)
             };
+            let allowed = first_enrollment || recent_possession_factor(&view.session.factors, now);
             if !allowed {
                 return Err(conflict(refusal::VERIFICATION_REQUIRED));
             }
@@ -1122,18 +1153,19 @@ impl Passkeys for Store {
         self.read("passkey_login_ceremony", move |conn| {
             let row = conn
                 .query_row(
-                    "SELECT txn_sha256,portal_bind_sha256,client_ip,state FROM webauthn_login_challenges WHERE challenge_sha256=?1 AND consumed_at IS NULL AND expires_at>?2",
+                    "SELECT txn_sha256,portal_bind_sha256,client_ip,state,created_at FROM webauthn_login_challenges WHERE challenge_sha256=?1 AND consumed_at IS NULL AND expires_at>?2",
                     params![blob(&digest), clock.now().secs()],
-                    |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?)),
+                    |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?, r.get::<_, i64>(4)?)),
                 )
                 .optional()?;
-            let Some((txn, bind, ip, state)) = row else { return Ok(None) };
+            let Some((txn, bind, ip, state, created)) = row else { return Ok(None) };
             let corrupt = |c: &str| StoreError::Corrupt(format!("webauthn_login_challenges.{c}"));
             Ok(Some(LoginCeremonyRecord {
                 transaction: Digest(<[u8; 32]>::try_from(txn.as_slice()).map_err(|_| corrupt("txn_sha256"))?),
                 portal_bind_sha256: Digest(<[u8; 32]>::try_from(bind.as_slice()).map_err(|_| corrupt("portal_bind_sha256"))?),
                 client_ip: ip.parse().map_err(|_| corrupt("client_ip"))?,
                 state,
+                created_at: Timestamp::from_secs(created),
             }))
         })
         .await
@@ -1279,6 +1311,32 @@ impl Passkeys for Store {
             }
             insert_events(&tx, &shared, &events)?;
             commit(tx, &shared, None)
+        })
+        .await
+    }
+
+    async fn end_passkey_sessions(&self, request_id: &str) -> StoreResult<u32> {
+        let request_id = request_id.to_owned();
+        self.write("end_passkey_sessions", move |env| {
+            let shared = env.shared.clone();
+            let now = shared.clock.now();
+            let tx = env.begin()?;
+            let live: Vec<(String, String)> = tx
+                .prepare("SELECT session_id,user_id FROM sessions WHERE provider_id=?1 AND terminated_at IS NULL ORDER BY session_id")?
+                .query_map([crate::provider::types::PASSKEY_PROVIDER], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<Result<_, _>>()?;
+            let n = u32::try_from(live.len()).unwrap_or(u32::MAX);
+            for (sid, user) in live {
+                let sid = SessionId::new(sid);
+                let ev = event(&shared, EventKind::SessionTerminated, Outcome::Success, &request_id)
+                    .user(&UserId::new(user))
+                    .session(&sid)
+                    .reason(reasons::PROVIDER_DISABLED)
+                    .build();
+                super::sessions::terminate_in(&tx, &shared, &sid, reasons::PROVIDER_DISABLED, now, &[ev])?;
+            }
+            commit(tx, &shared, None)?;
+            Ok(n)
         })
         .await
     }

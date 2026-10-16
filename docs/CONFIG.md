@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 38 -->
+<!-- doc-rev: 39 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -129,7 +129,7 @@ for. A host not listed is denied (`unknown_app`).
 | `apps[].on_authz_change` | `refresh`, `terminate` | `refresh` | What happens to live sessions when authorization data changes. |
 | `apps[].verify_cache_seconds` | integer | `0` | Staleness bound the gateway may cache an allow for; at most `30`. `hopae --check` prints the value per application and **warns when it is `false`**: `sec-fetch-site: same-origin` proves only that a document of the application's own origin started the navigation, so a navigation gadget in the application (a page that assigns a URL from its own query to `location`, such as `/continue?next=/_hopae/logout`) can end a user's session without a click. Keep `true` unless that is accepted. |
 | `apps[].logout_confirm` | boolean | `true` (inherited from the `default` application when it sets it) | `true`: `/_hopae/logout` on the application host redirects to the portal's confirmation page. `false`: a document navigation with `sec-fetch-site: same-origin` that presents a valid handle ends the session at once and is redirected to the portal's signed-out page; every other request still goes through the confirmation. After either, the portal shows a "Sign in again" link instead of redirecting to the protected target ([ADR-0015](adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md), [gateway contract](GATEWAY_CONTRACT.md#application-host-entry-points)). Reported by `--check`. |
-| `apps[].max_emitted_aal` | integer | `2` (inherited from the `default` application) | Highest level presented in `x-hopae-aal` and sealed into receipts for this application: `2` or `3`. `3` needs `webauthn.high_assurance` and is presented only while the session's current elevation is a high-assurance passkey ([ADR-0018](adr/0018-aal3-emission.md)); every other application sees `2` for the same session. Opt in only when the application and its peers accept `3`. |
+| `apps[].max_emitted_aal` | integer | `2` (never inherited from the `default` application) | Highest level presented in `x-hopae-aal` and sealed into receipts for this application: `2` or `3`. `3` needs `webauthn.high_assurance` and is presented only while the session's current elevation is a high-assurance passkey ([ADR-0018](adr/0018-aal3-emission.md)); every other application sees `2` for the same session. Opt in only when the application and its peers accept `3`. |
 | `apps[].step_up[]` | array of `{path_prefix, require: {aal, max_age}}` | none | Enforced session assurance rules (`aal` is 1 or 2, `path_prefix` starts with `/`, `max_age` is positive seconds). AAL 2 requires actual second-factor evidence; freshness uses its satisfaction time. Rules force `no-store`. An AAL 0 service credential cannot satisfy a matching rule. With a configured TOTP keyring, document requests start native OTP step-up; without one they fail closed. |
 
 #### Providers

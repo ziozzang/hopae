@@ -618,7 +618,8 @@ fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed, aal3: bool) -> Decision {
 
     touch(cx, app, &view);
 
-    let cache = cacheability(cx, app, expires_at, path_dependent);
+    // AAL 3 depends on live evidence outside the generation stamp: never cached (review F10).
+    let cache = cacheability(cx, app, expires_at, path_dependent || aal3);
     let mut identity = Identity {
         receipt_seal: None,
         user_id: view.session.user_id.clone(),

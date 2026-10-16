@@ -763,6 +763,21 @@ async fn bind_environment(
         .context("importing providers")?;
     log_import(&report);
     import_admin_grants_at_start(cfg, &*directory, &env).await?;
+    // Passwordless passkey sessions exist only while passwordless sign-in is
+    // configured (ADR-0017 decision 16, review F6).
+    if !cfg.webauthn.as_ref().is_some_and(|w| w.passwordless) {
+        use crate::store::Passkeys;
+        let ended = store
+            .end_passkey_sessions("r_startup")
+            .await
+            .context("ending passkey sessions")?;
+        if ended > 0 {
+            tracing::warn!(
+                ended,
+                "passwordless sign-in is not configured: passkey sessions ended"
+            );
+        }
+    }
     // The provider registry, from the rows the import just settled (the
     // database is authoritative). Its reporter writes `provider.error`.
     let prepared_providers = store

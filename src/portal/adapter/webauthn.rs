@@ -22,7 +22,45 @@ use crate::store::{FactorActor, Factors, HandleRow, Passkeys, StoreError};
 /// Ceremony rows live five minutes, like the authenticator timeout.
 const CEREMONY_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Passwordless ceremonies per address bucket and minute (IPv6 by /64), in
+/// front of the store's per-address and global bounds (review F7).
+#[derive(Default)]
+pub(super) struct LoginBuckets(
+    std::sync::Mutex<std::collections::HashMap<[u8; 8], (std::time::Instant, u32)>>,
+);
+
+impl LoginBuckets {
+    const PER_MINUTE: u32 = 30;
+    const CAPACITY: usize = 16_384;
+    fn admit(&self, ip: std::net::IpAddr) -> bool {
+        let key: [u8; 8] = match ip.to_canonical() {
+            std::net::IpAddr::V4(v4) => {
+                let o = v4.octets();
+                [4, o[0], o[1], o[2], o[3], 0, 0, 0]
+            }
+            std::net::IpAddr::V6(v6) => v6.octets()[..8].try_into().unwrap_or([6; 8]),
+        };
+        let Ok(mut map) = self.0.lock() else {
+            return false;
+        };
+        let now = std::time::Instant::now();
+        if map.len() >= Self::CAPACITY {
+            map.retain(|_, (start, _)| now.duration_since(*start).as_secs() < 60);
+            if map.len() >= Self::CAPACITY {
+                return false;
+            }
+        }
+        let entry = map.entry(key).or_insert((now, 0));
+        if now.duration_since(entry.0).as_secs() >= 60 {
+            *entry = (now, 0);
+        }
+        entry.1 += 1;
+        entry.1 <= Self::PER_MINUTE
+    }
+}
+
 pub(super) struct WebauthnDeps {
+    pub(super) buckets: LoginBuckets,
     pub(super) store: Arc<crate::store::Store>,
     pub(super) rp: Arc<RelyingParty>,
     pub(super) keys: Option<Arc<crate::factor::keyring::Keyring>>,
@@ -42,7 +80,7 @@ impl Adapter {
     ) -> Option<PasskeyOffer> {
         let deps = self.webauthn.as_ref().filter(|d| d.rp.passwordless())?;
         let bind = cookies.bind.as_ref()?;
-        if !ctx.https {
+        if !ctx.https || !deps.buckets.admit(ctx.client_ip) {
             return None;
         }
         let row = self
@@ -86,6 +124,7 @@ impl Adapter {
         rng: Arc<dyn crate::crypto::Rng>,
     ) -> Self {
         self.webauthn = Some(WebauthnDeps {
+            buckets: LoginBuckets::default(),
             store,
             rp,
             keys,
@@ -320,6 +359,42 @@ impl WebauthnDeps {
         }
     }
 
+    /// A store refusal after a verified response: the ceremony is consumed in
+    /// its own transaction and the cause recorded, so the same response can
+    /// never be resubmitted (review F4). Availability errors leave it alone.
+    async fn refused_after_verification(
+        &self,
+        who: (
+            &crate::identity::types::UserId,
+            &crate::session::types::SessionId,
+            &str,
+        ),
+        bearer: &Secret,
+        purpose: CeremonyPurpose,
+        error: StoreError,
+    ) -> Refusal {
+        if let StoreError::Conflict(cause) = &error {
+            let event = EventBuilder::new(
+                self.clock.as_ref(),
+                self.rng.as_ref(),
+                EventKind::FactorWebauthnFailed,
+                Outcome::Failure,
+                who.2,
+            )
+            .user(who.0)
+            .session(who.1)
+            .reason(reasons::CEREMONY_INVALID)
+            .attr("purpose", purpose.as_str())
+            .attr("cause", *cause)
+            .build();
+            let _ = self
+                .store
+                .fail_ceremony(&bearer.digest(), vec![event])
+                .await;
+        }
+        store_refusal(error)
+    }
+
     /// The reissued portal handle after a portal elevation.
     fn portal_handle(
         &self,
@@ -359,7 +434,17 @@ impl WebauthnDeps {
         };
         let (handle, row, expiry) = self.portal_handle(&actor, aal);
         let now = row.created_at;
-        self.store
+        let who = (
+            actor.user().clone(),
+            actor.view.session.session_id.clone(),
+            actor.request_id.clone(),
+        );
+        let ceremony = match &proof {
+            PortalProof::Passkey { ceremony, .. } => Some(*ceremony),
+            _ => None,
+        };
+        if let Err(e) = self
+            .store
             .elevate_portal(PortalElevation {
                 actor,
                 portal_binding: bind.digest(),
@@ -368,7 +453,30 @@ impl WebauthnDeps {
                 events: vec![],
             })
             .await
-            .map_err(store_refusal)?;
+        {
+            return Err(match ceremony {
+                Some(digest) => {
+                    if let StoreError::Conflict(cause) = &e {
+                        let event = EventBuilder::new(
+                            self.clock.as_ref(),
+                            self.rng.as_ref(),
+                            EventKind::FactorWebauthnFailed,
+                            Outcome::Failure,
+                            &who.2,
+                        )
+                        .user(&who.0)
+                        .session(&who.1)
+                        .reason(reasons::CEREMONY_INVALID)
+                        .attr("purpose", "verify")
+                        .attr("cause", *cause)
+                        .build();
+                        let _ = self.store.fail_ceremony(&digest, vec![event]).await;
+                    }
+                    store_refusal(e)
+                }
+                None => store_refusal(e),
+            });
+        }
         Ok(HandleCookie {
             value: handle,
             max_age: expiry.since(now),
@@ -551,7 +659,13 @@ impl SecurityServices for Adapter {
             });
         let now = deps.clock.now();
         let user = actor.user().clone();
-        deps.store
+        let who = (
+            user.clone(),
+            actor.view.session.session_id.clone(),
+            actor.request_id.clone(),
+        );
+        let result = deps
+            .store
             .register_passkey(RegisterPasskey {
                 actor,
                 ceremony: ceremony.digest(),
@@ -576,8 +690,18 @@ impl SecurityServices for Adapter {
                 },
                 events: vec![],
             })
-            .await
-            .map_err(store_refusal)
+            .await;
+        match result {
+            Ok(()) => Ok(()),
+            Err(e) => Err(deps
+                .refused_after_verification(
+                    (&who.0, &who.1, &who.2),
+                    ceremony,
+                    CeremonyPurpose::Register,
+                    e,
+                )
+                .await),
+        }
     }
 
     async fn rename(
@@ -959,6 +1083,24 @@ impl SecurityServices for Adapter {
             .collect();
         let asserted = match deps.rp.finish_login(response, &record.state, &stored) {
             Ok(a) => a,
+            Err(Ceremony::CounterRegression)
+                if passkeys.iter().any(|p| {
+                    p.credential_id == credential_id
+                        && p.last_used_at.is_some_and(|t| t >= record.created_at)
+                }) =>
+            {
+                // Review F2: the passkey was used after this ceremony began (the
+                // same user's other tab). The ceremony checks the current
+                // counter, so a slower tab is stale, not a clone.
+                deps.store
+                    .fail_login_ceremony(
+                        &ceremony.digest(),
+                        vec![fail("counter_stale", Some(&user))],
+                    )
+                    .await
+                    .map_err(|_| unavailable())?;
+                return Err(Refusal::Rejected);
+            }
             Err(Ceremony::CounterRegression) => {
                 let event = EventBuilder::new(
                     deps.clock.as_ref(),
@@ -998,7 +1140,7 @@ impl SecurityServices for Adapter {
             backup_state: asserted.backup_state,
             assurance: asserted.assurance,
         };
-        let (location, issued) = self
+        let completed = self
             .svc
             .complete_passkey_login(
                 &sctx,
@@ -1009,11 +1151,27 @@ impl SecurityServices for Adapter {
                 &user,
                 used,
             )
-            .await
-            .map_err(|e| match e {
-                crate::session::service::SessionError::Store(e) => store_refusal(e),
-                _ => Refusal::Rejected,
-            })?;
+            .await;
+        let (location, issued) = match completed {
+            Ok(v) => v,
+            Err(crate::session::service::SessionError::Store(e)) => {
+                // Consume the ceremony and record why (review F4).
+                if let StoreError::Conflict(cause) = &e {
+                    deps.store
+                        .fail_login_ceremony(&ceremony.digest(), vec![fail(cause, Some(&user))])
+                        .await
+                        .map_err(|_| unavailable())?;
+                }
+                return Err(store_refusal(e));
+            }
+            Err(_) => {
+                deps.store
+                    .fail_login_ceremony(&ceremony.digest(), vec![fail("session", Some(&user))])
+                    .await
+                    .map_err(|_| unavailable())?;
+                return Err(Refusal::Rejected);
+            }
+        };
         Ok(Redirect {
             location,
             set_handle: Some(HandleCookie {
@@ -1062,7 +1220,13 @@ impl SecurityServices for Adapter {
             handoff_row,
         } = Self::prepare_stepup(&actor, &row, ctx, deps.clock.as_ref(), deps.rng.as_ref())
             .map_err(Refusal::Failure)?;
-        deps.store
+        let who = (
+            actor.user().clone(),
+            actor.view.session.session_id.clone(),
+            actor.request_id.clone(),
+        );
+        let elevated = deps
+            .store
             .elevate_webauthn(WebauthnElevation {
                 actor,
                 ceremony: ceremony.digest(),
@@ -1074,8 +1238,17 @@ impl SecurityServices for Adapter {
                 handoff: handoff_row,
                 events: vec![],
             })
-            .await
-            .map_err(store_refusal)?;
+            .await;
+        if let Err(e) = elevated {
+            return Err(deps
+                .refused_after_verification(
+                    (&who.0, &who.1, &who.2),
+                    ceremony,
+                    CeremonyPurpose::StepUp,
+                    e,
+                )
+                .await);
+        }
         Ok(Redirect {
             location: crate::session::handoff::landing_location(
                 &row.return_target,

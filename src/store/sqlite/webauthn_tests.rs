@@ -655,9 +655,18 @@ async fn recovery_codes_need_a_factor_are_single_use_and_keep_aal_one() {
         f.store.elevate_portal(req).await,
         "recovery code unavailable",
     );
-    // The recovery entry is recent verification: replacing codes and adding a passkey work, and enrollment clears the flag.
+    // A recovery entry lets the user add a passkey (and clears the flag),
+    // but never mints new codes (review F1, F5).
+    refused(
+        f.store
+            .replace_recovery_codes(f.actor(&v), "b2".into(), codes("B"), vec![])
+            .await,
+        refusal::VERIFICATION_REQUIRED,
+    );
+    f.register(&p, &v, 2).await.unwrap();
+    let w = f.verify_portal(&p, &v, 2, 1).await.unwrap();
     f.store
-        .replace_recovery_codes(f.actor(&v), "b2".into(), codes("B"), vec![])
+        .replace_recovery_codes(f.actor(&w), "b2".into(), codes("B"), vec![])
         .await
         .unwrap();
     assert_eq!(
@@ -668,7 +677,6 @@ async fn recovery_codes_need_a_factor_are_single_use_and_keep_aal_one() {
             .recovery_unused,
         10
     );
-    f.register(&p, &v, 2).await.unwrap();
     assert!(
         f.store
             .factor_summary(&p.user.user_id)
@@ -966,5 +974,61 @@ async fn aal3_evidence_follows_the_current_high_assurance_elevation() {
     assert_eq!(
         f.count("SELECT COUNT(*) FROM session_webauthn_provenance WHERE assurance='aal2'"),
         1
+    );
+}
+
+#[tokio::test]
+async fn a_primary_only_session_cannot_mint_recovery_codes_for_an_enrolled_user() {
+    // Review F1: the victim enrolled in one session; the attacker holds only
+    // the primary credential and signs in afresh in another.
+    let f = fx();
+    let p = px(&f).await;
+    f.register(&p, &p.view, 1).await.unwrap();
+    let attacker = f.session(&p.user, vec![]).await;
+    let av = f.view(&attacker).await;
+    refused(
+        f.store
+            .replace_recovery_codes(f.actor(&av), "x".into(), codes("X"), vec![])
+            .await,
+        refusal::VERIFICATION_REQUIRED,
+    );
+    // The enrolling session itself may create the first set.
+    f.store
+        .replace_recovery_codes(f.actor(&p.view), "b1".into(), codes("A"), vec![])
+        .await
+        .unwrap();
+    // Once codes existed, even the enrolling session needs a possession factor.
+    f.store
+        .conn()
+        .execute("UPDATE recovery_codes SET used_at=1", [])
+        .unwrap();
+    refused(
+        f.store
+            .replace_recovery_codes(f.actor(&p.view), "b2".into(), codes("B"), vec![])
+            .await,
+        refusal::VERIFICATION_REQUIRED,
+    );
+}
+
+#[tokio::test]
+async fn passkey_sessions_end_when_passwordless_is_not_configured() {
+    let f = fx();
+    let p = px(&f).await;
+    let other = f.user(74).await;
+    let s = f.session(&other, vec![]).await;
+    f.store
+        .conn()
+        .execute(
+            "UPDATE sessions SET provider_id='hopae.passkey' WHERE session_id=?1",
+            [s.row.session_id.as_str()],
+        )
+        .unwrap();
+    assert_eq!(f.store.end_passkey_sessions("r_test").await.unwrap(), 1);
+    assert_eq!(f.count("SELECT COUNT(*) FROM sessions WHERE provider_id='hopae.passkey' AND terminated_at IS NULL"), 0);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM sessions WHERE terminated_at IS NULL"),
+        1,
+        "{:?}",
+        p.session.row.session_id
     );
 }

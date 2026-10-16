@@ -54,6 +54,7 @@ pub struct LoginCeremonyRecord {
     pub portal_bind_sha256: Digest,
     pub client_ip: std::net::IpAddr,
     pub state: String,
+    pub created_at: Timestamp,
 }
 
 /// A verified passwordless sign-in: one transaction consumes the ceremony and
@@ -322,6 +323,9 @@ pub trait Passkeys: Send + Sync {
         credential_id: &[u8],
         events: Vec<Event>,
     ) -> StoreResult<()>;
+    /// End every live passwordless session (`hopae.passkey`): passwordless
+    /// sign-in is not configured any more. Returns how many ended.
+    async fn end_passkey_sessions(&self, request_id: &str) -> StoreResult<u32>;
     /// Administrator reset: every factor revoked, every session ended.
     async fn reset_factors(
         &self,
