@@ -71,7 +71,7 @@ factor.
 
 | Date | Hopae version | Gateway version | Provider | Environment label | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| — | — | — | — | — | — | With the Hangang console: see the Hangang change. |
+| 2026-10-17 | 0.0.10 (feat/operator-aal) | Hangang console feat/operator-aal (emulated gateway) | mock | local G8, Chrome 152, virtual authenticator | pass (10/10) | `tools/browser-qual/run-operator.sh`: provider sign-in, passkey required before the first console grant, registration, passkey step-up, console SSO with `AAL2 · Passkey` in the header, stale-factor re-authentication for a sensitive change and recovery after the step-up, console audit records. Emulated gateway: ceiling `implemented`. |
 
 ## Open questions
 

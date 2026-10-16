@@ -1902,3 +1902,58 @@ fn s490_a1_operator_policy_configuration_is_checked() {
         );
     }
 }
+
+/// Hold a Hopae stack for the console operator browser qualification
+/// (`tools/browser-qual/run-operator.sh`): `app` and the console
+/// application `console` (console.example.test) with `console_operators`
+/// (passkey, 30 s on the step-up path), the native gateway on loopback for the
+/// Hangang console. Writes the stack file and keeps the clock at wall time.
+#[test]
+#[ignore]
+fn g8_hold_operator_stack() {
+    let Some(file) = std::env::var_os("G8_STACK_FILE") else {
+        return;
+    };
+    let file = std::path::PathBuf::from(file);
+    let native = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let idp = MockIdp::start("default");
+    let h = Hopae::spawn(
+        Fixture::with(
+            "m1-basic",
+            json!({
+                "webauthn": {},
+                "apps": [{"app_id": "console", "display_name": "Hangang console", "hosts": ["console.example.test"], "ports": [443]}],
+                "listen": {"native_gateway": native.to_string()},
+                "console_operators": {"app_id": "console", "step_up_max_age_secs": 30, "assertion_key_env": "HOPAE_TEST_OPERATOR_KEY"}
+            }),
+        ),
+        &idp,
+        &[("HOPAE_TEST_OPERATOR_KEY", OPERATOR_KEY)],
+    );
+    let wall = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+    };
+    h.set_clock_ms(wall());
+    let info = json!({
+        "portal": h.portal.to_string(),
+        "gateway": h.gateway.to_string(),
+        "native": native.to_string(),
+        "gateway_key": h.key_value(&crate::support::KeySlot::Current),
+        "operator_key": OPERATOR_KEY,
+        "cookie": h.config()["cookie"]["name"],
+    });
+    std::fs::write(&file, info.to_string()).unwrap();
+    let stop = file.with_extension("stop");
+    let deadline = std::time::Instant::now() + Duration::from_secs(1800);
+    while !stop.exists() && std::time::Instant::now() < deadline {
+        h.set_clock_ms(wall());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    drop(idp);
+}
