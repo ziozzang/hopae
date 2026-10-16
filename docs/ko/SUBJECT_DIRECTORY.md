@@ -17,7 +17,11 @@ gRPC 표면은 게이트웨이 트래픽만 다루며 관리용 대응이 없습
 ## 전제 조건과 설정
 
 - 관리 콘솔이 켜져 있어야 합니다(`admin.public_url`, `listen.admin`).
-  [관리](ADMIN.md)를 참고하십시오. 다른 설정 키는 없습니다.
+  [관리](ADMIN.md)를 참고하십시오. 추가 설정 키는 `admin.directory_privacy`
+  (기본값 `standard`, 또는 `strict`) 하나뿐입니다. 주체 디렉터리와 explain API가
+  답할 수 있는 가장 덜 엄격한 프로필입니다. 요청의 `privacy_profile`은 답을 더
+  엄격하게만 만들 수 있습니다. 하한보다 낮은 프로필을 요청하면 하한으로 답하며, 응답의
+  `privacy_profile`은 실제로 적용된 프로필을 밝힙니다.
 - 부여된 역할(`viewer` 또는 `admin`)이면 네 가지 읽기를 모두 호출할 수 있습니다.
   Hangang 위임 콘솔 행위자(`admin.hangang_delegation`)는 본문 전체에 대한 서명된
   단언으로 호출할 수 있습니다.

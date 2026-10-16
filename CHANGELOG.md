@@ -30,6 +30,9 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   `subjects/search`, `subjects/lifecycle`, `subjects/lifecycle/snapshot` and
   `explain/authentication` as `POST`, `mutation: false` routes so the Hangang
   broker forwards them; operators re-pin the new manifest SHA-256.
+- `admin.directory_privacy` (`standard` default, `strict`): an operator floor
+  for the privacy profile of subject directory and explain answers; a request
+  may only ask for a stricter profile.
 
 ### Security
 

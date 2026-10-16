@@ -182,6 +182,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `admin.require_aal` | `1`, `2` | `1` | 콘솔 핸들의 최소 보증 수준. `2`는 호스트 전체의 암묵적 애플리케이션에 단계 상승 규칙도 설정합니다. TOTP keyring이 없으면 콘솔 요청이 거부된다고 `--check`가 경고합니다. |
 | `admin.untrusted_peers` | `refuse`, `as_client` | `refuse` | `trusted_proxies` 밖의 TCP 피어를 관리 리스너가 어떻게 다루는지: `refuse`는 쿠키를 읽기 전에 `403 untrusted_peer`로 답함(집계, 속도 제한된 경고). `as_client`는 포털처럼 피어를 클라이언트로 취급. |
 | `admin.query_budget_ms` | 정수, 100부터 30000 | `2000` | 콘솔 저장소 작업 하나(목록, 검색, 변경)의 마감. 마감은 저장소 작업에 전달되어 SQLite 안에서 문장을 중단하고 롤백한 뒤 `503`으로 답함. |
+| `admin.directory_privacy` | `standard`, `strict` | `standard` | 감사되는 디렉터리 읽기([주체 디렉터리](SUBJECT_DIRECTORY.md), [인증 explain](AUTHENTICATION_EXPLAIN.md))의 개인정보 프로필에 대한 운영자 하한. 요청의 `privacy_profile`은 더 엄격하게만 할 수 있음. `strict`이면 요청과 무관하게 어떤 읽기도 이메일 주소를 어떤 형태로도 돌려주지 않음. |
 | `admin.users[]` | `{user_id?, email?, role?, note?}` 배열 | `[]` | 시작 시와 `hopae admin import`로 파일에서 심는 관리자 부여. 각 항목은 `user_id`(`u_` 다음에 문자, 숫자, `_`, `-`, 최대 64자)와 `email`(유효한 주소) 중 적어도 하나가 필요하고, `role`은 `admin`(기본) 또는 `viewer`, `note`는 최대 256자이며 알 수 없는 키는 거부됨. 이메일만 있는 항목은 검증된 주소를 정확히 한 사용자가 가지고 권위적일 때만 적용됨. 결함 있는 항목은 시작할 때 경고(건너뜀, 시작 실패 아님)이고 `--check --strict`에서는 오류. `managed_by`와 묘비를 가진 제공자 규칙으로 가져옴([관리](ADMIN.md#설정-파일의-부여)). |
 
 #### 이벤트

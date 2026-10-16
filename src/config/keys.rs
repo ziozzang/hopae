@@ -104,6 +104,7 @@ const ADMIN: Node = Obj(&[
     ("require_aal", Leaf),
     ("untrusted_peers", Leaf),
     ("query_budget_ms", Leaf),
+    ("directory_privacy", Leaf),
     ("users", Arr(&ADMIN_USER)),
 ]);
 

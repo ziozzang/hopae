@@ -489,7 +489,8 @@ pub async fn resolve_api(
     body: Body,
 ) -> Response {
     run(st, c, headers, body, Op::Resolve, async |st, c, bytes| {
-        let req: ResolveRequest = parse(bytes)?;
+        let mut req: ResolveRequest = parse(bytes)?;
+        req.privacy_profile = req.privacy_profile.at_least(st.cfg.privacy_floor);
         if req.ids.is_empty()
             || req.ids.len() > MAX_RESOLVE
             || req
@@ -560,7 +561,8 @@ pub async fn search_api(
     body: Body,
 ) -> Response {
     run(st, c, headers, body, Op::Search, async |st, c, bytes| {
-        let req: SearchRequest = parse(bytes)?;
+        let mut req: SearchRequest = parse(bytes)?;
+        req.privacy_profile = req.privacy_profile.at_least(st.cfg.privacy_floor);
         let q = req.q.trim();
         if q.is_empty() || q.chars().count() > 128 || q.chars().any(char::is_control) {
             return Err(reads::invalid());

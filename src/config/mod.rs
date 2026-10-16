@@ -172,8 +172,22 @@ pub struct AdminCfg {
     pub untrusted_peers: Option<UntrustedPeers>,
     #[serde(default)]
     pub query_budget_ms: Option<u64>,
+    /// The least private profile the subject directory and the explain API
+    /// may answer with; a request may only ask for a stricter one.
+    #[serde(default)]
+    pub directory_privacy: Option<DirectoryPrivacy>,
     #[serde(default)]
     pub users: Vec<AdminUserEntry>,
+}
+
+/// `admin.directory_privacy`: the operator's floor for the privacy profile of
+/// the audited directory reads. `strict` > `standard`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectoryPrivacy {
+    #[default]
+    Standard,
+    Strict,
 }
 
 /// One seeded grant: at least one of `user_id` and `email`.
@@ -198,6 +212,8 @@ pub struct AdminLimits {
     pub require_aal: Aal,
     pub untrusted_peers: UntrustedPeers,
     pub query_budget: Duration,
+    /// `admin.directory_privacy` (default `standard`).
+    pub directory_privacy: DirectoryPrivacy,
 }
 
 const ADMIN_MAX_AUTH_AGE_DEFAULT: Duration = Duration::from_secs(12 * 3600);
@@ -1568,6 +1584,7 @@ impl Config {
                 .unwrap_or(Aal::One),
             untrusted_peers: a.untrusted_peers.unwrap_or_default(),
             query_budget: Duration::from_millis(a.query_budget_ms.unwrap_or(2000)),
+            directory_privacy: a.directory_privacy.unwrap_or_default(),
         })
     }
 
@@ -2448,6 +2465,7 @@ mod tests {
             r#"{"listen": {"admin": "127.0.0.1:9999"},
                 "admin": {"session": {"idle": "10m", "absolute": "2h"}, "binding": {"ip": "prefix", "ua": "strict", "on_mismatch": "drop_handle"},
                           "max_auth_age": "45m", "untrusted_peers": "as_client", "query_budget_ms": 750,
+                          "directory_privacy": "strict",
                           "public_url": "https://hopae-admin.example.test:8443"}}"#,
         )
         .unwrap();
@@ -2467,6 +2485,13 @@ mod tests {
         assert_eq!(l.max_auth_age, Duration::from_secs(45 * 60));
         assert_eq!(l.untrusted_peers, UntrustedPeers::AsClient);
         assert_eq!(l.query_budget, Duration::from_millis(750));
+        assert_eq!(l.directory_privacy, DirectoryPrivacy::Strict);
+        let d = admin_with(r#"{"admin": {}}"#).unwrap();
+        assert_eq!(
+            d.admin_limits().unwrap().directory_privacy,
+            DirectoryPrivacy::Standard
+        );
+        assert!(admin_with(r#"{"admin": {"directory_privacy": "open"}}"#).is_err());
     }
 
     #[test]

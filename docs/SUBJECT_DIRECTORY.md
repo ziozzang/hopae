@@ -20,7 +20,12 @@ surface carries gateway traffic only and has no administrative mirror.
 ## Prerequisites and configuration
 
 - The management console is enabled (`admin.public_url`, `listen.admin`); see
-  [Administration](ADMIN.md). There is no further configuration key.
+  [Administration](ADMIN.md). The only further key is
+  `admin.directory_privacy` (`standard` by default, or `strict`): the least
+  private profile the subject directory and the explain API answer with. A
+  request's `privacy_profile` can only make an answer stricter; a request for
+  a profile below the floor is answered at the floor, and the answer's
+  `privacy_profile` names the profile actually applied.
 - Any granted role (`viewer` or `admin`) may call the four reads. A Hangang
   delegated console actor (`admin.hangang_delegation`) may call them with a
   signed assertion over the exact body.

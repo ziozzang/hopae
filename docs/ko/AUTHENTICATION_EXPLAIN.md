@@ -49,7 +49,7 @@ Hangang ADR 0020 콘솔에서 Hopae가 맡는 부분입니다(그 문서에서�
 | `client_ip`, `user_agent` | 요청 클라이언트. `client_ip`가 없으면 세션 바인딩과 프로필 네트워크는 평가하지 않았다고 알립니다 |
 | `at` | 평가 시각(유닉스 초), 지금부터 최대 30일(기본값은 지금) |
 | `hypothetical` | 로그인이 만들 세션: `aal`(1 또는 2, 기본값 1), `factors`(`totp`, `webauthn`, `external` 같은 인증 수단 종류), `auth_age_seconds`, `provider_id`(기본값은 주체의 첫 연결 제공자, 없으면 첫 활성 제공자), `auth_time_source`(기본값 `hopae_completion`, `provider_claim`) |
-| `privacy_profile` | 주체 표시 정보에 쓸 `standard` 또는 `strict` |
+| `privacy_profile` | 주체 표시 정보에 쓸 `standard` 또는 `strict`. `admin.directory_privacy`가 더 엄격하면 그 값으로 올라감 |
 
 `session_id`와 `subject`는 함께 쓸 수 없으며, 둘 다 없으면 익명 요청입니다. 형식이
 잘못된 요청은 `400 invalid_request`입니다.

@@ -50,7 +50,7 @@ only, beside the rest of the [administration API](ADMIN.md).
 | `client_ip`, `user_agent` | The request's client; without `client_ip` the session binding and profile networks are reported as not evaluated |
 | `at` | Unix seconds to evaluate at, at most 30 days from now (default now) |
 | `hypothetical` | The session a sign-in would create: `aal` (1 or 2, default 1), `factors` (factor kinds such as `totp`, `webauthn`, `external`), `auth_age_seconds`, `provider_id` (default the subject's first linked provider, else the first enabled provider), `auth_time_source` (`hopae_completion` default, `provider_claim`) |
-| `privacy_profile` | `standard` or `strict`, for the subject's display data |
+| `privacy_profile` | `standard` or `strict`, for the subject's display data; raised to `admin.directory_privacy` when that is stricter |
 
 `session_id` and `subject` are mutually exclusive; with neither the request is
 anonymous. A malformed request is `400 invalid_request`.

@@ -56,6 +56,12 @@ never leaves and no read goes unrecorded or unbounded.
 - When: a signed `POST /v1/subjects/resolve` (the assertion covers the exact body); the same nonce again; a fresh nonce over a body that differs from the signed one.
 - Then: `200` with `u_live` `active`; the replay and the altered body are `403 delegation_rejected`; the `admin.read` record carries `attrs.delegated_actor: "7:operator"`.
 
+### S307-6 The operator's privacy floor cannot be lowered by a request
+
+- Given: `admin.directory_privacy: "strict"`; the users of 307-1.
+- When: resolve `u_live` without a profile, with `"standard"` and with `"strict"`; search `alice` with `"standard"`.
+- Then: every answer is `privacy_profile: "strict"`, carries the display name and no e-mail address in any form.
+
 ## Abuse cases
 
 | Category | Case | Applies |
