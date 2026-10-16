@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=42 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=43 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 

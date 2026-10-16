@@ -1,6 +1,6 @@
 # 위협 모델
 
-<!-- translation-status: source=../THREAT_MODEL.md source-rev=20 status=current -->
+<!-- translation-status: source=../THREAT_MODEL.md source-rev=21 status=current -->
 
 [문서 목차](README.md) · [English](../THREAT_MODEL.md)
 

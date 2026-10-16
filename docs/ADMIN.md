@@ -1,6 +1,6 @@
 # Administration
 
-<!-- doc-rev: 8 -->
+<!-- doc-rev: 9 -->
 
 [Documentation](README.md) · [한국어](ko/ADMIN.md)
 

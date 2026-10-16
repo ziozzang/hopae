@@ -1,6 +1,6 @@
 # 관리
 
-<!-- translation-status: source=../ADMIN.md source-rev=8 status=current -->
+<!-- translation-status: source=../ADMIN.md source-rev=9 status=current -->
 
 [문서 목차](README.md) · [English](../ADMIN.md)
 

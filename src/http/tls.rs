@@ -2,12 +2,9 @@
 //! every handshake takes the configuration current at that moment. (The
 //! administrator listener is `http::admin_tls`.)
 
-use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use hyper_util::rt::{TokioIo, TokioTimer};
-use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tokio::time::timeout;
 

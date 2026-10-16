@@ -1,6 +1,6 @@
 # Subject directory API
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/SUBJECT_DIRECTORY.md)
 

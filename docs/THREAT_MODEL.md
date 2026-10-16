@@ -1,6 +1,6 @@
 # Threat model
 
-<!-- doc-rev: 20 -->
+<!-- doc-rev: 21 -->
 
 [Documentation](README.md) · [한국어](ko/THREAT_MODEL.md)
 

@@ -1,6 +1,6 @@
 # 주체 디렉터리 API
 
-<!-- translation-status: source=../SUBJECT_DIRECTORY.md source-rev=4 status=current -->
+<!-- translation-status: source=../SUBJECT_DIRECTORY.md source-rev=5 status=current -->
 
 [문서 목차](README.md) · [English](../SUBJECT_DIRECTORY.md)
 

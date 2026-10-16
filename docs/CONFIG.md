@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 42 -->
+<!-- doc-rev: 43 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 

@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 12 -->
+<!-- doc-rev: 13 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
