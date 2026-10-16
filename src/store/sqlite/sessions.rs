@@ -872,6 +872,11 @@ impl Sessions for Store {
                 "DELETE FROM handoff_codes WHERE expires_at <= ?1",
                 [now.secs()],
             )?);
+            // Ceremony rows are single use and short-lived (ADR-0017).
+            tx.execute(
+                "DELETE FROM webauthn_challenges WHERE expires_at <= ?1 OR consumed_at IS NOT NULL",
+                [now.secs()],
+            )?;
             // Handles and remaining codes of a deleted session go with it (ON DELETE CASCADE).
             let sessions = n(tx.execute(
                 "DELETE FROM sessions WHERE terminated_at IS NOT NULL AND terminated_at <= ?1",

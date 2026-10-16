@@ -191,7 +191,7 @@ fn identity_owner_v9_backfill_is_atomic_and_preserves_legacy_ids() {
         [],
     )
     .unwrap();
-    assert_eq!(migrate(&conn).unwrap(), 10);
+    assert_eq!(migrate(&conn).unwrap(), 11);
     validate_foundation(&conn).unwrap();
     assert_eq!(
         conn.query_row("SELECT user_id FROM human_user_ids", [], |r| r

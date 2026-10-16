@@ -7,6 +7,7 @@
 //! `pending` row per configured sink in the same transaction.
 
 pub mod hooks;
+pub mod passkeys;
 pub mod sqlite;
 pub mod types;
 
@@ -22,6 +23,7 @@ use crate::provider::types::ProviderId;
 use crate::session::types::SessionId;
 
 pub use hooks::StoreHooks;
+pub use passkeys::Passkeys;
 pub use sqlite::{
     LATEST_SCHEMA_VERSION, Shape as WindowShape, Store, earliest_present, precheck,
     validate_foundation,

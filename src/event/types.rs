@@ -95,6 +95,14 @@ pub enum EventKind {
     FactorRegistryPublished,
     FactorAuthorityPublished,
     FactorEnrollmentRevoked,
+    FactorWebauthnRegistered,
+    FactorWebauthnUsed,
+    FactorWebauthnRenamed,
+    FactorWebauthnRevoked,
+    FactorWebauthnFailed,
+    FactorWebauthnCloneSuspected,
+    FactorRecoveryCodesGenerated,
+    FactorRecoveryCodeUsed,
 
     SessionHandoff,
     HandoffRejected,
@@ -119,10 +127,12 @@ pub enum EventKind {
     AdminSessionTerminate,
     AdminSessionsTerminate,
     AdminDenied,
+    /// `hopae admin factors reset` (ADR-0017, required).
+    AdminFactorReset,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 33] = [
+    pub const ALL: [EventKind; 42] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -135,6 +145,14 @@ impl EventKind {
         EventKind::FactorRegistryPublished,
         EventKind::FactorAuthorityPublished,
         EventKind::FactorEnrollmentRevoked,
+        EventKind::FactorWebauthnRegistered,
+        EventKind::FactorWebauthnUsed,
+        EventKind::FactorWebauthnRenamed,
+        EventKind::FactorWebauthnRevoked,
+        EventKind::FactorWebauthnFailed,
+        EventKind::FactorWebauthnCloneSuspected,
+        EventKind::FactorRecoveryCodesGenerated,
+        EventKind::FactorRecoveryCodeUsed,
         EventKind::SessionHandoff,
         EventKind::HandoffRejected,
         EventKind::SessionTerminated,
@@ -156,6 +174,7 @@ impl EventKind {
         EventKind::AdminSessionTerminate,
         EventKind::AdminSessionsTerminate,
         EventKind::AdminDenied,
+        EventKind::AdminFactorReset,
     ];
 
     /// Required kinds travel in the transaction of the state change they
@@ -185,6 +204,14 @@ impl EventKind {
             EventKind::FactorRegistryPublished => "factor.registry_published",
             EventKind::FactorAuthorityPublished => "factor.authority_published",
             EventKind::FactorEnrollmentRevoked => "factor.enrollment_revoked",
+            EventKind::FactorWebauthnRegistered => "factor.webauthn_registered",
+            EventKind::FactorWebauthnUsed => "factor.webauthn_used",
+            EventKind::FactorWebauthnRenamed => "factor.webauthn_renamed",
+            EventKind::FactorWebauthnRevoked => "factor.webauthn_revoked",
+            EventKind::FactorWebauthnFailed => "factor.webauthn_failed",
+            EventKind::FactorWebauthnCloneSuspected => "factor.webauthn_clone_suspected",
+            EventKind::FactorRecoveryCodesGenerated => "factor.recovery_codes_generated",
+            EventKind::FactorRecoveryCodeUsed => "factor.recovery_code_used",
 
             EventKind::SessionHandoff => "session.handoff",
             EventKind::HandoffRejected => "handoff.rejected",
@@ -207,6 +234,7 @@ impl EventKind {
             EventKind::AdminSessionTerminate => "admin.session_terminate",
             EventKind::AdminSessionsTerminate => "admin.sessions_terminate",
             EventKind::AdminDenied => "admin.denied",
+            EventKind::AdminFactorReset => "admin.factor_reset",
         }
     }
 
@@ -376,6 +404,14 @@ pub mod reasons {
         INVALID_AUTH_TIME = "invalid_auth_time",
         REAUTH = "reauth",
         FACTOR_REVOKED = "factor_revoked",
+        // WebAuthn and recovery codes (ADR-0017)
+        COUNTER_REGRESSION = "counter_regression",
+        COUNTER_STALE = "counter_stale",
+        FACTOR_RESET = "factor_reset",
+        PASSKEY_REMOVED = "passkey_removed",
+        CEREMONY_INVALID = "ceremony_invalid",
+        CEREMONY_EXPIRED = "ceremony_expired",
+        RECOVERY_CODE = "recovery_code",
         INVALID_CURSOR = "invalid_cursor",
         INVALID_FILTER = "invalid_filter",
         INVALID_ID = "invalid_id",
@@ -400,6 +436,7 @@ pub mod reasons {
 pub const ATTR_ALLOWLIST: &[&str] = &[
     "aal",
     "actor",
+    "assurance",
     "enrollment_id",
     "factor_id",
     "actor_session",
@@ -604,14 +641,14 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 28);
+        assert_eq!(required, 37);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 33);
+        assert_eq!(EventKind::ALL.len(), 42);
         for (kind, name) in [
             (
                 EventKind::FactorExternalConsumed,

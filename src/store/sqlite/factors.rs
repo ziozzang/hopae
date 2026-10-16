@@ -419,6 +419,11 @@ impl Store {
                 require_actor(&tx,&shared,user.as_str(),actor)?;
                 let enrolled:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM totp_enrollments WHERE user_id=?1 AND state='active')",[user.as_str()],|row|row.get(0))?;
                 if enrolled { return Err(StoreError::Conflict("active factor requires replacement flow")); }
+                // ADR-0017 decision 10: with a passkey present, adding a factor needs a recent second factor.
+                let passkeys:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM webauthn_credentials WHERE user_id=?1 AND state='active')",[user.as_str()],|row|row.get(0))?;
+                if passkeys && !super::webauthn::recent_second_factor(&actor.view.session.factors,shared.clock.now()) {
+                    return Err(StoreError::Conflict(crate::store::passkeys::refusal::VERIFICATION_REQUIRED));
+                }
             }
 
             let expired: Option<String> = tx.query_row("SELECT enrollment_id FROM totp_enrollments WHERE user_id=?1 AND state='pending' AND pending_expires_at<=?2",params![user.as_str(),now],|row|row.get(0)).optional()?;
@@ -468,6 +473,10 @@ impl Store {
                 _ => return Err(StoreError::Conflict("invalid factor operation")),
             };
             if tx.execute(sql,params![id,user.as_str(),revision,counter,now])?!=1 { return Ok(false); }
+            if operation=="activate" {
+                // A new factor satisfies the re-enrollment requirement of a used recovery code (ADR-0017).
+                tx.execute("UPDATE users SET factor_recovery_required_at=NULL WHERE user_id=?1",[user.as_str()])?;
+            }
             if was_active {
                 let sessions:Vec<String>=tx.prepare("SELECT session_id FROM sessions WHERE user_id=?1 AND terminated_at IS NULL ORDER BY session_id")?.query_map([user.as_str()],|row|row.get(0))?.collect::<Result<_,_>>()?;
                 for id in sessions {
@@ -543,7 +552,7 @@ fn stepup_context(
     Ok(serde_json::json!({"credential_generation":generation,"enrollment_id":enrollment,"enrollment_revision":revision,"config_generation":config_generation.unwrap_or(0)}).to_string())
 }
 
-fn require_stepup_generation(
+pub(super) fn require_stepup_generation(
     tx: &rusqlite::Transaction<'_>,
     expected: Option<u64>,
 ) -> StoreResult<()> {
