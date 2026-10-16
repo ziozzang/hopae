@@ -1097,3 +1097,7 @@ mod tests {
 #[cfg(test)]
 #[path = "composition_tests.rs"]
 mod composition_tests;
+
+#[path = "runtime_admin.rs"]
+mod admin_view;
+pub(crate) use admin_view::{KeyVerdict, ServicePrincipal};

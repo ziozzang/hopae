@@ -19,6 +19,7 @@ pub(crate) mod primary_owner;
 pub(crate) mod provider_owner;
 mod rows;
 mod sessions;
+pub(crate) mod subject_directory;
 // Provenance infrastructure; actual native Human candidate integration is queued.
 #[cfg(test)]
 mod tests;

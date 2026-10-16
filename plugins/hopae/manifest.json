@@ -1,7 +1,7 @@
 {
   "id": "hopae",
   "name": "Hopae",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "api_version": 1,
   "entry": "index.js",
   "assets": {
@@ -73,6 +73,31 @@
       "path": "sessions/terminate",
       "method": "POST",
       "mutation": true
+    },
+    {
+      "path": "subjects/resolve",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "subjects/search",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "subjects/lifecycle",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "subjects/lifecycle/snapshot",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "explain/authentication",
+      "method": "POST",
+      "mutation": false
     }
   ]
 }

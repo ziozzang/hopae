@@ -1,6 +1,6 @@
 # Native Hangang verification and delegated console
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 7 -->
 
 [한국어](ko/HANGANG_NATIVE.md) · [Documentation](README.md)
 
@@ -55,7 +55,13 @@ Run `python3 tools/build_console_plugin.py`. Install `plugins/hopae` into the
 Hangang registry with reviewed manifest SHA-256, a fixed Hopae admin origin,
 `delegate_actor:true` and a dedicated `token_env` key. The package provides
 status, paginated users/sessions/events, user enable/disable, user session recall
-and individual session termination. Native theme tokens and host authentication
+and individual session termination. Since package 0.1.8 the manifest also
+declares the audited reads `subjects/resolve`, `subjects/search`,
+`subjects/lifecycle`, `subjects/lifecycle/snapshot` and `explain/authentication`
+(`POST`, `mutation: false`; see [subject directory](SUBJECT_DIRECTORY.md) and
+[authentication explain](AUTHENTICATION_EXPLAIN.md)), so the Hangang broker
+forwards them with their signed JSON body; `events/query` serves the unified
+audit view. Native theme tokens and host authentication
 are used; package code receives no backend key or raw Hangang credential.
 
 Enable `admin.hangang_delegation` explicitly:
