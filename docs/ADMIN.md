@@ -443,6 +443,7 @@ written. A console sign-in is visible as the ordinary
 | `config` | `generation`, `digest`, `insecure_mode`, `unauthenticated_caller`, `listeners` |
 | `portal` | `public_url`, `passkeys` (WebAuthn configured), `passwordless` |
 | `console` | `public_url` (the console origin), `authority`: `{mode, delegation}` — `mode` is `local` (the native grant table decides) or `hangang` (the Hangang console is the authority, `admin.hangang_delegation.authority = hangang`); `delegation` is `none`, `mapped` (Hangang actors mapped onto native sessions) or `hangang` |
+| `reload` | `tls[]`: per listener or client `name`, leaf `fingerprint`, `reloads`, `last_reload_at`, `failing`, `error`; `config` (`authentication.source = config` only): `failing`, `error`, `restart_required`, `profiles_revision`, `projections_revision`, `last_reconciled_at` ([operations](OPERATIONS.md#tls-certificate-renewal)) |
 
 Runtime changes to providers and applications are not part of M4-min. When
 they are added, a provider changed through the API becomes `managed_by = api`

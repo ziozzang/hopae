@@ -164,6 +164,8 @@ pub struct AdminState {
     /// When each untrusted peer was last warned about (one line per minute).
     pub peer_warned: Mutex<HashMap<IpAddr, Timestamp>>,
     pub delegation: Option<delegation::Config>,
+    /// What live reloading of TLS material and configuration last did.
+    pub reload: Arc<crate::reload::Status>,
     pub delegation_replay: delegation::Replay,
 }
 

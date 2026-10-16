@@ -189,7 +189,11 @@ pub(super) const ROOT: Node = Obj(&[
             ),
         ]),
     ),
-    ("authentication", Obj(&[("source", Leaf)])),
+    (
+        "authentication",
+        Obj(&[("source", Leaf), ("reload_interval_ms", Leaf)]),
+    ),
+    ("reload", Obj(&[("tls_interval_secs", Leaf)])),
     (
         "authentication_gateway",
         Obj(&[

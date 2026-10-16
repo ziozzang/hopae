@@ -171,7 +171,7 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 60] = [
+    pub const ALL: &[EventKind] = &[
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -317,7 +317,7 @@ impl EventKind {
     }
 
     pub fn from_name(s: &str) -> Option<EventKind> {
-        EventKind::ALL.into_iter().find(|k| k.name() == s)
+        EventKind::ALL.iter().copied().find(|k| k.name() == s)
     }
 }
 
@@ -742,18 +742,45 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), EventKind::ALL.len());
-        for k in EventKind::ALL {
+        for &k in EventKind::ALL {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
-        let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 52);
+        // Completeness without a hand-kept count (parallel branches each
+        // adding a kind used to collide on the number): every arm of the
+        // exhaustive `name()` match is listed in `ALL`, and only the
+        // documented diagnostic kinds are not required.
+        let source = include_str!("types.rs");
+        let body = &source[source.find("pub fn name(self)").unwrap()..];
+        let body = &body[..body.find("pub fn from_name").unwrap()];
+        let arms = body
+            .lines()
+            .filter(|l| l.trim_start().starts_with("EventKind::") && l.contains("=> \""))
+            .count();
+        assert_eq!(
+            arms,
+            EventKind::ALL.len(),
+            "a kind is missing from EventKind::ALL"
+        );
+        let optional: Vec<_> = EventKind::ALL.iter().filter(|k| !k.is_required()).collect();
+        assert_eq!(
+            optional,
+            [
+                &EventKind::VerifyDenied,
+                &EventKind::ProviderError,
+                &EventKind::TxnEvicted,
+                &EventKind::EventsDropped,
+                &EventKind::SinkBacklogOverflow,
+                &EventKind::GroupSyncRefused,
+                &EventKind::WorkloadKeysRotated,
+                &EventKind::WorkloadRevocationStale,
+            ]
+        );
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 60);
         for (kind, name) in [
             (
                 EventKind::FactorExternalConsumed,

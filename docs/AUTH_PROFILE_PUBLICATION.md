@@ -1,6 +1,6 @@
 # Authentication profile publication
 
-<!-- doc-rev: 11 -->
+<!-- doc-rev: 12 -->
 
 [Documentation](README.md) · [한국어](ko/AUTH_PROFILE_PUBLICATION.md)
 
@@ -214,7 +214,43 @@ store's next revision (the file's own `revision` is ignored in this mode).
 `GET /v1/authentication/profiles` reports `source`.
 
 This is the declarative mode a Kubernetes package needs: Helm values change the
-file, the rollout restarts the pods, and the store follows.
+file and the store follows — without a restart (below).
+
+### Live reconciliation
+
+In `config` mode Hopae also polls the configuration file while it runs
+(`authentication.reload_interval_ms`, default 1000; `0` turns it off, so only
+a start reconciles). Polling compares the file's content digest; it uses no
+file-system notifications, because a ConfigMap volume replaces a symlink
+(`..data`) that inotify watches on the file miss. A changed file goes through
+everything a start does — size bound, parse, validation of the whole
+configuration, the referenced environment variables, compilation of the
+profiles — and only then is the store reconciled through the same CAS
+publication (next revision, audit row with actor `config`) and the live
+snapshot swapped. The record is `authentication.reconciled` with
+`attrs.cause = reload`. A revoked API key or a removed profile stops
+authenticating on the next request after the swap.
+
+| The changed file | Effect |
+| --- | --- |
+| Valid, profiles or projection plans differ | Reconciled live: new revision, record, `hopae_config_reloads_total{result="reconciled"}` |
+| Valid, equal profiles and plans | Nothing written |
+| Invalid (unparsable, an invalid profile, a missing variable, …) | Nothing changes: the current profiles stay in force; `hopae_config_reload_failing` = `1`, a warning, and `GET /v1/status` → `reload.config.failing` and `error` until a valid file arrives |
+| Other keys changed (listeners, providers, `authentication.source`, …) | Not applied: `reload.config.restart_required = true`, `result="restart_required"`, a warning; the next start applies them |
+| Profiles appear where Hopae started without any | Reported as invalid: starting the authentication gateway needs a restart |
+
+**Timing.** With the default 1 s poll, a revocation is in force within about
+one second of the file changing inside the container (the poll interval plus
+validation and one store transaction). How fast the file changes after the
+ConfigMap object is updated is outside Hopae: the kubelet refreshes ConfigMap
+volumes on its sync period plus its cache TTL (by default up to about a
+minute), and never for `subPath` mounts. When revocations must be faster,
+mount the ConfigMap as a whole directory (not `subPath`) and either lower the
+kubelet's `configMapAndSecretChangeDetectionStrategy`/sync period, use a
+projected volume fed by a sidecar that writes the file directly (for example
+a config-reloader that watches the API), or deliver revocations through the
+console in `store` mode. Hopae's part of the latency is bounded by
+`authentication.reload_interval_ms`.
 
 Migration:
 

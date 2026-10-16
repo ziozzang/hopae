@@ -429,6 +429,7 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'`을 가집니다. 어
 | `config` | `generation`, `digest`, `insecure_mode`, `unauthenticated_caller`, `listeners` |
 | `portal` | `public_url`, `passkeys`(WebAuthn 설정 여부), `passwordless` |
 | `console` | `public_url`(콘솔 origin), `authority`: `{mode, delegation}`. `mode`는 `local`(네이티브 부여 테이블이 결정) 또는 `hangang`(Hangang 콘솔이 권한 주체, `admin.hangang_delegation.authority = hangang`)이고 `delegation`은 `none`, `mapped`(Hangang 행위자를 네이티브 세션에 대응) 또는 `hangang`입니다 |
+| `reload` | `tls[]`: 리스너나 클라이언트별 `name`, 리프 `fingerprint`, `reloads`, `last_reload_at`, `failing`, `error`. `config`(`authentication.source = config`일 때만): `failing`, `error`, `restart_required`, `profiles_revision`, `projections_revision`, `last_reconciled_at`([운영](OPERATIONS.md#tls-인증서-갱신)) |
 
 제공자와 애플리케이션의 실행 중 변경은 M4-min에 포함되지 않습니다. 추가될 때
 API로 바뀐 제공자는 `managed_by = api`가

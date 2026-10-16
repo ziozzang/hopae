@@ -2666,12 +2666,21 @@ async fn grpc_mtls_session_revocation_and_http_parity() {
     ));
     let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let tls = hangang_runtime::configuration(
-        &root.join("server.pem"),
-        &root.join("server.key"),
-        &root.join("ca.pem"),
-    )
-    .unwrap();
+    // The live-reloading TLS the binary uses (Hopae terminates TLS, tonic
+    // serves the decrypted streams).
+    let tls = grpc_gateway::GrpcTls::Reloading(
+        hopae::reload::ServerTls::load(
+            "grpc_gateway",
+            &hopae::config::NativeGatewayTls {
+                certificate: root.join("server.pem"),
+                key: root.join("server.key"),
+                client_ca: root.join("ca.pem"),
+            },
+            &[b"h2"],
+            Arc::default(),
+        )
+        .unwrap(),
+    );
     let (tx, rx) = watch::channel(false);
     let task = tokio::spawn(grpc_gateway::serve(listener, tls, router.clone(), keys, rx));
     let endpoint = Endpoint::from_shared(format!("https://127.0.0.1:{}", address.port()))

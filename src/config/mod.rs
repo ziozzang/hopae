@@ -73,6 +73,13 @@ pub struct Config {
     /// (`config`: reconciled at every start, console edits refused).
     #[serde(default)]
     pub authentication: AuthenticationCfg,
+    /// Polling of mounted material that changes while Hopae runs.
+    #[serde(default)]
+    pub reload: ReloadCfg,
+    /// The file this configuration was read from (set by [`load`]; never
+    /// configured). Live reconciliation polls it.
+    #[serde(skip)]
+    pub source_path: Option<PathBuf>,
     #[serde(default)]
     pub linking: Linking,
     #[serde(default)]
@@ -169,6 +176,57 @@ pub enum AdminRoleCfg {
 pub struct AuthenticationCfg {
     #[serde(default)]
     pub source: AuthenticationSource,
+    /// `source = config`: how often the configuration file is polled for a
+    /// changed profile or projection plan (milliseconds; `0` turns live
+    /// reconciliation off, so only a restart applies a change).
+    #[serde(default)]
+    pub reload_interval_ms: Option<u64>,
+}
+
+/// Default poll of the configuration file in `authentication.source = config`.
+pub const AUTH_RELOAD_DEFAULT_MS: u64 = 1000;
+/// Default poll of TLS certificate, key and CA files.
+pub const TLS_RELOAD_DEFAULT_SECS: u64 = 10;
+
+/// `reload`: polling of TLS material (no file-system notifications: a
+/// Kubernetes secret volume swaps a symlink, which inotify watches miss).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReloadCfg {
+    /// Seconds between polls of every TLS certificate, key and CA file
+    /// (listeners and outbound mTLS clients); `0` turns reloading off.
+    #[serde(default)]
+    pub tls_interval_secs: Option<u64>,
+}
+
+impl Config {
+    /// The TLS poll interval, `None` when reloading is off.
+    pub fn tls_reload_interval(&self) -> Option<Duration> {
+        match self
+            .reload
+            .tls_interval_secs
+            .unwrap_or(TLS_RELOAD_DEFAULT_SECS)
+        {
+            0 => None,
+            n => Some(Duration::from_secs(n)),
+        }
+    }
+
+    /// The configuration poll interval in `authentication.source = config`,
+    /// `None` in store mode or when turned off.
+    pub fn auth_reload_interval(&self) -> Option<Duration> {
+        if self.authentication.source != AuthenticationSource::Config {
+            return None;
+        }
+        match self
+            .authentication
+            .reload_interval_ms
+            .unwrap_or(AUTH_RELOAD_DEFAULT_MS)
+        {
+            0 => None,
+            n => Some(Duration::from_millis(n)),
+        }
+    }
 }
 
 /// `authentication.source`.
@@ -804,7 +862,9 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         return Err(ConfigError::TooLarge { path: display });
     }
     let text = std::fs::read_to_string(path).map_err(io)?;
-    parse(&text)
+    let mut cfg = parse(&text)?;
+    cfg.source_path = Some(path.to_path_buf());
+    Ok(cfg)
 }
 
 /// Parse and validate configuration text.
@@ -854,6 +914,20 @@ impl Config {
     /// Check every constraint that does not need the environment.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut errs = Vec::new();
+        if let Some(n) = self.reload.tls_interval_secs
+            && n > 3600
+        {
+            errs.push("reload.tls_interval_secs must be between 0 (off) and 3600".to_string());
+        }
+        if let Some(n) = self.authentication.reload_interval_ms
+            && n != 0
+            && !(200..=60_000).contains(&n)
+        {
+            errs.push(
+                "authentication.reload_interval_ms must be 0 (off) or between 200 and 60000"
+                    .to_string(),
+            );
+        }
         let portal = self.listen.portal.parse::<SocketAddr>();
         let gateway = self.listen.gateway.parse::<SocketAddr>();
         if portal.is_err() {
@@ -2370,6 +2444,29 @@ mod tests {
             Err(e) => e.to_string(),
             Ok(_) => panic!("expected an error for {extra}"),
         }
+    }
+
+    #[test]
+    fn reload_intervals_default_turn_off_and_are_bounded() {
+        let c = with("{}").unwrap();
+        assert_eq!(c.tls_reload_interval(), Some(Duration::from_secs(10)));
+        assert_eq!(c.auth_reload_interval(), None, "store mode never polls");
+        let c = with(r#"{"authentication": {"source": "config"}}"#).unwrap();
+        assert_eq!(c.auth_reload_interval(), Some(Duration::from_millis(1000)));
+        let c = with(r#"{"authentication": {"source": "config", "reload_interval_ms": 0}, "reload": {"tls_interval_secs": 0}}"#).unwrap();
+        assert_eq!(
+            (c.auth_reload_interval(), c.tls_reload_interval()),
+            (None, None)
+        );
+        assert!(
+            invalid(r#"{"reload": {"tls_interval_secs": 3601}}"#)
+                .contains("reload.tls_interval_secs")
+        );
+        assert!(
+            invalid(r#"{"authentication": {"reload_interval_ms": 50}}"#)
+                .contains("reload_interval_ms")
+        );
+        assert!(invalid(r#"{"reload": {"inotify": true}}"#).contains("inotify"));
     }
 
     #[test]

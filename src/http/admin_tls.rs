@@ -3,7 +3,8 @@
 //! header read, 64 headers, 32 KiB buffer, 300 s per connection), and in
 //! addition the verified leaf certificate's facts are put into the request
 //! extensions as [`PeerCertificate`] for the service-credential binding.
-//! Nothing a client sends can create either extension.
+//! Nothing a client sends can create either extension. Each handshake uses
+//! the material current at that moment ([`crate::reload`]).
 use crate::admin::service_credentials::PeerCertificate;
 use hyper_util::{
     rt::{TokioIo, TokioTimer},
@@ -14,7 +15,7 @@ use tokio::{net::TcpListener, time::timeout};
 
 pub async fn serve(
     listener: TcpListener,
-    config: Arc<rustls::ServerConfig>,
+    tls: Arc<crate::reload::ServerTls>,
     router: axum::Router,
     shutdown: impl Future<Output = ()> + Send,
 ) -> anyhow::Result<()> {
@@ -23,7 +24,8 @@ pub async fn serve(
         std::num::NonZeroUsize::new(2048).expect("nonzero"),
         Duration::from_secs(5),
         move |socket, peer| {
-            let acceptor = tokio_rustls::TlsAcceptor::from(config.clone());
+            // The material current at this handshake (live reload).
+            let acceptor = tls.acceptor();
             let router = router
                 .clone()
                 .layer(axum::Extension(axum::extract::ConnectInfo(peer)));

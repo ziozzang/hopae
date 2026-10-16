@@ -1,6 +1,6 @@
 # Operations
 
-<!-- doc-rev: 5 -->
+<!-- doc-rev: 6 -->
 
 [Documentation](README.md) · [한국어](ko/OPERATIONS.md)
 
@@ -181,6 +181,34 @@ that an error). A key mismatch shows as `403 caller_unauthorized` on every
 verify, a rising `hopae_verify_unauthorized_total`, and no state read or
 written.
 
+### TLS certificate renewal
+
+Every mutual-TLS listener (the administrator listener, the native and gRPC
+gateways) and the outbound mTLS clients of the projection receiver follow their
+files: Hopae re-reads the certificate, key and CA every
+`reload.tls_interval_secs` (default 10 s) and compares their content digest —
+no file-system notifications, so a Kubernetes secret volume's symlink swap
+and an in-place rewrite are both seen. With cert-manager, mount the secret as
+a directory (not `subPath`) and point the configuration at `tls.crt`,
+`tls.key` and `ca.crt`; a renewal needs no restart.
+
+- A changed set is checked completely first: certificates parse, the private
+  key matches the leaf, the CA file holds a certificate. Only then is the new
+  configuration swapped in, atomically. New handshakes use it; established
+  connections keep theirs until they close. Outbound clients switch to a new
+  channel for every later call.
+- Each load logs the leaf's fingerprint (`TLS material reloaded name=…
+  fingerprint=sha256:…`); `GET /v1/status` → `reload.tls[]` shows each item's
+  `fingerprint`, `reloads`, `last_reload_at`, `failing` and `error`.
+- An invalid or half-written set (a key from the next certificate, an empty
+  CA) changes nothing: the previous material stays in force,
+  `hopae_tls_reload_failing{name}` is `1` and a warning names the cause. It
+  clears when a valid set arrives or the files return to the material in use.
+  Alert on it, and on certificates that are not renewed before expiry.
+- A rotated client CA admits the clients it signs on their next handshake and
+  refuses the old ones; rotate a CA by publishing a bundle with both
+  certificates first.
+
 ### Provider secret rotation
 
 Provider client secrets are read from the environment when Hopae starts and
@@ -281,6 +309,10 @@ protected routes). The counter names, fixed for the later exposition:
 | `hopae_event_deliveries_failed_total` | `sink`, `reason` | Deliveries given up (`retries_exhausted`, `backlog_overflow`, `pruned`) |
 | `hopae_build_info` | `version` | Gauge, always `1` |
 | `hopae_config_loaded_timestamp` | none | Gauge, unix seconds of the last configuration load |
+| `hopae_tls_reloads_total` | `name` (`admin`, `native_gateway`, `grpc_gateway`, `projection_authority`), `result` (`reloaded`, `invalid`) | TLS material changes found by the poller |
+| `hopae_tls_reload_failing` | `name` | Gauge, `1` while the newest material of `name` is invalid and the previous one is still served |
+| `hopae_config_reloads_total` | `result` (`reconciled`, `invalid`, `restart_required`) | Changes of the configuration file seen in `authentication.source = config` |
+| `hopae_config_reload_failing` | none | Gauge, `1` while the newest configuration file is invalid and the previous profiles stay in force |
 
 ### Failure behavior
 

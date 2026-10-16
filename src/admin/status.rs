@@ -330,6 +330,7 @@ pub async fn collect(st: &AdminState) -> Result<StatusData, StoreError> {
             "public_url": st.cfg.origin.ascii_serialization(),
             "authority": authority_json(st),
         },
+        "reload": st.reload.to_json(),
         "config": {
             "generation": snap.generation,
             "digest": st.config_digest,

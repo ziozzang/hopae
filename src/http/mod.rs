@@ -12,6 +12,7 @@ pub mod denials;
 pub mod hooks;
 pub mod portal;
 pub mod security;
+pub mod tls;
 
 use axum::Router;
 use axum::http::StatusCode;

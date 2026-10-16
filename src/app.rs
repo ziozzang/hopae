@@ -231,6 +231,10 @@ pub struct Services {
     pub started_at: Timestamp,
     /// The bound listener addresses, set once every listener is bound.
     pub listeners: Arc<std::sync::OnceLock<crate::admin::Listeners>>,
+    /// What live reloading of TLS material and configuration last did.
+    pub reload_status: Arc<crate::reload::Status>,
+    /// The outbound mTLS material watched by the TLS poller.
+    pub(crate) client_tls: Vec<Arc<crate::reload::ClientTls>>,
 }
 
 impl Services {
@@ -328,6 +332,7 @@ impl Services {
             listeners: self.listeners.get().cloned().unwrap_or_default(),
             peer_warned: std::sync::Mutex::new(std::collections::HashMap::new()),
             delegation: self.config.admin.hangang_delegation.clone(),
+            reload: self.reload_status.clone(),
             delegation_replay: crate::admin::delegation::Replay::new(
                 self.config.state_dir.join("delegation-nonces.sqlite3"),
             ),
@@ -508,10 +513,10 @@ struct EventWiring {
 
 /// Bound listeners and the open store; call [`Bound::run`] to serve.
 pub struct Bound {
-    admin_tls: Option<Arc<rustls::ServerConfig>>,
-    grpc_gateway: Option<(TcpListener, tonic::transport::ServerTlsConfig)>,
+    admin_tls: Option<Arc<crate::reload::ServerTls>>,
+    grpc_gateway: Option<(TcpListener, http::grpc_gateway::GrpcTls)>,
     native_gateway: Option<(TcpListener, SocketAddr)>,
-    native_gateway_tls: Option<tokio_rustls::TlsAcceptor>,
+    native_gateway_tls: Option<Arc<crate::reload::ServerTls>>,
     portal: TcpListener,
     gateway: TcpListener,
     /// The admin listener, bound after the portal and before the gateway.
@@ -527,6 +532,9 @@ pub struct Bound {
 
 /// Digest of the effective configuration (not its content) for `config.loaded`.
 fn config_digest(cfg: &Config) -> String {
+    // The file's location is not part of the configuration.
+    let mut cfg = cfg.clone();
+    cfg.source_path = None;
     sha256(format!("{cfg:?}").as_bytes()).to_hex()
 }
 
@@ -577,6 +585,28 @@ async fn bind_environment(
                 .map_err(|_| anyhow::anyhow!("native projection resources unavailable"))
         })
         .transpose()?;
+    let reload_status = Arc::new(crate::reload::Status::default());
+    let mut client_tls = Vec::new();
+    if let (Some(configuration), Some(prepared)) = (&cfg.projection_receiver, &projection_resources)
+    {
+        let authority = &configuration.authority;
+        let prepared = prepared.clone();
+        client_tls.push(
+            crate::reload::ClientTls::watch(
+                "projection_authority",
+                &authority.ca,
+                &authority.certificate,
+                &authority.key,
+                reload_status.clone(),
+                Box::new(move |ca, certificate, key| {
+                    prepared.reload_tls(ca, certificate, key).map_err(|_| {
+                        anyhow::anyhow!("the projection authority clients refused the material")
+                    })
+                }),
+            )
+            .context("projection receiver mTLS material")?,
+        );
+    }
     let external_verifiers = Arc::new(
         crate::factor::external_registry::Registry::compile(
             &cfg.external_verifiers,
@@ -1054,6 +1084,8 @@ async fn bind_environment(
         registry,
         started_at: env.clock.now(),
         listeners: Arc::default(),
+        reload_status,
+        client_tls,
     };
     #[cfg(feature = "test-hooks")]
     let hooks = match (&env.hooks_addr, &env.test_clock, &env.store_hooks) {
@@ -1091,7 +1123,12 @@ async fn bind_environment(
         .admin_tls
         .as_ref()
         .map(|tls| {
-            hangang_runtime::tls_config(&tls.certificate, &tls.key, &tls.client_ca, &[b"http/1.1"])
+            crate::reload::ServerTls::load(
+                "admin",
+                tls,
+                &[b"http/1.1"],
+                services.reload_status.clone(),
+            )
         })
         .transpose()
         .context("loading administrator mTLS")?;
@@ -1103,7 +1140,15 @@ async fn bind_environment(
         .listen
         .native_gateway_tls
         .as_ref()
-        .map(http::native_gateway::tls_acceptor)
+        .filter(|_| cfg.listen.native_gateway.is_some())
+        .map(|tls| {
+            crate::reload::ServerTls::load(
+                "native_gateway",
+                tls,
+                &[b"hop1"],
+                services.reload_status.clone(),
+            )
+        })
         .transpose()
         .context("loading native gateway mTLS")?;
     let native_gateway = match &cfg.listen.native_gateway {
@@ -1123,11 +1168,14 @@ async fn bind_environment(
                 .native_gateway_tls
                 .as_ref()
                 .context("gRPC gateway requires mTLS")?;
-            let tls = hangang_runtime::configuration(
-                &settings.certificate,
-                &settings.key,
-                &settings.client_ca,
-            )?;
+            let tls = crate::reload::ServerTls::load(
+                "grpc_gateway",
+                settings,
+                &[b"h2"],
+                services.reload_status.clone(),
+            )
+            .context("loading gRPC gateway mTLS")?;
+            let tls = http::grpc_gateway::GrpcTls::Reloading(tls);
             let listener = TcpListener::bind(value)
                 .await
                 .context("binding gRPC gateway")?;
@@ -1310,6 +1358,28 @@ impl Bound {
             )
             .run(bg_rx.clone()),
         ));
+
+        // Live TLS reload: every listener's and client's material, polled.
+        let mut tls_watch = crate::reload::TlsWatch {
+            servers: Vec::new(),
+            clients: self.services.client_tls.clone(),
+        };
+        tls_watch.servers.extend(self.admin_tls.clone());
+        tls_watch.servers.extend(self.native_gateway_tls.clone());
+        if let Some((_, http::grpc_gateway::GrpcTls::Reloading(tls))) = &self.grpc_gateway {
+            tls_watch.servers.push(tls.clone());
+        }
+        if let Some(interval) = cfg.tls_reload_interval()
+            && !tls_watch.is_empty()
+        {
+            workers.push(tokio::spawn(tls_watch.run(interval, bg_rx.clone())));
+        }
+        // Live reconciliation of the configuration-authoritative profiles.
+        if let Some(interval) = cfg.auth_reload_interval() {
+            workers.push(tokio::spawn(
+                crate::config_reload::Reconciler::new(&self.services).run(interval, bg_rx.clone()),
+            ));
+        }
 
         // Servers.
         tokio::spawn(async move {
