@@ -94,6 +94,21 @@ pub fn response(evidence: Option<&VerifiedEvidence>, request_id: &str) -> Respon
         );
         headers.insert("x-hopae-principal-kind", HeaderValue::from_static(kind));
         headers.insert("x-hopae-aal", HeaderValue::from_static("0"));
+        // Kubernetes workload identity (Hangang ADR 0021/0022): the
+        // ServiceAccount-scoped principal and its SPIFFE ID, shared with
+        // Hangang's workload mTLS. Outputs of verification, never inputs.
+        if let Some(workload) = evidence.workload() {
+            if let Ok(value) = HeaderValue::from_str(&workload.principal) {
+                headers.insert("x-hopae-principal", value);
+            }
+            if let Some(value) = workload
+                .spiffe_id
+                .as_deref()
+                .and_then(|id| HeaderValue::from_str(id).ok())
+            {
+                headers.insert("x-hopae-workload-spiffe-id", value);
+            }
+        }
     } else {
         headers.insert(
             http::header::WWW_AUTHENTICATE,

@@ -1024,12 +1024,13 @@ impl Config {
                         self.authentication_gateway.as_ref().is_none_or(|gateway| {
                             !gateway.profiles.iter().any(|profile| {
                                 profile.service_id == scope.service
-                                    && profile.kubernetes_tokenreview.is_some()
+                                    && (profile.kubernetes_tokenreview.is_some()
+                                        || profile.kubernetes_workload.is_some())
                             })
                         })
                     }))
             {
-                errs.push("workload_receipts requires mTLS gRPC and native TokenReview profiles for every scope".into());
+                errs.push("workload_receipts requires mTLS gRPC and native Kubernetes workload profiles for every scope".into());
             }
             if let Some(humans) = &config.human_receipts {
                 if self.listen.grpc_gateway.is_none() || self.listen.native_gateway_tls.is_none() {

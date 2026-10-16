@@ -1,6 +1,17 @@
-//! Pod-bound workload authentication through a fixed trusted Kubernetes TokenReview API.
-//! No result cache: bound-object validity is checked by the API on every invocation.
-use super::{PrincipalKind, Subject, VerifiedEvidence, breaker::Circuit, runtime::Error};
+//! **Deprecated fallback** (Hangang ADR 0022): Pod-bound workload
+//! authentication through a fixed trusted Kubernetes TokenReview API plus
+//! live ServiceAccount/Pod metadata GETs. Every uncached invocation contacts
+//! the API server. The default connector is the offline
+//! [`super::workload`] verifier; this one stays for clusters whose issuer
+//! keys cannot be reached. An optional positive cache (at most 10 s) bounds
+//! the API load. The principal is the ServiceAccount (`wk2:`), as for the
+//! offline connector; the Pod-bound subject is available only inside an
+//! explicit, expiring compatibility window.
+use super::workload::{
+    identity::{self, BoundRef, SubjectMode, Workload},
+    signals::{Seen, Signal, Sink, WorkloadRef},
+};
+use super::{VerifiedEvidence, breaker::Circuit, runtime::Error};
 use anyhow::{Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -25,6 +36,21 @@ pub struct Profile {
     pub ca_pem_env: String,
     pub reviewer_token_env: String,
     pub token_prefix: String,
+    /// SPIFFE trust domain; when set, evidence carries the SPIFFE ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_domain: Option<String>,
+    /// `service_account` (default) or the deprecated `legacy_pod`.
+    #[serde(default)]
+    pub subject: SubjectMode,
+    /// Required with `legacy_pod`: the end of the compatibility window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_until_ms: Option<u64>,
+    /// Report legacy Pod subject → principal mappings until this instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_mapping_until_ms: Option<u64>,
+    /// Positive result cache, 0 (default, off) to 10000 ms.
+    #[serde(default)]
+    pub cache_ttl_ms: u64,
 }
 impl Profile {
     pub fn validate(&self) -> Result<()> {
@@ -46,6 +72,27 @@ impl Profile {
                     .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)),
             "explicit Kubernetes credential prefix required"
         );
+        ensure!(
+            self.trust_domain
+                .as_deref()
+                .is_none_or(identity::trust_domain)
+                && self.cache_ttl_ms <= 10_000
+                && self
+                    .legacy_mapping_until_ms
+                    .is_none_or(|t| t > 0 && t <= i64::MAX as u64),
+            "invalid Kubernetes TokenReview trust domain, cache or migration window"
+        );
+        match self.subject {
+            SubjectMode::ServiceAccount => ensure!(
+                self.legacy_until_ms.is_none(),
+                "legacy_until_ms requires subject legacy_pod"
+            ),
+            SubjectMode::LegacyPod => ensure!(
+                self.legacy_until_ms
+                    .is_some_and(|t| t > 0 && t <= i64::MAX as u64),
+                "subject legacy_pod is deprecated and requires legacy_until_ms"
+            ),
+        }
         Ok(())
     }
     pub fn compile(&self, env: &dyn Fn(&str) -> Option<String>) -> Result<Connector> {
@@ -56,8 +103,33 @@ impl Profile {
             env(&self.reviewer_token_env)
                 .ok_or_else(|| anyhow::anyhow!("Kubernetes reviewer reference unavailable"))?,
         );
-        Connector::compile(&self.connection, ca.as_bytes(), reviewer)
+        let mut connector = Connector::compile(&self.connection, ca.as_bytes(), reviewer)?;
+        connector.identity = IdentityPolicy {
+            trust_domain: self.trust_domain.clone(),
+            subject: self.subject,
+            legacy_until_ms: self.legacy_until_ms,
+            legacy_mapping_until_ms: self.legacy_mapping_until_ms,
+        };
+        connector.cache = super::workload::cache::Cache::new(self.cache_ttl_ms, 10_000);
+        let mut binding = Sha256::new();
+        binding.update(connector.binding);
+        binding.update(serde_json::to_vec(&connector.identity)?);
+        binding.update(self.cache_ttl_ms.to_be_bytes());
+        connector.binding = binding.finalize().into();
+        tracing::warn!(
+            cluster = %self.connection.cluster_id,
+            "kubernetes_tokenreview is deprecated: prefer kubernetes_workload (offline JWKS verification)"
+        );
+        Ok(connector)
     }
+}
+/// How verified facts become the published subject.
+#[derive(Clone, Debug, Default, Serialize)]
+pub(crate) struct IdentityPolicy {
+    trust_domain: Option<String>,
+    subject: SubjectMode,
+    legacy_until_ms: Option<u64>,
+    legacy_mapping_until_ms: Option<u64>,
 }
 pub struct Connector {
     config: Config,
@@ -67,6 +139,11 @@ pub struct Connector {
     authorization: reqwest::header::HeaderValue,
     capacity: tokio::sync::Semaphore,
     circuit: Arc<Circuit>,
+    identity: IdentityPolicy,
+    cache: super::workload::cache::Cache,
+    sink: std::sync::Mutex<Option<Sink>>,
+    observed: Seen,
+    mapped: Seen,
 }
 #[derive(Deserialize)]
 struct Claims {
@@ -224,7 +301,26 @@ impl Connector {
             authorization,
             capacity: tokio::sync::Semaphore::new(64),
             circuit: Circuit::new(3, 30_000).expect("constant circuit bounds"),
+            identity: IdentityPolicy::default(),
+            cache: super::workload::cache::Cache::new(0, 0),
+            sink: std::sync::Mutex::new(None),
+            observed: Seen::new(65_536),
+            mapped: Seen::new(65_536),
         })
+    }
+    pub(crate) fn attach(&self, sink: Sink) {
+        *self.sink.lock().unwrap_or_else(|p| p.into_inner()) = Some(sink);
+    }
+    fn emit(&self, signal: Signal) {
+        if let Some(sink) = self.sink.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            sink.emit(signal);
+        }
+    }
+    pub(crate) fn config(&self) -> &Config {
+        &self.config
+    }
+    pub(crate) fn trust_domain(&self) -> Option<&str> {
+        self.identity.trust_domain.as_deref()
     }
     pub(crate) fn same_binding(&self, other: &Self) -> bool {
         self.binding == other.binding
@@ -299,7 +395,29 @@ impl Connector {
         if !identifier(service) {
             return Err(Error::Invalid);
         }
+        if self.identity.subject == SubjectMode::LegacyPod
+            && self.identity.legacy_until_ms.is_some_and(|t| now_ms >= t)
+        {
+            super::workload::metrics::authentication(
+                service,
+                "tokenreview",
+                "denied",
+                "legacy_window_expired",
+            );
+            return Err(Error::Unavailable);
+        }
         let claims = self.claims(token, now_ms)?;
+        let key: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        if let Some((workload, expires_ms)) = self.cache.get(&key, now_ms) {
+            super::workload::metrics::cache(service, "hit");
+            super::workload::metrics::authentication(
+                service,
+                "tokenreview",
+                "authenticated",
+                "cached",
+            );
+            return self.publish(service, &workload, expires_ms, now_ms);
+        }
         let _permit = self
             .capacity
             .try_acquire()
@@ -307,15 +425,82 @@ impl Connector {
         let lease = self.circuit.admit().ok_or(Error::Unavailable)?;
         let result = self.exchange(service, token, claims, now_ms).await;
         lease.finish(matches!(result, Err(Error::Unavailable)));
-        result
+        let reason = match &result {
+            Ok(_) => "ok",
+            Err(Error::Unavailable) => "source_unavailable",
+            Err(Error::Expired) => "expired",
+            Err(_) => "invalid",
+        };
+        super::workload::metrics::authentication(
+            service,
+            "tokenreview",
+            if result.is_ok() {
+                "authenticated"
+            } else {
+                "denied"
+            },
+            reason,
+        );
+        let (workload, expires_ms) = result?;
+        if self.cache.enabled() {
+            super::workload::metrics::cache(service, "miss");
+            self.cache
+                .insert(key, Arc::new(workload.clone()), expires_ms, now_ms);
+        }
+        self.publish(service, &workload, expires_ms, now_ms)
+    }
+    /// The published subject and attributes of verified facts.
+    fn publish(
+        &self,
+        service: &str,
+        workload: &Workload,
+        expires_ms: u64,
+        now_ms: u64,
+    ) -> Result<VerifiedEvidence, Error> {
+        let (subject, attributes) = workload
+            .resolve(
+                self.identity.trust_domain.as_deref(),
+                self.identity.subject,
+                "tokenreview",
+            )
+            .ok_or(Error::Invalid)?;
+        let reference = WorkloadRef::of(service, &attributes);
+        if self.observed.insert(&attributes.principal) {
+            self.emit(Signal::Observed(reference.clone()));
+        }
+        if let Some(legacy) = &attributes.legacy_subject_ref
+            && self
+                .identity
+                .legacy_mapping_until_ms
+                .is_some_and(|until| now_ms < until)
+            && self
+                .mapped
+                .insert(&format!("{legacy}>{}", attributes.principal))
+        {
+            self.emit(Signal::LegacyMapped {
+                workload: reference,
+                legacy_subject_ref: legacy.clone(),
+            });
+        }
+        let expires_at = expires_ms.min(now_ms.checked_add(1000).ok_or(Error::Unavailable)?);
+        if expires_at <= now_ms {
+            return Err(Error::Expired);
+        }
+        Ok(VerifiedEvidence {
+            subject,
+            connector: "kubernetes-tokenreview".into(),
+            expires_at,
+            service: Some(service.to_owned()),
+            workload: Some(Arc::new(attributes)),
+        })
     }
     async fn exchange(
         &self,
-        service: &str,
+        _service: &str,
         token: &str,
         claims: Claims,
         now_ms: u64,
-    ) -> Result<VerifiedEvidence, Error> {
+    ) -> Result<(Workload, u64), Error> {
         let started = std::time::Instant::now();
         let future = async {
             let mut response = self.client.post(self.endpoint.clone()).header(reqwest::header::AUTHORIZATION,self.authorization.clone()).header(reqwest::header::ACCEPT,"application/json").json(&serde_json::json!({"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","spec":{"token":token,"audiences":[self.config.audience]}})).send().await.map_err(|_| Error::Unavailable)?;
@@ -345,20 +530,18 @@ impl Connector {
                     u64::try_from(started.elapsed().as_millis()).map_err(|_| Error::Unavailable)?,
                 )
                 .ok_or(Error::Unavailable)?;
-            let mut evidence = self.evidence(service, &claims, reply, verified_ms)?;
+            let (workload, expires_ms) = self.facts(&claims, reply, verified_ms)?;
             self.current_objects(&claims).await?;
             let final_ms = now_ms
                 .checked_add(
                     u64::try_from(started.elapsed().as_millis()).map_err(|_| Error::Unavailable)?,
                 )
                 .ok_or(Error::Unavailable)?;
-            evidence.expires_at = evidence
-                .expires_at
-                .min(now_ms.checked_add(1000).ok_or(Error::Unavailable)?);
-            if evidence.expires_at <= final_ms {
+            let lease = expires_ms.min(now_ms.checked_add(1000).ok_or(Error::Unavailable)?);
+            if lease <= final_ms {
                 return Err(Error::Invalid);
             }
-            Ok(evidence)
+            Ok((workload, expires_ms))
         };
         tokio::time::timeout(Duration::from_millis(self.config.timeout_ms), future)
             .await
@@ -424,13 +607,8 @@ impl Connector {
         }
         Ok(())
     }
-    fn evidence(
-        &self,
-        service: &str,
-        claims: &Claims,
-        reply: Reply,
-        now_ms: u64,
-    ) -> Result<VerifiedEvidence, Error> {
+    /// The attested facts of a positive review and the token expiry (ms).
+    fn facts(&self, claims: &Claims, reply: Reply, now_ms: u64) -> Result<(Workload, u64), Error> {
         if reply.api_version != "authentication.k8s.io/v1" || reply.kind != "TokenReview" {
             return Err(Error::Unavailable);
         }
@@ -459,38 +637,43 @@ impl Connector {
         {
             return Err(Error::Unavailable);
         }
-        let expires_at = claims
-            .exp
-            .checked_mul(1000)
-            .ok_or(Error::Invalid)?
-            .min(now_ms.checked_add(1000).ok_or(Error::Unavailable)?);
-        if expires_at <= now_ms {
+        let expires_ms = claims.exp.checked_mul(1000).ok_or(Error::Invalid)?;
+        if expires_ms.min(now_ms.checked_add(1000).ok_or(Error::Unavailable)?) <= now_ms {
             return Err(Error::Invalid);
         }
-        let mut digest = Sha256::new();
-        digest.update(b"hopae:kubernetes:pod-subject:v1\0");
-        for value in [
-            &k.namespace,
-            &k.serviceaccount.name,
-            &k.serviceaccount.uid,
-            &k.pod.name,
-            &k.pod.uid,
-        ] {
-            digest.update((value.len() as u32).to_be_bytes());
-            digest.update(value.as_bytes());
-        }
-        let subject = format!("w_{:x}", digest.finalize());
-        Ok(VerifiedEvidence {
-            subject: Subject {
+        let node = user
+            .extra
+            .get("authentication.kubernetes.io/node-name")
+            .filter(|v| v.len() == 1 && identity::object_name(&v[0]))
+            .map(|v| v[0].clone());
+        Ok((
+            Workload {
                 issuer: self.config.issuer.clone(),
-                realm: self.config.cluster_id.clone(),
-                subject,
-                kind: PrincipalKind::Workload,
+                cluster_id: self.config.cluster_id.clone(),
+                namespace: k.namespace.clone(),
+                service_account: k.serviceaccount.name.clone(),
+                service_account_uid: k.serviceaccount.uid.clone(),
+                pod: Some(BoundRef {
+                    name: k.pod.name.clone(),
+                    uid: k.pod.uid.clone(),
+                }),
+                secret: None,
+                node,
             },
-            connector: "kubernetes-tokenreview".into(),
-            expires_at,
-            service: Some(service.to_owned()),
-        })
+            expires_ms,
+        ))
+    }
+    /// Test helper: the evidence a review would publish.
+    #[cfg(test)]
+    fn evidence(
+        &self,
+        service: &str,
+        claims: &Claims,
+        reply: Reply,
+        now_ms: u64,
+    ) -> Result<VerifiedEvidence, Error> {
+        let (workload, expires_ms) = self.facts(claims, reply, now_ms)?;
+        self.publish(service, &workload, expires_ms, now_ms)
     }
 }
 
@@ -520,6 +703,11 @@ mod tests {
             authorization: reqwest::header::HeaderValue::from_static("Bearer fixture-only"),
             capacity: tokio::sync::Semaphore::new(64),
             circuit: Circuit::new(3, 30_000).unwrap(),
+            identity: IdentityPolicy::default(),
+            cache: super::super::workload::cache::Cache::new(0, 0),
+            sink: std::sync::Mutex::new(None),
+            observed: Seen::new(16),
+            mapped: Seen::new(16),
         }
     }
     fn reply() -> Reply {
@@ -546,12 +734,30 @@ mod tests {
         let e = c
             .evidence("orders", &c.claims(&t, 100).unwrap(), reply(), 100)
             .unwrap();
-        assert_eq!(e.subject.kind, PrincipalKind::Workload);
+        assert_eq!(e.subject.kind, super::super::PrincipalKind::Workload);
         assert_eq!(e.expires_at, 1100);
         assert_eq!(e.service(), Some("orders"));
         let stable = super::super::stable_subject(e.subject());
-        // Shared Pumgye workload-association contract vector.
-        assert_eq!(stable, "s_529be5b595ab327853eabe2d1adf52256e262af036510607");
+        // ADR 0022: the published principal is the ServiceAccount, not the Pod.
+        let attrs = e.workload().unwrap();
+        assert_eq!(e.subject().subject, attrs.principal);
+        assert_eq!(stable, attrs.subject_ref);
+        assert_eq!(attrs.pod.as_ref().unwrap().uid, "pod-1");
+        // The legacy Pod-bound contract vector stays derivable for migration.
+        assert_eq!(
+            attrs.legacy_subject_ref.as_deref(),
+            Some("s_529be5b595ab327853eabe2d1adf52256e262af036510607")
+        );
+        let mut legacy = connector();
+        legacy.identity.subject = SubjectMode::LegacyPod;
+        legacy.identity.legacy_until_ms = Some(10_000);
+        let le = legacy
+            .evidence("orders", &legacy.claims(&t, 100).unwrap(), reply(), 100)
+            .unwrap();
+        assert_eq!(
+            super::super::stable_subject(le.subject()),
+            "s_529be5b595ab327853eabe2d1adf52256e262af036510607"
+        );
         let mut other = reply();
         other.status.user.as_mut().unwrap().uid = "sa-2".into();
         assert!(

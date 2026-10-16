@@ -246,6 +246,7 @@ impl Connector {
                 kind: PrincipalKind::Service,
             },
             connector: "api-relay".into(),
+            workload: None,
             service: Some(service.to_owned()),
             expires_at: expires_at.min(now.saturating_add(1000)),
         })

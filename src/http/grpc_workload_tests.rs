@@ -325,7 +325,7 @@ async fn native_workload_receipt_and_observation_keep_class_original_age_and_own
     assert_eq!(c.identity.as_ref().unwrap().aal, 0);
     assert_eq!(
         c.identity.as_ref().unwrap().subject_ref,
-        "s_529be5b595ab327853eabe2d1adf52256e262af036510607"
+        service_account_subject()
     );
     assert_eq!(
         hopae_grpc::workload_epoch::decode(&c.identity_authority_epoch)
@@ -629,7 +629,7 @@ async fn public_sdk_actual_native_issue_independent_observe_refresh_and_local_re
     assert_eq!(observation.context().identity.as_ref().unwrap().aal, 0);
     assert_eq!(
         observation.context().identity.as_ref().unwrap().subject_ref,
-        "s_529be5b595ab327853eabe2d1adf52256e262af036510607"
+        service_account_subject()
     );
     let expected_hash =
         hopae_grpc::request_binding::digest(&hopae_grpc::request_binding::Request {
@@ -898,4 +898,23 @@ async fn native_human_source_mapping_cannot_mint_actual_service_receipt() {
         !fixture.root.path().join("calls").exists(),
         "API-key proof must not switch to TokenReview"
     );
+}
+
+/// ADR 0022: the published workload subject is the ServiceAccount principal
+/// (`wk2:` over issuer, cluster, namespace, ServiceAccount name and UID), not
+/// the Pod-bound subject `s_529be5…` it used to be.
+fn service_account_subject() -> String {
+    use crate::auth_gateway::workload::identity;
+    let principal = identity::principal_ref(
+        "https://issuer.example.test",
+        "example-cluster",
+        "blue",
+        "worker",
+        "sa-1",
+    );
+    crate::auth_gateway::stable_subject(&identity::principal_subject(
+        "https://issuer.example.test",
+        "example-cluster",
+        &principal,
+    ))
 }

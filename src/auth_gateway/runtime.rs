@@ -26,6 +26,9 @@ pub struct Profile {
     pub api_relay: Option<super::relay::Config>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kubernetes_tokenreview: Option<super::kubernetes::Profile>,
+    /// Offline-verified Kubernetes workload identity (ADR 0022, default path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubernetes_workload: Option<super::workload::Profile>,
     #[serde(default)]
     pub networks: Vec<String>,
     #[serde(default)]
@@ -75,12 +78,19 @@ impl Config {
                     && p.api_keys.len() <= 256
                     && (p.api_relay.is_some()
                         || p.kubernetes_tokenreview.is_some()
+                        || p.kubernetes_workload.is_some()
                         || !p.api_keys.is_empty())
                     && p.networks.len() <= 256,
                 "authentication profile exceeds bounds"
             );
             let mixed = p.api_relay.is_some()
-                && (!p.api_keys.is_empty() || p.kubernetes_tokenreview.is_some());
+                && (!p.api_keys.is_empty()
+                    || p.kubernetes_tokenreview.is_some()
+                    || p.kubernetes_workload.is_some());
+            ensure!(
+                !(p.kubernetes_tokenreview.is_some() && p.kubernetes_workload.is_some()),
+                "a profile uses either kubernetes_workload or the deprecated kubernetes_tokenreview"
+            );
             ensure!(
                 !mixed || p.composition.is_some() || p.relay_token_prefix.is_some(),
                 "mixed authentication requires an explicit relay token prefix"
@@ -116,6 +126,19 @@ impl Config {
                     p.relay_token_prefix
                         .as_ref()
                         .is_none_or(|prefix| prefix != &kubernetes.token_prefix),
+                    "credential routing prefixes must be distinct"
+                );
+            }
+            if let Some(workload) = &p.kubernetes_workload {
+                workload.validate()?;
+                ensure!(
+                    workload.cluster_id == p.realm,
+                    "Kubernetes cluster must match profile realm"
+                );
+                ensure!(
+                    p.relay_token_prefix
+                        .as_ref()
+                        .is_none_or(|prefix| prefix != &workload.token_prefix),
                     "credential routing prefixes must be distinct"
                 );
             }
@@ -235,6 +258,7 @@ struct Prepared {
     session_fallback: bool,
     relay: Option<std::sync::Arc<super::relay::Connector>>,
     kubernetes: Option<(std::sync::Arc<super::kubernetes::Connector>, String)>,
+    workload: Option<(std::sync::Arc<super::workload::Connector>, String)>,
     eligibility: Option<super::lua::Policy>,
     eligibility_capacity: tokio::sync::Semaphore,
     relay_token_prefix: Option<String>,
@@ -258,6 +282,9 @@ pub struct ConnectorStatus {
     pub connector: &'static str,
     pub circuit: &'static str,
     pub available_capacity: usize,
+    /// Offline workload verification state (keys, revocation, cache).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workload: Option<super::workload::verify::WorkloadStatus>,
 }
 impl Runtime {
     /// Management-only observation; no credential, destination or subject metadata.
@@ -282,6 +309,23 @@ impl Runtime {
                         connector,
                         circuit,
                         available_capacity,
+                        workload: None,
+                    });
+                }
+                if let Some((workload, _)) = &profile.workload {
+                    let status = workload.status();
+                    let ready = status.keys.fresh
+                        && status.revocation.as_ref().is_none_or(|r| {
+                            r.ready
+                                && !r.overflow
+                                && r.staleness_ms.is_some_and(|ms| ms <= r.max_staleness_ms)
+                        });
+                    rows.push(ConnectorStatus {
+                        service_id: profile.service_id.clone(),
+                        connector: "kubernetes-workload",
+                        circuit: if ready { "closed" } else { "open" },
+                        available_capacity: 0,
+                        workload: Some(status),
                     });
                 }
             }
@@ -321,7 +365,10 @@ impl Runtime {
                 ensure!(
                     p.kubernetes_tokenreview
                         .as_ref()
-                        .is_none_or(|k| !value.starts_with(&k.token_prefix)),
+                        .is_none_or(|k| !value.starts_with(&k.token_prefix))
+                        && p.kubernetes_workload
+                            .as_ref()
+                            .is_none_or(|k| !value.starts_with(&k.token_prefix)),
                     "local credential collides with Kubernetes routing namespace"
                 );
                 let digest: [u8; 32] = Sha256::digest(value.as_bytes()).into();
@@ -378,6 +425,24 @@ impl Runtime {
                     Ok::<_, anyhow::Error>((connector, k.token_prefix.clone()))
                 })
                 .transpose()?;
+            let workload = p
+                .kubernetes_workload
+                .as_ref()
+                .map(|k| {
+                    let candidate = std::sync::Arc::new(k.compile(&p.service_id, env)?);
+                    let connector = previous
+                        .and_then(|runtime| runtime.profiles.get(&p.host.to_ascii_lowercase()))
+                        .and_then(|ports| p.ports.iter().find_map(|port| ports.get(port)))
+                        .filter(|old| old.service_id == p.service_id && old.realm == p.realm)
+                        .and_then(|old| old.workload.as_ref())
+                        .filter(|(old, prefix)| {
+                            prefix == &k.token_prefix && old.same_binding(&candidate)
+                        })
+                        .map(|(old, _)| old.clone())
+                        .unwrap_or(candidate);
+                    Ok::<_, anyhow::Error>((connector, k.token_prefix.clone()))
+                })
+                .transpose()?;
             let prepared = std::sync::Arc::new(Prepared {
                 composition: p
                     .composition
@@ -390,6 +455,7 @@ impl Runtime {
                 session_fallback: p.session_fallback,
                 relay,
                 kubernetes,
+                workload,
                 eligibility: p
                     .eligibility_lua
                     .as_deref()
@@ -415,6 +481,25 @@ impl Runtime {
                 .map(|runtime| runtime.observed_time.clone())
                 .unwrap_or_default(),
         })
+    }
+    /// Start background work of workload connectors (key refresh, revocation
+    /// watch) and attach the lifecycle sink. Idempotent; connectors resumed
+    /// from a previous runtime keep running.
+    pub fn activate(&self, sink: Option<super::workload::signals::Sink>) {
+        let mut seen = std::collections::HashSet::new();
+        for ports in self.profiles.values() {
+            for profile in ports.values() {
+                if !seen.insert(std::sync::Arc::as_ptr(profile)) {
+                    continue;
+                }
+                if let Some((workload, _)) = &profile.workload {
+                    workload.activate(sink.clone());
+                }
+                if let (Some((kubernetes, _)), Some(sink)) = (&profile.kubernetes, &sink) {
+                    kubernetes.attach(sink.clone());
+                }
+            }
+        }
     }
     pub fn handles(&self, host: &str, port: u16) -> bool {
         self.profiles
@@ -545,6 +630,28 @@ impl Runtime {
         if profile.composition.is_some() {
             return Err(Error::Invalid);
         }
+        if let Some((workload, prefix)) = &profile.workload {
+            if !profile.networks.permits(ip) {
+                return Err(Error::NetworkDenied);
+            }
+            let credential = token.ok_or(Error::Missing)?;
+            if credential.len() > 8192 || !credential.bytes().all(|b| b.is_ascii_graphic()) {
+                return Err(Error::Invalid);
+            }
+            if let Some(credential) = credential.strip_prefix(prefix) {
+                self.observed_time
+                    .fetch_max(now, std::sync::atomic::Ordering::AcqRel);
+                let now = self
+                    .observed_time
+                    .load(std::sync::atomic::Ordering::Acquire);
+                let started = std::time::Instant::now();
+                let evidence = workload.authenticate(credential, now).await?;
+                return profile.restrict(
+                    evidence,
+                    now.saturating_add(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+                );
+            }
+        }
         if let Some((kubernetes, prefix)) = &profile.kubernetes {
             if !profile.networks.permits(ip) {
                 return Err(Error::NetworkDenied);
@@ -649,6 +756,7 @@ impl Prepared {
             subject: key.subject.clone(),
             service: Some(self.service_id.clone()),
             connector: format!("api-key:{}", self.service_id),
+            workload: None,
             expires_at: now
                 .saturating_add(1000)
                 .min(key.expires_at.unwrap_or(u64::MAX)),
@@ -1100,4 +1208,4 @@ mod composition_tests;
 
 #[path = "runtime_admin.rs"]
 mod admin_view;
-pub(crate) use admin_view::{KeyVerdict, ServicePrincipal};
+pub(crate) use admin_view::{KeyVerdict, ServicePrincipal, WorkloadVerdict, is_workload_subject};

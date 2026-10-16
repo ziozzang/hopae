@@ -857,6 +857,20 @@ async fn bind_environment(
             None
         }
     };
+    // Kubernetes workload lifecycle signals (ADR 0021/0022) become outbox
+    // events through one pump per process.
+    if let Some(authority) = &authentication_authority {
+        let (sink, rx) = crate::auth_gateway::workload::signals::channel();
+        tokio::spawn(crate::auth_gateway::workload::events::pump(
+            rx,
+            emitter.clone(),
+            store.events(),
+        ));
+        authority
+            .lock()
+            .map_err(|_| anyhow::anyhow!("authentication authority unavailable"))?
+            .attach_workload_signals(sink);
+    }
     let projection_authority = {
         let mut connection = store.conn();
         let durable = crate::auth_gateway::projection_authority::read(&connection)

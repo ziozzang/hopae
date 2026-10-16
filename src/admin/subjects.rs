@@ -57,6 +57,8 @@ pub enum Ref {
     User,
     Human,
     Service,
+    /// A Kubernetes workload principal (`wk2:`) or SPIFFE ID (ADR 0022).
+    Workload,
     Unrecognized,
 }
 
@@ -73,6 +75,10 @@ pub fn classify(id: &str) -> Ref {
         && lower_hex(hex, 48)
     {
         Ref::Service
+    } else if crate::auth_gateway::workload::identity::is_principal_ref(id)
+        || (id.starts_with("spiffe://") && id.len() <= 2048)
+    {
+        Ref::Workload
     } else if crate::config::valid_user_id(id) {
         Ref::User
     } else {
@@ -416,6 +422,12 @@ pub(crate) async fn resolve(
         .iter()
         .map(|id| match classify(id) {
             Ref::Unrecognized => Item::unknown(id, "unrecognized"),
+            // Minted at authentication time; the lifecycle feed reports them.
+            Ref::Workload => {
+                let mut item = Item::unknown(id, "not_enumerable");
+                item.kind = Some("workload");
+                item
+            }
             Ref::User => match rows.get(id.as_str()) {
                 Some(row) => Item::human(id, id, row, src.subject_of(id), privacy),
                 None => Item::unknown(id, "not_found"),
@@ -794,6 +806,13 @@ struct Change {
     /// The group of a group change (only with `include_groups`).
     #[serde(skip_serializing_if = "Option::is_none")]
     group_id: Option<String>,
+    /// The workload principal of a workload change (only with
+    /// `include_workloads`): `principal` (`wk2:`), `subject_ref` (`s_`),
+    /// `spiffe_id`, cluster, namespace, ServiceAccount name/UID, and for a
+    /// retirement `cause`/`replacement`, for a migration mapping
+    /// `legacy_subject_ref`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workload: Option<serde_json::Map<String, serde_json::Value>>,
     human_subject: Option<String>,
     /// The subject's status when this page was read (consumers apply it,
     /// which makes replays and reordering harmless).
@@ -821,6 +840,10 @@ struct FeedRequest {
     /// changes (ADR-0019).
     #[serde(default)]
     include_groups: bool,
+    /// Lifecycle feed only: also report Kubernetes workload principal
+    /// changes (Hangang ADR 0021/0022).
+    #[serde(default)]
+    include_workloads: bool,
 }
 
 fn feed_limit(v: Option<usize>, default: usize) -> Result<usize, Fail> {
@@ -881,6 +904,7 @@ pub async fn lifecycle_api(
                 human_subject: src.subject_of(&row.user_id),
                 user_id: Some(row.user_id.clone()),
                 group_id: None,
+                workload: None,
                 status: current_status(row.status.as_deref()),
                 at: row.created_at,
             });
@@ -895,6 +919,7 @@ pub async fn lifecycle_api(
                     from.outbox.clone(),
                     room,
                     req.include_groups,
+                    req.include_workloads,
                     api::deadline(st),
                 )
                 .await
@@ -934,6 +959,14 @@ pub async fn lifecycle_api(
             };
             for ch in page.changes {
                 let status = match &ch.user_id {
+                    // A workload change has neither a user nor a group.
+                    _ if ch.workload.is_some() => {
+                        if ch.change == "workload_retired" {
+                            "retired"
+                        } else {
+                            "active"
+                        }
+                    }
                     Some(u) => current_status(
                         rows.get(u)
                             .and_then(|r| r.user.as_ref())
@@ -953,6 +986,7 @@ pub async fn lifecycle_api(
                     at: Some(ch.at),
                     user_id: ch.user_id,
                     group_id: ch.group_id,
+                    workload: ch.workload,
                 });
             }
             next.outbox = page.next;
@@ -1071,6 +1105,12 @@ mod tests {
         assert_eq!(classify("s_0123456789ABCDEFGHJKMNPQRS"), Ref::Unrecognized);
         assert_eq!(classify("u_01HZY"), Ref::User);
         assert_eq!(classify("alice@example.test"), Ref::Unrecognized);
+        assert_eq!(classify(&format!("wk2:{}", "a".repeat(64))), Ref::Workload);
+        assert_eq!(
+            classify(&format!("wk2:{}", "A".repeat(64))),
+            Ref::Unrecognized
+        );
+        assert_eq!(classify("spiffe://td.example/ns/a/sa/b"), Ref::Workload);
         assert_eq!(classify(""), Ref::Unrecognized);
     }
 

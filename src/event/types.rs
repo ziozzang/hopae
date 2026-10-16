@@ -145,10 +145,22 @@ pub enum EventKind {
     GroupMembershipRestored,
     /// A provider's group assertion was not applied (diagnostic).
     GroupSyncRefused,
+    /// Kubernetes workload identity (Hangang ADR 0021/0022, required): a
+    /// ServiceAccount principal authenticated for the first time by this
+    /// process, a principal retired (ServiceAccount deleted or re-created
+    /// with a new UID), and a deprecated Pod-bound subject observed as a
+    /// principal during the migration window. Lifecycle feed sources.
+    WorkloadPrincipalObserved,
+    WorkloadPrincipalRetired,
+    WorkloadLegacySubjectMapped,
+    /// A workload issuer's signing-key set changed (diagnostic).
+    WorkloadKeysRotated,
+    /// A workload revocation index became stale or current again (diagnostic).
+    WorkloadRevocationStale,
 }
 
 impl EventKind {
-    pub const ALL: [EventKind; 51] = [
+    pub const ALL: [EventKind; 56] = [
         EventKind::LoginStarted,
         EventKind::LoginSucceeded,
         EventKind::LoginFailed,
@@ -200,6 +212,11 @@ impl EventKind {
         EventKind::GroupMembershipStale,
         EventKind::GroupMembershipRestored,
         EventKind::GroupSyncRefused,
+        EventKind::WorkloadPrincipalObserved,
+        EventKind::WorkloadPrincipalRetired,
+        EventKind::WorkloadLegacySubjectMapped,
+        EventKind::WorkloadKeysRotated,
+        EventKind::WorkloadRevocationStale,
     ];
 
     /// Required kinds travel in the transaction of the state change they
@@ -213,6 +230,8 @@ impl EventKind {
                 | EventKind::EventsDropped
                 | EventKind::SinkBacklogOverflow
                 | EventKind::GroupSyncRefused
+                | EventKind::WorkloadKeysRotated
+                | EventKind::WorkloadRevocationStale
         )
     }
 
@@ -270,6 +289,11 @@ impl EventKind {
             EventKind::GroupMembershipStale => "group.membership_stale",
             EventKind::GroupMembershipRestored => "group.membership_restored",
             EventKind::GroupSyncRefused => "group.sync_refused",
+            EventKind::WorkloadPrincipalObserved => "workload.principal_observed",
+            EventKind::WorkloadPrincipalRetired => "workload.principal_retired",
+            EventKind::WorkloadLegacySubjectMapped => "workload.legacy_subject_mapped",
+            EventKind::WorkloadKeysRotated => "workload.keys_rotated",
+            EventKind::WorkloadRevocationStale => "workload.revocation_stale",
         }
     }
 
@@ -469,6 +493,20 @@ pub mod reasons {
 /// [`EventBuilder::attr`]; add keys here (a minor change, ADR-0009), never
 /// token-like names.
 pub const ATTR_ALLOWLIST: &[&str] = &[
+    // Kubernetes workload identity (identifiers only, ADR 0021/0022).
+    "cluster",
+    "keys_added",
+    "keys_removed",
+    "legacy_subject_ref",
+    "namespace",
+    "principal",
+    "replacement",
+    "service",
+    "service_account",
+    "service_account_uid",
+    "spiffe_id",
+    "stale",
+    "subject_ref",
     "aal",
     "actor",
     "assurance",
@@ -683,14 +721,14 @@ mod tests {
             assert_eq!(EventKind::from_name(k.name()), Some(k));
         }
         let required = EventKind::ALL.iter().filter(|k| k.is_required()).count();
-        assert_eq!(required, 45);
+        assert_eq!(required, 48);
         assert!(!EventKind::VerifyDenied.is_required());
         assert!(EventKind::ConfigLoaded.is_required());
     }
 
     #[test]
     fn console_kinds_reasons_and_attributes_are_registered() {
-        assert_eq!(EventKind::ALL.len(), 51);
+        assert_eq!(EventKind::ALL.len(), 56);
         for (kind, name) in [
             (
                 EventKind::FactorExternalConsumed,
