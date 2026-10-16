@@ -86,7 +86,8 @@ Emission therefore needs, in order: a schema migration that rebuilds the three t
 
 | Pass | Date | S1 | S2 | S3 | S4 | Outcome |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 2026-10-16 | 1 | 1 | 5 | 6 | S1, S2 and four S3 fixed; S3 F6a and S4 F8, F9, F12, F13 dispositioned below. A confirmation pass is pending. |
+| 1 | 2026-10-16 | 1 | 1 | 5 | 6 | S1, S2 and four S3 fixed; S3 F6a and S4 F8, F9, F12, F13 dispositioned below. |
+| 2 | 2026-10-16 | 0 | 0 | 1 | 2 | F1–F6, F10, F11 closed; F7 partial (residual below). New N1 (S3) fixed; N2, N3 (S4) dispositioned. No S1/S2: eligible for Accepted after the maintainer's review. |
 
 Findings and dispositions (ADR-0018 findings F10, F11 are recorded there):
 
@@ -100,6 +101,10 @@ Findings and dispositions (ADR-0018 findings F10, F11 are recorded there):
 - F8 (S4): passkey step-up consumption is looser than TOTP's (no app id comparison, no binding of an unbound transaction). DEFERRED: not exploitable without the user's passkey; binding the transaction would break falling back to the authenticator code.
 - F9 (S4): `script-src 'self'` trusts every same-origin script. DEFERRED: a CSP hash source for an external script is not supported uniformly (Safari); the portal serves no other script and the response type is pinned.
 - F12 (S4): the gRPC readers accept 3 without any opt-in. ACCEPTED: accepting is harmless; only presenting 3 is gated (ADR-0018 decision 5).
+- N1 (S3, pass 2): the F3 fix ended a passwordless session when it removed a passkey it had only confirmed with. FIX: the establishing passkey is the one its sign-in record (`factor.webauthn_used`, purpose `login`) names. Scenario `s487_a8_removing_another_passkey_keeps_the_passwordless_session`.
+- N2 (S4, pass 2): a cloner can avoid the clone signal by waiting for the user's next sign-in during its ceremony; no access is gained (still refused). ACCEPTED as residual detection loss.
+- N3 (S4, pass 2): ending passkey sessions at start scans `sessions` without an index on the provider. ACCEPTED: once per start.
+- F7 residual (pass 2): a distributed source (many /64s, or /48) can still fill the global cap and hide the passkey option for up to five minutes; lazy ceremony creation on the button press is the follow-up.
 - F13 (S4): an unknown user handle fails slightly faster than a bad signature. DEFERRED: a handle is 122 random bits and is not guessable; recorded.
 
 ## References

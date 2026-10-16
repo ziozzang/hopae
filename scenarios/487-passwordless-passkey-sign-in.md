@@ -87,6 +87,12 @@ With passwordless sign-in configured, a user with a discoverable passkey signs i
 - When: that session removes the passkey it was established with.
 - Then: no live passwordless session remains.
 
+### S487-A8 Removing another passkey keeps the passwordless session
+
+- Given: a passwordless session established with one passkey that later confirmed with a second one.
+- When: it removes the second passkey.
+- Then: the session keeps running.
+
 ## Observability expectations
 
 - Audit: `login.succeeded` and `session.created` (`aal = 2`) with `kind = webauthn`, `factor.webauthn_used` (`purpose = login`); `login.failed` (`ceremony_invalid`, `cause`) for refusals; `factor.webauthn_clone_suspected` for a counter regression.
@@ -105,6 +111,7 @@ With passwordless sign-in configured, a user with a discoverable passkey signs i
 | S487-A5 | `s487_a5_removing_the_passkey_ends_its_passwordless_sessions` | `tests/scenarios/s480_passkeys.rs` | integration | passing |
 | S487-A6 | `s487_a6_a_slower_tab_is_stale_not_a_clone` | `tests/scenarios/s480_passkeys.rs` | integration | passing |
 | S487-A7 | `s487_a7_removing_the_establishing_passkey_ends_the_acting_session` | `tests/scenarios/s480_passkeys.rs` | integration | passing |
+| S487-A8 | `s487_a8_removing_another_passkey_keeps_the_passwordless_session` | `tests/scenarios/s480_passkeys.rs` | integration | passing |
 
 ## Live verification
 

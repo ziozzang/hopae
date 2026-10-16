@@ -1570,3 +1570,79 @@ fn s487_a7_removing_the_establishing_passkey_ends_the_acting_session() {
     assert_eq!(gone.status, 303, "{gone:?}");
     assert_eq!(p.sql("SELECT COUNT(*) FROM sessions WHERE provider_id='hopae.passkey' AND terminated_at IS NULL"), 0);
 }
+
+#[test]
+fn s487_a8_removing_another_passkey_keeps_the_passwordless_session() {
+    // Review N1: a passwordless session established with P1 that later
+    // verified with P2 keeps running when P2 is removed.
+    let mut p = Pk::start(passwordless());
+    assert_eq!(p.register("Laptop").status, 303);
+    let handle = p.user_handle("");
+    assert_eq!(p.verify_portal(PORTAL).status, 303);
+    let first_key = std::mem::replace(
+        &mut p.key,
+        WebauthnAuthenticator::new(SoftPasskey::new(true)),
+    );
+    assert_eq!(p.register("Phone").status, 303);
+    let second_key = std::mem::replace(&mut p.key, first_key);
+    let b = p.fresh();
+    let (_, form) = p.passwordless_form(&b, &handle);
+    assert_eq!(p.post_in(&b, "/login/passkey", &form).status, 302);
+    // Verify in B with P2.
+    p.key = second_key;
+    let page = b.portal.get("/security/verify?next=passkeys");
+    let opts: RequestChallengeResponse = serde_json::from_str(&options(&page.body)).unwrap();
+    let cred = p
+        .key
+        .do_authentication(Url::parse(PORTAL).unwrap(), opts)
+        .unwrap();
+    let v = p.post_in(
+        &b,
+        "/security/verify/passkey",
+        &[
+            (
+                "csrf".into(),
+                field(&page.body, "/security/verify/passkey", "csrf"),
+            ),
+            ("next".into(), "passkeys".into()),
+            (
+                "ceremony".into(),
+                field(&page.body, "/security/verify/passkey", "ceremony"),
+            ),
+            ("credential".into(), browser_json(&cred)),
+        ],
+    );
+    assert_eq!(v.status, 303, "{v:?}");
+    let list = b.portal.get("/security/passkeys");
+    let phone_id = {
+        use base64::Engine as _;
+        let c = rusqlite::Connection::open(p.h.state_dir.path().join("state").join("hopae.db"))
+            .unwrap();
+        let v: Vec<u8> = c
+            .query_row(
+                "SELECT credential_id FROM webauthn_credentials WHERE label='Phone'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v)
+    };
+    let gone = p.post_in(
+        &b,
+        "/security/passkeys/remove",
+        &[
+            (
+                "csrf".into(),
+                field(&list.body, "/security/passkeys/remove", "csrf"),
+            ),
+            ("credential".into(), phone_id),
+            ("confirm".into(), "1".into()),
+        ],
+    );
+    assert_eq!(
+        gone.location(),
+        Some("/security/passkeys?done=removed"),
+        "{gone:?}"
+    );
+    assert_eq!(p.sql("SELECT COUNT(*) FROM sessions WHERE provider_id='hopae.passkey' AND terminated_at IS NULL"), 1);
+}

@@ -732,7 +732,7 @@ impl Passkeys for Store {
             let mut events = request.events;
             let generation = rotate(&tx, &shared, actor, Aal::Two, FactorEntry { kind: FactorKind::Webauthn, provider: None, at: now }, &mut events)?;
             tx.execute(
-                "INSERT INTO session_webauthn_elevations(session_id,credential_id,at) VALUES(?1,?2,?3) ON CONFLICT(session_id,credential_id) DO UPDATE SET at=excluded.at",
+                "INSERT INTO session_webauthn_elevations(session_id,credential_id,at) VALUES(?1,?2,?3) ON CONFLICT(session_id,credential_id) DO UPDATE SET at=MIN(session_webauthn_elevations.at,excluded.at)",
                 params![sid.as_str(), request.used.credential_id, now.secs()],
             )?;
             // Native Human owner provenance (ADR-0017 phase 2).
@@ -860,7 +860,7 @@ impl Passkeys for Store {
             match &request.proof {
                 PortalProof::Passkey { used, .. } => {
                     tx.execute(
-                        "INSERT INTO session_webauthn_elevations(session_id,credential_id,at) VALUES(?1,?2,?3) ON CONFLICT(session_id,credential_id) DO UPDATE SET at=excluded.at",
+                        "INSERT INTO session_webauthn_elevations(session_id,credential_id,at) VALUES(?1,?2,?3) ON CONFLICT(session_id,credential_id) DO UPDATE SET at=MIN(session_webauthn_elevations.at,excluded.at)",
                         params![sid.as_str(), used.credential_id, now.secs()],
                     )?;
                     super::webauthn_owner::record(&tx, sid.as_str(), user.as_str(), generation, &used.credential_id, used.assurance.as_str(), index, now.0, config_generation)?;
@@ -997,8 +997,9 @@ impl Passkeys for Store {
             // (passwordless): such a session ends with its passkey (review F3).
             let established_here = actor.view.session.provider_id.as_str() == crate::provider::types::PASSKEY_PROVIDER
                 && tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM session_webauthn_elevations WHERE session_id=?1 AND credential_id=?2)",
-                    params![actor.view.session.session_id.as_str(), credential_id],
+                    // The establishing passkey is the one its sign-in record names (review N1).
+                    "SELECT EXISTS(SELECT 1 FROM events WHERE kind='factor.webauthn_used' AND session_id=?1 AND json_extract(attrs,'$.purpose')='login' AND json_extract(attrs,'$.factor_id')=?2)",
+                    params![actor.view.session.session_id.as_str(), factor_id(&credential_id)],
                     |r| r.get::<_, bool>(0),
                 )?;
             let keep = (!established_here).then_some(&actor.view.session.session_id);
