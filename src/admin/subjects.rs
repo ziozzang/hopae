@@ -1085,6 +1085,98 @@ pub async fn snapshot_api(
     .await
 }
 
+/// `POST /v1/subjects/workloads/snapshot`: every Kubernetes workload
+/// principal Hopae has recorded (live and retired) with its legacy Pod-bound
+/// subjects, in registry order, for a consumer that lost its feed position
+/// (`410 cursor_expired`). The first page carries `watermark`: the feed
+/// cursor taken before the first page, from which the feed (with
+/// `include_workloads`) continues.
+pub async fn workloads_snapshot_api(
+    State(st): State<Arc<AdminState>>,
+    c: Ctx,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    run(st, c, headers, body, Op::Lifecycle, async |st, c, bytes| {
+        let req: FeedRequest = parse(bytes)?;
+        if req.include_groups || req.include_workloads {
+            return Err(reads::invalid());
+        }
+        let limit = feed_limit(req.limit, FEED_MAX)?;
+        let after = match &req.cursor {
+            None => 0,
+            Some(v) => v
+                .strip_prefix("w1.")
+                .filter(|n| !n.is_empty() && n.len() <= 19 && n.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|n| n.parse::<i64>().ok())
+                .ok_or(Fail(StatusCode::BAD_REQUEST, "invalid_cursor"))?,
+        };
+        let fail = |e: StoreError| store_failure(c, "subjects", &e);
+        let src = Sources::of(st).await.map_err(fail)?;
+        let watermark = if req.cursor.is_none() {
+            let outbox = src
+                .store
+                .admin_outbox_head(api::deadline(st))
+                .await
+                .map_err(fail)?;
+            let ledger = src
+                .store
+                .admin_ledger_head(api::deadline(st))
+                .await
+                .map_err(fail)?;
+            Some(FeedCursor { ledger, outbox }.encode())
+        } else {
+            None
+        };
+        let rows = src
+            .store
+            .workload_snapshot_after(after, limit + 1, api::deadline(st))
+            .await
+            .map_err(fail)?;
+        let more = rows.len() > limit;
+        let rows = &rows[..rows.len().min(limit)];
+        let items: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                json!({
+                    "principal": r.principal,
+                    "subject_ref": r.subject_ref,
+                    "spiffe_id": r.spiffe_id,
+                    "service": r.service,
+                    "cluster": r.cluster,
+                    "namespace": r.namespace,
+                    "service_account": r.service_account,
+                    "service_account_uid": r.service_account_uid,
+                    "status": r.status,
+                    "first_seen_at": r.first_seen_at,
+                    "last_seen_at": r.last_seen_at,
+                    "retired_at": r.retired_at,
+                    "cause": r.cause,
+                    "replacement": r.replacement,
+                    "legacy_subject_refs": r.legacy_subject_refs,
+                })
+            })
+            .collect();
+        let next = more
+            .then(|| rows.last().map(|r| format!("w1.{}", r.position)))
+            .flatten();
+        reads::audit(st, c, Op::Lifecycle, bytes, |b| {
+            b.attr("count", items.len())
+                .attr("kind", "workload_snapshot")
+        })
+        .await?;
+        Ok(api::json(
+            StatusCode::OK,
+            &json!({
+                "items": items,
+                "next_cursor": next,
+                "watermark": watermark,
+            }),
+        ))
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

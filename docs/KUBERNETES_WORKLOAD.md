@@ -1,6 +1,6 @@
 # Kubernetes workload authentication
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/KUBERNETES_WORKLOAD.md)
 
@@ -267,7 +267,10 @@ and the consumer's periodic reconcile catches up. `POST
 `workload_observed`, `workload_retired` and `workload_legacy_mapped` changes
 with `user_id: null` and a `workload` object; without the option the feed is
 unchanged ([subject directory](SUBJECT_DIRECTORY.md)). No event carries a token,
-Pod name or Pod UID.
+Pod name or Pod UID. The same changes update a durable principal registry
+(schema 16, never pruned by event retention, retirement final), read by
+`POST /v1/subjects/workloads/snapshot` with a feed `watermark`, so a consumer
+recovers after `410 cursor_expired`.
 
 ## Status, metrics and explain
 

@@ -1,6 +1,6 @@
 # Kubernetes 워크로드 인증
 
-<!-- translation-status: source=../KUBERNETES_WORKLOAD.md source-rev=7 status=current -->
+<!-- translation-status: source=../KUBERNETES_WORKLOAD.md source-rev=8 status=current -->
 
 [문서](README.md) · [English](../KUBERNETES_WORKLOAD.md)
 
@@ -241,7 +241,10 @@ SPIFFE ID는 한강의 전용 워크로드 mTLS listener(`allowed_uri_sans`)와 
 주면 이를 `user_id: null`과 `workload` 객체를 가진 `workload_observed`,
 `workload_retired`, `workload_legacy_mapped` 변경으로 보고합니다. 옵션이 없으면
 피드는 바뀌지 않습니다([주체 디렉터리](SUBJECT_DIRECTORY.md)). 어떤 이벤트도 토큰,
-Pod 이름이나 Pod UID를 담지 않습니다.
+Pod 이름이나 Pod UID를 담지 않습니다. 같은 변경이 영속 주체 등록부(스키마 16, 이벤트
+보존 기간에 정리되지 않음, retired는 최종)를 갱신하며 `POST
+/v1/subjects/workloads/snapshot`이 피드 `watermark`와 함께 이를 읽으므로 소비자는
+`410 cursor_expired` 뒤에도 복구할 수 있습니다.
 
 ## 상태, 지표, explain
 

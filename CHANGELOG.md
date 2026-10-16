@@ -142,6 +142,9 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Migration
 
+- Schema version 16 (`0016_workload_principals`) adds the workload
+  principal registry read by `POST /v1/subjects/workloads/snapshot`; 15 is
+  reserved by the service-credential work, which must merge first.
 - Kubernetes workloads: existing `kubernetes_tokenreview` profiles fail to
   load until they declare `subject`. Add `"subject": "legacy_pod"` with
   `legacy_until_ms` and `legacy_mapping_until_ms` to keep today's subjects,

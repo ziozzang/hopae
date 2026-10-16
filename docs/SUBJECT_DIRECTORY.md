@@ -1,6 +1,6 @@
 # Subject directory API
 
-<!-- doc-rev: 3 -->
+<!-- doc-rev: 4 -->
 
 [Documentation](README.md) · [한국어](ko/SUBJECT_DIRECTORY.md)
 
@@ -181,6 +181,7 @@ before schema v10 are not in the ledger and cannot be reported.
 | `POST /v1/subjects/search` | `q`, `kind`, `status`, `limit`, `cursor`, `privacy_profile` | `items`, `next_cursor`, `privacy_profile` |
 | `POST /v1/subjects/lifecycle` | `cursor`, `limit` (1–200, default 100), `include_groups`, `include_workloads` | `changes`, `next_cursor`, `more` |
 | `POST /v1/subjects/lifecycle/snapshot` | `cursor`, `limit` (1–200, default 200) | `items`, `next_cursor`, `watermark` |
+| `POST /v1/subjects/workloads/snapshot` | `cursor`, `limit` (1–200, default 200) | `items`, `next_cursor`, `watermark` |
 
 Errors: `400 invalid_request` (shape, bounds, unknown field), `400
 invalid_cursor`, `403` from the console's authentication and JSON API rule,
@@ -221,9 +222,19 @@ not recorded. Refused requests are not reads and are not recorded as such.
   `cluster`, `namespace`, `service_account`, `service_account_uid`,
   `service` and, when applicable, `cause`, `replacement` and
   `legacy_subject_ref`. Without it the answer is unchanged. Workload
-  principals are not in the snapshot: a consumer reconciles them from the
-  feed and treats a retired principal's bindings as orphaned (Hangang ADR
-  0021).
+  principals are not in the user snapshot; after `410 cursor_expired` a
+  consumer takes `POST /v1/subjects/workloads/snapshot` (`cursor`, `limit`
+  1–200, default 200): every recorded principal in registry order, live and
+  retired, with `principal`, `subject_ref`, `spiffe_id`, `service`,
+  `cluster`, `namespace`, `service_account`, `service_account_uid`,
+  `status`, `first_seen_at`, `last_seen_at`, `retired_at`, `cause`,
+  `replacement` and up to 64 `legacy_subject_refs`; `next_cursor`
+  (`w1.<position>`) until the end; the first page carries `watermark`, the
+  feed cursor taken before it, from which the feed (with
+  `include_workloads`) continues. The registry (schema 16) is written with
+  the events in one transaction and is not pruned by event retention;
+  retirement is final. A consumer treats a retired principal's bindings as
+  orphaned (Hangang ADR 0021).
 - Service principals' lifecycle follows profile publication (the profile
   revision), not this feed.
 - The search cursor is bound to the process like every console listing

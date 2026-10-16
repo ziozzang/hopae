@@ -216,6 +216,28 @@ fn s900_8_lifecycle_feed_and_explain() {
     );
     assert_eq!(change["status"], "active");
     assert_eq!(change["user_id"], Value::Null);
+    // S900-12: after a lost cursor the workload snapshot recovers the
+    // principal, with a watermark to continue the feed from.
+    let snap = k
+        .client(&a)
+        .post_json("/v1/subjects/workloads/snapshot", json!({}));
+    assert_eq!(snap.status, 200, "{snap:?}");
+    let snap = snap.json();
+    assert!(snap["watermark"].as_str().unwrap().starts_with("f1."));
+    let item = snap["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["principal"] == principal.as_str())
+        .expect("principal in snapshot")
+        .clone();
+    assert_eq!(item["status"], "active");
+    assert_eq!(item["spiffe_id"], SPIFFE);
+    assert_eq!(item["legacy_subject_refs"], json!([]));
+    let bad = k
+        .client(&a)
+        .post_json("/v1/subjects/workloads/snapshot", json!({"cursor": "l1.5"}));
+    assert_eq!(bad.status, 400);
     // Existing consumers (no option) see no workload change.
     let plain = k
         .client(&a)

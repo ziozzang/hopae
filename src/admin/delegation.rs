@@ -350,6 +350,7 @@ pub async fn middleware(
             | "/v1/subjects/search"
             | "/v1/subjects/lifecycle"
             | "/v1/subjects/lifecycle/snapshot"
+            | "/v1/subjects/workloads/snapshot"
             | "/v1/explain/authentication"
             | "/v1/subjects/groups"
             | "/v1/groups/search"
