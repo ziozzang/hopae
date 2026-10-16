@@ -1,6 +1,6 @@
 # 주체 디렉터리 API
 
-<!-- translation-status: source=../SUBJECT_DIRECTORY.md source-rev=3 status=current -->
+<!-- translation-status: source=../SUBJECT_DIRECTORY.md source-rev=4 status=current -->
 
 [문서 목차](README.md) · [English](../SUBJECT_DIRECTORY.md)
 
@@ -165,6 +165,7 @@ Hopae에는 사용자 삭제나 계정 병합 작업이 없습니다. 다른 방
 | `POST /v1/subjects/search` | `q`, `kind`, `status`, `limit`, `cursor`, `privacy_profile` | `items`, `next_cursor`, `privacy_profile` |
 | `POST /v1/subjects/lifecycle` | `cursor`, `limit`(1~200, 기본값 100), `include_groups`, `include_workloads` | `changes`, `next_cursor`, `more` |
 | `POST /v1/subjects/lifecycle/snapshot` | `cursor`, `limit`(1~200, 기본값 200) | `items`, `next_cursor`, `watermark` |
+| `POST /v1/subjects/workloads/snapshot` | `cursor`, `limit`(1~200, 기본값 200) | `items`, `next_cursor`, `watermark` |
 
 오류: `400 invalid_request`(모양, 범위, 알 수 없는 필드), `400 invalid_cursor`, 콘솔
 인증과 JSON API 규칙에 따른 `403`, `410 cursor_expired`, `retry-after`가 붙은
@@ -196,9 +197,17 @@ Hopae에는 사용자 삭제나 계정 병합 작업이 없습니다. 다른 방
   `status` `active` 또는 `retired`, 그리고 `principal`(`wk2:`), `subject_ref`(`s_`),
   `spiffe_id`, `cluster`, `namespace`, `service_account`, `service_account_uid`,
   `service`와 해당하면 `cause`, `replacement`, `legacy_subject_ref`를 담은 `workload`
-  객체를 가집니다. 이것이 없으면 응답은 바뀌지 않습니다. 워크로드 주체는 스냅숏에
-  없으므로 소비자는 피드로 조정하고 retired 주체의 binding을 고아로 처리합니다
-  (한강 ADR 0021).
+  객체를 가집니다. 이것이 없으면 응답은 바뀌지 않습니다. 워크로드 주체는 사용자
+  스냅숏에 없습니다. `410 cursor_expired` 뒤에 소비자는 `POST
+  /v1/subjects/workloads/snapshot`(`cursor`, `limit` 1~200, 기본값 200)을 읽습니다.
+  기록된 모든 주체를 등록 순서대로, 살아 있는 것과 retired를 함께 `principal`,
+  `subject_ref`, `spiffe_id`, `service`, `cluster`, `namespace`, `service_account`,
+  `service_account_uid`, `status`, `first_seen_at`, `last_seen_at`, `retired_at`,
+  `cause`, `replacement`, 최대 64개 `legacy_subject_refs`와 함께 돌려줍니다. 끝까지
+  `next_cursor`(`w1.<position>`)가 있고 첫 페이지의 `watermark`는 그 전에 잡은 피드
+  커서이며 피드(`include_workloads`)는 거기서 이어집니다. 등록부(스키마 16)는 이벤트와
+  같은 트랜잭션에 기록되고 이벤트 보존 기간에 정리되지 않으며 retired는 되돌릴 수
+  없습니다. 소비자는 retired 주체의 binding을 고아로 처리합니다(한강 ADR 0021).
 - 서비스 주체의 생명주기는 이 피드가 아니라 프로필 게시(프로필 리비전)를 따릅니다.
 - 검색 커서는 다른 콘솔 목록 커서처럼 프로세스에 묶여 있습니다. 생명주기와 스냅숏
   커서는 지속됩니다.

@@ -864,7 +864,7 @@ async fn bind_environment(
         tokio::spawn(crate::auth_gateway::workload::events::pump(
             rx,
             emitter.clone(),
-            store.events(),
+            store.clone(),
         ));
         authority
             .lock()

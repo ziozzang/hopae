@@ -22,6 +22,7 @@ mod rows;
 pub mod service_credentials;
 mod sessions;
 pub(crate) mod subject_directory;
+pub mod workloads;
 // Provenance infrastructure; actual native Human candidate integration is queued.
 #[cfg(test)]
 mod tests;
@@ -124,6 +125,11 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         15,
         "0015_service_credentials",
         include_str!("../migrations/0015_service_credentials.sql"),
+    ),
+    (
+        16,
+        "0016_workload_principals",
+        include_str!("../migrations/0016_workload_principals.sql"),
     ),
 ];
 
