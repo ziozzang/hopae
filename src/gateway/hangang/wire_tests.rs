@@ -224,7 +224,8 @@ async fn decisions_and_latency_are_recorded_by_surface() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 403);
-    assert_eq!(AUTH_OUTCOMES.get(labels(Surface::ForwardAuth)), http0 + 1);
+    // Process-wide counters: tests running in parallel may add to them too.
+    assert!(AUTH_OUTCOMES.get(labels(Surface::ForwardAuth)) > http0);
     let mut request = axum::http::Request::builder()
         .uri(VERIFY_PATH)
         .header("x-hopae-gateway-key", "wrong")
@@ -233,6 +234,6 @@ async fn decisions_and_latency_are_recorded_by_surface() {
     request.extensions_mut().insert(Surface::Hop1);
     let resp = f.router.clone().oneshot(request).await.unwrap();
     assert_eq!(resp.status(), 403);
-    assert_eq!(AUTH_OUTCOMES.get(labels(Surface::Hop1)), hop0 + 1);
+    assert!(AUTH_OUTCOMES.get(labels(Surface::Hop1)) > hop0);
     assert!(metrics::latency_count(Surface::Hop1) > latency0);
 }
