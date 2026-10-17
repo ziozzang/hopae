@@ -499,11 +499,43 @@ fn default_trusted_proxies() -> Vec<String> {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Store {
-    #[serde(default)]
+    /// `sqlite` (default) or `postgres` (ADR-0020; `backend` is an alias).
+    #[serde(default, alias = "backend")]
     pub kind: StoreKind,
     /// Database file; defaults to `<state_dir>/hopae.db`.
     #[serde(default)]
     pub path: Option<PathBuf>,
+    /// PostgreSQL connection (required with `kind = "postgres"`).
+    #[serde(default)]
+    pub postgres: Option<PostgresStore>,
+}
+
+/// `store.postgres` (ADR-0020). The connection string is read from the
+/// environment variable `url_env`, never from the file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresStore {
+    pub url_env: String,
+    /// PEM CA bundle for TLS (`verify-full`); without it only loopback or a
+    /// Unix socket is allowed.
+    #[serde(default)]
+    pub ca_file: Option<PathBuf>,
+    #[serde(default = "default_pg_pool")]
+    pub pool_size: usize,
+    #[serde(default = "default_pg_connect")]
+    pub connect_timeout_ms: u64,
+    #[serde(default = "default_pg_statement")]
+    pub statement_timeout_ms: u64,
+}
+
+fn default_pg_pool() -> usize {
+    16
+}
+fn default_pg_connect() -> u64 {
+    5000
+}
+fn default_pg_statement() -> u64 {
+    2000
 }
 
 impl Default for Store {
@@ -511,6 +543,7 @@ impl Default for Store {
         Self {
             kind: StoreKind::Sqlite,
             path: None,
+            postgres: None,
         }
     }
 }
@@ -520,6 +553,9 @@ impl Default for Store {
 pub enum StoreKind {
     #[default]
     Sqlite,
+    /// ADR-0020 slice 1: store library and conformance tests only; `serve`
+    /// refuses it until the remaining slices land.
+    Postgres,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1186,6 +1222,43 @@ impl Config {
             && p.as_os_str().is_empty()
         {
             errs.push("store.path must not be empty".to_string());
+        }
+        match (self.store.kind, &self.store.postgres) {
+            (StoreKind::Sqlite, Some(_)) => {
+                errs.push("store.postgres requires store.kind = \"postgres\"".to_string())
+            }
+            (StoreKind::Postgres, None) => {
+                errs.push("store.kind = \"postgres\" requires store.postgres".to_string())
+            }
+            (StoreKind::Postgres, Some(pg)) => {
+                if !cfg!(feature = "postgres") {
+                    errs.push(
+                        "store.kind = \"postgres\" needs a binary built with the postgres feature"
+                            .to_string(),
+                    );
+                }
+                if pg.url_env.is_empty()
+                    || pg.url_env.len() > 128
+                    || !pg
+                        .url_env
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
+                    errs.push(
+                        "store.postgres.url_env must be an environment variable name".to_string(),
+                    );
+                }
+                if pg.ca_file.as_ref().is_some_and(|p| !p.is_absolute()) {
+                    errs.push("store.postgres.ca_file must be an absolute path".to_string());
+                }
+                if !(1..=128).contains(&pg.pool_size)
+                    || !(100..=60_000).contains(&pg.connect_timeout_ms)
+                    || !(10..=600_000).contains(&pg.statement_timeout_ms)
+                {
+                    errs.push("store.postgres: pool_size 1-128, connect_timeout_ms 100-60000, statement_timeout_ms 10-600000".to_string());
+                }
+            }
+            (StoreKind::Sqlite, None) => {}
         }
         if let Err(e) = check_public_url(&self.portal.public_url) {
             errs.push(format!("portal.public_url {e}"));
@@ -2510,6 +2583,39 @@ mod tests {
       "portal": {"public_url": "https://auth.example.test"},
       "gateway": {"kind": "hangang", "caller_key_env": "K"}
     }"#;
+
+    /// ADR-0020 slice 1: `store.kind`/`store.backend = "postgres"` parses and
+    /// validates; serving refuses it (see `app::refuse_incomplete_backend`).
+    #[test]
+    fn s600_6_postgres_store_configuration_is_validated() {
+        let mut value: serde_json::Value = serde_json::from_str(BASE).unwrap();
+        value["store"] =
+            serde_json::json!({"backend": "postgres", "postgres": {"url_env": "HOPAE_PG_URL"}});
+        let cfg: Config = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(cfg.store.kind, StoreKind::Postgres);
+        let r = cfg.validate();
+        if cfg!(feature = "postgres") {
+            r.unwrap();
+        } else {
+            assert!(format!("{}", r.unwrap_err()).contains("postgres feature"));
+        }
+        for bad in [
+            serde_json::json!({"kind": "postgres"}),
+            serde_json::json!({"kind": "sqlite", "postgres": {"url_env": "X"}}),
+            serde_json::json!({"kind": "postgres", "postgres": {"url_env": "postgres://inline"}}),
+            serde_json::json!({"kind": "postgres", "postgres": {"url_env": "X", "pool_size": 0}}),
+            serde_json::json!({"kind": "postgres", "postgres": {"url_env": "X", "ca_file": "relative.pem"}}),
+        ] {
+            value["store"] = bad.clone();
+            let cfg: Config = serde_json::from_value(value.clone()).unwrap();
+            assert!(cfg.validate().is_err(), "{bad}");
+        }
+        value["store"] = serde_json::json!({"kind": "postgres", "postgres": {"url_env": "X", "password": "inline"}});
+        assert!(
+            serde_json::from_value::<Config>(value).is_err(),
+            "unknown keys refused"
+        );
+    }
 
     #[test]
     fn root_kubernetes_profile_loads_references_and_refuses_inline_secret() {

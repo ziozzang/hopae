@@ -503,7 +503,24 @@ pub(super) const ROOT: Node = Obj(&[
         ]),
     ),
     ("state_dir", Leaf),
-    ("store", Obj(&[("kind", Leaf), ("path", Leaf)])),
+    (
+        "store",
+        Obj(&[
+            ("kind", Leaf),
+            ("backend", Leaf),
+            ("path", Leaf),
+            (
+                "postgres",
+                Obj(&[
+                    ("url_env", Leaf),
+                    ("ca_file", Leaf),
+                    ("pool_size", Leaf),
+                    ("connect_timeout_ms", Leaf),
+                    ("statement_timeout_ms", Leaf),
+                ]),
+            ),
+        ]),
+    ),
     (
         "portal",
         Obj(&[("public_url", Leaf), ("sso_confirm_new_host", Leaf)]),

@@ -126,6 +126,11 @@ import`, `hopae admin`은 잠금을 잡지 않습니다.
 복원하고, 옆에 남은 `hopae.db-wal`과 `hopae.db-shm`을 지운 뒤 이전 바이너리를
 시작합니다. 백업 이후에 만들어진 세션은 사라지고, 백업 이후에 기록된 관리자 부여와 감사 이벤트도 사라지며, 사용자는 다시 로그인합니다.
 
+
+### 저장소를 PostgreSQL로 이전
+
+`hopae --config <file> store migrate-to-postgres [--from <path>]`는 SQLite 저장소를 `store.postgres`가 가리키는 빈 PostgreSQL 저장소로 복사합니다([ADR-0020](../adr/0020-postgresql-store-backend.md)). `postgres` feature로 빌드한 바이너리가 필요합니다. 명령이 인스턴스 잠금을 잡으므로 먼저 Hopae를 멈춥니다. SQLite 파일은 이 바이너리의 스키마여야 하며(업그레이드 후 SQLite로 한 번 시작), 읽기 전용으로 열리고 바뀌지 않아 롤백 자료로 남습니다. 행이 하나라도 있는 PostgreSQL 저장소와 복사할 수 없는 SQLite 테이블은 거부합니다. 복사는 하나의 트랜잭션이며, 커밋 전에 테이블마다 행 수와 SHA-256 다이제스트를 양쪽에서 비교하고, 테이블별 보고를 출력하며, `store.migrated` 이벤트(실행자, 스키마, 테이블 수, 행 수, 다이제스트)가 데이터와 함께 커밋됩니다. 생애주기 피드와 원장 소비자는 이전 뒤 새 스냅샷을 받습니다. PostgreSQL에서의 서비스는 아직 켜지지 않았습니다(슬라이스 5). `make qualify-postgres`는 로컬 컨테이너로 이전과 복제본 2개 저장소 검증을 실행합니다.
+
 ### 관리 콘솔
 
 콘솔은 세 번째 리스너 `listen.admin`(기본값 `127.0.0.1:8702`)이며 `admin.public_url`이
@@ -225,7 +230,7 @@ Hopae는 **stderr**에 기록하며 stdout에는 위의 시작 줄만 나갑니�
 이벤트 종류: `login.started`, `login.succeeded`, `login.failed`,
 `session.created`, `session.handoff`, `handoff.rejected`, `session.terminated`,
 `handle.revoked`, `identity.linked`, `identity.conflict`, `csrf.rejected`,
-`config.loaded`, `admin.providers_import`, `verify.denied`, `risk.step_up_required`, `provider.error`,
+`config.loaded`, `admin.providers_import`, `store.migrated`, `verify.denied`, `risk.step_up_required`, `provider.error`,
 `txn.evicted`, `events.dropped`, `sink.backlog_overflow`, 그리고 콘솔의
 `admin.grant`, `admin.revoke`, `admin.user_disable`, `admin.user_enable`,
 `admin.session_terminate`, `admin.sessions_terminate`, `admin.denied`. 상태를 바꾸는 종류는 그

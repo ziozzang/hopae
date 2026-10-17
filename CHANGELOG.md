@@ -223,6 +223,48 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   `authentication.reconciled` event), an invalid file leaves the store
   untouched, console/API edits answer `409 config_authoritative`. The default
   `store` mode is unchanged.
+- PostgreSQL store backend, slice 1 ([ADR-0020](docs/adr/0020-postgresql-store-backend.md)):
+  the backend-neutral `CoreStore` contract (users, identities and the
+  user-ID ledger, provider bootstrap, sessions and handles, outbox), a
+  PostgreSQL implementation behind the `postgres` cargo feature
+  (`tokio-postgres`, `deadpool-postgres`, rustls), its schema and migration
+  runner, and a dual-backend conformance suite (scenario 600). Configuration
+  `store.kind`/`store.backend = "postgres"` with `store.postgres` is
+  validated; serving on it is refused until slice 4. SQLite stays the
+  default and unchanged.
+- PostgreSQL store slice 2a: login transactions and the handoff-code
+  redemption (`HandoffStore`) on both backends, PostgreSQL schema 2, and
+  `make test-postgres` (ephemeral tmpfs container, removed on exit).
+- PostgreSQL store slice 2b: administrator grants, the actor fence (actor
+  rows locked `FOR SHARE`, deadline as `statement_timeout`), fenced status
+  changes and session termination (`AdminStore`), and a replay ledger shared
+  across replicas (`NonceStore`, PostgreSQL schema 3 `replay_nonces`); the
+  Hangang delegation nonce admission can use the store ledger.
+- PostgreSQL store slice 2c: the `Factors` and `Passkeys` store traits on
+  PostgreSQL (TOTP, external factors, WebAuthn passkeys, recovery codes,
+  portal and application elevation, passwordless sign-in, factor reset),
+  PostgreSQL schema 4, and the configuration generation in the slice
+  contract. Factor writes lock the subject user's row before re-checking the
+  acting session.
+- PostgreSQL store slice 3: the event relay (`Events`; claims with
+  `SKIP LOCKED` and a lease, so relays on several replicas never double
+  claim), console listings (`ConsoleStore`), groups and the projection
+  journal (`GroupStore`; gapless revisions in commit order) and the subject
+  directory feeds (`SubjectDirectoryStore`; ledger and lifecycle-feed
+  positions in commit order), PostgreSQL schema 5.
+- PostgreSQL store slice 4: the Human owner foundation (realm,
+  `admin_human_realm`, owner revisions by trigger, primary provenance) and
+  the application mirror (schemas 6 and 7); `hopae store
+  migrate-to-postgres` (one way into an empty store, per-table counts and
+  SHA-256 digests compared before commit, a `store.migrated` audit event,
+  the SQLite file opened read-only and kept as the rollback artefact); and
+  `make qualify-postgres`, a local two-replica store qualification with one
+  replica killed mid-traffic. Serving on PostgreSQL remains refused until
+  slice 5.
+- PostgreSQL store, identity platform: schema 8 (service credentials and
+  the workload principal registry, copied by the migration), the console
+  listing filters, AAL 3 in the actor fence and `workload.*` changes in the
+  lifecycle feed, as on SQLite (scenario S600-34).
 
 ### Changed
 

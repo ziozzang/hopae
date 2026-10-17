@@ -139,6 +139,23 @@ start the previous binary. Sessions created after the backup are lost, and so
 are administrator grants and audit events written after it; users sign in
 again.
 
+### Migrating the store to PostgreSQL
+
+`hopae --config <file> store migrate-to-postgres [--from <path>]` copies the
+SQLite store into the empty PostgreSQL store that `store.postgres` names
+([ADR-0020](adr/0020-postgresql-store-backend.md)), with the binary built
+with the `postgres` feature. Stop Hopae first: the command takes the
+instance lock. The SQLite file must be at this binary's schema (start Hopae
+on it once after an upgrade) and is opened read-only; it is never changed
+and stays the rollback artefact. The command refuses a PostgreSQL store that
+holds any row and a SQLite table it cannot copy. The copy is one transaction:
+each table's row count and SHA-256 digest are compared on both sides before
+it commits, the per-table report is printed, and a `store.migrated` event
+(actor, schema, tables, rows, digest) commits with the data. Lifecycle-feed
+and ledger consumers take a new snapshot afterwards. Serving on PostgreSQL is
+not enabled yet (slice 5); `make qualify-postgres` runs the migration and a
+two-replica store qualification against a local container.
+
 ### Management console
 
 The console is a third listener, `listen.admin` (default `127.0.0.1:8702`),
@@ -249,7 +266,7 @@ Hopae writes to **stderr**; stdout carries only the startup lines above.
 Event kinds: `login.started`, `login.succeeded`, `login.failed`,
 `session.created`, `session.handoff`, `handoff.rejected`, `session.terminated`,
 `handle.revoked`, `identity.linked`, `identity.conflict`, `csrf.rejected`,
-`config.loaded`, `admin.providers_import`, `verify.denied`, `risk.step_up_required`, `provider.error`,
+`config.loaded`, `admin.providers_import`, `store.migrated`, `verify.denied`, `risk.step_up_required`, `provider.error`,
 `txn.evicted`, `events.dropped`, `sink.backlog_overflow`, and the console's
 `admin.grant`, `admin.revoke`, `admin.user_disable`, `admin.user_enable`,
 `admin.session_terminate`, `admin.sessions_terminate`, `admin.denied`. State-changing kinds
