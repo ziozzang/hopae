@@ -36,10 +36,16 @@ pub(super) async fn services(f: &Fx) -> (crate::app::Bound, crate::app::Services
             )
             .unwrap(),
     ));
-    let mut authority = receipt_authority::Authority::load(&f.store.conn(), 0).unwrap();
+    let mut authority = {
+        use crate::store::meta::MetaDb as _;
+        f.store
+            .meta()
+            .meta_read(|tx| receipt_authority::Authority::load(tx, 0))
+            .unwrap()
+    };
     authority
         .reconcile(
-            &mut f.store.conn(),
+            &mut f.store.meta(),
             &[receipt_keys::Key {
                 issuer_ref: "native-human".into(),
                 purpose: crate::auth_gateway::receipt::Purpose::Authentication,
@@ -200,11 +206,11 @@ pub(super) fn tls(root: &std::path::Path) {
         "peer.pem",
     ]);
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_rpc_actual_oidc_public_sdk_issue_observe_refresh_and_totp() {
     actual_provider_rpc(None).await;
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires private owned LDAP TLS fixture, executed separately"]
 async fn native_human_rpc_actual_ldap_public_sdk_issue_observe_refresh_and_totp() {
     let ldap = serde_json::json!({"ldap":{"endpoint":std::env::var("OWNED_LDAP_ENDPOINT").unwrap(),"starttls":std::env::var("OWNED_LDAP_STARTTLS").is_ok_and(|s|s=="1"),"ca":std::env::var("OWNED_LDAP_CA").unwrap(),"base_dn":"dc=example,dc=test","bind_dn":"cn=reader,dc=example,dc=test","bind_password_env":"OWNED_LDAP_BIND_KEY","username_attribute":"uid","subject_attribute":"entryUUID","timeout_ms":1000}});
@@ -374,7 +380,7 @@ async fn actual_provider_rpc(ldap: Option<serde_json::Value>) {
     stop.send(true).unwrap();
     task.await.unwrap().unwrap();
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_rpc_direct_original_missing_wrong_owner_duplicate_stale_and_mixed_refuse() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -452,7 +458,7 @@ async fn native_human_rpc_direct_original_missing_wrong_owner_duplicate_stale_an
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_rpc_query_started_before_later_valid_proof_cannot_readmit() {
     let mut f = Fx::new(None).await;
     let ticks = Arc::new(AtomicU64::new(100));
@@ -480,7 +486,7 @@ async fn native_human_rpc_query_started_before_later_valid_proof_cannot_readmit(
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_rpc_query_cannot_cross_expiry_during_last_source_samples() {
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     // Vary the clock-read position; do not assume a particular count of SQL/fence samples.
@@ -536,7 +542,7 @@ async fn native_human_rpc_query_cannot_cross_expiry_during_last_source_samples()
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_rpc_query_remaining_same_sample_rejects_wrong_owner_domain_and_latches() {
     let mut f = Fx::new(None).await;
     Arc::get_mut(&mut f.owner).unwrap().ticks = Some(Arc::new(|| Ok(100)));
@@ -579,7 +585,7 @@ async fn native_human_rpc_query_remaining_same_sample_rejects_wrong_owner_domain
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_rpc_verify_metadata_is_canonical_for_ordinary_and_private_capture() {
     use tower::ServiceExt;
     let f = Fx::new(None).await;
@@ -642,28 +648,25 @@ async fn native_human_rpc_verify_metadata_is_canonical_for_ordinary_and_private_
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_rpc_legacy_uid_verify_allows_without_metadata_source_refuses() {
     use tower::ServiceExt;
     let f = Fx::new(None).await;
     let (_, original) = f.login().await;
     let legacy = "u_legacy\n";
-    {
-        let conn = f.store.conn();
-        conn.execute(
-            "INSERT INTO users(user_id,created_at,updated_at) VALUES(?1,0,0)",
-            [legacy],
-        )
-        .unwrap();
-        assert_eq!(
-            conn.execute(
-                "UPDATE identities SET user_id=?1 WHERE user_id=?2",
-                rusqlite::params![legacy, original.session.user_id.as_str()]
-            )
-            .unwrap(),
-            1
-        );
-    }
+    f.sql(&format!(
+        "INSERT INTO users(user_id,created_at,updated_at) VALUES('{legacy}',0,0)"
+    ));
+    f.sql(&format!(
+        "UPDATE identities SET user_id='{legacy}' WHERE user_id='{}'",
+        original.session.user_id.as_str()
+    ));
+    assert_eq!(
+        f.count(&format!(
+            "SELECT count(*) FROM identities WHERE user_id='{legacy}'"
+        )),
+        1
+    );
     // Fresh actual provider authentication creates the native session/provenance.
     let (cookie, view) = f.login().await;
     assert_eq!(view.session.user_id.as_str(), legacy);

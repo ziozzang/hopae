@@ -31,6 +31,9 @@ pub fn options(cfg: &Config, env: &dyn Fn(&str) -> Option<String>) -> anyhow::Re
         .as_ref()
         .map(|p| std::fs::read(p).with_context(|| format!("reading {}", p.display())))
         .transpose()?;
+    // A refused `sslmode` fails here (start and `hopae --check`), by name.
+    crate::store::postgres::sslmode::apply(&url, ca_pem.is_some())
+        .map_err(|e| anyhow::anyhow!("{}: {e}", pg.url_env))?;
     Ok(PgOptions {
         url,
         ca_pem,

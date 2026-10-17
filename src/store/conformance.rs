@@ -37,6 +37,10 @@ pub(crate) struct Backend {
     pub console: Arc<dyn ConsoleStore>,
     pub groups: Arc<dyn GroupStore>,
     pub directory: Arc<dyn SubjectDirectoryStore>,
+    pub dir: Arc<dyn super::Directory>,
+    pub sess: Arc<dyn super::Sessions>,
+    /// The application's handle over the same store.
+    pub app: super::Store,
     pub clock: Arc<TestClock>,
     pub rng: Arc<SeededRng>,
     /// The SQLite store, for inherent operations outside the traits.
@@ -47,7 +51,7 @@ pub(crate) struct Backend {
 }
 
 impl Backend {
-    async fn cleanup(self) {
+    pub(crate) async fn cleanup(self) {
         #[cfg(feature = "postgres")]
         if let Some((pg, schema)) = self.pg {
             let client = pg.raw().await;
@@ -83,6 +87,9 @@ fn sqlite() -> Backend {
         console: store.clone(),
         groups: store.clone(),
         directory: store.clone(),
+        dir: store.clone(),
+        sess: store.clone(),
+        app: super::Store::Sqlite((*store).clone()),
         clock,
         rng,
         sqlite: Some(store),
@@ -136,6 +143,9 @@ pub(crate) async fn postgres_with(realm: bool) -> Option<Backend> {
         console: store.clone(),
         groups: store.clone(),
         directory: store.clone(),
+        dir: store.clone(),
+        sess: store.clone(),
+        app: super::Store::Postgres(store.clone()),
         store: store.clone(),
         clock,
         rng: Arc::new(SeededRng::new(42)),
@@ -4258,6 +4268,1335 @@ async fn s600_24_sqlite_store_migrates_to_an_empty_postgres_store() {
     target.cleanup().await;
 }
 
+// ---- slice 5 step 1: Directory and Sessions parity ------------------------
+
+fn seed(index: usize, key: SeedKey, role: AdminRole) -> SeedEntry {
+    SeedEntry {
+        index,
+        key,
+        role,
+        note: None,
+    }
+}
+
+async fn directory_parity(b: &Backend) {
+    let name = b.store.backend();
+    // Provider import: insert, update file rows, leave api rows, force.
+    let r = b
+        .dir
+        .import_providers(
+            vec![provider("mock", true), provider("two", true)],
+            None,
+            vec![],
+        )
+        .await
+        .unwrap();
+    assert_eq!((r.inserted.len(), r.updated.len()), (2, 0), "{name}");
+    let mut changed = provider("mock", false);
+    changed.display_name = "Changed".into();
+    let r = b
+        .dir
+        .import_providers(vec![changed.clone()], None, vec![])
+        .await
+        .unwrap();
+    assert_eq!(r.updated, vec![ProviderId::new("mock")], "{name}");
+    assert!(conflict(
+        b.dir
+            .import_providers(vec![changed], Some(&ProviderId::new("ghost")), vec![])
+            .await
+    ));
+    let all = b.dir.providers().await.unwrap();
+    assert_eq!(all.len(), 2, "{name}");
+    assert!(
+        all.iter()
+            .any(|p| p.provider_id.as_str() == "mock" && p.display_name == "Changed" && !p.enabled)
+    );
+    b.dir
+        .import_providers(vec![provider("mock", true)], None, vec![])
+        .await
+        .unwrap();
+    // Users through the trait; deadline reads.
+    let u = user(b, 1).await;
+    let (_, email) = new_user(1);
+    assert!(
+        b.dir
+            .user_within(&u.user_id, deadline())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let gone = Deadline(std::time::Instant::now() - Duration::from_millis(1));
+    assert!(
+        matches!(b.dir.user_within(&u.user_id, gone).await, Err(StoreError::Unavailable(ref m)) if m == "deadline"),
+        "{name}"
+    );
+    let (found, ids) = b
+        .dir
+        .resolve_grant_target(&GrantTarget::Email(email.clone()), deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (found.user_id.clone(), ids.len()),
+        (u.user_id.clone(), 1),
+        "{name}"
+    );
+    assert!(
+        b.dir
+            .resolve_grant_target(
+                &GrantTarget::Id(crate::identity::types::UserId::new("u_NONE")),
+                deadline()
+            )
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // The file import of administrator grants.
+    let u2 = user(b, 2).await;
+    let mk = |user: &crate::identity::types::UserId,
+              kind: EventKind,
+              _p: Option<AdminRole>,
+              _r: AdminRole,
+              _f: bool| {
+        let mut e = EventBuilder::new(
+            b.clock.as_ref(),
+            b.rng.as_ref(),
+            kind,
+            Outcome::Success,
+            "req-import",
+        )
+        .build();
+        e.user_id = Some(user.clone());
+        e
+    };
+    let entries = vec![
+        seed(0, SeedKey::ById(u.user_id.clone()), AdminRole::Admin),
+        seed(
+            1,
+            SeedKey::ById(crate::identity::types::UserId::new("u_GHOST")),
+            AdminRole::Admin,
+        ),
+        seed(2, SeedKey::ByEmail(email.clone()), AdminRole::Viewer),
+    ];
+    let rep = b
+        .dir
+        .import_grants(entries.clone(), None, deadline(), b.clock.now(), &mk)
+        .await
+        .unwrap();
+    assert_eq!(rep.inserted, vec![u.user_id.clone()], "{name}");
+    assert!(
+        rep.skipped
+            .iter()
+            .any(|(i, why)| *i == 1 && *why == skip::NO_SUCH_USER),
+        "{name}"
+    );
+    // Email entry: verified but not authoritative → skipped (resolution), or row exists.
+    let rep = b
+        .dir
+        .import_grants(entries[..1].to_vec(), None, deadline(), b.clock.now(), &mk)
+        .await
+        .unwrap();
+    assert_eq!(
+        rep.unchanged,
+        vec![u.user_id.clone()],
+        "{name}: re-import is no change"
+    );
+    // A runtime grant is not overridden; a removed file row is revoked by the file.
+    b.dir
+        .grant_admin(
+            &u2.user_id,
+            AdminRole::Admin,
+            GrantManagedBy::Api,
+            None,
+            "op",
+            None,
+            b.clock.now(),
+            grant_event(b),
+        )
+        .await
+        .unwrap();
+    let rep = b
+        .dir
+        .import_grants(
+            vec![seed(
+                0,
+                SeedKey::ById(u2.user_id.clone()),
+                AdminRole::Viewer,
+            )],
+            None,
+            deadline(),
+            b.clock.now(),
+            &mk,
+        )
+        .await
+        .unwrap();
+    assert!(
+        rep.skipped
+            .iter()
+            .any(|(_, why)| *why == skip::CHANGED_AT_RUN_TIME),
+        "{name}"
+    );
+    assert_eq!(rep.revoked, vec![u.user_id.clone()], "{name}");
+    let rep = b
+        .dir
+        .import_grants(
+            vec![seed(
+                0,
+                SeedKey::ById(u2.user_id.clone()),
+                AdminRole::Viewer,
+            )],
+            Some(ForceTarget::ById(u2.user_id.clone())),
+            deadline(),
+            b.clock.now(),
+            &mk,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rep.forced, vec![u2.user_id.clone()], "{name}");
+    let g = b
+        .dir
+        .admin_grant(&u2.user_id, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (g.role, g.managed_by),
+        (AdminRole::Viewer, GrantManagedBy::File),
+        "{name}"
+    );
+    let events = b.store.recent_events(100).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == EventKind::AdminRevoke && e.user_id.as_ref() == Some(&u.user_id)),
+        "{name}"
+    );
+}
+
+async fn sessions_parity(b: &Backend) {
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let u = user(b, 1).await;
+    let (row, h) = session(b, &u).await;
+    let host = Host::parse(PORTAL).unwrap();
+    // A second handle replacing the first; a handle of another session is refused.
+    let mut h2 = handle(b, &row.session_id);
+    h2.issued_aal = Aal::Two;
+    b.sess
+        .mint_handle(h2.clone(), Some(h.handle_sha256), vec![])
+        .await
+        .unwrap();
+    let v1 = b
+        .sess
+        .lookup_handle_within(&h.handle_sha256, &host, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        v1.handle.revoked_reason.as_deref(),
+        Some(reasons::REPLACED.0),
+        "{name}"
+    );
+    let v2 = b
+        .sess
+        .lookup_handle(&h2.handle_sha256, &host)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        v2.handle.issued_aal,
+        Aal::One,
+        "{name}: never above the session level"
+    );
+    let (other, oh) = session(b, &u).await;
+    assert!(
+        conflict(
+            b.sess
+                .mint_handle(handle(b, &row.session_id), Some(oh.handle_sha256), vec![])
+                .await
+        ),
+        "{name}"
+    );
+    // Snapshot refresh only moves forward.
+    let snap = IdentitySnapshot {
+        email: None,
+        display_name: Some("New".into()),
+        username: None,
+        groups: vec!["g".into()],
+    };
+    b.sess
+        .refresh_snapshot(&row.session_id, snap.clone(), 5)
+        .await
+        .unwrap();
+    b.sess
+        .refresh_snapshot(
+            &row.session_id,
+            IdentitySnapshot {
+                display_name: Some("Old".into()),
+                ..snap.clone()
+            },
+            4,
+        )
+        .await
+        .unwrap();
+    let s = b.store.session(&row.session_id).await.unwrap().unwrap();
+    assert_eq!(
+        (s.snapshot.display_name.as_deref(), s.authz_version),
+        (Some("New"), 5),
+        "{name}"
+    );
+    // Transactions: switch and logout bindings once; retry bind once; provider-checked consume.
+    let make = |purpose: TxnPurpose| {
+        let (mut t, d) = new_txn(b, "192.0.2.20");
+        t.purpose = purpose;
+        t.reauth_max_age = None;
+        (t, d)
+    };
+    let (t, sw) = make(TxnPurpose::Switch);
+    b.sess.create_transaction(t, vec![]).await.unwrap();
+    assert!(
+        b.sess
+            .bind_switch_transaction(&sw, Digest([1; 32]))
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.sess
+            .bind_switch_transaction(&sw, Digest([2; 32]))
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    assert!(
+        !b.sess
+            .bind_logout_transaction(&sw, Digest([2; 32]))
+            .await
+            .unwrap(),
+        "{name}: wrong purpose"
+    );
+    b.sess
+        .record_retry_bind(&sw, Digest([3; 32]))
+        .await
+        .unwrap();
+    assert!(conflict(
+        b.sess.record_retry_bind(&sw, Digest([4; 32])).await
+    ));
+    b.store
+        .ensure_provider(provider("off", false))
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            b.sess
+                .consume_transaction_for_provider(
+                    &sw,
+                    &ProviderId::new("off"),
+                    None,
+                    reasons::OK,
+                    b.clock.now(),
+                    vec![]
+                )
+                .await,
+            Err(StoreError::ProviderDisabled)
+        ),
+        "{name}"
+    );
+    assert!(
+        b.sess
+            .consume_transaction_for_provider(
+                &sw,
+                &ProviderId::new("mock"),
+                None,
+                reasons::OK,
+                b.clock.now(),
+                vec![]
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.sess
+            .consume_transaction_for_provider(
+                &sw,
+                &ProviderId::new("mock"),
+                None,
+                reasons::OK,
+                b.clock.now(),
+                vec![]
+            )
+            .await
+            .unwrap()
+    );
+    // A logout ticket ends its session in the same write, once.
+    let (t, lo) = make(TxnPurpose::Logout);
+    b.sess.create_transaction(t, vec![]).await.unwrap();
+    assert!(
+        b.sess
+            .bind_logout_transaction(&lo, Digest([5; 32]))
+            .await
+            .unwrap()
+    );
+    let mut ev = grant_event(b);
+    ev.session_id = Some(other.session_id.clone());
+    assert!(
+        b.sess
+            .consume_logout_ticket(
+                &lo,
+                Some(&other.session_id),
+                reasons::LOGOUT,
+                b.clock.now(),
+                vec![ev.clone()]
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !b.sess
+            .consume_logout_ticket(
+                &lo,
+                Some(&other.session_id),
+                reasons::LOGOUT,
+                b.clock.now(),
+                vec![ev]
+            )
+            .await
+            .unwrap(),
+        "{name}"
+    );
+    assert_eq!(
+        b.store
+            .session(&other.session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .terminated_reason
+            .as_deref(),
+        Some(reasons::LOGOUT.0)
+    );
+    // Reauthentication: one transaction consumed, handles rotated with one event each.
+    let (t, ra) = make(TxnPurpose::Login);
+    b.sess.create_transaction(t, vec![]).await.unwrap();
+    let mut fresh = handle(b, &row.session_id);
+    fresh.issued_aal = Aal::Two;
+    let mk = |h: &HandleRow| {
+        let mut e = EventBuilder::new(
+            b.clock.as_ref(),
+            b.rng.as_ref(),
+            EventKind::HandleRevoked,
+            Outcome::Success,
+            "req-reauth",
+        )
+        .build();
+        e.attrs.insert("host".into(), h.host.as_str().into());
+        e
+    };
+    let factor = FactorEntry {
+        kind: FactorKind::Oidc,
+        provider: Some(ProviderId::new("mock")),
+        at: b.clock.now(),
+    };
+    assert!(
+        matches!(
+            b.sess
+                .reauthenticate_session(
+                    &row.session_id,
+                    &ProviderId::new("off"),
+                    None,
+                    b.clock.now(),
+                    AuthTimeSource::ProviderClaim,
+                    factor.clone(),
+                    fresh.clone(),
+                    (ra, reasons::OK),
+                    deadline(),
+                    vec![],
+                    &mk
+                )
+                .await,
+            Err(StoreError::Conflict("provider_mismatch"))
+        ),
+        "{name}"
+    );
+    let before = b.store.recent_events(200).await.unwrap().len();
+    b.sess
+        .reauthenticate_session(
+            &row.session_id,
+            &ProviderId::new("mock"),
+            None,
+            b.clock.now(),
+            AuthTimeSource::ProviderClaim,
+            factor.clone(),
+            fresh.clone(),
+            (ra, reasons::OK),
+            deadline(),
+            vec![],
+            &mk,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        b.store.recent_events(200).await.unwrap().len(),
+        before + 1,
+        "{name}: one live handle revoked"
+    );
+    let s = b.store.session(&row.session_id).await.unwrap().unwrap();
+    assert_eq!(
+        (s.auth_time_source, s.factors.len()),
+        (AuthTimeSource::ProviderClaim, 2),
+        "{name}"
+    );
+    assert_eq!(
+        b.sess
+            .lookup_handle(&fresh.handle_sha256, &host)
+            .await
+            .unwrap()
+            .unwrap()
+            .handle
+            .issued_aal,
+        Aal::One
+    );
+    assert!(
+        conflict(
+            b.sess
+                .reauthenticate_session(
+                    &row.session_id,
+                    &ProviderId::new("mock"),
+                    None,
+                    b.clock.now(),
+                    AuthTimeSource::ProviderClaim,
+                    factor,
+                    handle(b, &row.session_id),
+                    (ra, reasons::OK),
+                    deadline(),
+                    vec![],
+                    &mk
+                )
+                .await
+        ),
+        "{name}: the transaction is spent"
+    );
+    // Fenced termination of a user's sessions.
+    let (actor, policy) = admin_actor(b, 50).await;
+    let target = user(b, 3).await;
+    session(b, &target).await;
+    session(b, &target).await;
+    let mks = |s: &SessionRow| {
+        let mut e = grant_event(b);
+        e.session_id = Some(s.session_id.clone());
+        e
+    };
+    assert_eq!(
+        b.sess
+            .admin_terminate_user_sessions(
+                &actor,
+                &policy,
+                &target.user_id,
+                deadline(),
+                grant_event(b),
+                &mks
+            )
+            .await
+            .unwrap(),
+        2,
+        "{name}"
+    );
+    assert_eq!(
+        b.sess
+            .admin_terminate_user_sessions(
+                &actor,
+                &policy,
+                &target.user_id,
+                deadline(),
+                grant_event(b),
+                &mks
+            )
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        !b.sess
+            .session_aal3_evidence(&row.session_id, s.cred_gen)
+            .await
+            .unwrap()
+    );
+    // Eviction and the sweep.
+    for i in 0..4 {
+        let (t, _) = new_txn(b, &format!("192.0.2.{}", 30 + i));
+        b.sess.create_transaction(t, vec![]).await.unwrap();
+    }
+    assert!(
+        b.sess.evict_transactions(2, b.clock.now()).await.unwrap() >= 4,
+        "{name}"
+    );
+    b.clock.advance(Duration::from_secs(40 * 86_400));
+    let swept = b
+        .sess
+        .sweep(b.clock.now(), Duration::from_secs(86_400))
+        .await
+        .unwrap();
+    assert!(
+        swept.sessions >= 3 && swept.transactions >= 2,
+        "{name}: {swept:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_25_directory_trait_agrees_on_both_backends() {
+    for b in backends().await {
+        directory_parity(&b).await;
+        b.cleanup().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_26_sessions_trait_agrees_on_both_backends() {
+    for b in backends().await {
+        sessions_parity(&b).await;
+        b.cleanup().await;
+    }
+}
+
+// ---- slice 5 step 2: the application store handle ------------------------
+
+async fn app_store_dispatch(b: &Backend) {
+    use super::{Directory, Events, Sessions};
+    let name = b.store.backend();
+    assert_eq!(b.app.backend(), name);
+    b.app
+        .import_providers(vec![provider("mock", true)], None, vec![])
+        .await
+        .unwrap();
+    let u = user(b, 1).await;
+    assert_eq!(
+        Directory::user(&b.app, &u.user_id)
+            .await
+            .unwrap()
+            .map(|x| x.user_id),
+        Some(u.user_id.clone()),
+        "{name}"
+    );
+    let (row, h) = session(b, &u).await;
+    let v = b
+        .app
+        .lookup_handle(&h.handle_sha256, &Host::parse(PORTAL).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(v.session.session_id, row.session_id);
+    b.app
+        .append_required(vec![required(b, Some(&u))])
+        .await
+        .unwrap();
+    assert!(b.app.count_rows().await.unwrap().0 >= 1);
+    b.app.barrier().await.unwrap();
+    assert!(b.app.schema_version().unwrap() > 0);
+    // The trait objects the application hands around reach the same rows.
+    assert!(b.app.directory().user(&u.user_id).await.unwrap().is_some());
+    assert!(
+        b.app
+            .sessions()
+            .session(&row.session_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(b.app.events().count_rows().await.unwrap().0 >= 1);
+    // A subsystem not ported yet refuses by name on PostgreSQL, never falls back.
+    let out = b.app.dump_deliveries(None).await;
+    if name == "postgres" {
+        assert!(
+            matches!(out, Err(StoreError::Unavailable(ref m)) if m.contains("PostgreSQL")),
+            "{name}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_27_the_application_store_handle_dispatches_on_both_backends() {
+    for b in backends().await {
+        app_store_dispatch(&b).await;
+        b.cleanup().await;
+    }
+}
+
+// ---- slice 5 step 3: the native meta owners -------------------------------
+
+fn receipt_key(epoch: u64, seed: u8) -> crate::auth_gateway::receipt_keys::Key {
+    crate::auth_gateway::receipt_keys::Key {
+        issuer_ref: "owned".into(),
+        purpose: crate::auth_gateway::receipt::Purpose::Authentication,
+        epoch,
+        public_key: ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+            .verifying_key()
+            .to_bytes(),
+    }
+}
+
+/// Receipt keys, profile and projection publication through the store's
+/// meta handle: the owners' one-transaction semantics on either backend.
+fn meta_owners(app: super::Store) {
+    use super::meta::MetaDb;
+    use crate::auth_gateway::receipt_keys::Refused;
+    use crate::auth_gateway::{
+        projection_authority, publication, receipt_authority, receipt_key_store,
+    };
+    let name = app.backend();
+    let mut db = app.meta();
+    // Receipt key history: compare-and-swap on the revision, floors kept.
+    let r1 = receipt_key_store::publish(&mut db, 0, &[receipt_key(1, 7)], "operator", &|_| Ok(()))
+        .unwrap();
+    assert_eq!(r1.revision(), 1, "{name}");
+    assert!(
+        receipt_key_store::publish(&mut db, 0, &[receipt_key(1, 7)], "operator", &|_| Ok(()))
+            .is_err(),
+        "{name}: stale"
+    );
+    assert!(
+        db.meta_read(|tx| receipt_key_store::load(tx, 2)).is_err(),
+        "{name}: minimum revision"
+    );
+    // A guard refusing after the writes rolls everything back.
+    let calls = std::cell::Cell::new(0);
+    let late = |_: &dyn super::meta::MetaTx| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 2 {
+            Err(Refused)
+        } else {
+            Ok(())
+        }
+    };
+    assert!(receipt_key_store::publish(&mut db, 1, &[], "operator", &late).is_err());
+    assert_eq!(
+        db.meta_read(|tx| receipt_key_store::load(tx, 0))
+            .unwrap()
+            .unwrap()
+            .revision(),
+        1,
+        "{name}: rolled back"
+    );
+    // The owner: an unchanged reconcile keeps the revision, a changed set moves it.
+    let mut owner = db
+        .meta_read(|tx| receipt_authority::Authority::load(tx, 0))
+        .unwrap();
+    assert_eq!(
+        owner
+            .reconcile(&mut db, &[receipt_key(1, 7)], "startup", &|_| Ok(()))
+            .unwrap(),
+        1,
+        "{name}"
+    );
+    assert_eq!(
+        owner
+            .reconcile(&mut db, &[receipt_key(2, 8)], "startup", &|_| Ok(()))
+            .unwrap(),
+        2,
+        "{name}"
+    );
+    assert!(owner.verifier().capture().is_ok());
+    // Profile publication: CAS, tombstone, guard rollback with no audit row.
+    let doc = publication::publish(&mut db, 0, None, "operator").unwrap();
+    assert_eq!(doc.revision, 1);
+    assert!(
+        matches!(
+            publication::publish(&mut db, 0, None, "operator"),
+            Err(publication::Error::Conflict)
+        ),
+        "{name}"
+    );
+    let calls = std::cell::Cell::new(0);
+    let denied = |_: &dyn super::meta::MetaTx| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 2 {
+            Err(publication::Error::Denied)
+        } else {
+            Ok(())
+        }
+    };
+    assert!(matches!(
+        publication::publish_guarded(&mut db, 1, None, "operator", &denied),
+        Err(publication::Error::Denied)
+    ));
+    assert_eq!(
+        db.meta_read(|tx| publication::read(tx))
+            .unwrap()
+            .unwrap()
+            .revision,
+        1,
+        "{name}"
+    );
+    assert!(
+        db.meta_read(|tx| tx.get("authentication_profile_publication_audit:2"))
+            .unwrap()
+            .is_none(),
+        "{name}: no audit"
+    );
+    // Projection plan authority: a disabled tombstone at revision 1.
+    let mut plans = db
+        .meta_read(|tx| projection_authority::Authority::load(tx, 0))
+        .unwrap();
+    let doc = plans
+        .publish(&mut db, 0, None, "operator", &|_| Ok(()))
+        .unwrap();
+    assert_eq!(
+        (doc.revision, doc.configuration.is_none()),
+        (1, true),
+        "{name}"
+    );
+    assert_eq!(plans.reader().load().revision(), 1);
+    drop(db);
+    // Concurrent publishers on one expected revision: exactly one commits.
+    let barrier = std::sync::Barrier::new(6);
+    let won = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..6)
+            .map(|_| {
+                let (app, barrier) = (app.clone(), &barrier);
+                scope.spawn(move || {
+                    // Wait first: the SQLite handle is the utility connection's lock.
+                    barrier.wait();
+                    let mut db = app.meta();
+                    publication::publish(&mut db, 1, None, "racer").is_ok()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|w| *w)
+            .count()
+    });
+    assert_eq!(won, 1, "{name}: one publisher wins");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_28_native_meta_owners_agree_on_both_backends() {
+    for b in backends().await {
+        let app = b.app.clone();
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let _guard = handle.enter();
+            meta_owners(app)
+        })
+        .await
+        .unwrap();
+        b.cleanup().await;
+    }
+}
+
+// ---- slice 5 step 3b: provider and compiled-material owners -----------------
+
+async fn provider_owners(b: &Backend) {
+    use super::Directory as _;
+    fn refused<T>(r: StoreResult<T>) -> bool {
+        matches!(r, Err(StoreError::Conflict(_)))
+    }
+    let name = b.store.backend();
+    b.app
+        .import_providers(
+            vec![provider("mock", true), provider("two", true)],
+            None,
+            vec![],
+        )
+        .await
+        .unwrap();
+    // A preparation requires the generation in force.
+    assert!(
+        refused(b.app.prepare_registry_providers(0, deadline()).await),
+        "{name}"
+    );
+    let generation = b.store.bump_config_generation().await.unwrap();
+    let prepared = b
+        .app
+        .prepare_registry_providers(generation, deadline())
+        .await
+        .unwrap();
+    let ids: Vec<_> = prepared
+        .rows()
+        .iter()
+        .map(|r| r.provider_id.as_str().to_string())
+        .collect();
+    assert_eq!(ids, ["mock", "two"], "{name}");
+    b.app
+        .require_prepared_providers(&prepared, deadline())
+        .await
+        .unwrap();
+    b.app
+        .require_prepared_provider(&prepared, &ProviderId::new("mock"), deadline())
+        .await
+        .unwrap();
+    // Compiled material: published once, an identical republish is stable.
+    let key = crate::provider::material::Key::resolve(Some("K"), &|_| {
+        Some(data_encoding::BASE64URL_NOPAD.encode(&[3u8; 32]))
+    })
+    .unwrap();
+    let mut desired = std::collections::BTreeMap::new();
+    for row in prepared.rows() {
+        desired.insert(
+            row.provider_id.to_string(),
+            key.start(row).unwrap().finish(),
+        );
+    }
+    let published = b
+        .app
+        .publish_materials(&prepared, &desired, deadline())
+        .await
+        .unwrap();
+    assert!(
+        published.contains("mock") && published.contains("two"),
+        "{name}"
+    );
+    let again = b
+        .app
+        .publish_materials(&prepared, &desired, deadline())
+        .await
+        .unwrap();
+    assert!(again.same(&published) || again.contains("mock"), "{name}");
+    // A different compiled fingerprint (same rows, another secret) republishes
+    // as the next revision: an upsert of an existing owner row is accepted.
+    let other_key = crate::provider::material::Key::resolve(Some("K"), &|_| {
+        Some(data_encoding::BASE64URL_NOPAD.encode(&[4u8; 32]))
+    })
+    .unwrap();
+    let mut replaced = desired.clone();
+    let mock = prepared
+        .rows()
+        .iter()
+        .find(|r| r.provider_id.as_str() == "mock")
+        .unwrap();
+    replaced.insert("mock".into(), other_key.start(mock).unwrap().finish());
+    let fresh = b
+        .app
+        .prepare_registry_providers(generation, deadline())
+        .await
+        .unwrap();
+    let moved = b
+        .app
+        .publish_materials(&fresh, &replaced, deadline())
+        .await
+        .unwrap();
+    let owner = b.app.owner_ref();
+    assert_eq!(
+        moved.expected(&owner, "mock").unwrap().revision(),
+        published.expected(&owner, "mock").unwrap().revision() + 1,
+        "{name}: a changed fingerprint is the next revision"
+    );
+    assert_eq!(
+        moved.expected(&owner, "two").unwrap().revision(),
+        published.expected(&owner, "two").unwrap().revision(),
+        "{name}"
+    );
+    // A material change of a provider moves its owner: the preparation is stale.
+    let mut changed = provider("mock", true);
+    changed.config =
+        serde_json::json!({"client_id": "other", "issuer": "https://idp.example.test"});
+    b.app
+        .import_providers(vec![changed], None, vec![])
+        .await
+        .unwrap();
+    assert!(
+        refused(
+            b.app
+                .require_prepared_providers(&prepared, deadline())
+                .await
+        ),
+        "{name}"
+    );
+    assert!(
+        refused(
+            b.app
+                .require_prepared_provider(&prepared, &ProviderId::new("mock"), deadline())
+                .await
+        ),
+        "{name}"
+    );
+    b.app
+        .require_prepared_provider(&prepared, &ProviderId::new("two"), deadline())
+        .await
+        .unwrap();
+    assert!(
+        refused(
+            b.app
+                .publish_materials(&prepared, &desired, deadline())
+                .await
+        ),
+        "{name}: stale owners"
+    );
+    // A new generation invalidates every preparation.
+    b.store.bump_config_generation().await.unwrap();
+    assert!(
+        refused(
+            b.app
+                .require_prepared_provider(&prepared, &ProviderId::new("two"), deadline())
+                .await
+        ),
+        "{name}"
+    );
+    // A preparation of one store is refused by another.
+    let other = sqlite();
+    other
+        .store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    assert!(
+        refused(
+            other
+                .app
+                .require_prepared_providers(&prepared, deadline())
+                .await
+        ),
+        "{name}: foreign store"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_29_provider_and_material_owners_agree_on_both_backends() {
+    for b in backends().await {
+        provider_owners(&b).await;
+        b.cleanup().await;
+    }
+}
+
+// ---- slice 5: published snapshots follow other replicas ---------------------
+
+/// Two owners on one store stand for two replicas: what one publishes the
+/// other installs on refresh, never backwards, and a revision this process
+/// cannot compile closes its profile readers instead of serving stale state.
+fn followed_publications(app: super::Store, name: &'static str) {
+    use crate::auth_gateway::{authority::Authority, projection_authority as projection};
+    use crate::store::meta::MetaDb as _;
+    let key = "follow-service-credential-at-least-32-bytes";
+    let env = |n: &str| (n == "FOLLOW_KEY").then(|| key.to_string());
+    let none = |_: &str| None;
+    let ok = |_: &crate::auth_gateway::runtime::Config| Ok(());
+    let profile: crate::auth_gateway::runtime::Config = serde_json::from_value(serde_json::json!({
+        "authority_id": "owned", "profiles": [{"service_id": "app", "host": "app.example.test",
+        "ports": [443], "realm": "owned", "api_keys": [{"token_env": "FOLLOW_KEY", "subject": "worker"}]}]}))
+    .unwrap();
+    let mut a = Authority::load(&mut app.meta(), Some(profile.clone()), &env, &ok).unwrap();
+    let mut b = Authority::load(&mut app.meta(), None, &env, &ok).unwrap();
+    assert_eq!(
+        (a.snapshot().revision, b.snapshot().revision),
+        (1, 1),
+        "{name}"
+    );
+    assert!(
+        !b.refresh(&mut app.meta(), &env, &ok).unwrap(),
+        "{name}: nothing new"
+    );
+    a.publish(&mut app.meta(), 1, None, "operator", &env, &ok)
+        .unwrap();
+    // B has not followed yet: its own publication on the old revision conflicts.
+    assert!(matches!(
+        b.publish(&mut app.meta(), 1, None, "operator", &env, &ok),
+        Err(crate::auth_gateway::publication::Error::Conflict)
+    ));
+    assert!(b.refresh(&mut app.meta(), &env, &ok).unwrap(), "{name}");
+    let followed = b.snapshot();
+    assert_eq!(followed.revision, 2, "{name}");
+    assert!(
+        followed.available() && followed.runtime.is_none(),
+        "{name}: tombstone followed"
+    );
+    // A revision B cannot compile (credential absent here) closes B's readers.
+    a.publish(
+        &mut app.meta(),
+        2,
+        Some(profile.clone()),
+        "operator",
+        &env,
+        &ok,
+    )
+    .unwrap();
+    assert!(b.refresh(&mut app.meta(), &none, &ok).unwrap(), "{name}");
+    assert!(
+        !b.snapshot().available(),
+        "{name}: uncompilable revision fails closed"
+    );
+    // A failed publication from the closed state leaves it closed.
+    assert!(
+        b.publish(&mut app.meta(), 1, None, "operator", &env, &ok)
+            .is_err()
+    );
+    assert!(!b.snapshot().available(), "{name}");
+    // B publishes on the followed revision; A follows it in turn.
+    b.publish(&mut app.meta(), 3, Some(profile), "operator", &env, &ok)
+        .unwrap();
+    assert!(b.snapshot().available(), "{name}");
+    assert!(a.refresh(&mut app.meta(), &env, &ok).unwrap(), "{name}");
+    assert_eq!(a.snapshot().revision, 4, "{name}");
+    assert!(a.snapshot().runtime.is_some(), "{name}");
+
+    // Projection plans: a follower's stale reader refuses, refresh installs.
+    let plans = |revision: u64| -> crate::auth_gateway::projection::Configuration {
+        serde_json::from_value(
+            serde_json::json!({"revision": revision, "plans": [{"service": "app",
+            "audience": "app-api", "resource": "app", "action": "read", "minimum_aal": 1,
+            "credential": {"type": "bearer_reference", "secret_ref": "vault:follow"}}]}),
+        )
+        .unwrap()
+    };
+    let any = |_: &crate::auth_gateway::projection::Configuration| Ok(());
+    let mut pa = app
+        .meta()
+        .meta_read(|tx| projection::Authority::load(tx, 0))
+        .unwrap();
+    let mut pb = app
+        .meta()
+        .meta_read(|tx| projection::Authority::load(tx, 0))
+        .unwrap();
+    pa.publish(&mut app.meta(), 0, Some(plans(1)), "operator", &|_| Ok(()))
+        .unwrap();
+    let reader = pb.reader();
+    assert_eq!(reader.load().revision(), 0, "{name}");
+    let refuse = |_: &crate::auth_gateway::projection::Configuration| {
+        Err(crate::auth_gateway::receipt_keys::Refused)
+    };
+    assert!(
+        pb.refresh(&mut app.meta(), &refuse).is_err(),
+        "{name}: capabilities checked"
+    );
+    assert_eq!(reader.load().revision(), 0, "{name}");
+    assert!(pb.refresh(&mut app.meta(), &any).unwrap(), "{name}");
+    assert_eq!(reader.load().revision(), 1, "{name}");
+    assert!(
+        reader.load().enabled() && reader.load().available(),
+        "{name}"
+    );
+    assert!(
+        !pb.refresh(&mut app.meta(), &any).unwrap(),
+        "{name}: idempotent"
+    );
+    pb.publish(&mut app.meta(), 1, None, "operator", &|_| Ok(()))
+        .unwrap();
+    assert!(pa.refresh(&mut app.meta(), &any).unwrap(), "{name}");
+    assert!(!pa.reader().load().enabled(), "{name}: tombstone followed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_30_published_snapshots_follow_other_replicas_on_both_backends() {
+    for b in backends().await {
+        let (app, name) = (b.app.clone(), b.store.backend());
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let _guard = handle.enter();
+            followed_publications(app, name)
+        })
+        .await
+        .unwrap();
+        #[cfg(feature = "postgres")]
+        if let Some((pg, _)) = &b.pg {
+            publication_notifications(pg.clone(), b.app.clone()).await;
+        }
+        b.cleanup().await;
+    }
+}
+
+/// A committed publication wakes a listener; a dropped listener reconnects
+/// and wakes once more so its follower catches up on what it missed.
+#[cfg(feature = "postgres")]
+async fn publication_notifications(pg: Arc<super::postgres::PgStore>, app: super::Store) {
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let listener = tokio::spawn(
+        pg.clone()
+            .follow_publications(wake.clone(), Duration::from_millis(100)),
+    );
+    let woken = |what: &'static str| {
+        let wake = wake.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(5), wake.notified())
+                .await
+                .unwrap_or_else(|_| panic!("postgres: {what}"));
+        }
+    };
+    woken("connected").await;
+    let publish = |expected: u64| {
+        let app = app.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::auth_gateway::publication::publish(&mut app.meta(), expected, None, "operator")
+                .unwrap()
+        })
+    };
+    let current = {
+        let app = app.clone();
+        tokio::task::spawn_blocking(move || {
+            use crate::store::meta::MetaDb as _;
+            app.meta()
+                .meta_read(|tx| crate::auth_gateway::publication::read(tx))
+                .unwrap()
+                .map_or(0, |d| d.revision)
+        })
+        .await
+        .unwrap()
+    };
+    publish(current).await.unwrap();
+    woken("notified on commit").await;
+    // Drop every listener connection: the follower reconnects and wakes.
+    let client = pg.client().await.unwrap();
+    client
+        .execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'hopae-listen'",
+            &[],
+        )
+        .await
+        .unwrap();
+    woken("woken after reconnect").await;
+    publish(current + 1).await.unwrap();
+    woken("notified after reconnect").await;
+    listener.abort();
+}
+
+// ---- a PostgreSQL schema for whole-subsystem suites --------------------------
+
+/// The backend the native Human suites run on: SQLite, or PostgreSQL when
+/// `HOPAE_TEST_HUMAN_BACKEND=postgres` and `HOPAE_TEST_POSTGRES_URL` are set
+/// (`make test-postgres` runs them both ways).
+pub(crate) fn human_suite_on_postgres() -> bool {
+    cfg!(feature = "postgres")
+        && std::env::var("HOPAE_TEST_HUMAN_BACKEND").as_deref() == Ok("postgres")
+        && std::env::var("HOPAE_TEST_POSTGRES_URL").is_ok()
+}
+
+/// A fresh schema on `HOPAE_TEST_POSTGRES_URL`, dropped when this value is.
+/// Stores open on it (and reopen, like a SQLite file); SQL runs
+/// synchronously from any thread or runtime on its own connection.
+#[cfg(feature = "postgres")]
+pub(crate) struct PgSchema {
+    url: String,
+    schema: String,
+}
+
+#[cfg(feature = "postgres")]
+impl PgSchema {
+    pub(crate) fn new() -> Option<Self> {
+        let url = std::env::var("HOPAE_TEST_POSTGRES_URL").ok()?;
+        let schema = format!(
+            "hopae_h_{}",
+            random_id(&crate::crypto::OsRng, "").to_ascii_lowercase()
+        );
+        Some(Self { url, schema })
+    }
+
+    /// Open (or reopen) a store on this schema.
+    pub(crate) async fn store(
+        &self,
+        clock: Arc<dyn crate::crypto::Clock>,
+        rng: Arc<dyn crate::crypto::Rng>,
+    ) -> super::Store {
+        let store = super::postgres::PgStore::connect(
+            super::postgres::PgOptions {
+                url: self.url.clone(),
+                ca_pem: None,
+                // Whole suites run many fixtures in parallel on one server.
+                pool_size: 3,
+                connect_timeout: Duration::from_secs(5),
+                statement_timeout: Duration::from_secs(5),
+                search_path: Some(self.schema.clone()),
+            },
+            clock,
+            rng,
+            vec![],
+        )
+        .await
+        .expect("connect to HOPAE_TEST_POSTGRES_URL");
+        store.ensure_realm().await.expect("store realm");
+        super::Store::Postgres(Arc::new(store))
+    }
+
+    fn on_own_runtime<T: Send + 'static>(
+        &self,
+        search_path: bool,
+        f: impl for<'c> FnOnce(
+            &'c tokio_postgres::Client,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'c>>
+        + Send
+        + 'static,
+    ) -> T {
+        let mut cfg: tokio_postgres::Config = self.url.parse().expect("postgres url");
+        if search_path {
+            cfg.options(format!("-c search_path={}", self.schema));
+        }
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let (client, connection) =
+                    cfg.connect(tokio_postgres::NoTls).await.expect("connect");
+                tokio::spawn(connection);
+                f(&client).await
+            })
+        })
+        .join()
+        .expect("postgres helper thread")
+    }
+
+    /// Run statements (a `;`-separated batch) in this schema.
+    pub(crate) fn exec(&self, sql: &str) {
+        let sql = sql.to_string();
+        self.on_own_runtime(true, move |c| {
+            Box::pin(async move { c.batch_execute(&sql).await.expect(&sql) })
+        })
+    }
+
+    /// One statement with one text parameter.
+    pub(crate) fn exec_text(&self, sql: &str, value: &str) {
+        let (sql, value) = (sql.to_string(), value.to_string());
+        self.on_own_runtime(true, move |c| {
+            Box::pin(async move {
+                c.execute(&sql, &[&value]).await.expect(&sql);
+            })
+        })
+    }
+
+    /// Run statements; the error text if they fail.
+    pub(crate) fn try_exec(&self, sql: &str) -> Result<(), String> {
+        let sql = sql.to_string();
+        self.on_own_runtime(true, move |c| {
+            Box::pin(async move { c.batch_execute(&sql).await.map_err(|e| e.to_string()) })
+        })
+    }
+
+    /// The first column of the first row, as text.
+    pub(crate) fn text(&self, sql: &str) -> String {
+        let sql = sql.to_string();
+        self.on_own_runtime(true, move |c| {
+            Box::pin(async move {
+                c.query_one(&sql, &[])
+                    .await
+                    .expect(&sql)
+                    .get::<_, String>(0)
+            })
+        })
+    }
+
+    /// The first column of the first row, as a 64-bit integer.
+    pub(crate) fn scalar(&self, sql: &str) -> i64 {
+        let sql = sql.to_string();
+        self.on_own_runtime(true, move |c| {
+            Box::pin(async move { c.query_one(&sql, &[]).await.expect(&sql).get::<_, i64>(0) })
+        })
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl Drop for PgSchema {
+    fn drop(&mut self) {
+        let schema = self.schema.clone();
+        self.on_own_runtime(false, move |c| {
+            Box::pin(async move {
+                let _ = c
+                    .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+                    .await;
+            })
+        })
+    }
+}
+
 // ---- identity platform: console filters and the workload registry ------------
 
 async fn workload_record(
@@ -4549,4 +5888,122 @@ async fn s600_34_identity_platform_filters_and_workload_registry_agree_on_both_b
         identity_platform(&b).await;
         b.cleanup().await;
     }
+}
+
+// ---- password and code attempts shared by replicas (PostgreSQL) -------------
+
+#[cfg(feature = "postgres")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_35_postgres_attempt_windows_hold_across_replicas() {
+    use crate::portal::password_attempts::{Limit, PasswordAttempts};
+    let Some(b) = postgres().await else {
+        return;
+    };
+    let (pg, schema) = b.pg.clone().unwrap();
+    // A second "replica": its own pool on the same schema and clock.
+    let other = Arc::new(
+        super::postgres::PgStore::connect(
+            super::postgres::PgOptions {
+                url: std::env::var("HOPAE_TEST_POSTGRES_URL").unwrap(),
+                ca_pem: None,
+                pool_size: 8,
+                connect_timeout: Duration::from_secs(5),
+                statement_timeout: Duration::from_secs(5),
+                search_path: Some(schema.clone()),
+            },
+            b.clock.clone(),
+            Arc::new(SeededRng::new(7)),
+            vec![],
+        )
+        .await
+        .unwrap(),
+    );
+    let ip_limit = Limit {
+        burst: 5,
+        window: Duration::from_secs(60),
+    };
+    let account_limit = Limit {
+        burst: 3,
+        window: Duration::from_secs(300),
+    };
+    let a = Arc::new(PasswordAttempts::new(
+        ip_limit,
+        account_limit,
+        Some(pg.clone()),
+    ));
+    let c = Arc::new(PasswordAttempts::new(
+        ip_limit,
+        account_limit,
+        Some(other.clone()),
+    ));
+    // Twenty concurrent submissions from one address through both replicas:
+    // exactly the burst is admitted.
+    let ip: std::net::IpAddr = "192.0.2.77".parse().unwrap();
+    let mut tasks = Vec::new();
+    for i in 0..20 {
+        let r = if i % 2 == 0 { a.clone() } else { c.clone() };
+        tasks.push(tokio::spawn(async move { r.admit(ip, None).await }));
+    }
+    let mut admitted = 0;
+    for t in tasks {
+        admitted += usize::from(t.await.unwrap());
+    }
+    assert_eq!(admitted, 5, "one address budget across replicas");
+    // An IPv4-mapped spelling is the same address.
+    assert!(!c.admit("::ffff:192.0.2.77".parse().unwrap(), None).await);
+    // One account from many addresses: its own, longer window.
+    let account = PasswordAttempts::account("ldap", "Alice");
+    for n in 0..3u8 {
+        let from = std::net::IpAddr::V4([198, 51, 100, n].into());
+        let r = if n % 2 == 0 { &a } else { &c };
+        assert!(r.admit(from, Some(&account)).await);
+    }
+    assert!(
+        !a.admit("198.51.100.9".parse().unwrap(), Some(&account))
+            .await
+    );
+    assert!(
+        a.admit(
+            "198.51.100.9".parse().unwrap(),
+            Some(&PasswordAttempts::account("ldap", "bob"))
+        )
+        .await
+    );
+    // Keys are digests: no address or username is stored.
+    let client = pg.raw().await;
+    let leaked: i64 = client
+        .query_one(
+            "SELECT count(*) FROM attempt_windows WHERE position('192.0.2.77' in encode(key, 'escape')) > 0 \
+             OR position('alice' in encode(key, 'escape')) > 0",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(leaked, 0);
+    // The address window ends (60 s) before the account window (300 s).
+    b.clock.advance(Duration::from_secs(61));
+    assert!(c.admit(ip, None).await, "a new address window");
+    assert!(
+        !c.admit("198.51.100.10".parse().unwrap(), Some(&account))
+            .await
+    );
+    b.clock.advance(Duration::from_secs(240));
+    assert!(
+        c.admit("198.51.100.10".parse().unwrap(), Some(&account))
+            .await
+    );
+    // Expired windows are pruned as admissions continue.
+    b.clock.advance(Duration::from_secs(600));
+    for n in 0..4u8 {
+        a.admit(std::net::IpAddr::V4([203, 0, 113, n].into()), None)
+            .await;
+    }
+    let rows: i64 = client
+        .query_one("SELECT count(*) FROM attempt_windows", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(rows, 4, "only the open windows remain");
+    b.cleanup().await;
 }

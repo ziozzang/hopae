@@ -17,6 +17,8 @@
 //! All four are reads for any granted role, rate-limited per actor and
 //! recorded as `admin.read` before the answer leaves.
 
+#[allow(unused_imports)]
+use crate::store::core::{GroupStore as _, SubjectDirectoryStore as _};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
@@ -257,7 +259,7 @@ fn indexes() -> &'static tokio::sync::Mutex<Vec<HumanIndex>> {
 /// Resolve Human subjects to user IDs. The second value is `false` when the
 /// index could not catch up with the ledger within the request's budget.
 pub(crate) async fn human_users(
-    store: &crate::store::sqlite::Store,
+    store: &crate::store::Store,
     issuer: &str,
     subjects: &[String],
     budget: std::time::Duration,
@@ -350,7 +352,7 @@ pub(crate) async fn human_users(
 
 /// Everything a resolution draws on, gathered once per request.
 pub(crate) struct Sources {
-    pub store: crate::store::sqlite::Store,
+    pub store: crate::store::Store,
     pub issuer: Option<String>,
     pub realm: Option<String>,
     pub services: Option<Vec<ServicePrincipal>>,
@@ -1251,7 +1253,7 @@ mod tests {
     async fn the_index_resolves_live_and_deleted_subjects_and_misses_nothing_else() {
         use crate::crypto::{TestClock, Timestamp};
         let dir = tempfile::tempdir().unwrap();
-        let store = crate::store::sqlite::Store::open(
+        let store = crate::store::Store::open(
             &dir.path().join("hopae.db"),
             Arc::new(TestClock::new(Timestamp(1_700_000_000_000))),
             vec![],

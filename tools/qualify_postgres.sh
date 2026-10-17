@@ -11,6 +11,9 @@
 #      the same shared workload concurrently; B is killed with SIGKILL
 #      mid-traffic and replaced by C; `verify` checks that no effect
 #      happened twice and that the user-ID ledger is unique.
+#   3. Serving replicas (ADR-0020 slice 5): scenario S610 starts two real
+#      `hopae serve` processes on one database behind a TCP round-robin and
+#      drives logins, verify, handoffs, console writes and a SIGKILL over HTTP.
 #
 #   make qualify-postgres
 #
@@ -87,4 +90,8 @@ wait "$b" 2>/dev/null || true
 HOPAE_QUALIFY_REPLICA=c "$qualify" work </dev/null & c=$!; pids+=("$c")
 wait "$a"; wait "$c"
 timeout 120 "$qualify" verify </dev/null
+
+echo "== 3. Two serving replicas behind a round-robin balancer (S610)"
+export HOPAE_TEST_POSTGRES_URL="$(url_for hopae)"
+timeout 900 cargo test -j "${CARGO_JOBS:-4}" --locked --features postgres,test-hooks --test scenarios -- s610 </dev/null
 echo "qualification passed"

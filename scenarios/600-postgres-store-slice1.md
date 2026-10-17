@@ -160,6 +160,36 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - When: the store is migrated; the migration runs again; a SQLite table the migration does not know gets a row and the migration runs into another empty store.
 - Then: the SQLite file is byte for byte unchanged; users, passkeys, TOTP, the configuration generation, groups and the mirror, the realm and the lifecycle feed read the same on PostgreSQL; the migrated nonce is still refused; one `store.migrated` event carries the report digest and has its delivery row; the second run is refused (not empty); the unknown table is refused by name and nothing is written.
 
+### S600-25 The Directory trait agrees (slice 5)
+
+- Given: providers `mock` and `two` in the file; users with grants.
+- When: providers are imported, a file row changed and re-imported, an import forces a provider the file does not list; users are read under an expired deadline; grant targets are resolved by address and by an unknown ID; `admin.users[]` is imported (by ID, an unknown ID, by address), re-imported, imported after a runtime grant with a file row dropped, and forced.
+- Then: inserted, then updated, the forced unknown refused; `Unavailable(deadline)`; the user with every identity, `None`; one insert and `no_such_user`, then unchanged, then `changed_at_run_time` with the dropped file row revoked (with its `admin.revoke` event), then the forced row rewritten as file-managed.
+
+### S600-26 The Sessions trait agrees (slice 5)
+
+- Given: a user with portal sessions and handles.
+- When: a handle is minted replacing another, and with a handle of another session; a snapshot is refreshed forward then backward; switch, logout and login transactions are bound, retry-bound, consumed for a disabled then a live provider; a logout ticket ends its session twice; a session is reauthenticated with the wrong provider, then right, then again on the spent transaction; an administrator ends a user's sessions twice; transactions are evicted and the store swept.
+- Then: the old handle revoked as `replaced` and the new one capped at the session level, the foreign one refused; only the forward refresh applies; each binding once, the wrong purpose refused, the retry bind once; `ProviderDisabled`, then consumed once; the ticket and its session end once; `provider_mismatch`, then one handle event, `provider_claim` and a new factor, then `Conflict`; 2 then 0; the oldest rows evicted and expired rows swept.
+
+### S600-27 The application store handle dispatches (slice 5)
+
+- Given: the application's `Store` handle over either backend.
+- When: providers are imported, a user and a session are read, an event is appended and counted through the handle and through the trait objects it hands out; an operation not available on PostgreSQL (the delivery dump) is asked for.
+- Then: every answer comes from the backend it wraps; on PostgreSQL the unported operation is refused by name (no fallback).
+
+### S600-28 The native meta owners agree (slice 5)
+
+- Given: the store's meta handle on either backend.
+- When: the receipt key history is published, published again on a stale revision, read under a higher minimum, and published with a guard that refuses after the writes; the receipt key owner reconciles an unchanged and a changed set; a profile is published, republished on a stale revision and published with a late refusing guard; a projection tombstone is published; six publishers race on one revision; eight consumers race to admit one receipt (PostgreSQL, next to the replay code).
+- Then: revision 1, the stale one refused, the minimum refused, the late refusal rolls back; 1 then 2 with a live verifier; revision 1, `Conflict`, `Denied` with no audit row; revision 1 disabled; exactly one publisher and exactly one consumer win.
+
+### S600-29 Provider and compiled-material owners agree (slice 5)
+
+- Given: providers `mock` and `two` imported through the application handle.
+- When: providers are prepared for a generation that is not in force, then for the current one; the preparation is required whole and per provider; compiled material fingerprints are published twice, then with another fingerprint for `mock`; `mock`'s configuration changes; the generation moves; another store is asked to accept the preparation.
+- Then: `Conflict`; both rows in order; both requirements pass; both fingerprints recorded and the republish stable; the changed fingerprint is `mock`'s next revision and `two` keeps its own (an upsert of an existing owner row is accepted on PostgreSQL too); the stale preparation is refused whole, for `mock` and for a material publication while `two` still passes; refused after the new generation; refused by the foreign store.
+
 ### S600-5 PostgreSQL ledger, migrations and newer schema
 
 - Given: a PostgreSQL store.
@@ -170,13 +200,49 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 
 - Given: `store.backend = "postgres"` with `store.postgres`.
 - When: the configuration is validated and a serve/store command starts.
-- Then: invalid or inline settings are refused; without the feature the configuration is refused; with it, validation passes but serving and store commands refuse with a slice message and never fall back to SQLite.
+- Then: invalid or inline settings are refused; without the feature the configuration is refused; with it, `serve` and the store commands run on PostgreSQL (slice 5; two serving replicas are S610), the native Human owners included; nothing falls back to SQLite.
+
+### S600-30 Published snapshots follow other replicas
+
+- Given: two profile owners and two projection owners on one store, standing for two replicas.
+- When: one publishes; the other refreshes; one publishes a profile revision the other cannot compile; a PostgreSQL listener is dropped.
+- Then: the follower installs the newer durable revision and never an older one, and its own publication on the old revision conflicts until it followed; a revision it cannot compile installs as unavailable (verify answers unavailable) and a failed publication leaves it so; projection plans that exceed the follower's declared capabilities are not installed; on PostgreSQL a committed publication wakes the listener (`NOTIFY` on commit) and a dropped listener reconnects and wakes once more so the follower catches up.
+
+### S600-31 Native Human snapshot and primary owner agree
+
+- Given: a native OIDC provider with published compiled material, on each backend.
+- When: a user logs in, a native witness is captured and checked; a second session is captured; the provider row moves (disabled and enabled); the registry is prepared and published again and a fresh login is captured; the user is disabled.
+- Then: the login records exactly one primary provenance row in its own transaction; the capture is current; the provider move retires both captures; after re-preparation a new login is qualified again; the disabled user retires it.
+
+### S600-32 Native factor provenance agrees
+
+- Given: a native session elevated by TOTP, and one elevated by a passkey, on each backend.
+- When: the TOTP counter moves, then the enrollment is revoked; the passkey's counter and revision move, then it is revoked.
+- Then: a counter move keeps the capture current (another use of the same factor); a revocation retires it.
+
+### S600-33 The native Human ledger checks inside its own transaction
+
+- Given: a captured Human check prepared for the ledger, on each backend.
+- When: another store's ledger runs the check; the same store's ledger runs it, disables the user inside the same transaction and runs it again; the transaction rolls back.
+- Then: the other store is refused; the first check passes, the second is refused; the user is still active afterwards.
 
 ### S600-34 Identity-platform listings and the workload registry agree
 
 - Given: an administrator, a user with an active authenticator app, a user in a local group, and a live session, on each backend.
 - When: users are listed by `mfa`, `group` and `provider`, sessions by stored level, events by kind prefix; a workload principal is observed and retired with its `workload.*` events; the lifecycle feed is read with and without workloads.
 - Then: each filter selects exactly its users, sessions and events; the registry holds the retired principal; the feed reports `workload_observed` and `workload_retired` only when asked, with the reported workload keys only.
+
+### S600-35 Attempt windows hold across replicas (PostgreSQL)
+
+- Given: two store handles on one schema (two replicas), an address limit of 5 per 60 s and an account limit of 3 per 300 s.
+- When: twenty concurrent submissions from one address go through both; an IPv4-mapped spelling of it follows; one account is named from many addresses; time passes 61 s, 300 s and 900 s.
+- Then: exactly five are admitted; the mapped spelling is the same address; the account is refused after three while another account is not; the address window restarts before the account window; expired windows are pruned so only open ones remain; keys are digests.
+
+### S600-36 libpq `sslmode` in the store URL
+
+- Given: store URLs in URI and key/value form, with and without `store.postgres.ca_file`.
+- When: `sslmode` is absent, `verify-full`, `disable`, `require`, `verify-ca`, `prefer`, `allow`, unknown or repeated.
+- Then: absent or `verify-full` with the CA is verified TLS; `verify-full` without it, `disable` with it, the weaker modes (by name), an unknown value and a repeated key are refused; `disable` and absent without a CA are plain (loopback or Unix socket only); the parameter is removed before the driver parses the rest, quoted values intact.
 
 ## Abuse cases
 
@@ -224,10 +290,23 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-22 | `s600_22_human_realm_and_subjects_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-23 | `s600_23_postgres_owner_triggers_match_sqlite` | `src/store/conformance.rs` | unit | passing |
 | S600-24 | `s600_24_sqlite_store_migrates_to_an_empty_postgres_store` | `src/store/conformance.rs` | unit | passing |
+| S600-25 | `s600_25_directory_trait_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-26 | `s600_26_sessions_trait_agrees_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-27 | `s600_27_the_application_store_handle_dispatches_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-28 | `s600_28_native_meta_owners_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-28 | `s600_28_postgres_connections_admit_exactly_one_concurrent_consumer` | `src/auth_gateway/receipt_replay.rs` | unit | passing |
+| S600-29 | `s600_29_provider_and_material_owners_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-30 | `s600_30_published_snapshots_follow_other_replicas_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-31 | `s600_31_native_human_snapshot_and_primary_owner_agree_on_both_backends` | `src/verify/human_tests.rs` | unit | passing |
+| S600-32 | `s600_32_native_human_factor_provenance_agrees_on_both_backends` | `src/verify/human_tests.rs` | unit | passing |
+| S600-33 | `s600_33_native_human_ledger_checks_inside_its_own_transaction_on_both_backends` | `src/verify/human_tests.rs` | unit | passing |
 | S600-34 | `s600_34_identity_platform_filters_and_workload_registry_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-35 | `s600_35_postgres_attempt_windows_hold_across_replicas` | `src/store/conformance.rs` | unit | passing |
+| S600-36 | `s600_36_sslmode_verify_full_needs_the_ca_and_is_the_default_with_it` | `src/store/postgres/sslmode.rs` | unit | passing |
+| S600-36 | `s600_36_sslmode_weaker_modes_are_refused_by_name_and_disable_is_plain` | `src/store/postgres/sslmode.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
-| S600-6 | `s600_6_serving_refuses_the_incomplete_postgres_backend` | `src/app.rs` | unit | passing |
+| S600-6 | `s600_6_serving_accepts_postgres_only_in_a_postgres_build` | `src/app.rs` | unit | passing |
 
 ## Live verification
 
@@ -238,7 +317,7 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 
 ## Open questions
 
-- Slice 5 (ADR-0020): serving on PostgreSQL (native owners and the remaining session and directory operations) and the HTTP two-replica qualification. Hosted CI stays disabled; `make test-postgres` is the PostgreSQL run.
+- Slice 5 (ADR-0020): `serve` runs on PostgreSQL and the HTTP two-replica qualification is S610. The native Human owners run on PostgreSQL too (S600-31 to S600-33, and the whole native Human suite with `HOPAE_TEST_HUMAN_BACKEND=postgres` in `make test-postgres`). Hosted CI stays disabled; `make test-postgres` and `make qualify-postgres` are the PostgreSQL runs.
 
 ## 한국어 요약
 

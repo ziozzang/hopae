@@ -1,22 +1,19 @@
 //! Durable CAS for opaque fingerprints of actual compiled material, not grants.
-use super::{Check, Inner, Store, commit_checked, provider_owner::PreparedProviders};
+use super::{Check, Store, commit_checked, provider_owner::PreparedProviders};
 use crate::{
     provider::material::Fingerprint,
     store::{Deadline, StoreError, StoreResult},
 };
 use rusqlite::{OptionalExtension, params};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Weak},
-};
+use std::collections::BTreeMap;
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct Row {
-    pub(super) revision: i64,
-    pub(super) fingerprint: Option<Vec<u8>>,
+pub(crate) struct Row {
+    pub(crate) revision: i64,
+    pub(crate) fingerprint: Option<Vec<u8>>,
 }
-pub(super) type Ledger = BTreeMap<String, Row>;
+pub(crate) type Ledger = BTreeMap<String, Row>;
 pub(crate) struct Published {
-    store: Weak<Inner>,
+    store: crate::store::owner_ref::OwnerRef,
     entries: Ledger,
 }
 #[derive(Clone)]
@@ -48,11 +45,19 @@ pub(super) fn read(c: &rusqlite::Connection, check: &Check) -> StoreResult<Ledge
     Ok(out)
 }
 impl Published {
-    pub(crate) fn same(&self, other: &Self) -> bool {
-        Weak::ptr_eq(&self.store, &other.store) && self.entries == other.entries
+    #[cfg(feature = "postgres")]
+    pub(crate) fn from_parts(store: crate::store::owner_ref::OwnerRef, entries: Ledger) -> Self {
+        Self { store, entries }
     }
-    pub(crate) fn expected(&self, store: &Store, id: &str) -> StoreResult<Expected> {
-        if !Weak::ptr_eq(&self.store, &Arc::downgrade(&store.inner)) {
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        self.store.same(&other.store) && self.entries == other.entries
+    }
+    pub(crate) fn expected(
+        &self,
+        store: &crate::store::owner_ref::OwnerRef,
+        id: &str,
+    ) -> StoreResult<Expected> {
+        if !self.store.same(store) {
             return Err(refused());
         }
         let row = self.entries.get(id).ok_or_else(refused)?;
@@ -71,8 +76,21 @@ impl Expected {
     pub(crate) fn revision(&self) -> i64 {
         self.revision
     }
-    pub(crate) fn require(&self, c: &rusqlite::Connection, id: &str) -> StoreResult<()> {
-        let row:Option<(i64,Vec<u8>)>=c.query_row("SELECT revision,fingerprint FROM human_provider_material_owners WHERE provider_id=?1 AND fingerprint IS NOT NULL",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    pub(crate) fn require(&self, tx: &dyn crate::store::meta::MetaTx, id: &str) -> StoreResult<()> {
+        let row: Option<(i64, Vec<u8>)> = if let Some(c) = tx.sqlite() {
+            c.query_row("SELECT revision,fingerprint FROM human_provider_material_owners WHERE provider_id=?1 AND fingerprint IS NOT NULL",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?
+        } else {
+            #[cfg(feature = "postgres")]
+            {
+                crate::store::postgres::human::material_row(tx.postgres().ok_or_else(refused)?, id)?
+            }
+            #[cfg(not(feature = "postgres"))]
+            return Err(refused());
+        };
+        self.require_row(row)
+    }
+    /// The comparison itself, for a row read elsewhere (PostgreSQL writes).
+    pub(crate) fn require_row(&self, row: Option<(i64, Vec<u8>)>) -> StoreResult<()> {
         if row != Some((self.revision, self.fingerprint.clone())) {
             return Err(refused());
         }
@@ -86,7 +104,7 @@ impl Store {
         desired: &BTreeMap<String, Fingerprint>,
         deadline: Deadline,
     ) -> StoreResult<Published> {
-        if !Weak::ptr_eq(&prepared.store, &Arc::downgrade(&self.inner)) {
+        if !prepared.store.is_sqlite(&self.inner) {
             return Err(refused());
         }
         let expected = prepared.materials.clone();
@@ -123,7 +141,7 @@ impl Store {
  commit_checked(tx,&shared,Some("human_material_publish"),check)?;Ok(next)
  }).await?;
         Ok(Published {
-            store: Arc::downgrade(&self.inner),
+            store: crate::store::owner_ref::OwnerRef::sqlite(&self.inner),
             entries,
         })
     }

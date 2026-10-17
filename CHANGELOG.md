@@ -259,8 +259,36 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   SHA-256 digests compared before commit, a `store.migrated` audit event,
   the SQLite file opened read-only and kept as the rollback artefact); and
   `make qualify-postgres`, a local two-replica store qualification with one
-  replica killed mid-traffic. Serving on PostgreSQL remains refused until
-  slice 5.
+  replica killed mid-traffic.
+- PostgreSQL store slice 5: `hopae serve` runs on `store.kind = postgres`,
+  with several replicas on one database. The application store is
+  backend-neutral (`AppStore`); the receipt, replay, publication and
+  projection owners run on a shared `meta` contract (PostgreSQL schema 9);
+  the portal CSRF and console MAC keys are shared through the store.
+  `make qualify-postgres` adds two serving replicas behind a TCP round-robin
+  (scenario 610). Profile and projection publications follow across
+  replicas within about one second (`NOTIFY` on commit plus a poll; a
+  replica that missed the notification catches up by polling).
+  The native Human owners (Human snapshot and ledger, native primary
+  sessions and reauthentication, TOTP and WebAuthn provenance, Human
+  receipts) run on PostgreSQL: decision rows are read `FOR SHARE` inside
+  owner writes and read snapshots are `REPEATABLE READ`; the native Human
+  suite runs on both backends (`make test-postgres`). PostgreSQL schema 10
+  accepts a compiled-material republish of an existing provider (the
+  insert trigger fired on upserts), and schema 11 scopes advisory locks to
+  the store's schema. With `authentication.source = config`, the start and
+  the live reload reconcile through the PostgreSQL publication; replicas
+  converge on one publication per file change and follow each other's
+  (scenario S610-3).
+- Password and code attempt limits are configurable
+  (`password_attempts.per_ip`, `password_attempts.per_account`: `burst`,
+  `window_ms`) and a password login also counts against the account it
+  names; on PostgreSQL the windows are kept in the store (schema 12,
+  digests only, pruned) so they hold across replicas (S600-35).
+- Store URLs accept libpq's `sslmode`: `verify-full` (with
+  `store.postgres.ca_file`) and `disable` (loopback or Unix socket only);
+  `require`, `verify-ca`, `prefer` and `allow` are refused by name, at start
+  and by `hopae --check` (S600-36).
 - PostgreSQL store, identity platform: schema 8 (service credentials and
   the workload principal registry, copied by the migration), the console
   listing filters, AAL 3 in the actor fence and `workload.*` changes in the
@@ -268,6 +296,12 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Changed
 
+- The configuration digest behind the configuration generation ignores
+  placement (`state_dir`, listener addresses), so replicas of one
+  deployment share a generation; an upgraded instance moves its generation
+  once.
+- A login whose native primary owner is unavailable logs a warning (the
+  session stays unqualified for native Human receipts, as before).
 - Kubernetes workload callers authenticate as their ServiceAccount
   principal (issuer, cluster, namespace, ServiceAccount name and UID); the
   Pod name/UID is an audit attribute. `kubernetes_tokenreview` profiles must

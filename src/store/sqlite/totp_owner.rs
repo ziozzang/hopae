@@ -23,15 +23,24 @@ pub(crate) struct TotpOwner {
     session: String,
     facts: Facts,
 }
+/// The provenance facts, the session's factor list and the configuration
+/// generation in force, as one row reads them.
+type Found = (Facts, Option<String>, Option<String>);
+
 fn refused() -> StoreError {
     StoreError::Conflict("TOTP establishing owner unavailable")
 }
 
-pub(super) fn current(c: &rusqlite::Connection, session: &str) -> StoreResult<Facts> {
-    let found = c.query_row(
+pub(super) fn current(tx: &dyn crate::store::meta::MetaTx, session: &str) -> StoreResult<Facts> {
+    let found: Option<Found> = if let Some(c) = tx.sqlite() {
+        c.query_row(
         "SELECT p.user_id,p.credential_generation,p.enrollment_id,p.enrollment_revision,p.factor_index,p.verified_at_ms,p.config_generation,CASE WHEN length(s.factors)<=65536 THEN s.factors ELSE NULL END,(SELECT value FROM meta WHERE key='config_generation') FROM session_totp_provenance p JOIN sessions s ON s.session_id=p.session_id AND s.user_id=p.user_id AND s.cred_gen=p.credential_generation JOIN users u ON u.user_id=s.user_id JOIN totp_enrollments e ON e.enrollment_id=p.enrollment_id AND e.user_id=p.user_id AND e.revision=p.enrollment_revision WHERE p.session_id=?1 AND s.terminated_at IS NULL AND s.aal=2 AND u.status='active' AND e.state='active' AND e.last_counter IS NOT NULL AND p.config_generation IS NOT NULL",
         [session], |r| Ok((Facts{user:r.get(0)?,generation:r.get(1)?,enrollment:r.get(2)?,revision:r.get(3)?,index:r.get(4)?,at_ms:r.get(5)?,config:r.get(6)?},r.get::<_,Option<String>>(7)?,r.get::<_,Option<String>>(8)?))
-    ).optional()?.ok_or_else(refused)?;
+        ).optional()?
+    } else {
+        postgres_current(tx, session)?
+    };
+    let found = found.ok_or_else(refused)?;
     let (facts, factors, config) = found;
     let config = config
         .and_then(|s| s.parse::<i64>().ok())
@@ -49,6 +58,39 @@ pub(super) fn current(c: &rusqlite::Connection, session: &str) -> StoreResult<Fa
         return Err(refused());
     }
     Ok(facts)
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_current(
+    tx: &dyn crate::store::meta::MetaTx,
+    session: &str,
+) -> StoreResult<Option<Found>> {
+    let tx = tx.postgres().ok_or_else(refused)?;
+    Ok(crate::store::postgres::human::totp_row(tx, session)?.map(
+        |((user, generation, enrollment, revision, index, at_ms, config), factors, current)| {
+            (
+                Facts {
+                    user,
+                    generation,
+                    enrollment,
+                    revision,
+                    index,
+                    at_ms,
+                    config,
+                },
+                factors,
+                current,
+            )
+        },
+    ))
+}
+
+#[cfg(not(feature = "postgres"))]
+fn postgres_current(
+    _tx: &dyn crate::store::meta::MetaTx,
+    _session: &str,
+) -> StoreResult<Option<Found>> {
+    Err(refused())
 }
 
 pub(super) fn validate_foundation(c: &rusqlite::Connection) -> StoreResult<()> {

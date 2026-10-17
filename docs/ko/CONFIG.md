@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=46 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=47 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -63,9 +63,9 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `listen.portal` | 문자열, 소켓 주소 | `127.0.0.1:8700` | 포털 리스너(로그인, 콜백, 로그아웃, `/healthz`). 게이트웨이의 포털 라우트가 프록시합니다. |
 | `listen.gateway` | 문자열, 소켓 주소 | `127.0.0.1:8701` | 게이트웨이 리스너(`/_hopae/verify`). `listen.portal`과 달라야 합니다. 루프백이 아닌 주소는 경고를 냅니다. 이 리스너는 공개적으로 접근할 수 있어서는 안 됩니다([게이트웨이 계약](GATEWAY_CONTRACT.md#전제-조건과-설정)). |
 | `state_dir` | 문자열, 경로 | 필수 | 런타임 상태(데이터베이스, 인스턴스 잠금, 백업)를 위한 쓰기 가능한 디렉터리이며 모드 `0700`으로 생성됩니다. 비어 있으면 안 됩니다. |
-| `store.kind`(별칭 `store.backend`) | `sqlite`, `postgres` | `sqlite` | 기본 저장소 백엔드([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md), [ADR-0020](../adr/0020-postgresql-store-backend.md)). `postgres`는 `postgres` feature로 빌드한 바이너리와 `store.postgres`가 필요합니다. 검증되고 `hopae store migrate-to-postgres`가 사용합니다. `serve`와 다른 저장소 명령은 ADR-0020 슬라이스 5 전까지 거부합니다(SQLite로 대체하지 않음). |
-| `store.postgres.url_env` | 환경 변수 이름 | — | 연결 문자열(libpq URL 또는 key/value). 파일이 아니라 환경에서 읽습니다 |
-| `store.postgres.ca_file` | 절대 경로 | 없음 | TLS용 PEM CA 묶음. 없으면 루프백이나 Unix 소켓만 허용합니다 |
+| `store.kind`(별칭 `store.backend`) | `sqlite`, `postgres` | `sqlite` | 기본 저장소 백엔드([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md), [ADR-0020](../adr/0020-postgresql-store-backend.md)). `postgres`는 `postgres` feature로 빌드한 바이너리와 `store.postgres`가 필요합니다. `serve`, `providers import`, `hopae store migrate-to-postgres`가 사용합니다. 여러 복제본이 데이터베이스 하나를 함께 서비스할 수 있습니다. 프로필과 프로젝션 게시는 약 1초 안에 모든 복제본에 반영됩니다. 네이티브 Human 소유자(`human_material_key_env`, `receipt_issuer.human_receipts`)도 이 설정에서 동작합니다. 복제본은 같은 구성으로 실행해야 합니다. 공유 구성 세대는 배치(`state_dir`, 리스너 주소)만 무시하므로, 이전 정책으로 실행 중인 복제본은 재시작할 때까지 네이티브 Human 세션을 인정하지 않습니다. SQLite로 대체하지 않습니다. |
+| `store.postgres.url_env` | 환경 변수 이름 | — | 연결 문자열(libpq URI 또는 key/value). 파일이 아니라 환경에서 읽습니다. libpq의 `sslmode`를 받습니다. 값이 없거나 `verify-full`이고 `store.postgres.ca_file`이 있으면 인증서 체인과 호스트 이름을 검증하는 TLS입니다. `ca_file` 없이 `verify-full`이면 거부합니다. `disable`(또는 `ca_file` 없이 값 없음)은 평문 TCP로, 루프백이나 Unix 소켓에만 허용되고 `ca_file`과 함께 쓸 수 없습니다. `require`, `verify-ca`, `prefer`, `allow`는 이름을 밝혀 거부합니다(호패는 항상 호스트 이름을 검증합니다). 시작할 때와 `hopae --check`에서 확인합니다 |
+| `store.postgres.ca_file` | 절대 경로 | 없음 | TLS용 PEM CA 묶음(`sslmode=verify-full`). 없으면 루프백이나 Unix 소켓만 허용합니다 |
 | `store.postgres.pool_size`, `connect_timeout_ms`, `statement_timeout_ms` | 정수 | `16`, `5000`, `2000` | 풀 크기 1~128, 연결 제한 시간 100~60,000 ms, 트랜잭션별 문장 제한 시간 10~600,000 ms |
 | `store.path` | 문자열, 경로 | `<state_dir>/hopae.db` | SQLite 데이터베이스 파일. 지정했다면 비어 있으면 안 됩니다. |
 | `log.level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | stderr 프로세스 로그의 상세도. |
@@ -91,8 +91,10 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `linking.on_conflict` | `link_required`, `separate`, `deny` | `link_required` | 로그인의 검증된 이메일이 다른 제공자를 통한 기존 사용자와 일치할 때의 동작([ADR-0011](../adr/0011-account-linking-policy.md)). |
 | `linking.mode` | `verified_email`, `off` | `verified_email` | 계정 연결 정책. |
 | `txn.max_rows` | 정수, 1 이상 | `1000` | 살아 있는 로그인 트랜잭션 수 상한([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)). 트랜잭션 수명은 상수 600초이며 키가 없습니다. |
-| `txn.per_ip_per_minute` | 정수, 1 이상 | `30` | 클라이언트 IP 하나가 분당 시작할 수 있는 로그인 트랜잭션 수. |
-| `handoff.per_ip_failures_per_minute` | 정수, 1 이상 | `10` | 클라이언트 IP 하나가 분당 일으킬 수 있는 핸드오프 코드 실패 수. 넘으면 속도 제한됩니다. |
+| `txn.per_ip_per_minute` | 정수, 1 이상 | `30` | 클라이언트 IP 하나가 분당 시작할 수 있는 로그인 트랜잭션 수(저장소에서 세므로 PostgreSQL에서는 복제본이 공유). |
+| `handoff.per_ip_failures_per_minute` | 정수, 1 이상 | `10` | 클라이언트 IP 하나가 분당 일으킬 수 있는 핸드오프 코드 실패 수. 넘으면 속도 제한됩니다(저장소에서 세므로 PostgreSQL에서는 복제본이 공유). |
+| `password_attempts.per_ip.burst`, `password_attempts.per_ip.window_ms` | 정수: 1–10,000, 1,000–86,400,000 | `10`, `60000` | 클라이언트 주소 하나가 창(window)마다 할 수 있는 비밀번호 로그인과 코드 제출(TOTP·패스키 단계 상승, 설정 재확인) 횟수. CSRF가 유효한 제출은 자격 증명이 틀려도 모두 셉니다. 넘으면 `429`와 `Retry-After`로 답합니다. |
+| `password_attempts.per_account.burst`, `password_attempts.per_account.window_ms` | 정수: 1–10,000, 1,000–86,400,000 | `10`, `60000` | 주소와 관계없이 계정 하나(제공자와 대소문자를 접은 사용자 이름)를 지정한 비밀번호 로그인 횟수(창마다). SQLite에서는 두 한도를 프로세스 안에 두고, PostgreSQL에서는 저장소(`attempt_windows`, 다이제스트만 저장, 만료 행 정리)에 두어 복제본 사이에서도 지킵니다. |
 | `handoff.max_recoveries` | 정수 | `3` | 알려진 핸드오프 코드가 거부되었을 때(첫 사용 바인딩 쿠키 경쟁 등) 브라우저를 포털로 되돌려 보내 복구하는 횟수. 넘으면 중계된 `403` 페이지로 루프가 끝납니다([ADR-0014](../adr/0014-handoff-recovery-on-any-rejected-code.md)). 범위 검사는 하지 않습니다. |
 
 #### 게이트웨이
@@ -244,7 +246,6 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `gateway.rate_limit_status` | HC-8 이후 | `403` | 게이트웨이가 중계하면 `429`([ADR-0005](../adr/0005-gateway-contract-and-versioning.md)) |
 | `oidc` 또는 `ldap`가 아닌 `providers[].kind` | M3 | — | 카카오, 네이버, 이메일 링크, 비밀번호([ADR-0010](../adr/0010-provider-abstraction.md)) |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, 없음, 없음 | 로컬 캐시와 Redis 버스([ADR-0006](../adr/0006-verify-caching-and-invalidation.md)) |
-| `store.kind = postgres`로 서비스 | ADR-0020 슬라이스 5(M2) | — | 공유 기본 저장소. 슬라이스 1~4는 저장소 계약, PostgreSQL 스키마, 양쪽 백엔드 적합성 테스트, SQLite 이전 명령, 복제본 2개 저장소 검증을 제공합니다 |
 
 ## 동작
 

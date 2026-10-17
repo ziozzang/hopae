@@ -95,6 +95,10 @@ pub struct Config {
     pub txn: Txn,
     #[serde(default)]
     pub handoff: HandoffCfg,
+    /// Password and code submission limits (per client address and, for a
+    /// password login, per named account).
+    #[serde(default)]
+    pub password_attempts: PasswordAttemptsCfg,
     #[serde(default)]
     pub events: EventsCfg,
     #[serde(default = "default_trusted_proxies")]
@@ -931,6 +935,55 @@ impl Default for HandoffCfg {
             per_ip_failures_per_minute: d_handoff_failures(),
             max_recoveries: d_handoff_recoveries(),
         }
+    }
+}
+
+/// One attempt limit: `burst` submissions per `window_ms`.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptLimitCfg {
+    pub burst: u32,
+    pub window_ms: u64,
+}
+
+impl AttemptLimitCfg {
+    pub fn limit(&self) -> crate::portal::password_attempts::Limit {
+        crate::portal::password_attempts::Limit {
+            burst: self.burst,
+            window: std::time::Duration::from_millis(self.window_ms),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PasswordAttemptsCfg {
+    #[serde(default = "d_attempts_per_ip")]
+    pub per_ip: AttemptLimitCfg,
+    #[serde(default = "d_attempts_per_account")]
+    pub per_account: AttemptLimitCfg,
+}
+
+impl Default for PasswordAttemptsCfg {
+    fn default() -> Self {
+        Self {
+            per_ip: d_attempts_per_ip(),
+            per_account: d_attempts_per_account(),
+        }
+    }
+}
+
+fn d_attempts_per_ip() -> AttemptLimitCfg {
+    AttemptLimitCfg {
+        burst: 10,
+        window_ms: 60_000,
+    }
+}
+
+fn d_attempts_per_account() -> AttemptLimitCfg {
+    AttemptLimitCfg {
+        burst: 10,
+        window_ms: 60_000,
     }
 }
 
@@ -1922,6 +1975,22 @@ impl Config {
     }
 
     fn validate_bounds(&self, errs: &mut Vec<String>) {
+        for (key, limit) in [
+            ("password_attempts.per_ip", self.password_attempts.per_ip),
+            (
+                "password_attempts.per_account",
+                self.password_attempts.per_account,
+            ),
+        ] {
+            if !(1..=10_000).contains(&limit.burst) {
+                errs.push(format!("{key}.burst must be between 1 and 10000"));
+            }
+            if !(1_000..=86_400_000).contains(&limit.window_ms) {
+                errs.push(format!(
+                    "{key}.window_ms must be between 1000 (1 s) and 86400000 (24 h)"
+                ));
+            }
+        }
         let positive: [(&str, u64); 12] = [
             ("txn.max_rows", u64::from(self.txn.max_rows)),
             (
@@ -2542,6 +2611,24 @@ pub fn check_env(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<S
         && let Err(error) = crate::verify::operator::signing_key(c, &lookup)
     {
         out.push(error);
+    }
+    #[cfg(feature = "postgres")]
+    if cfg.store.kind == StoreKind::Postgres
+        && let Some(pg) = &cfg.store.postgres
+    {
+        match lookup(&pg.url_env).filter(|v| !v.is_empty()) {
+            None => out.push(format!(
+                "environment variable {} (store.postgres.url_env) is not set or is empty",
+                pg.url_env
+            )),
+            Some(url) => {
+                if let Err(error) =
+                    crate::store::postgres::sslmode::apply(&url, pg.ca_file.is_some())
+                {
+                    out.push(format!("store.postgres ({}): {error}", pg.url_env));
+                }
+            }
+        }
     }
     out
 }

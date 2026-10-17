@@ -29,7 +29,7 @@ fn workload(b: EventBuilder, w: &WorkloadRef) -> EventBuilder {
 pub async fn pump(
     mut rx: tokio::sync::mpsc::Receiver<Signal>,
     emitter: Emitter,
-    store: crate::store::sqlite::Store,
+    store: crate::store::Store,
 ) {
     use crate::store::sqlite::workloads::WorkloadChange;
     let mut buffer = Vec::with_capacity(BATCH);
@@ -187,7 +187,11 @@ mod tests {
             false,
         );
         let (sink, rx) = signals::channel();
-        let pump = tokio::spawn(pump(rx, emitter, store.clone()));
+        let pump = tokio::spawn(pump(
+            rx,
+            emitter,
+            crate::store::Store::Sqlite(store.clone()),
+        ));
         sink.emit(Signal::Observed(workload("sa-1")));
         sink.emit(Signal::LegacyMapped {
             workload: workload("sa-1"),
@@ -268,7 +272,11 @@ mod tests {
             false,
         );
         let (sink, rx) = signals::channel();
-        let pump = tokio::spawn(pump(rx, emitter, store.clone()));
+        let pump = tokio::spawn(pump(
+            rx,
+            emitter,
+            crate::store::Store::Sqlite(store.clone()),
+        ));
         let legacy = format!("s_{}", "c".repeat(48));
         sink.emit(Signal::Observed(workload("sa-1")));
         sink.emit(Signal::LegacyMapped {

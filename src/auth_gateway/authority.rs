@@ -1,7 +1,7 @@
 //! Single-owner publication worker primitive; request reads use immutable snapshots.
 use super::{publication, runtime};
+use crate::store::meta::{MetaDb, MetaTx};
 use arc_swap::ArcSwap;
-use rusqlite::Connection;
 use std::sync::Arc;
 
 pub struct Snapshot {
@@ -136,7 +136,7 @@ pub struct Reconciled {
 }
 pub struct Authorization<'a> {
     pub actor: &'a str,
-    pub guard: &'a dyn Fn(&Connection) -> Result<(), publication::Error>,
+    pub guard: &'a dyn Fn(&dyn MetaTx) -> Result<(), publication::Error>,
 }
 pub struct Authority {
     observed_time: Arc<std::sync::atomic::AtomicU64>,
@@ -146,13 +146,13 @@ pub struct Authority {
 impl Authority {
     /// Load durable state before readiness. Bootstrap is imported only if no durable row exists.
     /// Application-scope validation must be supplied by the authenticated owner.
-    pub fn load(
-        connection: &mut Connection,
+    pub fn load<D: MetaDb>(
+        connection: &mut D,
         bootstrap: Option<runtime::Config>,
         env: &dyn Fn(&str) -> Option<String>,
         validate: &dyn Fn(&runtime::Config) -> Result<(), publication::Error>,
     ) -> Result<Self, publication::Error> {
-        let document = publication::read(connection)?;
+        let document = connection.meta_read(|tx| publication::read(tx))?;
         let configuration = document
             .as_ref()
             .map_or(bootstrap.as_ref(), |d| d.configuration.as_ref());
@@ -192,26 +192,36 @@ impl Authority {
     /// never touches the store), then the store is reconciled through the
     /// same CAS publication (revision + audit row, actor `config`) when its
     /// durable document differs. Equal documents keep their revision.
-    pub fn load_from_config(
-        connection: &mut Connection,
+    pub fn load_from_config<D: MetaDb>(
+        connection: &mut D,
         desired: Option<runtime::Config>,
         env: &dyn Fn(&str) -> Option<String>,
         validate: &dyn Fn(&runtime::Config) -> Result<(), publication::Error>,
     ) -> Result<(Self, Reconciled), publication::Error> {
         let runtime = Self::compile(desired.as_ref(), env, validate)?;
-        let durable = publication::read(connection)?;
-        let previous = durable.as_ref().map_or(0, |d| d.revision);
-        let same = match &durable {
-            Some(d) => {
-                serde_json::to_value(&d.configuration).map_err(|_| publication::Error::Invalid)?
-                    == serde_json::to_value(&desired).map_err(|_| publication::Error::Invalid)?
+        let wanted = serde_json::to_value(&desired).map_err(|_| publication::Error::Invalid)?;
+        // Replicas starting together reconcile the same file: a revision
+        // conflict means another one published first; compare again.
+        let mut attempts = 0;
+        let (previous, revision, same) = loop {
+            let durable = connection.meta_read(|tx| publication::read(tx))?;
+            let previous = durable.as_ref().map_or(0, |d| d.revision);
+            let same = match &durable {
+                Some(d) => {
+                    serde_json::to_value(&d.configuration)
+                        .map_err(|_| publication::Error::Invalid)?
+                        == wanted
+                }
+                None => desired.is_none(),
+            };
+            if same {
+                break (previous, previous, true);
             }
-            None => desired.is_none(),
-        };
-        let revision = if same {
-            previous
-        } else {
-            publication::publish(connection, previous, desired, "config")?.revision
+            match publication::publish(connection, previous, desired.clone(), "config") {
+                Ok(document) => break (previous, document.revision, false),
+                Err(publication::Error::Conflict) if attempts < 3 => attempts += 1,
+                Err(e) => return Err(e),
+            }
         };
         let observed_time = runtime
             .as_ref()
@@ -256,9 +266,9 @@ impl Authority {
     }
     /// Run synchronously inside the exclusive blocking publication worker.
     /// No await or fallible operation separates commit from snapshot installation.
-    pub fn publish(
+    pub fn publish<D: MetaDb>(
         &mut self,
-        connection: &mut Connection,
+        connection: &mut D,
         expected: u64,
         configuration: Option<runtime::Config>,
         actor: &str,
@@ -277,9 +287,9 @@ impl Authority {
             validate,
         )
     }
-    pub fn publish_authorized(
+    pub fn publish_authorized<D: MetaDb>(
         &mut self,
-        connection: &mut Connection,
+        connection: &mut D,
         expected: u64,
         configuration: Option<runtime::Config>,
         authorization: Authorization<'_>,
@@ -310,9 +320,10 @@ impl Authority {
             revision: expected.checked_add(1).ok_or(publication::Error::Invalid)?,
             runtime,
         });
-        previous
+        // A snapshot a refresh installed as unavailable stays so on failure.
+        let was_closed = previous
             .publication
-            .store(true, std::sync::atomic::Ordering::Release);
+            .swap(true, std::sync::atomic::Ordering::AcqRel);
         let result = publication::publish_guarded(
             connection,
             expected,
@@ -325,7 +336,7 @@ impl Authority {
             Err(error) => {
                 previous
                     .publication
-                    .store(false, std::sync::atomic::Ordering::Release);
+                    .store(was_closed, std::sync::atomic::Ordering::Release);
                 return Err(error);
             }
         };
@@ -338,6 +349,53 @@ impl Authority {
             .store(false, std::sync::atomic::Ordering::Release);
         Ok(document)
     }
+    /// Follow a publication another replica committed (ADR-0020 slice 5).
+    /// Installs a newer durable revision, never an older one. When this
+    /// process cannot compile it (a referenced credential missing here, or a
+    /// configuration it does not accept), it installs that revision as
+    /// unavailable: verify answers unavailable for every profile request
+    /// until a later revision compiles. Runs under the same owner lock as
+    /// `publish`. True when a snapshot was installed.
+    pub fn refresh<D: MetaDb>(
+        &mut self,
+        connection: &mut D,
+        env: &dyn Fn(&str) -> Option<String>,
+        validate: &dyn Fn(&runtime::Config) -> Result<(), publication::Error>,
+    ) -> Result<bool, publication::Error> {
+        let previous = self.snapshot.load_full();
+        let Some(document) = connection.meta_read(|tx| publication::read(tx))? else {
+            return Ok(false);
+        };
+        if document.revision <= previous.revision {
+            return Ok(false);
+        }
+        let compiled = document
+            .configuration
+            .as_ref()
+            .map(|config| {
+                validate(config)?;
+                runtime::Runtime::compile_resuming(config, env, previous.runtime.as_ref())
+                    .map_err(|_| publication::Error::Invalid)
+            })
+            .transpose();
+        let (runtime, closed) = match compiled {
+            Ok(mut runtime) => {
+                if let Some(runtime) = &mut runtime {
+                    runtime.observed_time = self.observed_time.clone();
+                    // Later published runtimes keep reporting workload signals.
+                    runtime.activate(self.workload_signals.clone());
+                }
+                (runtime, false)
+            }
+            Err(_) => (None, true),
+        };
+        self.snapshot.store(Arc::new(Snapshot {
+            publication: Arc::new(std::sync::atomic::AtomicBool::new(closed)),
+            revision: document.revision,
+            runtime,
+        }));
+        Ok(true)
+    }
     pub fn reader(&self) -> Arc<ArcSwap<Snapshot>> {
         self.snapshot.clone()
     }
@@ -347,6 +405,7 @@ impl Authority {
 }
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
     #[test]
     fn observed_completion_charges_pre_auth_suspend_before_starting_a_new_budget() {
         use std::time::Duration;

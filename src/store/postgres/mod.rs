@@ -6,13 +6,20 @@
 //! constraints, so several replicas behave like the single SQLite writer.
 //! Times come from the application clock, never from `now()`.
 mod admin;
+mod attempts;
 mod directory;
 mod events;
 mod factors;
 mod groups;
 mod handoff;
+pub(crate) mod human;
 pub mod import;
+pub mod meta;
+mod owners;
 mod passkeys;
+mod service_credentials;
+pub mod sslmode;
+mod traits;
 mod workloads;
 mod write;
 
@@ -71,8 +78,37 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0008_identity_platform",
         include_str!("migrations/0008_identity_platform.sql"),
     ),
+    (
+        9,
+        "0009_slice5_meta",
+        include_str!("migrations/0009_slice5_meta.sql"),
+    ),
+    (
+        10,
+        "0010_slice5_material_upsert",
+        include_str!("migrations/0010_slice5_material_upsert.sql"),
+    ),
+    (
+        11,
+        "0011_slice5_lock_namespace",
+        include_str!("migrations/0011_slice5_lock_namespace.sql"),
+    ),
+    (
+        12,
+        "0012_attempt_windows",
+        include_str!("migrations/0012_attempt_windows.sql"),
+    ),
 ];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
+/// Take the transaction-scoped advisory lock `$1` (an `i64` key below 2^31)
+/// in this store's namespace: its schema. Stores in different schemas of
+/// one database never contend, and the two-key space never meets other
+/// applications' single-key locks. Only the migration runner's lock spans
+/// the database.
+pub(crate) const ADVISORY_XACT_LOCK: &str =
+    "SELECT pg_advisory_xact_lock(hashtext(current_schema()), ($1::bigint)::int4)";
+/// Advisory lock key serializing login-transaction admission (count, evict, insert).
+pub(crate) const LOGIN_TXN_LOCK: i64 = 7008;
 /// `pg_advisory_xact_lock` key of the migration runner ("hopae-mi").
 const MIGRATION_LOCK: i64 = 0x686f_7061_652d_6d69;
 const RAW_CLAIMS_MAX: usize = 8192;
@@ -112,6 +148,20 @@ pub struct PgStore {
     statement_timeout_ms: u64,
     /// Bounds the diagnostic writes in flight (SQLite's queue capacity).
     diag: Arc<tokio::sync::Semaphore>,
+    /// The runtime the pool's connections live on (blocking owner calls use it).
+    handle: tokio::runtime::Handle,
+    /// How to open the dedicated `LISTEN` connection (outside the pool).
+    listen: Listen,
+}
+
+/// The connection settings of the publication listener.
+#[derive(Clone)]
+enum Listen {
+    Plain(tokio_postgres::Config),
+    Tls(
+        tokio_postgres::Config,
+        tokio_postgres_rustls::MakeRustlsConnect,
+    ),
 }
 
 /// Map a driver error to the store's error classes; never echo values.
@@ -163,10 +213,16 @@ impl PgStore {
         rng: Arc<dyn Rng>,
         sinks: Vec<String>,
     ) -> StoreResult<Self> {
-        let mut cfg: tokio_postgres::Config = options
-            .url
+        // libpq's `sslmode`, decided here (the driver lacks `verify-*`).
+        let (url, transport) = sslmode::apply(&options.url, options.ca_pem.is_some())
+            .map_err(StoreError::Unavailable)?;
+        let mut cfg: tokio_postgres::Config = url
             .parse()
             .map_err(|_| StoreError::Unavailable("invalid postgres connection string".into()))?;
+        debug_assert_eq!(
+            transport == sslmode::Transport::VerifyFull,
+            options.ca_pem.is_some()
+        );
         cfg.connect_timeout(options.connect_timeout);
         cfg.application_name("hopae");
         if let Some(schema) = &options.search_path {
@@ -181,6 +237,9 @@ impl PgStore {
         let manager_config = ManagerConfig {
             recycling_method: RecyclingMethod::Verified,
         };
+        let mut listen_cfg = cfg.clone();
+        listen_cfg.application_name("hopae-listen");
+        let listen;
         let manager = match &options.ca_pem {
             Some(pem) => {
                 let mut roots = rustls::RootCertStore::empty();
@@ -197,11 +256,10 @@ impl PgStore {
                 .with_root_certificates(roots)
                 .with_no_client_auth();
                 cfg.ssl_mode(tokio_postgres::config::SslMode::Require);
-                Manager::from_config(
-                    cfg,
-                    tokio_postgres_rustls::MakeRustlsConnect::new(tls),
-                    manager_config,
-                )
+                listen_cfg.ssl_mode(tokio_postgres::config::SslMode::Require);
+                let connector = tokio_postgres_rustls::MakeRustlsConnect::new(tls);
+                listen = Listen::Tls(listen_cfg, connector.clone());
+                Manager::from_config(cfg, connector, manager_config)
             }
             None => {
                 if !loopback_only(&cfg) {
@@ -209,6 +267,7 @@ impl PgStore {
                         "postgres without TLS is allowed only on loopback or a Unix socket".into(),
                     ));
                 }
+                listen = Listen::Plain(listen_cfg);
                 Manager::from_config(cfg, tokio_postgres::NoTls, manager_config)
             }
         };
@@ -228,6 +287,8 @@ impl PgStore {
             diag: Arc::new(tokio::sync::Semaphore::new(
                 crate::store::sqlite::DIAGNOSTIC_QUEUE_CAP,
             )),
+            handle: tokio::runtime::Handle::current(),
+            listen,
         };
         if let Some(schema) = &options.search_path {
             let client = store.pool.get().await.map_err(pool_err)?;
@@ -339,7 +400,28 @@ impl PgStore {
         Ok(tx)
     }
 
-    async fn client(&self) -> StoreResult<deadpool_postgres::Object> {
+    /// One read-only snapshot (`REPEATABLE READ`) with the statement timeout.
+    pub(super) async fn begin_snapshot<'a>(
+        &self,
+        client: &'a mut deadpool_postgres::Object,
+    ) -> StoreResult<Transaction<'a>> {
+        let tx = client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .await
+            .map_err(pg)?;
+        tx.batch_execute(&format!(
+            "SET LOCAL statement_timeout = {}",
+            self.statement_timeout_ms
+        ))
+        .await
+        .map_err(pg)?;
+        Ok(tx)
+    }
+
+    pub(crate) async fn client(&self) -> StoreResult<deadpool_postgres::Object> {
         self.pool.get().await.map_err(pool_err)
     }
 
@@ -375,7 +457,7 @@ impl PgStore {
             .map_err(pg)?;
             if events::in_feed(ev.kind) {
                 // Feed positions in commit order: only these writes take the lock.
-                tx.execute("SELECT pg_advisory_xact_lock($1)", &[&events::FEED_LOCK])
+                tx.execute(ADVISORY_XACT_LOCK, &[&events::FEED_LOCK])
                     .await
                     .map_err(pg)?;
                 tx.execute(
@@ -722,7 +804,21 @@ impl PgStore {
         })
     }
 
-    async fn try_create_session(&self, req: &CreateSession) -> StoreResult<()> {
+    /// A login session whose native primary authentication is recorded in
+    /// the same transaction (ADR-0020 slice 5).
+    pub(crate) async fn create_session_primary(
+        &self,
+        req: CreateSession,
+        primary: crate::session::service::VerifiedPrimary,
+    ) -> StoreResult<()> {
+        retry(|| self.try_create_session(&req, Some(&primary))).await
+    }
+
+    async fn try_create_session(
+        &self,
+        req: &CreateSession,
+        primary: Option<&crate::session::service::VerifiedPrimary>,
+    ) -> StoreResult<()> {
         if req.portal_handle.handle_sha256 != req.portal_handle_digest {
             return Err(StoreError::Conflict("portal handle digest mismatch"));
         }
@@ -752,6 +848,9 @@ impl PgStore {
         }
         write::insert_session(&tx, s).await?;
         write::insert_handle(&tx, &req.portal_handle).await?;
+        if let Some(primary) = primary {
+            primary.write_postgres(self, &tx, s, 0).await?;
+        }
         tx.execute(
             "UPDATE users SET last_login_at=$2 WHERE user_id=$1",
             &[&s.user_id.as_str(), &s.created_at.secs()],
@@ -771,6 +870,9 @@ impl PgStore {
             }
         }
         self.insert_events(&tx, &req.events).await?;
+        if let Some(primary) = primary {
+            primary.publication()?;
+        }
         tx.commit().await.map_err(pg)
     }
 
@@ -1020,7 +1122,7 @@ impl CoreStore for PgStore {
     }
 
     async fn create_session(&self, req: CreateSession) -> StoreResult<()> {
-        retry(|| self.try_create_session(&req)).await
+        retry(|| self.try_create_session(&req, None)).await
     }
 
     async fn session(&self, id: &SessionId) -> StoreResult<Option<SessionRow>> {
@@ -1195,5 +1297,77 @@ impl CoreStore for PgStore {
 impl PgStore {
     pub(crate) async fn raw(&self) -> deadpool_postgres::Object {
         self.pool.get().await.expect("pool")
+    }
+}
+
+/// Wait on the publication channel (ADR-0020 slice 5).
+impl PgStore {
+    /// Follow `NOTIFY` on the publication channel over a dedicated
+    /// connection and wake `wake` for each one, and once after every
+    /// (re)connect so a follower catches up on what it missed. A dropped
+    /// connection is reopened after `retry`; notifications sent meanwhile
+    /// are lost, which is why followers also poll. Runs until the process
+    /// exits.
+    pub async fn follow_publications(
+        self: Arc<Self>,
+        wake: Arc<tokio::sync::Notify>,
+        retry: std::time::Duration,
+    ) {
+        loop {
+            let result = match &self.listen {
+                Listen::Plain(cfg) => listen_once(cfg, tokio_postgres::NoTls, &wake).await,
+                Listen::Tls(cfg, tls) => listen_once(cfg, tls.clone(), &wake).await,
+            };
+            if let Err(e) = result {
+                tracing::warn!(
+                    "publication listener disconnected ({}); polling until it reconnects",
+                    pg(e)
+                );
+            }
+            tokio::time::sleep(retry).await;
+        }
+    }
+}
+
+async fn listen_once<T>(
+    cfg: &tokio_postgres::Config,
+    tls: T,
+    wake: &tokio::sync::Notify,
+) -> Result<(), tokio_postgres::Error>
+where
+    T: tokio_postgres::tls::MakeTlsConnect<tokio_postgres::Socket>,
+    T::Stream: Send + 'static,
+{
+    let (client, mut connection) = cfg.connect(tls).await?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let driver = tokio::spawn(async move {
+        loop {
+            match std::future::poll_fn(|cx| connection.poll_message(cx)).await {
+                Some(Ok(tokio_postgres::AsyncMessage::Notification(_))) => {
+                    if tx.send(()).is_err() {
+                        return Ok(());
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => return Err(e),
+                None => return Ok(()),
+            }
+        }
+    });
+    let listened = client
+        .batch_execute(&format!("LISTEN {}", meta::PUBLICATION_CHANNEL))
+        .await;
+    if let Err(e) = listened {
+        driver.abort();
+        return Err(e);
+    }
+    wake.notify_one();
+    while rx.recv().await.is_some() {
+        wake.notify_one();
+    }
+    drop(client);
+    match driver.await {
+        Ok(result) => result,
+        Err(_) => Ok(()),
     }
 }

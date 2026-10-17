@@ -379,7 +379,7 @@ impl PgStore {
         tx.batch_execute(&format!("SET LOCAL statement_timeout = {ms}"))
             .await
             .map_err(pg)?;
-        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&GROUPS_LOCK])
+        tx.execute(super::ADVISORY_XACT_LOCK, &[&GROUPS_LOCK])
             .await
             .map_err(pg)?;
         Ok(tx)

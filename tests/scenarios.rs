@@ -79,6 +79,8 @@ mod scenarios {
     mod s495_risk_step_up;
     #[path = "s600_metrics.rs"]
     mod s600_metrics;
+    #[path = "s610_postgres_replicas.rs"]
+    mod s610_postgres_replicas;
     #[path = "s900_kubernetes_workload.rs"]
     mod s900_kubernetes_workload;
 }

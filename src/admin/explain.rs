@@ -12,6 +12,8 @@
 //! writes: no session, handle, transaction or touch is created, and a
 //! session the simulation finds expired is not terminated.
 
+#[allow(unused_imports)]
+use crate::store::core::{GroupStore as _, SubjectDirectoryStore as _};
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;

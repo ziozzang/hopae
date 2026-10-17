@@ -97,7 +97,7 @@ fn migrations_are_idempotent_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hopae.db");
     let first = open(&path).unwrap();
-    let count = |s: &hopae::store::sqlite::Store| -> (i64, i64) {
+    let count = |s: &hopae::store::Store| -> (i64, i64) {
         s.conn()
             .query_row(
                 "SELECT COUNT(*), MAX(version) FROM schema_migrations",

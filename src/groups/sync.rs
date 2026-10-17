@@ -6,6 +6,8 @@
 //! person's previous memberships as they were and is reported as a
 //! `group.sync_refused` diagnostic event.
 
+#[allow(unused_imports)]
+use crate::store::core::{GroupStore as _, SubjectDirectoryStore as _};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +21,7 @@ use crate::event::types::{Event, EventBuilder, EventKind, Outcome};
 use crate::identity::types::UserId;
 use crate::provider::ProviderKind;
 use crate::provider::types::{ProviderId, RawGroup};
-use crate::store::sqlite::Store;
+use crate::store::Store;
 use crate::store::sqlite::groups::{MaintenanceReport, SyncReport, WritePolicy};
 use crate::store::types::ProviderRow;
 use crate::store::{Deadline, Directory};

@@ -22,6 +22,7 @@ pub mod lock;
 #[cfg(feature = "postgres")]
 pub mod pg;
 pub mod preflight;
+pub mod publications;
 pub mod state;
 
 use std::future::Future;
@@ -233,6 +234,9 @@ pub struct Services {
     pub started_at: Timestamp,
     /// The bound listener addresses, set once every listener is bound.
     pub listeners: Arc<std::sync::OnceLock<crate::admin::Listeners>>,
+    /// Keys every replica must share (PostgreSQL): the portal CSRF key and
+    /// the console's MAC key. `None` on SQLite: one instance draws its own.
+    pub(crate) shared_keys: Option<SharedKeys>,
     /// What live reloading of TLS material and configuration last did.
     pub reload_status: Arc<crate::reload::Status>,
     /// The outbound mTLS material watched by the TLS poller.
@@ -316,6 +320,9 @@ impl Services {
         let cfg = crate::admin::AdminConfig::from_config(&self.config)?;
         let mut key = [0u8; 32];
         self.rng.fill(&mut key);
+        if let Some(keys) = &self.shared_keys {
+            key = keys.console;
+        }
         Some(Arc::new(crate::admin::AdminState {
             projection_authority: self.projection_authority.clone(),
             profile_authority: self.authentication_authority.clone(),
@@ -343,11 +350,69 @@ impl Services {
             peer_warned: std::sync::Mutex::new(std::collections::HashMap::new()),
             delegation: self.config.admin.hangang_delegation.clone(),
             reload: self.reload_status.clone(),
-            delegation_replay: crate::admin::delegation::Replay::new(
-                self.config.state_dir.join("delegation-nonces.sqlite3"),
-            ),
+            delegation_replay: self.delegation_replay(),
         }))
     }
+}
+
+impl Services {
+    /// Delegation nonces: a private file per instance on SQLite, the shared
+    /// replay ledger on PostgreSQL (every replica refuses a used nonce).
+    fn delegation_replay(&self) -> crate::admin::delegation::Replay {
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = self.store.postgres() {
+            return crate::admin::delegation::Replay::shared(pg.clone());
+        }
+        crate::admin::delegation::Replay::new(
+            self.config.state_dir.join("delegation-nonces.sqlite3"),
+        )
+    }
+}
+
+/// Keys the replicas of one PostgreSQL store share.
+#[derive(Clone)]
+pub(crate) struct SharedKeys {
+    pub(crate) portal_csrf: [u8; 32],
+    pub(crate) console: [u8; 32],
+}
+
+/// The shared keys of a PostgreSQL store, created once by whichever replica
+/// starts first (random, from the OS) and read by every other one. They
+/// protect against cross-site forgery and forged cursors, not data: a
+/// reader of the database could forge those tokens, as one could with the
+/// configuration of a single instance.
+async fn shared_keys(store: &Store) -> anyhow::Result<Option<SharedKeys>> {
+    if store.backend() != "postgres" {
+        return Ok(None);
+    }
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || {
+        use crate::store::meta::MetaDb as _;
+        let mut db = store.meta();
+        let key = |tx: &dyn crate::store::meta::MetaTx,
+                   name: &str|
+         -> Result<[u8; 32], crate::store::meta::MetaError> {
+            let mut fresh = [0u8; 32];
+            crate::crypto::OsRng.fill(&mut fresh);
+            tx.insert_if_absent(name, &data_encoding::HEXLOWER.encode(&fresh))?;
+            let stored = tx.get(name)?.ok_or(crate::store::meta::MetaError)?;
+            data_encoding::HEXLOWER
+                .decode(stored.as_bytes())
+                .ok()
+                .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+                .ok_or(crate::store::meta::MetaError)
+        };
+        db.meta_write(&std::cell::Cell::new(false), |tx| {
+            Ok::<_, crate::store::meta::MetaError>(SharedKeys {
+                portal_csrf: key(tx, "replica_key:portal_csrf")?,
+                console: key(tx, "replica_key:console_mac")?,
+            })
+        })
+        .map(Some)
+        .map_err(|_| anyhow::anyhow!("shared replica keys unavailable"))
+    })
+    .await
+    .context("shared key task")?
 }
 
 /// The provider registry's reporter: a provider-side failure becomes a
@@ -449,6 +514,25 @@ pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
         services.clock.clone(),
         services.rng.clone(),
     );
+    if let Some(keys) = &services.shared_keys {
+        // A form rendered by one replica is posted to whichever one the balancer picks.
+        portal_state.csrf_key = crate::http::csrf::CsrfKey::new(keys.portal_csrf);
+    }
+    // Password and code attempt windows: in this process on SQLite, in the
+    // shared store on PostgreSQL (the limits hold across replicas).
+    let limits = &services.config.password_attempts;
+    #[allow(unused_mut)]
+    let mut ledger: Option<Arc<dyn crate::portal::password_attempts::AttemptLedger>> = None;
+    #[cfg(feature = "postgres")]
+    if let Some(pg) = services.store.postgres() {
+        ledger = Some(pg.clone());
+    }
+    portal_state.password_attempts =
+        Arc::new(crate::portal::password_attempts::PasswordAttempts::new(
+            limits.per_ip.limit(),
+            limits.per_account.limit(),
+            ledger,
+        ));
     if services.webauthn.is_some() {
         portal_state = portal_state.with_settings(adapter.clone());
     }
@@ -541,11 +625,30 @@ pub struct Bound {
 }
 
 /// Digest of the effective configuration (not its content) for `config.loaded`.
+/// The digest of the configuration replicas share. Where this process keeps
+/// its files and which addresses it binds are placement, not policy: two
+/// replicas of one deployment on one PostgreSQL store differ there and must
+/// still share the configuration generation (ADR-0020 slice 5). Listener TLS
+/// and every policy setting stay in the digest.
 fn config_digest(cfg: &Config) -> String {
-    // The file's location is not part of the configuration.
-    let mut cfg = cfg.clone();
-    cfg.source_path = None;
-    sha256(format!("{cfg:?}").as_bytes()).to_hex()
+    let mut shared = cfg.clone();
+    // The file's location is not part of the configuration either.
+    shared.source_path = None;
+    shared.state_dir = std::path::PathBuf::new();
+    let listen = &mut shared.listen;
+    listen.portal.clear();
+    listen.gateway.clear();
+    for address in [
+        &mut listen.native_gateway,
+        &mut listen.grpc_gateway,
+        &mut listen.admin,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        address.clear();
+    }
+    sha256(format!("{shared:?}").as_bytes()).to_hex()
 }
 
 fn unix_secs(t: Timestamp) -> i64 {
@@ -680,7 +783,8 @@ async fn bind_environment(
     //    version) is left byte for byte as it is, with no backup and no
     //    migration (scenario 305-9). Then a copy of an older database is
     //    written before it is migrated.
-    {
+    let postgres = cfg.store.kind == crate::config::StoreKind::Postgres;
+    if !postgres {
         let p = store_path.clone();
         let version = tokio::task::spawn_blocking(move || crate::store::precheck(&p))
             .await
@@ -690,7 +794,7 @@ async fn bind_environment(
             tracing::info!("schema foundation validated (v{version})");
         }
     }
-    {
+    if !postgres {
         let p = store_path.clone();
         let made = tokio::task::spawn_blocking(move || {
             backup::backup_before_migration(&p, backup::LATEST_SCHEMA_VERSION)
@@ -702,8 +806,11 @@ async fn bind_environment(
         }
     }
 
-    // 3. Store opened and migrated.
-    let store = {
+    // 3. Store opened and migrated (PostgreSQL: connected, migrated under its
+    //    advisory lock, realm set once).
+    let store = if postgres {
+        open_postgres(cfg, &env).await?
+    } else {
         let p = store_path.clone();
         let (clock, hooks) = (env.clock.clone(), env.store_hooks.clone());
         let sinks = cfg.event_sinks();
@@ -712,14 +819,17 @@ async fn bind_environment(
             .context("store open task")?
             .with_context(|| format!("opening store {}", store_path.display()))?
     };
+    let shared_keys = shared_keys(&store).await?;
     let receipt_authority = {
-        let mut connection = store.conn();
-        let mut authority = crate::auth_gateway::receipt_authority::Authority::load(&connection, 0)
+        use crate::store::meta::MetaDb as _;
+        let mut db = store.meta();
+        let mut authority = db
+            .meta_read(|tx| crate::auth_gateway::receipt_authority::Authority::load(tx, 0))
             .map_err(|_| anyhow::anyhow!("native receipt key history unavailable"))?;
         // Native validated configuration owns startup publication; the instance
         // lock is held. Request-role publication must use its real actor guard.
         authority
-            .reconcile(&mut connection, &receiver_keys, "startup", &|_| Ok(()))
+            .reconcile(&mut db, &receiver_keys, "startup", &|_| Ok(()))
             .map_err(|_| anyhow::anyhow!("native receipt key history refused configuration"))?;
         Arc::new(std::sync::Mutex::new(authority))
     };
@@ -759,14 +869,19 @@ async fn bind_environment(
     let digest = config_digest(cfg);
     let now = env.clock.now();
     let (changed, _) = {
-        let conn = store.conn();
-        let changed = state::config_changed(&conn, &digest).context("recording config digest")?;
-        state::track_caller_key_next(
-            &conn,
-            cfg.gateway.caller_key_next_env.is_some(),
-            unix_secs(SystemClock.now()),
-        )
-        .context("recording caller key overlap")?;
+        use crate::store::meta::MetaDb as _;
+        let mut db = store.meta();
+        let changed = db
+            .meta_write(&std::cell::Cell::new(false), |tx| {
+                let changed = state::config_changed(tx, &digest)?;
+                state::track_caller_key_next(
+                    tx,
+                    cfg.gateway.caller_key_next_env.is_some(),
+                    unix_secs(SystemClock.now()),
+                )?;
+                Ok::<_, crate::store::meta::MetaError>(changed)
+            })
+            .context("recording config digest and caller key overlap")?;
         (changed, ())
     };
     let directory = store.directory();
@@ -883,8 +998,9 @@ async fn bind_environment(
     // reconciled (written after the publications commit).
     let mut reconciled_events = Vec::new();
     let authentication_authority = {
-        let mut connection = store.conn();
-        let durable = crate::auth_gateway::publication::read(&connection)?;
+        use crate::store::meta::MetaDb as _;
+        let mut connection = store.meta();
+        let durable = connection.meta_read(|tx| crate::auth_gateway::publication::read(tx))?;
         if cfg.authentication_gateway.is_some() || durable.is_some() {
             let validate = |profiles: &crate::auth_gateway::runtime::Config| {
                 let mut candidate = cfg.clone();
@@ -938,8 +1054,10 @@ async fn bind_environment(
             .attach_workload_signals(sink);
     }
     let projection_authority = {
-        let mut connection = store.conn();
-        let durable = crate::auth_gateway::projection_authority::read(&connection)
+        use crate::store::meta::MetaDb as _;
+        let mut connection = store.meta();
+        let durable = connection
+            .meta_read(|tx| crate::auth_gateway::projection_authority::read(tx))
             .map_err(|_| anyhow::anyhow!("invalid durable credential projection state"))?;
         if !config_authoritative
             && let Some(configuration) = durable.as_ref().and_then(|d| d.configuration.as_ref())
@@ -952,34 +1070,63 @@ async fn bind_environment(
                 anyhow::anyhow!("durable credential projection exceeds declared capabilities")
             })?;
         }
-        let mut owner = crate::auth_gateway::projection_authority::Authority::load(&connection, 0)
+        let mut owner = connection
+            .meta_read(|tx| crate::auth_gateway::projection_authority::Authority::load(tx, 0))
             .map_err(|_| anyhow::anyhow!("credential projection owner unavailable"))?;
         if config_authoritative {
             // The plan's revision is the store's: compare the plans, then
-            // publish the file's plans at the next revision.
-            let previous = durable.as_ref().map_or(0, |d| d.revision);
+            // publish the file's plans at the next revision. Replicas
+            // starting together converge: a concurrent publication moves the
+            // revision, so compare again against the store.
             let plans = |c: &Option<crate::auth_gateway::projection::Configuration>| {
                 serde_json::to_value(c.as_ref().map(|c| &c.plans)).ok()
             };
-            let current = durable.as_ref().and_then(|d| d.configuration.clone());
-            let same = match &durable {
-                Some(_) => plans(&current) == plans(&cfg.credential_projection),
-                None => cfg.credential_projection.is_none(),
-            };
-            if !same {
+            let mut durable = durable;
+            for attempt in 0.. {
+                let previous = durable.as_ref().map_or(0, |d| d.revision);
+                let current = durable.as_ref().and_then(|d| d.configuration.clone());
+                let same = match &durable {
+                    Some(_) => plans(&current) == plans(&cfg.credential_projection),
+                    None => cfg.credential_projection.is_none(),
+                };
+                if same {
+                    break;
+                }
                 let mut desired = cfg.credential_projection.clone();
                 if let Some(d) = &mut desired {
                     d.revision = previous + 1;
                 }
-                let document = owner
-                    .publish(&mut connection, previous, desired, "config", &|_| Ok(()))
-                    .map_err(|_| anyhow::anyhow!("authentication.source = config: the configured credential projection is invalid; the store was not changed"))?;
-                tracing::info!(
-                    previous,
-                    revision = document.revision,
-                    "credential projection reconciled to the configuration"
-                );
-                reconciled_events.push(("projections", previous, document.revision));
+                match owner.publish(&mut connection, previous, desired, "config", &|_| Ok(())) {
+                    Ok(document) => {
+                        tracing::info!(
+                            previous,
+                            revision = document.revision,
+                            "credential projection reconciled to the configuration"
+                        );
+                        reconciled_events.push(("projections", previous, document.revision));
+                        break;
+                    }
+                    Err(_) => {
+                        let moved = connection
+                            .meta_read(|tx| crate::auth_gateway::projection_authority::read(tx))
+                            .map_err(|_| {
+                                anyhow::anyhow!("invalid durable credential projection state")
+                            })?;
+                        if attempt >= 3 || moved.as_ref().map_or(0, |d| d.revision) == previous {
+                            anyhow::bail!(
+                                "authentication.source = config: the configured credential projection is invalid; the store was not changed"
+                            );
+                        }
+                        owner = connection
+                            .meta_read(|tx| {
+                                crate::auth_gateway::projection_authority::Authority::load(tx, 0)
+                            })
+                            .map_err(|_| {
+                                anyhow::anyhow!("credential projection owner unavailable")
+                            })?;
+                        durable = moved;
+                    }
+                }
             }
         } else if durable.is_none()
             && let Some(configuration) = &cfg.credential_projection
@@ -1097,6 +1244,7 @@ async fn bind_environment(
         registry,
         started_at: env.clock.now(),
         listeners: Arc::default(),
+        shared_keys,
         reload_status,
         client_tls,
         risk_keys: cfg.risk.as_ref().map(|r| {
@@ -1369,6 +1517,10 @@ impl Bound {
                 .run(bg_rx.clone()),
         ));
         workers.push(tokio::spawn(pruner.run(bg_rx.clone())));
+        workers.push(tokio::spawn(publications::run(
+            self.services.clone(),
+            bg_rx.clone(),
+        )));
         workers.push(tokio::spawn(self.services.groups.clone().run(
             self.services.directory(),
             self.services.registry.clone(),
@@ -1529,9 +1681,11 @@ impl Bound {
         let _ = self.services.store.barrier().await;
         let store = self.services.store.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            store
-                .conn()
-                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            // SQLite only: fold the write-ahead log back into the database file.
+            store.sqlite().map(|s| {
+                s.conn()
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            })
         })
         .await;
         tracing::info!("shutdown complete");
@@ -1604,8 +1758,11 @@ pub async fn import_providers_cli(
 ) -> anyhow::Result<ImportReport> {
     let env = env();
     let store_path = cfg.store_path();
-    // No instance lock: a running instance is fine, SQLite serializes the write.
-    let store = {
+    // No instance lock: a running instance is fine, the store serializes the write.
+    refuse_incomplete_backend(cfg)?;
+    let store = if cfg.store.kind == crate::config::StoreKind::Postgres {
+        open_postgres(cfg, &env).await?
+    } else {
         let p = store_path.clone();
         let (clock, hooks, sinks) = (
             env.clock.clone(),
@@ -1653,8 +1810,10 @@ pub async fn import_providers_cli(
     store.barrier().await.ok();
     let s = store.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        s.conn()
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        s.sqlite().map(|s| {
+            s.conn()
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        })
     })
     .await;
     Ok(report)
@@ -2106,17 +2265,53 @@ fn cli_event(
 /// ADR-0020: until the remaining slices land, a PostgreSQL configuration is
 /// refused by every command that would open the store (never a silent
 /// fallback to a local SQLite file).
+/// ADR-0020: the native Human owner paths (compiled-material primary
+/// qualification, native Human receipts and their projections) still run on
+/// SQLite only; a PostgreSQL configuration that enables them is refused
+/// before anything opens (never a silent fallback to a local file).
 fn refuse_incomplete_backend(cfg: &Config) -> anyhow::Result<()> {
-    if cfg.store.kind == crate::config::StoreKind::Postgres {
-        anyhow::bail!(
-            "store.kind = \"postgres\": serving on PostgreSQL is not enabled yet (ADR-0020 slice 5: the native receipt, publication and Human owners and the remaining session and directory operations still need SQLite); `hopae store migrate-to-postgres` prepares the PostgreSQL store"
-        );
+    if cfg.store.kind != crate::config::StoreKind::Postgres {
+        return Ok(());
+    }
+    if !cfg!(feature = "postgres") {
+        anyhow::bail!("store.kind = \"postgres\" needs a binary built with the postgres feature");
     }
     Ok(())
 }
 
+/// Connect, migrate and seed the PostgreSQL store of `store.postgres`.
+#[cfg(feature = "postgres")]
+async fn open_postgres(cfg: &Config, env: &Env) -> anyhow::Result<Store> {
+    let options = pg::options(cfg, &|n| std::env::var(n).ok())?;
+    let store = crate::store::postgres::PgStore::connect(
+        options,
+        env.clock.clone(),
+        env.rng.clone(),
+        cfg.event_sinks(),
+    )
+    .await
+    .context("connecting to PostgreSQL")?;
+    store
+        .ensure_realm()
+        .await
+        .context("PostgreSQL store realm")?;
+    tracing::info!(
+        "store ready: postgres (schema v{})",
+        crate::store::postgres::LATEST_SCHEMA_VERSION
+    );
+    Ok(Store::Postgres(Arc::new(store)))
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn open_postgres(_cfg: &Config, _env: &Env) -> anyhow::Result<Store> {
+    anyhow::bail!("store.kind = \"postgres\" needs a binary built with the postgres feature")
+}
+
 async fn open_cli_store(cfg: &Config, env: &Env) -> anyhow::Result<Store> {
     refuse_incomplete_backend(cfg)?;
+    if cfg.store.kind == crate::config::StoreKind::Postgres {
+        return open_postgres(cfg, env).await;
+    }
     let path = cfg.store_path();
     let (clock, sinks) = (env.clock.clone(), cfg.event_sinks());
     let p = path.clone();
@@ -3573,22 +3768,46 @@ mod tests {
 
 #[cfg(test)]
 mod postgres_backend_tests {
-    /// S600-6: a PostgreSQL configuration is never served by a slice-1 binary
-    /// and never silently falls back to SQLite.
+    /// S610-2: replicas share one configuration generation when they differ
+    /// only in placement (state directory, listener addresses).
     #[test]
-    fn s600_6_serving_refuses_the_incomplete_postgres_backend() {
+    fn s610_2_replicas_differing_only_in_placement_share_the_configuration_digest() {
+        let parse = |state: &str, port: u16, providers: &str| {
+            crate::config::parse(&format!(
+                r#"{{"state_dir": "{state}", "listen": {{"portal": "127.0.0.1:{port}", "gateway": "127.0.0.1:{}"}}, "portal": {{"public_url": "https://auth.example.test"}}, "gateway": {{"kind": "hangang", "caller_key_env": "K"}}{providers}}}"#,
+                port + 1
+            ))
+            .unwrap()
+        };
+        let a = super::config_digest(&parse("/srv/a", 8700, ""));
+        assert_eq!(a, super::config_digest(&parse("/srv/b", 9700, "")));
+        let other = parse(
+            "/srv/a",
+            8700,
+            r#", "providers": [{"provider_id": "x", "kind": "oidc", "client_id": "c", "client_secret_env": "S", "issuer": "https://idp.example.test"}]"#,
+        );
+        assert_ne!(a, super::config_digest(&other), "policy is in the digest");
+    }
+
+    /// S600-6: a PostgreSQL configuration is served only by a binary with the
+    /// postgres feature, and never silently falls back to SQLite.
+    #[test]
+    fn s600_6_serving_accepts_postgres_only_in_a_postgres_build() {
         let mut cfg = crate::config::parse(
             r#"{"state_dir": "/tmp/hopae-unused", "portal": {"public_url": "https://auth.example.test"}, "gateway": {"kind": "hangang", "caller_key_env": "K"}}"#,
         )
         .unwrap();
         assert!(super::refuse_incomplete_backend(&cfg).is_ok());
         cfg.store.kind = crate::config::StoreKind::Postgres;
-        let e = super::refuse_incomplete_backend(&cfg)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            e.contains("slice 5") && e.contains("migrate-to-postgres"),
-            "{e}"
-        );
+        // The native Human owners run on PostgreSQL too (slice 5).
+        cfg.human_material_key_env = Some("HOPAE_MATERIAL_KEY".into());
+        if cfg!(feature = "postgres") {
+            assert!(super::refuse_incomplete_backend(&cfg).is_ok());
+        } else {
+            let e = super::refuse_incomplete_backend(&cfg)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("postgres feature"), "{e}");
+        }
     }
 }

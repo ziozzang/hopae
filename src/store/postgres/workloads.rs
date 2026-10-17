@@ -49,7 +49,7 @@ impl PgStore {
         retry(|| async {
             let mut client = self.client().await?;
             let tx = self.begin(&mut client).await?;
-            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&WORKLOAD_LOCK])
+            tx.execute(super::ADVISORY_XACT_LOCK, &[&WORKLOAD_LOCK])
                 .await
                 .map_err(pg)?;
             let now = self.now().secs();

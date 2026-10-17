@@ -562,6 +562,13 @@ pub(super) const ROOT: Node = Obj(&[
         ]),
     ),
     (
+        "password_attempts",
+        Obj(&[
+            ("per_ip", Obj(&[("burst", Leaf), ("window_ms", Leaf)])),
+            ("per_account", Obj(&[("burst", Leaf), ("window_ms", Leaf)])),
+        ]),
+    ),
+    (
         "events",
         Obj(&[
             ("retention_days", Leaf),
