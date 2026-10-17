@@ -217,6 +217,15 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   the live reload reconcile through the PostgreSQL publication; replicas
   converge on one publication per file change and follow each other's
   (scenario S610-3).
+- Password and code attempt limits are configurable
+  (`password_attempts.per_ip`, `password_attempts.per_account`: `burst`,
+  `window_ms`) and a password login also counts against the account it
+  names; on PostgreSQL the windows are kept in the store (schema 12,
+  digests only, pruned) so they hold across replicas (S600-35).
+- Store URLs accept libpq's `sslmode`: `verify-full` (with
+  `store.postgres.ca_file`) and `disable` (loopback or Unix socket only);
+  `require`, `verify-ca`, `prefer` and `allow` are refused by name, at start
+  and by `hopae --check` (S600-36).
 - PostgreSQL store, identity platform: schema 8 (service credentials and
   the workload principal registry, copied by the migration), the console
   listing filters, AAL 3 in the actor fence and `workload.*` changes in the

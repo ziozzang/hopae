@@ -510,6 +510,21 @@ pub fn build_routers(services: &Services) -> anyhow::Result<Routers> {
         // A form rendered by one replica is posted to whichever one the balancer picks.
         portal_state.csrf_key = crate::http::csrf::CsrfKey::new(keys.portal_csrf);
     }
+    // Password and code attempt windows: in this process on SQLite, in the
+    // shared store on PostgreSQL (the limits hold across replicas).
+    let limits = &services.config.password_attempts;
+    #[allow(unused_mut)]
+    let mut ledger: Option<Arc<dyn crate::portal::password_attempts::AttemptLedger>> = None;
+    #[cfg(feature = "postgres")]
+    if let Some(pg) = services.store.postgres() {
+        ledger = Some(pg.clone());
+    }
+    portal_state.password_attempts =
+        Arc::new(crate::portal::password_attempts::PasswordAttempts::new(
+            limits.per_ip.limit(),
+            limits.per_account.limit(),
+            ledger,
+        ));
     if services.webauthn.is_some() {
         portal_state = portal_state.with_settings(adapter.clone());
     }

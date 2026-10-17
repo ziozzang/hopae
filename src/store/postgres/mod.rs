@@ -6,6 +6,7 @@
 //! constraints, so several replicas behave like the single SQLite writer.
 //! Times come from the application clock, never from `now()`.
 mod admin;
+mod attempts;
 mod directory;
 mod events;
 mod factors;
@@ -17,6 +18,7 @@ pub mod meta;
 mod owners;
 mod passkeys;
 mod service_credentials;
+pub mod sslmode;
 mod traits;
 mod workloads;
 mod write;
@@ -90,6 +92,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         11,
         "0011_slice5_lock_namespace",
         include_str!("migrations/0011_slice5_lock_namespace.sql"),
+    ),
+    (
+        12,
+        "0012_attempt_windows",
+        include_str!("migrations/0012_attempt_windows.sql"),
     ),
 ];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
@@ -206,10 +213,16 @@ impl PgStore {
         rng: Arc<dyn Rng>,
         sinks: Vec<String>,
     ) -> StoreResult<Self> {
-        let mut cfg: tokio_postgres::Config = options
-            .url
+        // libpq's `sslmode`, decided here (the driver lacks `verify-*`).
+        let (url, transport) = sslmode::apply(&options.url, options.ca_pem.is_some())
+            .map_err(StoreError::Unavailable)?;
+        let mut cfg: tokio_postgres::Config = url
             .parse()
             .map_err(|_| StoreError::Unavailable("invalid postgres connection string".into()))?;
+        debug_assert_eq!(
+            transport == sslmode::Transport::VerifyFull,
+            options.ca_pem.is_some()
+        );
         cfg.connect_timeout(options.connect_timeout);
         cfg.application_name("hopae");
         if let Some(schema) = &options.search_path {

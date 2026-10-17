@@ -5889,3 +5889,121 @@ async fn s600_34_identity_platform_filters_and_workload_registry_agree_on_both_b
         b.cleanup().await;
     }
 }
+
+// ---- password and code attempts shared by replicas (PostgreSQL) -------------
+
+#[cfg(feature = "postgres")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_35_postgres_attempt_windows_hold_across_replicas() {
+    use crate::portal::password_attempts::{Limit, PasswordAttempts};
+    let Some(b) = postgres().await else {
+        return;
+    };
+    let (pg, schema) = b.pg.clone().unwrap();
+    // A second "replica": its own pool on the same schema and clock.
+    let other = Arc::new(
+        super::postgres::PgStore::connect(
+            super::postgres::PgOptions {
+                url: std::env::var("HOPAE_TEST_POSTGRES_URL").unwrap(),
+                ca_pem: None,
+                pool_size: 8,
+                connect_timeout: Duration::from_secs(5),
+                statement_timeout: Duration::from_secs(5),
+                search_path: Some(schema.clone()),
+            },
+            b.clock.clone(),
+            Arc::new(SeededRng::new(7)),
+            vec![],
+        )
+        .await
+        .unwrap(),
+    );
+    let ip_limit = Limit {
+        burst: 5,
+        window: Duration::from_secs(60),
+    };
+    let account_limit = Limit {
+        burst: 3,
+        window: Duration::from_secs(300),
+    };
+    let a = Arc::new(PasswordAttempts::new(
+        ip_limit,
+        account_limit,
+        Some(pg.clone()),
+    ));
+    let c = Arc::new(PasswordAttempts::new(
+        ip_limit,
+        account_limit,
+        Some(other.clone()),
+    ));
+    // Twenty concurrent submissions from one address through both replicas:
+    // exactly the burst is admitted.
+    let ip: std::net::IpAddr = "192.0.2.77".parse().unwrap();
+    let mut tasks = Vec::new();
+    for i in 0..20 {
+        let r = if i % 2 == 0 { a.clone() } else { c.clone() };
+        tasks.push(tokio::spawn(async move { r.admit(ip, None).await }));
+    }
+    let mut admitted = 0;
+    for t in tasks {
+        admitted += usize::from(t.await.unwrap());
+    }
+    assert_eq!(admitted, 5, "one address budget across replicas");
+    // An IPv4-mapped spelling is the same address.
+    assert!(!c.admit("::ffff:192.0.2.77".parse().unwrap(), None).await);
+    // One account from many addresses: its own, longer window.
+    let account = PasswordAttempts::account("ldap", "Alice");
+    for n in 0..3u8 {
+        let from = std::net::IpAddr::V4([198, 51, 100, n].into());
+        let r = if n % 2 == 0 { &a } else { &c };
+        assert!(r.admit(from, Some(&account)).await);
+    }
+    assert!(
+        !a.admit("198.51.100.9".parse().unwrap(), Some(&account))
+            .await
+    );
+    assert!(
+        a.admit(
+            "198.51.100.9".parse().unwrap(),
+            Some(&PasswordAttempts::account("ldap", "bob"))
+        )
+        .await
+    );
+    // Keys are digests: no address or username is stored.
+    let client = pg.raw().await;
+    let leaked: i64 = client
+        .query_one(
+            "SELECT count(*) FROM attempt_windows WHERE position('192.0.2.77' in encode(key, 'escape')) > 0 \
+             OR position('alice' in encode(key, 'escape')) > 0",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(leaked, 0);
+    // The address window ends (60 s) before the account window (300 s).
+    b.clock.advance(Duration::from_secs(61));
+    assert!(c.admit(ip, None).await, "a new address window");
+    assert!(
+        !c.admit("198.51.100.10".parse().unwrap(), Some(&account))
+            .await
+    );
+    b.clock.advance(Duration::from_secs(240));
+    assert!(
+        c.admit("198.51.100.10".parse().unwrap(), Some(&account))
+            .await
+    );
+    // Expired windows are pruned as admissions continue.
+    b.clock.advance(Duration::from_secs(600));
+    for n in 0..4u8 {
+        a.admit(std::net::IpAddr::V4([203, 0, 113, n].into()), None)
+            .await;
+    }
+    let rows: i64 = client
+        .query_one("SELECT count(*) FROM attempt_windows", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(rows, 4, "only the open windows remain");
+    b.cleanup().await;
+}

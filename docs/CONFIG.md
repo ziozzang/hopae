@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 44 -->
+<!-- doc-rev: 45 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -67,8 +67,8 @@ table, [Management console](#management-console).
 | `listen.gateway` | string, socket address | `127.0.0.1:8701` | Gateway listener (`/_hopae/verify`). Must differ from `listen.portal`. A non-loopback address produces a warning: the listener must never be publicly reachable ([gateway contract](GATEWAY_CONTRACT.md#prerequisites-and-configuration)). |
 | `state_dir` | string, path | required | Writable directory for runtime state (database, instance lock, backups), created with mode `0700`. Must not be empty. |
 | `store.kind` (alias `store.backend`) | `sqlite`, `postgres` | `sqlite` | Primary store backend ([ADR-0002](adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md), [ADR-0020](adr/0020-postgresql-store-backend.md)). `postgres` needs a binary built with the `postgres` feature and `store.postgres`; `serve`, `providers import` and `hopae store migrate-to-postgres` use it. Several replicas may serve one database; profile and projection publications reach every replica within about one second. The native Human owners (`human_material_key_env`, `receipt_issuer.human_receipts`) run on it too. Replicas must run the same configuration: the shared configuration generation ignores only placement (`state_dir`, listener addresses), so a replica on an older policy stops qualifying native Human sessions until it restarts. Nothing falls back to SQLite. |
-| `store.postgres.url_env` | environment variable name | — | Connection string (libpq URL or key/value), read from the environment, never from the file |
-| `store.postgres.ca_file` | absolute path | none | PEM CA bundle for TLS; without it only loopback or a Unix socket is allowed |
+| `store.postgres.url_env` | environment variable name | — | Connection string (libpq URI or key/value), read from the environment, never from the file. libpq's `sslmode` is accepted: absent or `verify-full` with `store.postgres.ca_file` is TLS with certificate chain and host-name verification; `verify-full` without `ca_file` is refused; `disable` (or absent without `ca_file`) is plain TCP, allowed only to loopback or a Unix socket, and contradicts `ca_file`; `require`, `verify-ca`, `prefer` and `allow` are refused by name (Hopae always verifies the host name). Checked at start and by `hopae --check` |
+| `store.postgres.ca_file` | absolute path | none | PEM CA bundle for TLS (`sslmode=verify-full`); without it only loopback or a Unix socket is allowed |
 | `store.postgres.pool_size`, `connect_timeout_ms`, `statement_timeout_ms` | integers | `16`, `5000`, `2000` | Pool size 1–128; connect timeout 100–60,000 ms; per-transaction statement timeout 10–600,000 ms |
 | `store.path` | string, path | `<state_dir>/hopae.db` | SQLite database file. Must not be empty when set. |
 | `log.level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | Verbosity of the process log on stderr. |
@@ -96,6 +96,8 @@ table, [Management console](#management-console).
 | `txn.max_rows` | integer, at least 1 | `1000` | Cap on live login transactions ([ADR-0004](adr/0004-session-model-and-cross-domain-handoff.md)). The transaction lifetime is a constant 600 s and has no key. |
 | `txn.per_ip_per_minute` | integer, at least 1 | `30` | Login transactions one client IP may start per minute (counted in the store: shared by replicas on PostgreSQL). |
 | `handoff.per_ip_failures_per_minute` | integer, at least 1 | `10` | Handoff-code failures one client IP may cause per minute before it is rate limited (counted in the store: shared by replicas on PostgreSQL). |
+| `password_attempts.per_ip.burst`, `password_attempts.per_ip.window_ms` | integers: 1–10,000; 1,000–86,400,000 | `10`, `60000` | Password logins and code submissions (TOTP and passkey step-up, settings re-verification) one client address may make per window; every CSRF-valid submission counts, rejected credentials included. Over the limit: `429` with `Retry-After`. |
+| `password_attempts.per_account.burst`, `password_attempts.per_account.window_ms` | integers: 1–10,000; 1,000–86,400,000 | `10`, `60000` | Password logins naming one account (provider and case-folded username) from any address, per window. On SQLite both limits are kept in the process; on PostgreSQL in the store (`attempt_windows`, digests only, expired rows pruned), so they hold across replicas. |
 | `handoff.max_recoveries` | integer | `3` | How many times a browser is sent back to the portal to recover from a rejected known handoff code (first-use binding-cookie race and similar) before a relayed `403` page ends the loop ([ADR-0014](adr/0014-handoff-recovery-on-any-rejected-code.md)). Not range-checked. |
 
 #### Gateway

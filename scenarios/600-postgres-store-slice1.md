@@ -232,6 +232,18 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - When: users are listed by `mfa`, `group` and `provider`, sessions by stored level, events by kind prefix; a workload principal is observed and retired with its `workload.*` events; the lifecycle feed is read with and without workloads.
 - Then: each filter selects exactly its users, sessions and events; the registry holds the retired principal; the feed reports `workload_observed` and `workload_retired` only when asked, with the reported workload keys only.
 
+### S600-35 Attempt windows hold across replicas (PostgreSQL)
+
+- Given: two store handles on one schema (two replicas), an address limit of 5 per 60 s and an account limit of 3 per 300 s.
+- When: twenty concurrent submissions from one address go through both; an IPv4-mapped spelling of it follows; one account is named from many addresses; time passes 61 s, 300 s and 900 s.
+- Then: exactly five are admitted; the mapped spelling is the same address; the account is refused after three while another account is not; the address window restarts before the account window; expired windows are pruned so only open ones remain; keys are digests.
+
+### S600-36 libpq `sslmode` in the store URL
+
+- Given: store URLs in URI and key/value form, with and without `store.postgres.ca_file`.
+- When: `sslmode` is absent, `verify-full`, `disable`, `require`, `verify-ca`, `prefer`, `allow`, unknown or repeated.
+- Then: absent or `verify-full` with the CA is verified TLS; `verify-full` without it, `disable` with it, the weaker modes (by name), an unknown value and a repeated key are refused; `disable` and absent without a CA are plain (loopback or Unix socket only); the parameter is removed before the driver parses the rest, quoted values intact.
+
 ## Abuse cases
 
 | Category | Case | Applies |
@@ -289,6 +301,9 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-32 | `s600_32_native_human_factor_provenance_agrees_on_both_backends` | `src/verify/human_tests.rs` | unit | passing |
 | S600-33 | `s600_33_native_human_ledger_checks_inside_its_own_transaction_on_both_backends` | `src/verify/human_tests.rs` | unit | passing |
 | S600-34 | `s600_34_identity_platform_filters_and_workload_registry_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-35 | `s600_35_postgres_attempt_windows_hold_across_replicas` | `src/store/conformance.rs` | unit | passing |
+| S600-36 | `s600_36_sslmode_verify_full_needs_the_ca_and_is_the_default_with_it` | `src/store/postgres/sslmode.rs` | unit | passing |
+| S600-36 | `s600_36_sslmode_weaker_modes_are_refused_by_name_and_disable_is_plain` | `src/store/postgres/sslmode.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
 | S600-6 | `s600_6_serving_accepts_postgres_only_in_a_postgres_build` | `src/app.rs` | unit | passing |
