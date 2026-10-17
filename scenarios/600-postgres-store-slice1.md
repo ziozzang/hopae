@@ -200,7 +200,7 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 
 - Given: `store.backend = "postgres"` with `store.postgres`.
 - When: the configuration is validated and a serve/store command starts.
-- Then: invalid or inline settings are refused; without the feature the configuration is refused; with it, validation passes but serving and store commands refuse with a slice message and never fall back to SQLite.
+- Then: invalid or inline settings are refused; without the feature the configuration is refused; with it, `serve` and the store commands run on PostgreSQL (slice 5; two serving replicas are S610), except that settings needing the native Human owners (`human_material_key_env`, `receipt_issuer.human_receipts`) are refused at start with a slice message; nothing falls back to SQLite.
 
 ## Abuse cases
 
@@ -256,7 +256,7 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-29 | `s600_29_provider_and_material_owners_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
-| S600-6 | `s600_6_serving_refuses_the_incomplete_postgres_backend` | `src/app.rs` | unit | passing |
+| S600-6 | `s600_6_serving_refuses_unported_postgres_features` | `src/app.rs` | unit | passing |
 
 ## Live verification
 
@@ -267,7 +267,7 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 
 ## Open questions
 
-- Slice 5 (ADR-0020): serving on PostgreSQL (native owners and the remaining session and directory operations) and the HTTP two-replica qualification. Hosted CI stays disabled; `make test-postgres` is the PostgreSQL run.
+- Slice 5 (ADR-0020): `serve` runs on PostgreSQL and the HTTP two-replica qualification is S610. The native Human owners remain to be ported. Hosted CI stays disabled; `make test-postgres` and `make qualify-postgres` are the PostgreSQL runs.
 
 ## 한국어 요약
 

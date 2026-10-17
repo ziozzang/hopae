@@ -124,8 +124,16 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   SHA-256 digests compared before commit, a `store.migrated` audit event,
   the SQLite file opened read-only and kept as the rollback artefact); and
   `make qualify-postgres`, a local two-replica store qualification with one
-  replica killed mid-traffic. Serving on PostgreSQL remains refused until
-  slice 5.
+  replica killed mid-traffic.
+- PostgreSQL store slice 5: `hopae serve` runs on `store.kind = postgres`,
+  with several replicas on one database. The application store is
+  backend-neutral (`AppStore`); the receipt, replay, publication and
+  projection owners run on a shared `meta` contract (PostgreSQL schema 8);
+  the portal CSRF and console MAC keys are shared through the store.
+  `make qualify-postgres` adds two serving replicas behind a TCP round-robin
+  (scenario 610). The native Human owners are not ported yet:
+  `human_material_key_env` and `receipt_issuer.human_receipts` are refused
+  on PostgreSQL at start.
 
 ### Changed
 

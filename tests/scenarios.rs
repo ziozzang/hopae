@@ -67,4 +67,6 @@ mod scenarios {
     mod s310_groups;
     #[path = "s480_passkeys.rs"]
     mod s480_passkeys;
+    #[path = "s610_postgres_replicas.rs"]
+    mod s610_postgres_replicas;
 }
