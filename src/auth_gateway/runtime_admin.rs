@@ -115,6 +115,9 @@ impl Runtime {
         if p.kubernetes.is_some() {
             connectors.push("kubernetes_tokenreview");
         }
+        if p.workload.is_some() {
+            connectors.push("kubernetes_workload");
+        }
         Some((
             ProfileFacts {
                 service_id: p.service_id.clone(),
@@ -132,7 +135,135 @@ impl Runtime {
     }
 }
 
+/// What the live workload path would answer for a hypothetical
+/// ServiceAccount caller holding a valid token (the token-dependent checks —
+/// signature, audience, lifetime, bound objects — cannot be simulated).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkloadVerdict {
+    NoProfile,
+    /// The profile has no Kubernetes workload connector.
+    NotConfigured,
+    /// Not a canonical SPIFFE ID of this trust domain or a
+    /// `system:serviceaccount:<ns>:<sa>` name.
+    SubjectInvalid,
+    NetworkDenied,
+    NamespaceNotAllowed,
+    ServiceAccountNotAllowed,
+    KeysUnavailable,
+    RevocationStale,
+    ServiceAccountAbsent,
+    LegacyWindowExpired,
+    Allowed {
+        verification: &'static str,
+        network_evaluated: bool,
+        revocation_evaluated: bool,
+        spiffe_id: Option<String>,
+        /// `wk2:` when the ServiceAccount UID is known (revocation index).
+        principal: Option<String>,
+        subject_ref: Option<String>,
+    },
+}
+
+/// `(namespace, service account)` of an explain subject.
+fn workload_name<'a>(trust_domain: Option<&str>, subject: &'a str) -> Option<(&'a str, &'a str)> {
+    if let Some(rest) = subject.strip_prefix("system:serviceaccount:") {
+        let (ns, sa) = rest.split_once(':')?;
+        return (crate::auth_gateway::workload::identity::namespace(ns)
+            && crate::auth_gateway::workload::identity::object_name(sa))
+        .then_some((ns, sa));
+    }
+    crate::auth_gateway::workload::identity::parse_spiffe(trust_domain?, subject)
+}
+
+/// Whether an explain subject names a Kubernetes workload.
+pub(crate) fn is_workload_subject(subject: &str) -> bool {
+    subject.starts_with("spiffe://") || subject.starts_with("system:serviceaccount:")
+}
+
 impl Runtime {
+    /// The live workload path for a hypothetical ServiceAccount caller: the
+    /// same profile lookup, network predicate, namespace/ServiceAccount
+    /// scope, key-source freshness, revocation index and migration window,
+    /// in the live order. Nothing is fetched and no state changes.
+    pub(crate) fn admin_explain_workload(
+        &self,
+        host: &str,
+        port: u16,
+        subject: &str,
+        ip: Option<IpAddr>,
+        now_ms: u64,
+    ) -> WorkloadVerdict {
+        use crate::auth_gateway::workload::{identity, verify::ExplainVerdict};
+        let Some(p) = self.profiles.get(host).and_then(|ports| ports.get(&port)) else {
+            return WorkloadVerdict::NoProfile;
+        };
+        let network_evaluated = ip.is_some() || p.networks.unrestricted;
+        if let Some((workload, _)) = &p.workload {
+            let profile = workload.profile();
+            let Some((ns, sa)) = workload_name(Some(&profile.trust_domain), subject) else {
+                return WorkloadVerdict::SubjectInvalid;
+            };
+            if let Some(ip) = ip
+                && !p.networks.permits(ip)
+            {
+                return WorkloadVerdict::NetworkDenied;
+            }
+            return match workload.explain(ns, sa, now_ms) {
+                ExplainVerdict::NamespaceNotAllowed => WorkloadVerdict::NamespaceNotAllowed,
+                ExplainVerdict::ServiceAccountNotAllowed => {
+                    WorkloadVerdict::ServiceAccountNotAllowed
+                }
+                ExplainVerdict::KeysUnavailable => WorkloadVerdict::KeysUnavailable,
+                ExplainVerdict::RevocationStale => WorkloadVerdict::RevocationStale,
+                ExplainVerdict::ServiceAccountAbsent => WorkloadVerdict::ServiceAccountAbsent,
+                ExplainVerdict::LegacyWindowExpired => WorkloadVerdict::LegacyWindowExpired,
+                ExplainVerdict::Allowed {
+                    revocation_evaluated,
+                } => {
+                    let principal = workload.current_principal(ns, sa);
+                    WorkloadVerdict::Allowed {
+                        verification: "offline_jwks",
+                        network_evaluated,
+                        revocation_evaluated,
+                        spiffe_id: Some(identity::spiffe_id(&profile.trust_domain, ns, sa)),
+                        subject_ref: principal.as_ref().map(|principal| {
+                            stable_subject(&identity::principal_subject(
+                                &profile.issuer,
+                                &profile.cluster_id,
+                                principal,
+                            ))
+                        }),
+                        principal,
+                    }
+                }
+            };
+        }
+        if let Some((kubernetes, _)) = &p.kubernetes {
+            let Some((ns, sa)) = workload_name(kubernetes.trust_domain(), subject) else {
+                return WorkloadVerdict::SubjectInvalid;
+            };
+            if let Some(ip) = ip
+                && !p.networks.permits(ip)
+            {
+                return WorkloadVerdict::NetworkDenied;
+            }
+            if !kubernetes.config().namespaces.iter().any(|n| n == ns) {
+                return WorkloadVerdict::NamespaceNotAllowed;
+            }
+            return WorkloadVerdict::Allowed {
+                verification: "tokenreview",
+                network_evaluated,
+                revocation_evaluated: false,
+                spiffe_id: kubernetes
+                    .trust_domain()
+                    .map(|td| identity::spiffe_id(td, ns, sa)),
+                principal: None,
+                subject_ref: None,
+            };
+        }
+        WorkloadVerdict::NotConfigured
+    }
+
     /// The live API-key path (`authenticate`) for the credential of
     /// `subject_ref`, without the credential: the same profile lookup, expiry
     /// rule, network predicate and eligibility script, in the same order. The
@@ -170,6 +301,7 @@ impl Runtime {
             subject: key.subject.clone(),
             service: Some(p.service_id.clone()),
             connector: format!("api-key:{}", p.service_id),
+            workload: None,
             expires_at: now_ms
                 .saturating_add(1000)
                 .min(key.expires_at.unwrap_or(u64::MAX)),

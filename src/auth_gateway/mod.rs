@@ -8,6 +8,7 @@ pub(crate) mod human_request;
 pub(crate) mod human_source;
 pub mod kubernetes;
 pub mod lua;
+pub(crate) mod mtls_channel;
 pub mod permission_live;
 pub mod projection;
 pub mod projection_admission;
@@ -28,6 +29,7 @@ pub mod receipt_replay;
 pub mod relay;
 pub mod request_binding;
 pub mod runtime;
+pub mod workload;
 pub(crate) mod workload_owner;
 pub(crate) mod workload_permission_live;
 
@@ -67,6 +69,9 @@ pub struct VerifiedEvidence {
     connector: String,
     expires_at: u64,
     service: Option<String>,
+    /// Kubernetes workload facts (ADR 0022): principal, SPIFFE ID and audit
+    /// attributes. Present only for workload connectors.
+    workload: Option<std::sync::Arc<workload::WorkloadAttributes>>,
 }
 impl VerifiedEvidence {
     pub fn service(&self) -> Option<&str> {
@@ -80,6 +85,9 @@ impl VerifiedEvidence {
     }
     pub fn connector(&self) -> &str {
         &self.connector
+    }
+    pub fn workload(&self) -> Option<&workload::WorkloadAttributes> {
+        self.workload.as_deref()
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,6 +204,7 @@ mod tests {
             },
             expires_at: 10,
             service: None,
+            workload: None,
         }
     }
     #[test]

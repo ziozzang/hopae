@@ -1,6 +1,6 @@
 # Roadmap
 
-<!-- doc-rev: 14 -->
+<!-- doc-rev: 15 -->
 
 [Documentation](README.md) · [한국어](ko/ROADMAP.md)
 
@@ -231,7 +231,7 @@ Scope (scenarios 400–499):
 - [ ] Login-notification webhooks (440–469): events from ADR-0009 (login success, failure, new device, lockout, logout, revocation) delivered from the per-destination delivery rows, at-least-once with `event_id` as the idempotency key; HMAC-signed deliveries; bounded retries and backlog with dead-lettering; per-endpoint secrets from the environment; destination restrictions against internal address ranges by default.
 - [ ] Second-factor mechanism (470–499) per ADR-0008: `Factor` trait (enroll, challenge, verify, recover, administrator reset); step-up rules per application evaluated at verify; TOTP first, WebAuthn second, recovery codes.
   - WebAuthn passkeys ([ADR-0017](adr/0017-webauthn-passkeys.md), scenarios 480–486, [design](WEBAUTHN.md)): first pass in source behind the default-off `webauthn` configuration — portal-only registration and step-up, security overview and passkey management, portal security confirmation, recovery codes (AAL 1, forced re-enrollment), last-factor rule, sign-count regression handling, administrator reset from the command line. AAL 3 is classified and recorded, not emitted. Phase 2: native Human owner provenance for passkey elevations (migration 12).
-  - Phase 2 (in source): passwordless (discoverable) sign-in with conditional UI on the login page (scenario 487). Deferred: factor management in the console; a passkey requirement for console operators (`admin.require_aal` with a phishing-resistant factor); requiring AAL 3 in step-up rules, `admin.require_aal` and Pumgye plans (emission itself is ADR-0018, per application, opt-in).
+  - Phase 2 (in source): passwordless (discoverable) sign-in with conditional UI on the login page (scenario 487). Console factor management API (list, reset by scope; scenario 314) and AAL 3 requirements in step-up rules and `admin.require_aal` (scenario 489, ADR-0018 decisions 7–11) are in source. Deferred: Pumgye plans of `minimum_aal: 3` (needs Pumgye to evaluate 3); a passkey requirement for console operators short of AAL 3 (`admin.require_aal = 2` accepts any second factor).
 
 Exit: a route requiring a second factor denies a first-factor-only session live; a webhook delivery is verified against a loopback receiver and one real endpoint.
 

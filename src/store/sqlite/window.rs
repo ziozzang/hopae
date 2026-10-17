@@ -43,7 +43,7 @@ fn window_cols(shape: Shape) -> &'static str {
         Shape::Events(_) => {
             "e.event_id, e.at, e.kind, e.outcome, e.user_id, e.session_id, e.client_ip"
         }
-        Shape::Sessions { .. } => "e.session_id, e.created_at, e.absolute_expires_at",
+        Shape::Sessions { .. } => "e.session_id, e.created_at, e.absolute_expires_at, e.aal",
         Shape::Users => {
             "e.user_id, e.created_at, e.primary_email, e.username, e.display_name, e.status"
         }
@@ -130,15 +130,15 @@ fn meta_sql(shape: Shape) -> String {
 fn match_sql(shape: Shape) -> String {
     match shape {
         Shape::Events(_) => format!(
-            "SELECT {cols} FROM events ev WHERE ev.event_id IN (SELECT event_id FROM w WHERE (:user IS NULL OR user_id = :user) AND (:kind IS NULL OR kind = :kind) AND (:outcome IS NULL OR outcome = :outcome) AND (:session IS NULL OR session_id = :session) AND (:ip IS NULL OR client_ip = :ip) AND (:since IS NULL OR at >= :since) AND (:until IS NULL OR at <= :until) ORDER BY at DESC, event_id DESC LIMIT :limit_plus) ORDER BY ev.at DESC, ev.event_id DESC",
+            "SELECT {cols} FROM events ev WHERE ev.event_id IN (SELECT event_id FROM w WHERE (:user IS NULL OR user_id = :user) AND (:kind IS NULL OR kind = :kind) AND (:outcome IS NULL OR outcome = :outcome) AND (:session IS NULL OR session_id = :session) AND (:ip IS NULL OR client_ip = :ip) AND (:since IS NULL OR at >= :since) AND (:until IS NULL OR at <= :until) AND (:kind_prefix IS NULL OR substr(kind, 1, length(:kind_prefix)) = :kind_prefix) ORDER BY at DESC, event_id DESC LIMIT :limit_plus) ORDER BY ev.at DESC, ev.event_id DESC",
             cols = cols("ev", EVENT_COLS)
         ),
         Shape::Sessions { .. } => format!(
-            "SELECT {cols} FROM sessions s WHERE s.session_id IN (SELECT session_id FROM w WHERE absolute_expires_at > :now ORDER BY created_at DESC, session_id DESC LIMIT :limit_plus) ORDER BY s.created_at DESC, s.session_id DESC",
+            "SELECT {cols} FROM sessions s WHERE s.session_id IN (SELECT session_id FROM w WHERE absolute_expires_at > :now AND (:aal IS NULL OR aal = :aal) ORDER BY created_at DESC, session_id DESC LIMIT :limit_plus) ORDER BY s.created_at DESC, s.session_id DESC",
             cols = cols("s", SESSION_COLS)
         ),
         Shape::Users => format!(
-            "SELECT {cols} FROM users u WHERE u.user_id IN (SELECT user_id FROM w WHERE (:q IS NULL OR primary_email LIKE :q || '%' ESCAPE '\\' OR username LIKE :q || '%' ESCAPE '\\' OR lower(display_name) LIKE '%' || lower(:q) || '%' ESCAPE '\\') AND (:status IS NULL OR status = :status) ORDER BY created_at DESC, user_id DESC LIMIT :limit_plus) ORDER BY u.created_at DESC, u.user_id DESC",
+            "SELECT {cols} FROM users u WHERE u.user_id IN (SELECT user_id FROM w WHERE (:q IS NULL OR primary_email LIKE :q || '%' ESCAPE '\\' OR username LIKE :q || '%' ESCAPE '\\' OR lower(display_name) LIKE '%' || lower(:q) || '%' ESCAPE '\\') AND (:status IS NULL OR status = :status) AND (:provider IS NULL OR EXISTS (SELECT 1 FROM identities i WHERE i.user_id = w.user_id AND i.provider_id = :provider)) AND (:mfa IS NULL OR :mfa = (EXISTS (SELECT 1 FROM webauthn_credentials c WHERE c.user_id = w.user_id AND c.state = 'active') OR EXISTS (SELECT 1 FROM totp_enrollments t WHERE t.user_id = w.user_id AND t.state = 'active'))) AND (:grp IS NULL OR EXISTS (SELECT 1 FROM group_members gm JOIN directory_groups g ON g.group_id = gm.group_id WHERE gm.group_id = :grp AND gm.user_id = w.user_id AND g.state = 'active' AND gm.stale_at IS NULL AND (gm.expires_at IS NULL OR gm.expires_at > :now))) ORDER BY created_at DESC, user_id DESC LIMIT :limit_plus) ORDER BY u.created_at DESC, u.user_id DESC",
             cols = cols("u", USER_COLS)
         ),
     }
@@ -329,6 +329,15 @@ impl Store {
                 q.status
                     .map_or(Value::Null, |s| Value::Text(s.as_str().into())),
             );
+            p.set("provider", opt_text(q.filters.provider.clone()));
+            p.set(
+                "mfa",
+                q.filters
+                    .mfa_enrolled
+                    .map_or(Value::Null, |b| Value::Integer(i64::from(b))),
+            );
+            p.set("grp", opt_text(q.filters.group.clone()));
+            p.set("now", Value::Integer(clock.now().secs()));
             match &q.cursor {
                 Some(cur) => {
                     p.set("c_at", secs_param(cur));
@@ -468,6 +477,10 @@ impl Store {
             let by_user = q.user_id.is_some();
             let mut p = Params::default();
             p.set("now", Value::Integer(q.now.secs()));
+            p.set(
+                "aal",
+                q.aal.map_or(Value::Null, |a| Value::Integer(a.as_i64())),
+            );
             if let Some(u) = &q.user_id {
                 p.set("user", Value::Text(u.to_string()));
             }
@@ -557,6 +570,7 @@ impl Store {
                 opt_text(q.session_id.as_ref().map(|v| v.to_string())),
             );
             p.set("ip", opt_text(q.client_ip.map(|v| v.to_string())));
+            p.set("kind_prefix", opt_text(q.kind_prefix.clone()));
             let secs =
                 |t: Option<Timestamp>| t.map_or(Value::Null, |t| Value::Real(t.0 as f64 / 1000.0));
             p.set("since", secs(q.since));

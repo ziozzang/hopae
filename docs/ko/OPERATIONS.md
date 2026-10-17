@@ -1,6 +1,6 @@
 # 운영
 
-<!-- translation-status: source=../OPERATIONS.md source-rev=5 status=current -->
+<!-- translation-status: source=../OPERATIONS.md source-rev=6 status=current -->
 
 [문서 목차](README.md) · [English](../OPERATIONS.md)
 
@@ -171,6 +171,29 @@ Hopae는 겹침이 시작된 시점을 기록합니다. `caller_key_next_env`가
 모든 verify의 `403 caller_unauthorized`, 증가하는 `hopae_verify_unauthorized_total`,
 읽거나 쓴 상태가 없음으로 나타납니다.
 
+### TLS 인증서 갱신
+
+모든 상호 TLS 리스너(관리자 리스너, 네이티브와 gRPC 게이트웨이)와 투영 수신기의 나가는
+mTLS 클라이언트는 자기 파일을 따라갑니다. Hopae는 `reload.tls_interval_secs`(기본
+10초)마다 인증서·키·CA를 다시 읽고 내용 다이제스트를 비교합니다. 파일 시스템 알림을
+쓰지 않으므로 Kubernetes 시크릿 볼륨의 심볼릭 링크 교체와 제자리 덮어쓰기를 모두
+알아챕니다. cert-manager를 쓴다면 시크릿을 디렉터리째(`subPath` 아님) 마운트하고 설정이
+`tls.crt`, `tls.key`, `ca.crt`를 가리키게 하세요. 갱신에 재시작이 필요 없습니다.
+
+- 바뀐 자료는 먼저 전부 검사합니다. 인증서가 해석되고, 개인 키가 리프와 맞고, CA 파일에
+  인증서가 있어야 합니다. 그다음에야 새 설정을 원자적으로 교체합니다. 새 핸드셰이크가
+  그것을 쓰고, 이미 맺어진 연결은 닫힐 때까지 기존 자료를 씁니다. 나가는 클라이언트는
+  이후 모든 호출에서 새 채널로 바꿉니다.
+- 불러올 때마다 리프의 지문을 로그로 남깁니다(`TLS material reloaded name=…
+  fingerprint=sha256:…`). `GET /v1/status`의 `reload.tls[]`는 항목별 `fingerprint`,
+  `reloads`, `last_reload_at`, `failing`, `error`를 보여 줍니다.
+- 잘못되었거나 반쯤 쓰인 자료(다음 인증서의 키, 빈 CA)는 아무것도 바꾸지 않습니다. 이전
+  자료가 계속 쓰이고 `hopae_tls_reload_failing{name}`이 `1`이 되며 경고가 원인을
+  밝힙니다. 유효한 자료가 오거나 파일이 사용 중인 자료로 돌아가면 해제됩니다. 이것과
+  만료 전에 갱신되지 않는 인증서에 경보를 거세요.
+- 교체한 클라이언트 CA는 다음 핸드셰이크부터 자신이 서명한 클라이언트를 받아들이고 이전
+  클라이언트를 거부합니다. CA를 교체할 때는 두 인증서를 모두 담은 묶음을 먼저 게시하세요.
+
 ### 제공자 비밀 값 교체
 
 제공자 클라이언트 비밀 값은 Hopae가 시작될 때, 그리고 제공자 레지스트리를 만들 때
@@ -266,6 +289,10 @@ Hopae는 프로세스 내 카운터를 유지합니다. M7 이전에는 **운영
 | `hopae_event_deliveries_failed_total` | `sink`, `reason` | 포기한 전달(`retries_exhausted`, `backlog_overflow`, `pruned`) |
 | `hopae_build_info` | `version` | 게이지, 항상 `1` |
 | `hopae_config_loaded_timestamp` | 없음 | 게이지, 마지막 설정 로드의 유닉스 초 |
+| `hopae_tls_reloads_total` | `name`(`admin`, `native_gateway`, `grpc_gateway`, `projection_authority`), `result`(`reloaded`, `invalid`) | 확인 작업이 찾은 TLS 자료 변경 |
+| `hopae_tls_reload_failing` | `name` | 게이지, `name`의 최신 자료가 잘못되어 이전 자료를 계속 쓰는 동안 `1` |
+| `hopae_config_reloads_total` | `result`(`reconciled`, `invalid`, `restart_required`) | `authentication.source = config`에서 본 설정 파일 변경 |
+| `hopae_config_reload_failing` | 없음 | 게이지, 최신 설정 파일이 잘못되어 이전 프로필이 유지되는 동안 `1` |
 
 ### 장애 동작
 

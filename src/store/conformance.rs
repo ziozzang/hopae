@@ -39,6 +39,8 @@ pub(crate) struct Backend {
     pub directory: Arc<dyn SubjectDirectoryStore>,
     pub clock: Arc<TestClock>,
     pub rng: Arc<SeededRng>,
+    /// The SQLite store, for inherent operations outside the traits.
+    sqlite: Option<Arc<super::sqlite::Store>>,
     _dir: Option<tempfile::TempDir>,
     #[cfg(feature = "postgres")]
     pg: Option<(Arc<super::postgres::PgStore>, String)>,
@@ -80,9 +82,10 @@ fn sqlite() -> Backend {
         events: store.clone(),
         console: store.clone(),
         groups: store.clone(),
-        directory: store,
+        directory: store.clone(),
         clock,
         rng,
+        sqlite: Some(store),
         _dir: Some(dir),
         #[cfg(feature = "postgres")]
         pg: None,
@@ -136,6 +139,7 @@ pub(crate) async fn postgres_with(realm: bool) -> Option<Backend> {
         store: store.clone(),
         clock,
         rng: Arc::new(SeededRng::new(42)),
+        sqlite: None,
         _dir: None,
         pg: Some((store, schema)),
     })
@@ -2994,6 +2998,7 @@ async fn console_listings(b: &Backend) {
         b.clock.advance(Duration::from_secs(1));
     }
     let q = |q: Option<&str>, limit, cursor| UsersQuery {
+        filters: Default::default(),
         q: q.map(Into::into),
         status: None,
         limit,
@@ -3049,6 +3054,7 @@ async fn console_listings(b: &Backend) {
         .unwrap();
     let sq = |user: Option<&User>| SessionsQuery {
         user_id: user.map(|u| u.user_id.clone()),
+        aal: None,
         limit: 10,
         cursor: None,
         now: b.clock.now(),
@@ -3149,6 +3155,7 @@ impl Backend {
             .console
             .list_users(
                 UsersQuery {
+                    filters: Default::default(),
                     q: u.username.clone(),
                     status: None,
                     limit: 10,
@@ -3699,7 +3706,7 @@ async fn subject_directory(b: &Backend) {
     assert!(matches!(created, Cas::Done(_)));
     let page = b
         .directory
-        .admin_feed_changes(start.clone(), 50, false, deadline())
+        .admin_feed_changes(start.clone(), 50, false, false, deadline())
         .await
         .unwrap()
         .unwrap();
@@ -3719,7 +3726,7 @@ async fn subject_directory(b: &Backend) {
     );
     let with_groups = b
         .directory
-        .admin_feed_changes(start.clone(), 50, true, deadline())
+        .admin_feed_changes(start.clone(), 50, true, false, deadline())
         .await
         .unwrap()
         .unwrap();
@@ -3734,7 +3741,7 @@ async fn subject_directory(b: &Backend) {
     // Resuming after a page returns nothing new; a forged position is lost.
     let rest = b
         .directory
-        .admin_feed_changes(page.next.clone(), 50, true, deadline())
+        .admin_feed_changes(page.next.clone(), 50, true, false, deadline())
         .await
         .unwrap()
         .unwrap();
@@ -3745,7 +3752,7 @@ async fn subject_directory(b: &Backend) {
     };
     assert!(
         b.directory
-            .admin_feed_changes(forged, 50, true, deadline())
+            .admin_feed_changes(forged, 50, true, false, deadline())
             .await
             .unwrap()
             .is_err(),
@@ -3760,6 +3767,7 @@ async fn subject_directory(b: &Backend) {
                 },
                 50,
                 true,
+                false,
                 deadline()
             )
             .await
@@ -4186,6 +4194,7 @@ async fn s600_24_sqlite_store_migrates_to_an_empty_postgres_store() {
             },
             50,
             true,
+            false,
             deadline(),
         )
         .await
@@ -4247,4 +4256,297 @@ async fn s600_24_sqlite_store_migrates_to_an_empty_postgres_store() {
     );
     other.cleanup().await;
     target.cleanup().await;
+}
+
+// ---- identity platform: console filters and the workload registry ------------
+
+async fn workload_record(
+    b: &Backend,
+    changes: Vec<crate::store::sqlite::workloads::WorkloadChange>,
+    events: Vec<Event>,
+) {
+    if let Some(s) = &b.sqlite {
+        return s.workload_record(changes, events).await.unwrap();
+    }
+    #[cfg(feature = "postgres")]
+    if let Some((pg, _)) = &b.pg {
+        return pg.workload_record(changes, events).await.unwrap();
+    }
+    unreachable!()
+}
+
+async fn workload_snapshot(b: &Backend) -> Vec<crate::store::sqlite::workloads::WorkloadRow> {
+    if let Some(s) = &b.sqlite {
+        return s.workload_snapshot_after(0, 100, deadline()).await.unwrap();
+    }
+    #[cfg(feature = "postgres")]
+    if let Some((pg, _)) = &b.pg {
+        return pg
+            .workload_snapshot_after(0, 100, deadline())
+            .await
+            .unwrap();
+    }
+    unreachable!()
+}
+
+async fn identity_platform(b: &Backend) {
+    use crate::auth_gateway::workload::signals::WorkloadRef;
+    use crate::store::sqlite::workloads::WorkloadChange;
+    let name = b.store.backend();
+    b.store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    let (actor, policy) = admin_actor(b, 1).await;
+    let (a, c, g) = (user(b, 2).await, user(b, 3).await, user(b, 4).await);
+    // MFA: an active authenticator app for `c`.
+    b.factors
+        .create_totp_pending(
+            "t-c".into(),
+            c.user_id.clone(),
+            envelope(b, &c, "t-c"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    b.factors
+        .activate_totp("t-c", &c.user_id, 1, 7, vec![])
+        .await
+        .unwrap();
+    // A group with `g` as its member.
+    let gid = crate::groups::new_ref(b.rng.as_ref());
+    for e in [
+        Edit::Create {
+            group_id: gid.clone(),
+            key: "ops".into(),
+            name: "Ops".into(),
+            description: None,
+        },
+        Edit::AddMember {
+            group_id: gid.clone(),
+            expected: 1,
+            user_id: g.user_id.to_string(),
+            expires_at: None,
+            reason: "member".into(),
+        },
+    ] {
+        let done = b
+            .groups
+            .groups_admin_edit(
+                &actor,
+                &policy,
+                e,
+                GROUP_POLICY,
+                ev(b, EventKind::GroupCreated),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(done, Cas::Done(_)), "{name}");
+    }
+    let users = |filters: UserFilters| {
+        let console = b.console.clone();
+        async move {
+            let mut ids: Vec<String> = console
+                .list_users(
+                    UsersQuery {
+                        q: None,
+                        status: None,
+                        filters,
+                        limit: 50,
+                        cursor: None,
+                    },
+                    deadline(),
+                )
+                .await
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|s| s.user.user_id.to_string())
+                .collect();
+            ids.sort();
+            ids
+        }
+    };
+    let sorted = |v: &[&User]| {
+        let mut ids: Vec<String> = v.iter().map(|u| u.user_id.to_string()).collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(
+        users(UserFilters {
+            mfa_enrolled: Some(true),
+            ..Default::default()
+        })
+        .await,
+        sorted(&[&c]),
+        "{name}: mfa"
+    );
+    assert_eq!(
+        users(UserFilters {
+            group: Some(gid.clone()),
+            ..Default::default()
+        })
+        .await,
+        sorted(&[&g]),
+        "{name}: group"
+    );
+    assert!(
+        users(UserFilters {
+            provider: Some("other".into()),
+            ..Default::default()
+        })
+        .await
+        .is_empty(),
+        "{name}: provider"
+    );
+    assert_eq!(
+        users(UserFilters {
+            provider: Some("mock".into()),
+            mfa_enrolled: Some(false),
+            ..Default::default()
+        })
+        .await
+        .len(),
+        3,
+        "{name}: provider and no mfa (the actor, a, g)"
+    );
+    // Sessions by stored level; events by kind prefix.
+    session(b, &a).await;
+    let live = |aal| {
+        let console = b.console.clone();
+        let now = b.clock.now();
+        async move {
+            console
+                .list_live_sessions(
+                    SessionsQuery {
+                        user_id: None,
+                        aal,
+                        limit: 50,
+                        cursor: None,
+                        now,
+                    },
+                    deadline(),
+                )
+                .await
+                .unwrap()
+                .items
+                .len()
+        }
+    };
+    assert!(live(Some(Aal::One)).await >= 1, "{name}");
+    assert_eq!(live(Some(Aal::Two)).await, 0, "{name}");
+    let events = b
+        .events
+        .query_page(
+            EventsQuery {
+                kind_prefix: Some("group.".into()),
+                limit: 50,
+                ..Default::default()
+            },
+            deadline(),
+        )
+        .await
+        .unwrap();
+    assert!(!events.items.is_empty(), "{name}");
+    assert!(
+        events
+            .items
+            .iter()
+            .all(|e| e.kind.name().starts_with("group.")),
+        "{name}"
+    );
+    // The workload registry and its lifecycle-feed changes.
+    let start = b.directory.admin_outbox_head(deadline()).await.unwrap();
+    let w = WorkloadRef {
+        service: "orders".into(),
+        principal: format!("wk2:{}", "a".repeat(64)),
+        subject_ref: format!("s_{}", "b".repeat(48)),
+        spiffe_id: Some("spiffe://cluster.example/ns/blue/sa/orders".into()),
+        cluster_id: "cluster".into(),
+        namespace: "blue".into(),
+        service_account: "orders".into(),
+        service_account_uid: "uid-1".into(),
+    };
+    let observed = EventBuilder::new(
+        b.clock.as_ref(),
+        b.rng.as_ref(),
+        EventKind::WorkloadPrincipalObserved,
+        Outcome::Info,
+        "wl",
+    )
+    .attr("service", "orders")
+    .attr("principal", w.principal.as_str())
+    .attr("subject_ref", w.subject_ref.as_str())
+    .attr("namespace", "blue")
+    .attr("status", "active")
+    .build();
+    workload_record(b, vec![WorkloadChange::Observed(w.clone())], vec![observed]).await;
+    let retired = EventBuilder::new(
+        b.clock.as_ref(),
+        b.rng.as_ref(),
+        EventKind::WorkloadPrincipalRetired,
+        Outcome::Info,
+        "wl",
+    )
+    .attr("principal", w.principal.as_str())
+    .attr("cause", "deleted")
+    .build();
+    workload_record(
+        b,
+        vec![WorkloadChange::Retired {
+            workload: w.clone(),
+            cause: "deleted",
+            replacement: None,
+        }],
+        vec![retired],
+    )
+    .await;
+    let rows = workload_snapshot(b).await;
+    assert_eq!(rows.len(), 1, "{name}");
+    assert_eq!(
+        (
+            rows[0].principal.as_str(),
+            rows[0].status.as_str(),
+            rows[0].cause.as_deref()
+        ),
+        (w.principal.as_str(), "retired", Some("deleted")),
+        "{name}"
+    );
+    let without = b
+        .directory
+        .admin_feed_changes(start.clone(), 50, false, false, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        without.changes.is_empty(),
+        "{name}: workloads not asked for"
+    );
+    let with = b
+        .directory
+        .admin_feed_changes(start, 50, false, true, deadline())
+        .await
+        .unwrap()
+        .unwrap();
+    let kinds: Vec<_> = with.changes.iter().map(|c| c.change).collect();
+    assert_eq!(kinds, ["workload_observed", "workload_retired"], "{name}");
+    let first = with.changes[0].workload.as_ref().unwrap();
+    assert_eq!(first["principal"], w.principal.as_str(), "{name}");
+    assert!(
+        !first.contains_key("status"),
+        "{name}: only the reported keys"
+    );
+    assert!(
+        with.changes[0].group_id.is_none() && with.changes[0].user_id.is_none(),
+        "{name}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_34_identity_platform_filters_and_workload_registry_agree_on_both_backends() {
+    for b in backends().await {
+        identity_platform(&b).await;
+        b.cleanup().await;
+    }
 }

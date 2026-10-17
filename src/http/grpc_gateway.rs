@@ -673,9 +673,32 @@ pub(crate) fn human_projection_transport_for_test(
             .min(std::time::Duration::from_secs(1)),
     ))
 }
+/// The gRPC gateway's TLS: fixed (`ServerTlsConfig`, tonic terminates it) or
+/// following its files ([`crate::reload::ServerTls`], Hopae terminates it and
+/// hands tonic the decrypted streams).
+pub enum GrpcTls {
+    Static(ServerTlsConfig),
+    Reloading(std::sync::Arc<crate::reload::ServerTls>),
+}
+
+impl From<ServerTlsConfig> for GrpcTls {
+    fn from(tls: ServerTlsConfig) -> Self {
+        GrpcTls::Static(tls)
+    }
+}
+
+/// The server bounds of `hangang_runtime::server`, without tonic's TLS.
+fn plain_server() -> tonic::transport::Server {
+    tonic::transport::Server::builder()
+        .concurrency_limit_per_connection(64)
+        .max_concurrent_streams(Some(64))
+        .http2_max_header_list_size(Some(8192))
+        .timeout(std::time::Duration::from_millis(1000))
+}
+
 pub async fn serve_with_receipts(
     listener: TcpListener,
-    tls: ServerTlsConfig,
+    tls: impl Into<GrpcTls>,
     router: Router,
     keys: Arc<CallerKeys>,
     mut stop: watch::Receiver<bool>,
@@ -764,7 +787,12 @@ pub async fn serve_with_receipts(
             .max_decoding_message_size(wire::MAX_FRAME)
             .max_encoding_message_size(2048)
     });
-    hangang_runtime::server(tls)?
+    let tls = tls.into();
+    let mut server = match &tls {
+        GrpcTls::Static(config) => hangang_runtime::server(config.clone())?,
+        GrpcTls::Reloading(_) => plain_server(),
+    };
+    let routes = server
         .add_optional_service(human_service)
         .add_optional_service(human_projection_service)
         .add_service(bounded_transport(
@@ -796,18 +824,32 @@ pub async fn serve_with_receipts(
         .add_optional_service(
             observed_projection_service
                 .map(|service| bounded_transport(service, pipeline.clone(), ingress.clone(), 8448)),
-        )
-        .serve_with_incoming_shutdown(hangang_runtime::incoming(listener), async move {
-            let _ = stop.wait_for(|v| *v).await;
-        })
-        .await?;
+        );
+    let shutdown = async move {
+        let _ = stop.wait_for(|v| *v).await;
+    };
+    match tls {
+        GrpcTls::Static(_) => {
+            routes
+                .serve_with_incoming_shutdown(hangang_runtime::incoming(listener), shutdown)
+                .await?
+        }
+        GrpcTls::Reloading(tls) => {
+            routes
+                .serve_with_incoming_shutdown(
+                    crate::http::tls::grpc_incoming(listener, tls),
+                    shutdown,
+                )
+                .await?
+        }
+    }
     Ok(())
 }
 
 /// Compatibility entry for verification-only consumers.
 pub async fn serve(
     listener: TcpListener,
-    tls: ServerTlsConfig,
+    tls: impl Into<GrpcTls>,
     router: Router,
     keys: Arc<CallerKeys>,
     stop: watch::Receiver<bool>,

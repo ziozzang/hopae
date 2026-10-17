@@ -68,6 +68,9 @@ const TABLES: &[&str] = &[
     "human_provider_owners",
     "human_provider_material_owners",
     "session_primary_provenance",
+    "service_credentials",
+    "workload_principals",
+    "workload_legacy_mappings",
     "meta",
 ];
 /// SQLite bookkeeping that is not store data.
@@ -446,7 +449,16 @@ impl PgStore {
         // The lifecycle feed positions of the copied events, in outbox order.
         tx.execute(
             "INSERT INTO outbox_feed (event_id) SELECT event_id FROM events \
-             WHERE kind IN ('admin.user_disable', 'admin.user_enable') OR kind LIKE 'group.%' ORDER BY at, event_id",
+             WHERE kind IN ('admin.user_disable', 'admin.user_enable', 'workload.principal_observed', \
+             'workload.principal_retired', 'workload.legacy_subject_mapped') OR kind LIKE 'group.%' ORDER BY at, event_id",
+            &[],
+        )
+        .await
+        .map_err(pg)?;
+        // Copied identity keys: new rows continue after the highest one.
+        tx.execute(
+            "SELECT setval(pg_get_serial_sequence('workload_principals', 'position'), \
+             GREATEST(COALESCE(max(position), 0), 1), max(position) IS NOT NULL) FROM workload_principals",
             &[],
         )
         .await

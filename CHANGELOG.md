@@ -10,6 +10,23 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- Live reload without a restart (scenario 320,
+  [operations](docs/OPERATIONS.md#tls-certificate-renewal)):
+  - TLS: the administrator listener, the native and gRPC gateways and the
+    projection receiver's outbound mTLS clients re-read their certificate, key
+    and CA every `reload.tls_interval_secs` (default 10 s; polling by content
+    digest, no inotify) and swap a valid set atomically for new handshakes; an
+    invalid set keeps the current one (`hopae_tls_reload_failing`), each load
+    logs the leaf fingerprint, `GET /v1/status` reports `reload.tls`.
+  - `authentication.source = config`: the configuration file is polled every
+    `authentication.reload_interval_ms` (default 1 s) and a changed profile or
+    projection plan is validated, compiled and reconciled through the CAS
+    publication live (`authentication.reconciled`, `cause: reload`); an invalid
+    file keeps the current profiles and is reported; other keys need a restart.
+- `EventKind::ALL` is a slice and the kind tests derive their counts from the
+  exhaustive `name()` match, so branches adding event kinds no longer collide on
+  hand-kept numbers.
+
 - WebAuthn passkeys behind the new, default-off `webauthn` configuration
   ([ADR-0017](docs/adr/0017-webauthn-passkeys.md), [WebAuthn passkeys](docs/WEBAUTHN.md)):
   portal security overview, passkey registration, list, rename and removal,
@@ -88,6 +105,61 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   canonical in lower case. The owned OpenLDAP fixture enables `memberof` and
   checks group sync against a real directory.
 
+- Console administration APIs for the Identities section (console package
+  0.1.10; [administration](docs/ADMIN.md)):
+  - `GET /v1/users/{id}/factors` lists a user's passkeys (`pk_` id, authenticator
+    name from the AAGUID, synced and backup state, last use), authenticator app and
+    remaining recovery codes as an audited read; `POST /v1/users/{id}/factors/reset`
+    removes all of them, one passkey, the authenticator app or the recovery codes
+    and ends the sessions the removed factor vouched for (scenario 314).
+  - Listing filters: users by `provider`, `mfa` (`enrolled`, `none`) and `group`;
+    sessions by `aal`; events by `kind_prefix` (with `user_id`, `since`, `until`),
+    natively and through the Hangang adapter; `users/get` returns the detail with
+    linked identities (scenario 315).
+  - An optional `reason` on disable, enable, session termination, the factor reset,
+    the bulk disable and the profile and projection publications, recorded as
+    `attrs.note`; `POST /v1/users/bulk/disable` for up to 100 users with a result
+    per item (scenario 316).
+  - `POST /v1/authentication/profiles/validate`: the publication's checks without
+    publishing, with structured errors and JSON paths; publications now write
+    `admin.profiles_publish` / `admin.projections_publish` in their transaction
+    (scenario 317).
+  - `GET /v1/status` reports `portal.public_url` and the console authority mode
+    (`local` or `hangang`).
+  - The console manifest declares `users/get`, `users/factors`,
+    `users/factors/reset`, `users/bulk-disable` and
+    `authentication/profiles/validate`; operators re-pin the manifest SHA-256.
+- AAL 3 requirements (ADR-0018 decisions 7–11, scenario 489): step-up rules and
+  `admin.require_aal` accept `3` with `webauthn.high_assurance`; the step-up page
+  then offers only high-assurance keys and tells users without one; the console's
+  write fence re-checks the evidence. The authentication explain API reports
+  `aal3_evidence` and `presented_aal`.
+- Route-scoped, read-only service credentials for machine callers of the
+  admin listener ([service credentials](docs/SERVICE_CREDENTIALS.md)): mTLS
+  client-certificate binding (SPKI pin and/or SAN) plus a bearer whose
+  digest only is stored (current and next for rotation), exact read-route
+  allowlist (mutations never grantable), audience, expiry, per-credential
+  rate limit, `admin.read` with `credential_id`; `hopae admin
+  service-credentials create|rotate|promote|revoke|list` (preset
+  `pumgye-v2`); `admin.service_audience`. Threat model TM-75 to TM-77.
+- Offline Kubernetes workload identity (Hangang ADR 0022 P0,
+  [Kubernetes workloads](docs/KUBERNETES_WORKLOAD.md)): the
+  `kubernetes_workload` connector verifies projected ServiceAccount tokens
+  against the issuer's discovery/JWKS (pinned issuer and CA, bounded key
+  cache with rotation and rate-limited `kid`-miss refetch, dedicated
+  exclusive audience, `exp`/`nbf`/`iat` with skew, bound-object claims,
+  short positive cache) with no API-server request on the request path; an
+  optional watch-backed revocation index with bounded staleness; the
+  ServiceAccount principal `wk2:` and SPIFFE ID in `x-hopae-principal` and
+  `x-hopae-workload-spiffe-id`; `workload.*` lifecycle events and
+  `include_workloads` on the subject lifecycle feed; workload subjects in
+  the authentication explain API; `hopae_workload_*` counters.
+- `authentication.source = "config"`: the configuration file owns the
+  authentication profiles and the credential projection plan; every start
+  reconciles the store through the validated CAS publication (audit row,
+  `authentication.reconciled` event), an invalid file leaves the store
+  untouched, console/API edits answer `409 config_authoritative`. The default
+  `store` mode is unchanged.
 - PostgreSQL store backend, slice 1 ([ADR-0020](docs/adr/0020-postgresql-store-backend.md)):
   the backend-neutral `CoreStore` contract (users, identities and the
   user-ID ledger, provider bootstrap, sessions and handles, outbox), a
@@ -126,9 +198,19 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   `make qualify-postgres`, a local two-replica store qualification with one
   replica killed mid-traffic. Serving on PostgreSQL remains refused until
   slice 5.
+- PostgreSQL store, identity platform: schema 8 (service credentials and
+  the workload principal registry, copied by the migration), the console
+  listing filters, AAL 3 in the actor fence and `workload.*` changes in the
+  lifecycle feed, as on SQLite (scenario S600-34).
 
 ### Changed
 
+- Kubernetes workload callers authenticate as their ServiceAccount
+  principal (issuer, cluster, namespace, ServiceAccount name and UID); the
+  Pod name/UID is an audit attribute. `kubernetes_tokenreview` profiles must
+  declare `subject` (`service_account`, or `legacy_pod` with a mandatory
+  `legacy_until_ms`); a profile without it fails at load and preflight. `kubernetes_tokenreview` is deprecated and
+  gains an optional positive cache (`cache_ttl_ms`, at most 10 s).
 - A recovery factor entry no longer counts as AAL 2 evidence in step-up
   evaluation (no such entry existed before).
 - With a passkey enrolled, adding an authenticator app needs a second factor
@@ -162,6 +244,17 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Migration
 
+- Schema version 15 (`0015_service_credentials`) adds `service_credentials`.
+
+- Schema version 16 (`0016_workload_principals`) adds the workload
+  principal registry read by `POST /v1/subjects/workloads/snapshot`; 15 is
+  reserved by the service-credential work, which must merge first.
+- Kubernetes workloads: existing `kubernetes_tokenreview` profiles fail to
+  load until they declare `subject`. Add `"subject": "legacy_pod"` with
+  `legacy_until_ms` and `legacy_mapping_until_ms` to keep today's subjects,
+  re-grant on the ServiceAccount principals reported by
+  `workload.legacy_subject_mapped`, then switch to `"service_account"` ([migration](docs/KUBERNETES_WORKLOAD.md#migration-from-pod-bound-subjects)).
+  Threat model TM-70 to TM-74.
 - Schema version 14 (`0014_groups`) adds `directory_groups`, `group_members`,
   `group_changes` and `group_sync_state`. Versions 11–13 are reserved by the
   passkey work, which must be merged and released first; back up the store

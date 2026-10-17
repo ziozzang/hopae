@@ -148,13 +148,11 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Semaphore;
-use tonic::{
-    metadata::MetadataValue,
-    transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity},
-};
+use tonic::metadata::MetadataValue;
 const MAXIMUM: u64 = 9_007_199_254_740_991;
 pub(crate) struct Client {
-    observed_rpc:pumgye_grpc::v1::human_observed_projection_permits_client::HumanObservedProjectionPermitsClient<Channel>,
+    channel: super::mtls_channel::ReloadingChannel,
+    observed_rpc:pumgye_grpc::v1::human_observed_projection_permits_client::HumanObservedProjectionPermitsClient<super::mtls_channel::ReloadingChannel>,
     credential:MetadataValue<tonic::metadata::Ascii>,
     admission:Semaphore,sequence:AtomicU64,owner:Arc<()>,
 }
@@ -212,19 +210,14 @@ impl Client {
         let mut credential: MetadataValue<tonic::metadata::Ascii> =
             format!("Bearer {token}").parse().map_err(|_| Refused)?;
         credential.set_sensitive(true);
-        let tls = ClientTlsConfig::new()
-            .domain_name(server_name)
-            .ca_certificate(Certificate::from_pem(ca))
-            .identity(Identity::from_pem(certificate, key));
-        let channel = Endpoint::from_shared(address.to_owned())
-            .map_err(|_| Refused)?
-            .connect_timeout(Duration::from_secs(1))
-            .timeout(Duration::from_secs(1))
-            .tcp_nodelay(true)
-            .tls_config(tls)
-            .map_err(|_| Refused)?
-            .connect_lazy();
+        let channel = super::mtls_channel::ReloadingChannel::new(
+            address,
+            server_name,
+            super::mtls_channel::channel(address, server_name, ca, certificate, key)
+                .map_err(|_| Refused)?,
+        );
         Ok(Self {
+            channel: channel.clone(),
             observed_rpc: pumgye_grpc::v1::human_observed_projection_permits_client::HumanObservedProjectionPermitsClient::new(channel.clone()).max_encoding_message_size(8192).max_decoding_message_size(1024),
             credential,
             admission: Semaphore::new(128),
@@ -329,5 +322,25 @@ impl Client {
             owner: self.owner.clone(),
             proof,
         })
+    }
+}
+
+impl Client {
+    /// Use new mTLS material for every later call ([`crate::reload`]).
+    pub(crate) fn reload_tls(
+        &self,
+        ca: &[u8],
+        certificate: &[u8],
+        key: &[u8],
+    ) -> Result<(), Refused> {
+        if [ca, certificate, key]
+            .iter()
+            .any(|value| value.is_empty() || value.len() > 128 * 1024)
+        {
+            return Err(Refused);
+        }
+        self.channel
+            .replace(ca, certificate, key)
+            .map_err(|_| Refused)
     }
 }

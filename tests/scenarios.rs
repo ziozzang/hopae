@@ -65,6 +65,16 @@ mod scenarios {
     mod s309_authentication_explain;
     #[path = "s310_groups.rs"]
     mod s310_groups;
+    #[path = "s314_admin_api_gaps.rs"]
+    mod s314_admin_api_gaps;
+    #[path = "s318_service_credentials.rs"]
+    mod s318_service_credentials;
+    #[path = "s319_config_authoritative_profiles.rs"]
+    mod s319_config_authoritative_profiles;
+    #[path = "s320_live_reload.rs"]
+    mod s320_live_reload;
     #[path = "s480_passkeys.rs"]
     mod s480_passkeys;
+    #[path = "s900_kubernetes_workload.rs"]
+    mod s900_kubernetes_workload;
 }

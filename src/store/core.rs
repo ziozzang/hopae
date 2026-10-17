@@ -387,6 +387,7 @@ pub trait SubjectDirectoryStore: Send + Sync {
         after: directory::OutboxPosition,
         limit: usize,
         groups: bool,
+        workloads: bool,
         deadline: Deadline,
     ) -> StoreResult<Result<directory::StatusPage, directory::PositionLost>>;
     async fn admin_live_handle(

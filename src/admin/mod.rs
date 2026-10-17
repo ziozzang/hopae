@@ -29,6 +29,7 @@ pub mod delegation_wire;
 pub mod events;
 pub mod explain;
 mod explain_messages;
+pub mod factors;
 pub mod groups;
 pub mod me;
 pub mod pages;
@@ -36,6 +37,7 @@ pub mod profiles;
 pub mod projections;
 pub mod reads;
 pub mod seed;
+pub mod service_credentials;
 pub mod sessions;
 pub mod status;
 pub mod subjects;
@@ -91,6 +93,9 @@ pub struct AdminConfig {
     pub insecure_mode: bool,
     /// `gateway.allow_unauthenticated_caller`.
     pub unauthenticated_caller: bool,
+    /// The audience service credentials must name (`admin.service_audience`,
+    /// default the console origin).
+    pub service_audience: String,
 }
 
 impl AdminConfig {
@@ -116,6 +121,11 @@ impl AdminConfig {
             session: cfg.session_policy(),
             insecure_mode: cfg.insecure_mode(),
             unauthenticated_caller: cfg.gateway.allow_unauthenticated_caller,
+            service_audience: cfg.admin.service_audience.clone().unwrap_or_else(|| {
+                cfg.admin_origin()
+                    .map(|o| o.ascii_serialization())
+                    .unwrap_or_default()
+            }),
         })
     }
 }
@@ -154,6 +164,8 @@ pub struct AdminState {
     /// When each untrusted peer was last warned about (one line per minute).
     pub peer_warned: Mutex<HashMap<IpAddr, Timestamp>>,
     pub delegation: Option<delegation::Config>,
+    /// What live reloading of TLS material and configuration last did.
+    pub reload: Arc<crate::reload::Status>,
     pub delegation_replay: delegation::Replay,
 }
 
@@ -237,6 +249,8 @@ pub struct ReqInfo {
 #[derive(Clone, Debug)]
 pub struct Ctx {
     pub delegated_actor: Option<delegation::Actor>,
+    /// Set when a route-scoped service credential authenticated the request.
+    pub service: Option<service_credentials::ServiceCaller>,
     pub principal: Principal,
     pub req: ReqInfo,
 }

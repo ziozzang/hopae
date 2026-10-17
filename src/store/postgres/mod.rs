@@ -13,6 +13,7 @@ mod groups;
 mod handoff;
 pub mod import;
 mod passkeys;
+mod workloads;
 mod write;
 
 use std::sync::Arc;
@@ -64,6 +65,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         7,
         "0007_slice4_apps",
         include_str!("migrations/0007_slice4_apps.sql"),
+    ),
+    (
+        8,
+        "0008_identity_platform",
+        include_str!("migrations/0008_identity_platform.sql"),
     ),
 ];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;

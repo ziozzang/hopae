@@ -254,6 +254,32 @@ pub struct FactorResetReport {
     pub sessions: u32,
 }
 
+/// What a console factor reset removes (ADR-0017, console factor management).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FactorResetScope {
+    /// Every passkey, the authenticator app and the recovery codes; every
+    /// session of the user ends (as `hopae admin factors reset`).
+    All,
+    /// One passkey (`pk_` factor id); the sessions it established or
+    /// elevated end.
+    Passkey(String),
+    /// The authenticator app; the sessions a TOTP code elevated end.
+    Totp,
+    /// The unused recovery codes; no session ends (a code is AAL 1 evidence).
+    RecoveryCodes,
+}
+
+impl FactorResetScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FactorResetScope::All => "all",
+            FactorResetScope::Passkey(_) => "passkey",
+            FactorResetScope::Totp => "totp",
+            FactorResetScope::RecoveryCodes => "recovery_codes",
+        }
+    }
+}
+
 #[async_trait]
 pub trait Passkeys: Send + Sync {
     /// The user's WebAuthn user handle, set to `candidate` when absent.

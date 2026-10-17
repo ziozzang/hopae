@@ -38,7 +38,14 @@ const MAX_LIMIT: usize = 1000;
 /// Outbox kinds the subject lifecycle feed reports (positions in `outbox_feed`).
 pub(super) fn in_feed(kind: EventKind) -> bool {
     let name = kind.name();
-    matches!(name, "admin.user_disable" | "admin.user_enable") || name.starts_with("group.")
+    matches!(
+        name,
+        "admin.user_disable"
+            | "admin.user_enable"
+            | "workload.principal_observed"
+            | "workload.principal_retired"
+            | "workload.legacy_subject_mapped"
+    ) || name.starts_with("group.")
 }
 
 fn standalone(events: &[Event]) -> StoreResult<()> {
@@ -162,7 +169,7 @@ fn window(shape: Shape, a: &mut Args, f: &Filters) -> String {
                 None => String::new(),
             };
             format!(
-                "w AS (SELECT e.session_id, e.created_at, e.absolute_expires_at FROM sessions e \
+                "w AS (SELECT e.session_id, e.created_at, e.absolute_expires_at, e.aal FROM sessions e \
                  WHERE {pred}{seek} ORDER BY e.created_at DESC, e.session_id DESC LIMIT {w})"
             )
         }
@@ -225,6 +232,10 @@ fn matches(shape: Shape, a: &mut Args, f: &Filters, limit: usize) -> String {
             if let Some(v) = f.until {
                 r.push(format!("at <= {}", a.p(v)));
             }
+            if let Some(v) = &f.kind_prefix {
+                // A byte prefix, never a LIKE pattern.
+                r.push(format!("starts_with(kind, {})", a.p(v.clone())));
+            }
             let pred = if r.is_empty() {
                 "TRUE".into()
             } else {
@@ -234,10 +245,16 @@ fn matches(shape: Shape, a: &mut Args, f: &Filters, limit: usize) -> String {
                 "SELECT {EVENT_COLS} FROM events WHERE event_id IN (SELECT event_id FROM w WHERE {pred} ORDER BY at DESC, event_id DESC LIMIT {n}) ORDER BY at DESC, event_id DESC"
             )
         }
-        Shape::Sessions { .. } => format!(
-            "SELECT {SESSION_COLS} FROM sessions s WHERE s.session_id IN (SELECT session_id FROM w WHERE absolute_expires_at > {} ORDER BY created_at DESC, session_id DESC LIMIT {n}) ORDER BY s.created_at DESC, s.session_id DESC",
-            a.p(f.now)
-        ),
+        Shape::Sessions { .. } => {
+            let now = a.p(f.now);
+            let aal = match f.aal {
+                Some(v) => format!(" AND aal = {}::bigint", a.p(v)),
+                None => String::new(),
+            };
+            format!(
+                "SELECT {SESSION_COLS} FROM sessions s WHERE s.session_id IN (SELECT session_id FROM w WHERE absolute_expires_at > {now}{aal} ORDER BY created_at DESC, session_id DESC LIMIT {n}) ORDER BY s.created_at DESC, s.session_id DESC"
+            )
+        }
         Shape::Users => {
             let mut r = Vec::new();
             if let Some(q) = &f.q {
@@ -249,6 +266,28 @@ fn matches(shape: Shape, a: &mut Args, f: &Filters, limit: usize) -> String {
             }
             if let Some(s) = &f.status {
                 r.push(format!("status = {}", a.p(s.clone())));
+            }
+            if let Some(p) = &f.provider {
+                r.push(format!(
+                    "EXISTS (SELECT 1 FROM identities i WHERE i.user_id = w.user_id AND i.provider_id = {})",
+                    a.p(p.clone())
+                ));
+            }
+            if let Some(m) = f.mfa {
+                r.push(format!(
+                    "{} = (EXISTS (SELECT 1 FROM webauthn_credentials c WHERE c.user_id = w.user_id AND c.state = 'active') \
+                     OR EXISTS (SELECT 1 FROM totp_enrollments t WHERE t.user_id = w.user_id AND t.state = 'active'))",
+                    a.p(m)
+                ));
+            }
+            if let Some(g) = &f.group {
+                let now = a.p(f.now);
+                r.push(format!(
+                    "EXISTS (SELECT 1 FROM group_members gm JOIN directory_groups g ON g.group_id = gm.group_id \
+                     WHERE gm.group_id = {} AND gm.user_id = w.user_id AND g.state = 'active' AND gm.stale_at IS NULL \
+                     AND (gm.expires_at IS NULL OR gm.expires_at > {now}))",
+                    a.p(g.clone())
+                ));
             }
             let pred = if r.is_empty() {
                 "TRUE".into()
@@ -277,6 +316,11 @@ struct Filters {
     now: i64,
     q: Option<String>,
     status: Option<String>,
+    kind_prefix: Option<String>,
+    aal: Option<i64>,
+    provider: Option<String>,
+    mfa: Option<bool>,
+    group: Option<String>,
 }
 
 /// `(rows, examined, oldest key)`; a row is `(item, key ms, id)`.
@@ -380,6 +424,10 @@ impl ConsoleStore for PgStore {
                 cursor: q.cursor.clone(),
                 q: q.q.clone().filter(|s| !s.is_empty()),
                 status: q.status.map(|s| s.as_str().to_string()),
+                provider: q.filters.provider.clone(),
+                mfa: q.filters.mfa_enrolled,
+                group: q.filters.group.clone(),
+                now,
                 ..Filters::default()
             };
             let page = run_window(&tx, Shape::Users, &f, limit, |r| {
@@ -509,6 +557,7 @@ impl ConsoleStore for PgStore {
                 cursor: q.cursor.clone(),
                 user: q.user_id.as_ref().map(|u| u.to_string()),
                 now: q.now.secs(),
+                aal: q.aal.map(|a| a.as_i64()),
                 ..Filters::default()
             };
             let shape = Shape::Sessions {
@@ -910,6 +959,7 @@ impl Events for PgStore {
                 cursor: q.cursor.clone(),
                 user: q.user_id.as_ref().map(|v| v.to_string()),
                 kind: q.kind.map(|k| k.name().to_string()),
+                kind_prefix: q.kind_prefix.clone(),
                 outcome: q.outcome.map(|o| o.as_str().to_string()),
                 session: q.session_id.as_ref().map(|v| v.to_string()),
                 ip: q.client_ip.map(|v| v.to_string()),

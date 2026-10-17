@@ -172,6 +172,12 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - When: the configuration is validated and a serve/store command starts.
 - Then: invalid or inline settings are refused; without the feature the configuration is refused; with it, validation passes but serving and store commands refuse with a slice message and never fall back to SQLite.
 
+### S600-34 Identity-platform listings and the workload registry agree
+
+- Given: an administrator, a user with an active authenticator app, a user in a local group, and a live session, on each backend.
+- When: users are listed by `mfa`, `group` and `provider`, sessions by stored level, events by kind prefix; a workload principal is observed and retired with its `workload.*` events; the lifecycle feed is read with and without workloads.
+- Then: each filter selects exactly its users, sessions and events; the registry holds the retired principal; the feed reports `workload_observed` and `workload_retired` only when asked, with the reported workload keys only.
+
 ## Abuse cases
 
 | Category | Case | Applies |
@@ -218,6 +224,7 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-22 | `s600_22_human_realm_and_subjects_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-23 | `s600_23_postgres_owner_triggers_match_sqlite` | `src/store/conformance.rs` | unit | passing |
 | S600-24 | `s600_24_sqlite_store_migrates_to_an_empty_postgres_store` | `src/store/conformance.rs` | unit | passing |
+| S600-34 | `s600_34_identity_platform_filters_and_workload_registry_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
 | S600-6 | `s600_6_serving_refuses_the_incomplete_postgres_backend` | `src/app.rs` | unit | passing |

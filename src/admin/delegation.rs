@@ -347,6 +347,10 @@ pub async fn middleware(
     }
     let mut profile_publication: Option<(u64, Vec<u8>)> = None;
     let mut read_body = false;
+    // A translated read served by a native `GET` (user detail, factors).
+    let mut get_request = false;
+    // The body a translated mutation forwards instead of `{}`.
+    let mut forwarded_body: Option<Vec<u8>> = None;
     let translated = match (method.as_str(), original_path.as_str()) {
         (
             "GET",
@@ -368,13 +372,17 @@ pub async fn middleware(
             struct Publication {
                 revision: u64,
                 configuration: serde_json::Value,
+                #[serde(default)]
+                reason: Option<serde_json::Value>,
             }
             let Ok(publication) = serde_json::from_slice::<Publication>(&bytes) else {
                 return denied();
             };
-            let Ok(body) =
-                serde_json::to_vec(&serde_json::json!({"configuration":publication.configuration}))
-            else {
+            let mut forwarded = serde_json::json!({"configuration": publication.configuration});
+            if let Some(reason) = publication.reason {
+                forwarded["reason"] = reason;
+            }
+            let Ok(body) = serde_json::to_vec(&forwarded) else {
                 return denied();
             };
             profile_publication = Some((publication.revision, body));
@@ -387,6 +395,7 @@ pub async fn middleware(
             | "/v1/subjects/search"
             | "/v1/subjects/lifecycle"
             | "/v1/subjects/lifecycle/snapshot"
+            | "/v1/subjects/workloads/snapshot"
             | "/v1/explain/authentication"
             | "/v1/subjects/groups"
             | "/v1/groups/search"
@@ -398,38 +407,67 @@ pub async fn middleware(
             | "/v1/groups/update"
             | "/v1/groups/delete"
             | "/v1/groups/members/add"
-            | "/v1/groups/members/remove",
+            | "/v1/groups/members/remove"
+            // Dry-run profile validation and the bulk disable carry their
+            // whole request in the signed body.
+            | "/v1/authentication/profiles/validate",
         ) => {
             read_body = true;
             original_path.clone()
         }
+        ("POST", "/v1/users/bulk-disable") => {
+            read_body = true;
+            "/v1/users/bulk/disable".to_owned()
+        }
         ("POST", path @ ("/v1/users/query" | "/v1/sessions/query" | "/v1/events/query")) => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Query {
-                #[serde(default)]
-                cursor: Option<String>,
-                #[serde(default)]
-                limit: Option<u16>,
-            }
-            let Ok(query) = serde_json::from_slice::<Query>(&bytes) else {
+            // The listing's filters, as the native listing's query parameters
+            // (which validate them): strings or integers only, each bounded.
+            let allowed: &[&str] = match path {
+                "/v1/users/query" => &["q", "status", "provider", "mfa", "group"],
+                "/v1/sessions/query" => &["user_id", "aal"],
+                _ => &[
+                    "kind",
+                    "kind_prefix",
+                    "outcome",
+                    "user_id",
+                    "session_id",
+                    "client_ip",
+                    "since",
+                    "until",
+                ],
+            };
+            let Ok(serde_json::Value::Object(query)) =
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+            else {
                 return denied();
             };
-            if query.limit.is_some_and(|n| n == 0 || n > 200)
-                || query.cursor.as_ref().is_some_and(|v| v.len() > 2048)
-            {
-                return denied();
-            }
             let mut params = form_urlencoded::Serializer::new(String::new());
-            if let Some(cursor) = query.cursor {
-                params.append_pair("cursor", &cursor);
-            }
-            if let Some(limit) = query.limit {
-                params.append_pair("limit", &limit.to_string());
+            for (name, value) in &query {
+                let text = match (name.as_str(), value) {
+                    (_, serde_json::Value::Null) => continue,
+                    ("cursor", serde_json::Value::String(v)) if v.len() <= 2048 => v.clone(),
+                    ("limit", serde_json::Value::Number(n))
+                        if n.as_u64().is_some_and(|n| (1..=200).contains(&n)) =>
+                    {
+                        n.to_string()
+                    }
+                    (name, serde_json::Value::String(v))
+                        if allowed.contains(&name) && v.len() <= 256 =>
+                    {
+                        v.clone()
+                    }
+                    (name, serde_json::Value::Number(n))
+                        if allowed.contains(&name) && (n.is_u64() || n.is_i64()) =>
+                    {
+                        n.to_string()
+                    }
+                    _ => return denied(),
+                };
+                params.append_pair(name, &text);
             }
             format!("{}?{}", path.trim_end_matches("/query"), params.finish())
         }
-        ("POST", path) => {
+        ("POST", path @ ("/v1/users/get" | "/v1/users/factors")) => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Target {
@@ -438,6 +476,52 @@ pub async fn middleware(
             let Ok(target) = serde_json::from_slice::<Target>(&bytes) else {
                 return denied();
             };
+            if !crate::config::valid_user_id(&target.id) {
+                return denied();
+            }
+            get_request = true;
+            if path == "/v1/users/get" {
+                format!("/v1/users/{}", target.id)
+            } else {
+                format!("/v1/users/{}/factors", target.id)
+            }
+        }
+        ("POST", "/v1/users/factors/reset") => {
+            let Ok(serde_json::Value::Object(mut body)) =
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+            else {
+                return denied();
+            };
+            let Some(serde_json::Value::String(id)) = body.remove("id") else {
+                return denied();
+            };
+            if !crate::config::valid_user_id(&id) {
+                return denied();
+            }
+            let Ok(rest) = serde_json::to_vec(&body) else {
+                return denied();
+            };
+            forwarded_body = Some(rest);
+            format!("/v1/users/{id}/factors/reset")
+        }
+        ("POST", path) => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Target {
+                id: String,
+                // The optional reason travels on to the native mutation.
+                #[serde(default)]
+                reason: Option<serde_json::Value>,
+            }
+            let Ok(target) = serde_json::from_slice::<Target>(&bytes) else {
+                return denied();
+            };
+            if let Some(reason) = &target.reason {
+                let Ok(rest) = serde_json::to_vec(&serde_json::json!({"reason": reason})) else {
+                    return denied();
+                };
+                forwarded_body = Some(rest);
+            }
             match path {
                 "/v1/users/disable" if crate::config::valid_user_id(&target.id) => {
                     format!("/v1/users/{}/disable", target.id)
@@ -460,13 +544,15 @@ pub async fn middleware(
     if !st.delegation_replay.admit(&assertion.nonce, now).await {
         return denied();
     }
-    let listing = original_path.ends_with("/query");
+    let listing = original_path.ends_with("/query") || get_request;
     req = Request::from_parts(
         parts,
         if let Some((_, body)) = &profile_publication {
             Body::from(body.clone())
         } else if read_body {
             Body::from(bytes.clone())
+        } else if let Some(body) = forwarded_body {
+            Body::from(body)
         } else if method == Method::POST && !listing {
             Body::from("{}")
         } else {

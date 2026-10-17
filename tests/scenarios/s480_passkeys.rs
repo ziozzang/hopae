@@ -1646,3 +1646,92 @@ fn s487_a8_removing_another_passkey_keeps_the_passwordless_session() {
     );
     assert_eq!(p.sql("SELECT COUNT(*) FROM sessions WHERE provider_id='hopae.passkey' AND terminated_at IS NULL"), 1);
 }
+
+// ---- 489: AAL 3 step-up rules (ADR-0018) -------------------------------------
+
+/// `app` requires AAL 3 under `/admin` (presenting at most 2), with the
+/// software token's attestation accepted for high-assurance registration.
+fn aal3_rule_stack() -> (
+    Pk,
+    WebauthnAuthenticator<webauthn_authenticator_rs::softtoken::SoftToken>,
+    tempfile::TempDir,
+) {
+    let (token, ca) = webauthn_authenticator_rs::softtoken::SoftToken::new(true).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let pem = dir.path().join("ca.pem");
+    std::fs::write(&pem, ca.to_pem().unwrap()).unwrap();
+    let p = Pk::start(json!({
+        "webauthn": {"high_assurance": {
+            "attestation_ca_files": [pem.to_str().unwrap()],
+            "aaguids": [webauthn_authenticator_rs::softtoken::AAGUID.to_string()]
+        }},
+        "apps": [{"app_id": "app",
+                  "step_up": [{"path_prefix": "/admin", "require": {"aal": 3, "max_age": 900}}]}]
+    }));
+    (p, WebauthnAuthenticator::new(token), dir)
+}
+
+#[test]
+fn s489_1_an_aal3_rule_is_met_only_by_a_high_assurance_key() {
+    let (p, mut key, _ca) = aal3_rule_stack();
+    // Registers the attested key, steps up with it at `/admin` (the page
+    // offers only that key) and returns the application's answer afterwards.
+    let clean = aal3_register_and_step_up(&p, &mut key);
+    assert_eq!(clean.status, 200, "{clean:?}");
+    assert_eq!(
+        clean.header("x-hopae-aal"),
+        Some("2"),
+        "the rule is met; the application did not opt into seeing AAL 3"
+    );
+    let again = p.verify("https://app.example.test/admin/y");
+    assert_eq!(again.status, 200, "the elevation still satisfies the rule");
+}
+
+#[test]
+fn s489_2_without_a_high_assurance_key_the_user_is_told_and_nothing_else_is_offered() {
+    let (mut p, _token, _ca) = aal3_rule_stack();
+    // A synced passkey registers fine but cannot meet the rule.
+    assert_eq!(p.register("Phone").status, 303);
+    let r = p.verify(ADMIN);
+    assert_eq!(r.status, 302, "{r:?}");
+    let to = path_of(r.location().unwrap());
+    let page = p.portal.get(&to);
+    assert_eq!(page.status, 403, "{page:?}");
+    assert!(page.body.contains("/security/passkeys"), "{}", page.body);
+    assert!(
+        !page.body.contains("data-webauthn"),
+        "no ceremony is offered"
+    );
+    assert!(!page.body.contains("factor=totp"));
+    // The authenticator-app route refuses the transaction as well.
+    let totp = p.portal.get(&format!("{to}&factor=totp"));
+    assert_ne!(totp.status, 200, "{totp:?}");
+}
+
+#[test]
+fn s489_a1_aal3_requirements_need_high_assurance_configuration() {
+    let idp = MockIdp::start("default");
+    let dir = tempfile::tempdir().unwrap();
+    let check = |over: Value| {
+        let cfg = Fixture::with("m1-basic", over).render(dir.path(), &idp);
+        let path = crate::support::write_config(dir.path(), &cfg.to_string());
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_hopae"))
+            .args(["--check", "--config"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string()
+                + &String::from_utf8_lossy(&out.stderr),
+        )
+    };
+    for over in [
+        json!({"webauthn": {}, "apps": [{"app_id": "app", "step_up": [{"path_prefix": "/v", "require": {"aal": 3}}]}]}),
+        json!({"webauthn": {}, "apps": [{"app_id": "app", "step_up": [{"path_prefix": "/v", "require": {"aal": 4}}]}]}),
+    ] {
+        let (ok, out) = check(over);
+        assert!(!ok, "{out}");
+        assert!(out.contains("require.aal"), "{out}");
+    }
+}

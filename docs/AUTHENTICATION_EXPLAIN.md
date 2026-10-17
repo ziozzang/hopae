@@ -1,6 +1,6 @@
 # Authentication explain API
 
-<!-- doc-rev: 2 -->
+<!-- doc-rev: 4 -->
 
 [Documentation](README.md) · [한국어](ko/AUTHENTICATION_EXPLAIN.md)
 
@@ -46,7 +46,7 @@ only, beside the rest of the [administration API](ADMIN.md).
 | `url` | The original URL the gateway would report (required, at most 2,048 bytes) |
 | `navigation` | `document` (default) or `other` (a fetch or API call) |
 | `session_id` | Evaluate this live session, as its handle on the URL's host would be evaluated |
-| `subject` | Instead of a session: a user ID, a `human1:` subject or an `s_` service principal (resolved as by the [subject directory](SUBJECT_DIRECTORY.md)) |
+| `subject` | Instead of a session: a user ID, a `human1:` subject, an `s_` service principal (resolved as by the [subject directory](SUBJECT_DIRECTORY.md)), or a Kubernetes workload as a SPIFFE ID (`spiffe://<td>/ns/<ns>/sa/<sa>`) or `system:serviceaccount:<ns>:<sa>` |
 | `client_ip`, `user_agent` | The request's client; without `client_ip` the session binding and profile networks are reported as not evaluated |
 | `at` | Unix seconds to evaluate at, at most 30 days from now (default now) |
 | `hypothetical` | The session a sign-in would create: `aal` (1 or 2, default 1), `factors` (factor kinds such as `totp`, `webauthn`, `external`), `auth_age_seconds`, `provider_id` (default the subject's first linked provider, else the first enabled provider), `auth_time_source` (`hopae_completion` default, `provider_claim`) |
@@ -75,7 +75,18 @@ the current configuration snapshot and service profile publication:
    workload principal at AAL 0 cannot satisfy (`machine_step_up`); a profile
    without session fallback refuses browser sessions
    (`service_credential_required`); a service principal on a host without a
-   profile (`service_profile_absent`);
+   profile (`service_profile_absent`); for a Kubernetes workload subject, the
+   workload connector's predicates in the live order — subject form and
+   trust domain (`workload_subject_invalid`), network (`network_denied`),
+   namespace and ServiceAccount allowlists
+   (`workload_namespace_not_allowed`, `workload_service_account_not_allowed`),
+   the legacy window (`workload_legacy_window_expired`), key freshness
+   (`workload_keys_unavailable`) and the revocation index
+   (`workload_revocation_stale`, `workload_service_account_absent`, or
+   `workload_revocation_not_evaluated` without a watch); the token checks
+   themselves need the real token (`workload_token_not_simulated`) and the
+   trace reports the SPIFFE ID and, when the revocation index knows the
+   ServiceAccount UID, the `wk2:` principal and wire subject;
 5. for a session: termination, its live handle on the host (`handle_absent`),
    the lifetime state machine (`idle`, `absolute`, `clock_skew`), the binding
    policy (`binding_ip`, `binding_ua`, or `binding_not_evaluated`), the user's
@@ -159,6 +170,15 @@ default); a console with its own catalogue uses `message_key`. The catalogue:
 | `remote_verifier` | A remote connector verifies this credential at request time; its verdict cannot be simulated. |
 | `machine_step_up` | Service and workload principals have AAL 0 and cannot satisfy a step-up rule. |
 | `authority_unavailable` | Service authentication is being republished; requests are answered as unavailable. |
+| `workload_subject_invalid` | The workload is not a SPIFFE ID of this trust domain or a system:serviceaccount name. |
+| `workload_namespace_not_allowed` | The workload's namespace is not allowed by the service profile. |
+| `workload_service_account_not_allowed` | The ServiceAccount is not in the profile's ServiceAccount allowlist. |
+| `workload_service_account_absent` | The ServiceAccount does not exist in the current revocation index. |
+| `workload_keys_unavailable` | The issuer's signing keys are unavailable or older than the staleness bound. |
+| `workload_revocation_stale` | The revocation index is not current within its staleness bound. |
+| `workload_legacy_window_expired` | The legacy Pod-bound subject compatibility window has ended. |
+| `workload_revocation_not_evaluated` | No revocation watch is configured; deleted ServiceAccounts are refused only at token expiry. |
+| `workload_token_not_simulated` | Token checks (signature, audience, lifetime, bound objects) need the real token and are not simulated. |
 
 ## Management API, console and observability
 

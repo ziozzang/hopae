@@ -23,6 +23,12 @@ hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 libc = "0.2"
 tower = { version = "0.5", features = ["util"] }
+# Admin mTLS server that exposes the verified client certificate to the
+# service-credential binding, and the reloading TLS acceptors (same versions
+# hangang-runtime already pulls in).
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 anyhow = "1"
 askama = "0.14"
 arc-swap = "1"
@@ -53,6 +59,7 @@ deadpool-postgres = { version = "0.14", optional = true }
 tokio-postgres-rustls = { version = "0.14", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_path_to_error = "0.1"
 sha1 = "0.10"
 sha2 = "0.10"
 zeroize = "1"
