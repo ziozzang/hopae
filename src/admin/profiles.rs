@@ -19,7 +19,10 @@ pub async fn get(
     let store = state.profile_store.clone();
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        crate::auth_gateway::publication::read(&store.conn())
+        use crate::store::meta::MetaDb as _;
+        store
+            .meta()
+            .meta_read(|tx| crate::auth_gateway::publication::read(tx))
     });
     let result = tokio::time::timeout(state.cfg.query_budget, task).await;
     let mut response = match result {
@@ -138,10 +141,10 @@ pub async fn put(
                 .validate()
                 .map_err(|_| crate::auth_gateway::publication::Error::Invalid)
         };
-        let guard = |connection: &rusqlite::Connection| {
+        let guard = |tx: &dyn crate::store::meta::MetaTx| {
             state
                 .profile_store
-                .fence_profile_actor(connection, &actor, &policy)
+                .fence_meta(tx, &actor, &policy)
                 .map_err(|error| match error {
                     crate::store::StoreError::Conflict(_) => {
                         crate::auth_gateway::publication::Error::Denied
@@ -149,7 +152,7 @@ pub async fn put(
                     _ => crate::auth_gateway::publication::Error::Storage,
                 })
         };
-        let mut connection = state.profile_store.conn();
+        let mut connection = state.profile_store.meta();
         authority.publish_authorized(
             &mut connection,
             expected,

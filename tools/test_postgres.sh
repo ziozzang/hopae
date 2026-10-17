@@ -28,3 +28,5 @@ done
 docker exec "$name" pg_isready -U hopae -d hopae -h 127.0.0.1 >/dev/null
 export HOPAE_TEST_POSTGRES_URL="host=127.0.0.1 port=${port} user=hopae password=${password} dbname=hopae"
 cargo test -j "${CARGO_JOBS:-4}" --locked --lib --features postgres store::conformance "$@"
+# Owner-level PostgreSQL races that live next to their owner code.
+cargo test -j "${CARGO_JOBS:-4}" --locked --lib --features postgres s600_28_postgres_connections "$@"

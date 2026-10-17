@@ -154,7 +154,7 @@ impl Runtime {
             current()?;
             let value = plan.project_observed(
                 chain,
-                &mut runtime.store.conn(),
+                &mut runtime.store.meta(),
                 runtime.receiver.clone(),
                 &|_| current(),
                 &|reference| runtime.resources.resolve(reference),

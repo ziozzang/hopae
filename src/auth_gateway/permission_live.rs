@@ -965,9 +965,11 @@ mod tests {
         (db, keys, plans.reader().load_full(), request)
     }
     fn local_identity(
-        db: &rusqlite::Connection,
+        db: &dyn crate::store::meta::MetaTx,
     ) -> Result<(), super::super::receipt_keys::Refused> {
         let revision: String = db
+            .sqlite()
+            .unwrap()
             .query_row(
                 "SELECT value FROM meta WHERE key='owned_identity_revision'",
                 [],
@@ -1080,14 +1082,16 @@ mod tests {
         let admission =
             projection_receiver::verify(observed, &client, &keys.verifier(), 104).unwrap();
         let checks = std::cell::Cell::new(0);
-        let guard = |db: &rusqlite::Connection| {
+        let guard = |db: &dyn crate::store::meta::MetaTx| {
             checks.set(checks.get() + 1);
             if checks.get() == 2 {
-                db.execute(
-                    "UPDATE meta SET value='2' WHERE key='owned_identity_revision'",
-                    [],
-                )
-                .map_err(|_| super::super::receipt_keys::Refused)?;
+                db.sqlite()
+                    .unwrap()
+                    .execute(
+                        "UPDATE meta SET value='2' WHERE key='owned_identity_revision'",
+                        [],
+                    )
+                    .map_err(|_| super::super::receipt_keys::Refused)?;
             }
             local_identity(db)
         };

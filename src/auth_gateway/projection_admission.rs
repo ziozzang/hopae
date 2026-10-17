@@ -6,7 +6,6 @@ use super::{
     receipt_keys::Refused,
     receipt_replay,
 };
-use rusqlite::{Connection, Transaction};
 use sha2::{Digest as _, Sha256};
 
 pub struct Input<'a> {
@@ -88,12 +87,12 @@ impl Admission {
     /// Consume both receipts and associated owner DB work in one transaction.
     /// Guard must inspect authoritative current state twice. Credential output and
     /// irreversible network effects must occur only after this returns success.
-    pub fn consume<T>(
+    pub fn consume<T, D: crate::store::meta::MetaDb>(
         self,
-        db: &mut Connection,
+        db: &mut D,
         clock: &dyn Fn() -> u64,
-        guard: &dyn Fn(&Connection) -> Result<(), Refused>,
-        operation: impl FnOnce(&Transaction<'_>) -> Result<T, Refused>,
+        guard: &dyn Fn(&dyn crate::store::meta::MetaTx) -> Result<(), Refused>,
+        operation: impl FnOnce(&dyn crate::store::meta::MetaTx) -> Result<T, Refused>,
     ) -> Result<T, Refused> {
         receipt_replay::consume_group(
             db,
@@ -115,6 +114,7 @@ mod tests {
         receipt_binding::{self, Identity},
         receipt_keys::Key,
     };
+    use rusqlite::Connection;
     use rusqlite::OptionalExtension;
     struct Fixture {
         db: Connection,
@@ -309,11 +309,13 @@ mod tests {
             f.admission()
                 .unwrap()
                 .consume(&mut f.db, &|| clock.get(), &|_| Ok(()), |tx| {
-                    tx.execute(
-                        "INSERT INTO meta(key,value) VALUES('issued-fixture','1')",
-                        [],
-                    )
-                    .map_err(|_| Refused)?;
+                    tx.sqlite()
+                        .unwrap()
+                        .execute(
+                            "INSERT INTO meta(key,value) VALUES('issued-fixture','1')",
+                            [],
+                        )
+                        .map_err(|_| Refused)?;
                     clock.set(900); // Authentication expires first, while permit remains valid.
                     Ok(())
                 });
@@ -331,11 +333,13 @@ mod tests {
         f.admission()
             .unwrap()
             .consume(&mut f.db, &|| 102, &|_| Ok(()), |tx| {
-                tx.execute(
-                    "INSERT INTO meta(key,value) VALUES('issued-fixture','1')",
-                    [],
-                )
-                .map_err(|_| Refused)?;
+                tx.sqlite()
+                    .unwrap()
+                    .execute(
+                        "INSERT INTO meta(key,value) VALUES('issued-fixture','1')",
+                        [],
+                    )
+                    .map_err(|_| Refused)?;
                 Ok(())
             })
             .unwrap();
@@ -343,7 +347,7 @@ mod tests {
         assert!(
             f.admission()
                 .unwrap()
-                .consume::<()>(&mut f.db, &|| 103, &|_| Ok(()), |_| panic!(
+                .consume::<(), _>(&mut f.db, &|| 103, &|_| Ok(()), |_| panic!(
                     "replay reached owner work"
                 ))
                 .is_err()
@@ -361,7 +365,7 @@ mod tests {
         assert!(
             f.admission()
                 .unwrap()
-                .consume::<()>(&mut f.db, &|| 103, &|_| Ok(()), |_| panic!(
+                .consume::<(), _>(&mut f.db, &|| 103, &|_| Ok(()), |_| panic!(
                     "used permission reached work"
                 ))
                 .is_err()
@@ -413,8 +417,8 @@ mod tests {
                     let admitted = verify(verifier, Input { authentication_context: auth_context, authentication_receipt: auth, permission_context, permission_receipt: permission, permit }, 102).unwrap();
                     barrier.wait();
                     admitted.consume(&mut db, &|| 102, &|_| Ok(()), |tx| {
-                        let count = tx.query_row("SELECT value FROM meta WHERE key='issued-fixture'", [], |r| r.get::<_,String>(0)).optional().map_err(|_| Refused)?.unwrap_or_else(|| "0".into()).parse::<u64>().map_err(|_| Refused)?;
-                        tx.execute("INSERT INTO meta(key,value) VALUES('issued-fixture',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [(count+1).to_string()]).map_err(|_| Refused)?;
+                        let count = tx.sqlite().unwrap().query_row("SELECT value FROM meta WHERE key='issued-fixture'", [], |r| r.get::<_,String>(0)).optional().map_err(|_| Refused)?.unwrap_or_else(|| "0".into()).parse::<u64>().map_err(|_| Refused)?;
+                        tx.sqlite().unwrap().execute("INSERT INTO meta(key,value) VALUES('issued-fixture',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [(count+1).to_string()]).map_err(|_| Refused)?;
                         Ok(())
                     }).is_ok()
                 }));
@@ -818,7 +822,7 @@ mod tests {
         assert!(reader.load().project(f.admission().unwrap(), &mut f.db, &|| 102, &|db| {
             calls.set(calls.get()+1);
             if calls.get() == 2 {
-                db.execute("UPDATE meta SET value=json_set(value,'$.configuration.plans[0].resource','billing') WHERE key='projection_plan_authority_v1'", []).map_err(|_| Refused)?;
+                db.sqlite().unwrap().execute("UPDATE meta SET value=json_set(value,'$.configuration.plans[0].resource','billing') WHERE key='projection_plan_authority_v1'", []).map_err(|_| Refused)?;
             }
             Ok(())
         }, &|_| Ok(zeroize::Zeroizing::new("owned-example-token".into()))).is_err());

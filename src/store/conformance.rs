@@ -49,7 +49,7 @@ pub(crate) struct Backend {
 }
 
 impl Backend {
-    async fn cleanup(self) {
+    pub(crate) async fn cleanup(self) {
         #[cfg(feature = "postgres")]
         if let Some((pg, schema)) = self.pg {
             let client = pg.raw().await;
@@ -4909,6 +4909,169 @@ async fn app_store_dispatch(b: &Backend) {
 async fn s600_27_the_application_store_handle_dispatches_on_both_backends() {
     for b in backends().await {
         app_store_dispatch(&b).await;
+        b.cleanup().await;
+    }
+}
+
+// ---- slice 5 step 3: the native meta owners -------------------------------
+
+fn receipt_key(epoch: u64, seed: u8) -> crate::auth_gateway::receipt_keys::Key {
+    crate::auth_gateway::receipt_keys::Key {
+        issuer_ref: "owned".into(),
+        purpose: crate::auth_gateway::receipt::Purpose::Authentication,
+        epoch,
+        public_key: ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+            .verifying_key()
+            .to_bytes(),
+    }
+}
+
+/// Receipt keys, profile and projection publication through the store's
+/// meta handle: the owners' one-transaction semantics on either backend.
+fn meta_owners(app: super::Store) {
+    use super::meta::MetaDb;
+    use crate::auth_gateway::receipt_keys::Refused;
+    use crate::auth_gateway::{
+        projection_authority, publication, receipt_authority, receipt_key_store,
+    };
+    let name = app.backend();
+    let mut db = app.meta();
+    // Receipt key history: compare-and-swap on the revision, floors kept.
+    let r1 = receipt_key_store::publish(&mut db, 0, &[receipt_key(1, 7)], "operator", &|_| Ok(()))
+        .unwrap();
+    assert_eq!(r1.revision(), 1, "{name}");
+    assert!(
+        receipt_key_store::publish(&mut db, 0, &[receipt_key(1, 7)], "operator", &|_| Ok(()))
+            .is_err(),
+        "{name}: stale"
+    );
+    assert!(
+        db.meta_read(|tx| receipt_key_store::load(tx, 2)).is_err(),
+        "{name}: minimum revision"
+    );
+    // A guard refusing after the writes rolls everything back.
+    let calls = std::cell::Cell::new(0);
+    let late = |_: &dyn super::meta::MetaTx| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 2 {
+            Err(Refused)
+        } else {
+            Ok(())
+        }
+    };
+    assert!(receipt_key_store::publish(&mut db, 1, &[], "operator", &late).is_err());
+    assert_eq!(
+        db.meta_read(|tx| receipt_key_store::load(tx, 0))
+            .unwrap()
+            .unwrap()
+            .revision(),
+        1,
+        "{name}: rolled back"
+    );
+    // The owner: an unchanged reconcile keeps the revision, a changed set moves it.
+    let mut owner = db
+        .meta_read(|tx| receipt_authority::Authority::load(tx, 0))
+        .unwrap();
+    assert_eq!(
+        owner
+            .reconcile(&mut db, &[receipt_key(1, 7)], "startup", &|_| Ok(()))
+            .unwrap(),
+        1,
+        "{name}"
+    );
+    assert_eq!(
+        owner
+            .reconcile(&mut db, &[receipt_key(2, 8)], "startup", &|_| Ok(()))
+            .unwrap(),
+        2,
+        "{name}"
+    );
+    assert!(owner.verifier().capture().is_ok());
+    // Profile publication: CAS, tombstone, guard rollback with no audit row.
+    let doc = publication::publish(&mut db, 0, None, "operator").unwrap();
+    assert_eq!(doc.revision, 1);
+    assert!(
+        matches!(
+            publication::publish(&mut db, 0, None, "operator"),
+            Err(publication::Error::Conflict)
+        ),
+        "{name}"
+    );
+    let calls = std::cell::Cell::new(0);
+    let denied = |_: &dyn super::meta::MetaTx| {
+        calls.set(calls.get() + 1);
+        if calls.get() == 2 {
+            Err(publication::Error::Denied)
+        } else {
+            Ok(())
+        }
+    };
+    assert!(matches!(
+        publication::publish_guarded(&mut db, 1, None, "operator", &denied),
+        Err(publication::Error::Denied)
+    ));
+    assert_eq!(
+        db.meta_read(|tx| publication::read(tx))
+            .unwrap()
+            .unwrap()
+            .revision,
+        1,
+        "{name}"
+    );
+    assert!(
+        db.meta_read(|tx| tx.get("authentication_profile_publication_audit:2"))
+            .unwrap()
+            .is_none(),
+        "{name}: no audit"
+    );
+    // Projection plan authority: a disabled tombstone at revision 1.
+    let mut plans = db
+        .meta_read(|tx| projection_authority::Authority::load(tx, 0))
+        .unwrap();
+    let doc = plans
+        .publish(&mut db, 0, None, "operator", &|_| Ok(()))
+        .unwrap();
+    assert_eq!(
+        (doc.revision, doc.configuration.is_none()),
+        (1, true),
+        "{name}"
+    );
+    assert_eq!(plans.reader().load().revision(), 1);
+    drop(db);
+    // Concurrent publishers on one expected revision: exactly one commits.
+    let barrier = std::sync::Barrier::new(6);
+    let won = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..6)
+            .map(|_| {
+                let (app, barrier) = (app.clone(), &barrier);
+                scope.spawn(move || {
+                    // Wait first: the SQLite handle is the utility connection's lock.
+                    barrier.wait();
+                    let mut db = app.meta();
+                    publication::publish(&mut db, 1, None, "racer").is_ok()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|w| *w)
+            .count()
+    });
+    assert_eq!(won, 1, "{name}: one publisher wins");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_28_native_meta_owners_agree_on_both_backends() {
+    for b in backends().await {
+        let app = b.app.clone();
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let _guard = handle.enter();
+            meta_owners(app)
+        })
+        .await
+        .unwrap();
         b.cleanup().await;
     }
 }

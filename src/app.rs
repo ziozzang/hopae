@@ -673,13 +673,15 @@ async fn bind_environment(
             .with_context(|| format!("opening store {}", store_path.display()))?
     };
     let receipt_authority = {
-        let mut connection = store.conn();
-        let mut authority = crate::auth_gateway::receipt_authority::Authority::load(&connection, 0)
+        use crate::store::meta::MetaDb as _;
+        let mut db = store.meta();
+        let mut authority = db
+            .meta_read(|tx| crate::auth_gateway::receipt_authority::Authority::load(tx, 0))
             .map_err(|_| anyhow::anyhow!("native receipt key history unavailable"))?;
         // Native validated configuration owns startup publication; the instance
         // lock is held. Request-role publication must use its real actor guard.
         authority
-            .reconcile(&mut connection, &receiver_keys, "startup", &|_| Ok(()))
+            .reconcile(&mut db, &receiver_keys, "startup", &|_| Ok(()))
             .map_err(|_| anyhow::anyhow!("native receipt key history refused configuration"))?;
         Arc::new(std::sync::Mutex::new(authority))
     };
@@ -719,14 +721,19 @@ async fn bind_environment(
     let digest = config_digest(cfg);
     let now = env.clock.now();
     let (changed, _) = {
-        let conn = store.conn();
-        let changed = state::config_changed(&conn, &digest).context("recording config digest")?;
-        state::track_caller_key_next(
-            &conn,
-            cfg.gateway.caller_key_next_env.is_some(),
-            unix_secs(SystemClock.now()),
-        )
-        .context("recording caller key overlap")?;
+        use crate::store::meta::MetaDb as _;
+        let mut db = store.meta();
+        let changed = db
+            .meta_write(&std::cell::Cell::new(false), |tx| {
+                let changed = state::config_changed(tx, &digest)?;
+                state::track_caller_key_next(
+                    tx,
+                    cfg.gateway.caller_key_next_env.is_some(),
+                    unix_secs(SystemClock.now()),
+                )?;
+                Ok::<_, crate::store::meta::MetaError>(changed)
+            })
+            .context("recording config digest and caller key overlap")?;
         (changed, ())
     };
     let directory = store.directory();
@@ -838,8 +845,9 @@ async fn bind_environment(
         .context("binding portal listener")?;
     let portal_addr = portal.local_addr()?;
     let authentication_authority = {
-        let mut connection = store.conn();
-        let durable = crate::auth_gateway::publication::read(&connection)?;
+        use crate::store::meta::MetaDb as _;
+        let mut connection = store.meta();
+        let durable = connection.meta_read(|tx| crate::auth_gateway::publication::read(tx))?;
         if cfg.authentication_gateway.is_some() || durable.is_some() {
             let validate = |profiles: &crate::auth_gateway::runtime::Config| {
                 let mut candidate = cfg.clone();
@@ -861,8 +869,10 @@ async fn bind_environment(
         }
     };
     let projection_authority = {
-        let mut connection = store.conn();
-        let durable = crate::auth_gateway::projection_authority::read(&connection)
+        use crate::store::meta::MetaDb as _;
+        let mut connection = store.meta();
+        let durable = connection
+            .meta_read(|tx| crate::auth_gateway::projection_authority::read(tx))
             .map_err(|_| anyhow::anyhow!("invalid durable credential projection state"))?;
         if let Some(configuration) = durable.as_ref().and_then(|d| d.configuration.as_ref()) {
             crate::auth_gateway::projection::validate_capabilities(
@@ -873,7 +883,8 @@ async fn bind_environment(
                 anyhow::anyhow!("durable credential projection exceeds declared capabilities")
             })?;
         }
-        let mut owner = crate::auth_gateway::projection_authority::Authority::load(&connection, 0)
+        let mut owner = connection
+            .meta_read(|tx| crate::auth_gateway::projection_authority::Authority::load(tx, 0))
             .map_err(|_| anyhow::anyhow!("credential projection owner unavailable"))?;
         if durable.is_none()
             && let Some(configuration) = &cfg.credential_projection
@@ -1349,9 +1360,11 @@ impl Bound {
         let _ = self.services.store.barrier().await;
         let store = self.services.store.clone();
         let _ = tokio::task::spawn_blocking(move || {
-            store
-                .conn()
-                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            // SQLite only: fold the write-ahead log back into the database file.
+            store.sqlite().map(|s| {
+                s.conn()
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+            })
         })
         .await;
         tracing::info!("shutdown complete");
@@ -1473,8 +1486,10 @@ pub async fn import_providers_cli(
     store.barrier().await.ok();
     let s = store.clone();
     let _ = tokio::task::spawn_blocking(move || {
-        s.conn()
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        s.sqlite().map(|s| {
+            s.conn()
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        })
     })
     .await;
     Ok(report)

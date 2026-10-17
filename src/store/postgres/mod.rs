@@ -12,6 +12,7 @@ mod factors;
 mod groups;
 mod handoff;
 pub mod import;
+pub mod meta;
 mod passkeys;
 mod traits;
 mod write;
@@ -66,6 +67,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0007_slice4_apps",
         include_str!("migrations/0007_slice4_apps.sql"),
     ),
+    (
+        8,
+        "0008_slice5_meta",
+        include_str!("migrations/0008_slice5_meta.sql"),
+    ),
 ];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
 /// `pg_advisory_xact_lock` key of the migration runner ("hopae-mi").
@@ -107,6 +113,8 @@ pub struct PgStore {
     statement_timeout_ms: u64,
     /// Bounds the diagnostic writes in flight (SQLite's queue capacity).
     diag: Arc<tokio::sync::Semaphore>,
+    /// The runtime the pool's connections live on (blocking owner calls use it).
+    handle: tokio::runtime::Handle,
 }
 
 /// Map a driver error to the store's error classes; never echo values.
@@ -223,6 +231,7 @@ impl PgStore {
             diag: Arc::new(tokio::sync::Semaphore::new(
                 crate::store::sqlite::DIAGNOSTIC_QUEUE_CAP,
             )),
+            handle: tokio::runtime::Handle::current(),
         };
         if let Some(schema) = &options.search_path {
             let client = store.pool.get().await.map_err(pool_err)?;

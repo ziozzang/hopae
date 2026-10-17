@@ -11,6 +11,7 @@ pub mod app_store;
 pub mod conformance;
 pub mod core;
 pub mod hooks;
+pub mod meta;
 pub mod passkeys;
 #[cfg(feature = "postgres")]
 pub mod postgres;

@@ -21,7 +21,10 @@ pub async fn get(
     let store = state.profile_store.clone();
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        crate::auth_gateway::projection_authority::read(&store.conn())
+        use crate::store::meta::MetaDb as _;
+        store
+            .meta()
+            .meta_read(|tx| crate::auth_gateway::projection_authority::read(tx))
     });
     let mut response = match tokio::time::timeout(state.cfg.query_budget, task).await {
         Ok(Ok(Ok(document))) => {
@@ -111,17 +114,19 @@ pub async fn put(
         if owner.reader().load().revision() != expected {
             return Err(StatusCode::CONFLICT);
         }
-        let mut connection = state.profile_store.conn();
-        let durable = crate::auth_gateway::projection_authority::read(&connection)
+        use crate::store::meta::MetaDb as _;
+        let mut connection = state.profile_store.meta();
+        let durable = connection
+            .meta_read(|tx| crate::auth_gateway::projection_authority::read(tx))
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         if durable.as_ref().map_or(0, |d| d.revision) != expected {
             return Err(StatusCode::CONFLICT);
         }
         let denied = std::cell::Cell::new(false);
-        let guard = |db: &rusqlite::Connection| {
+        let guard = |db: &dyn crate::store::meta::MetaTx| {
             state
                 .profile_store
-                .fence_profile_actor(db, &actor, &policy)
+                .fence_meta(db, &actor, &policy)
                 .map_err(|error| {
                     if matches!(error, crate::store::StoreError::Conflict(_)) {
                         denied.set(true);

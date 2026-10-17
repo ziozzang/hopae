@@ -891,6 +891,39 @@ impl AppStore {
         }
     }
 
+    /// The meta connection of the native owners (blocking; see `store::meta`).
+    pub fn meta(&self) -> super::meta::MetaHandle<'_> {
+        match self {
+            AppStore::Sqlite(s) => super::meta::MetaHandle::Sqlite(s.conn()),
+            #[cfg(feature = "postgres")]
+            AppStore::Postgres(p) => {
+                super::meta::MetaHandle::Postgres(super::postgres::meta::PgMeta::new(p.clone()))
+            }
+        }
+    }
+
+    /// The administrator fence (ADR-0016) inside an open meta transaction.
+    pub fn fence_meta(
+        &self,
+        tx: &dyn super::meta::MetaTx,
+        actor: &Actor,
+        policy: &ActorPolicy,
+    ) -> StoreResult<()> {
+        match self {
+            AppStore::Sqlite(s) => {
+                let c = tx
+                    .sqlite()
+                    .ok_or(StoreError::Unavailable("foreign meta transaction".into()))?;
+                s.fence_profile_actor(c, actor, policy)
+            }
+            #[cfg(feature = "postgres")]
+            AppStore::Postgres(_) => tx
+                .postgres()
+                .ok_or(StoreError::Unavailable("foreign meta transaction".into()))?
+                .fence(actor, policy),
+        }
+    }
+
     /// Wait until every write queued before this call has committed.
     pub async fn barrier(&self) -> StoreResult<()> {
         match self {
@@ -1158,19 +1191,6 @@ impl AppStore {
             }
             #[cfg(feature = "postgres")]
             AppStore::Postgres(_) => Err(unported("native primary reauthentication")),
-        }
-    }
-
-    pub(crate) fn fence_profile_actor(
-        &self,
-        connection: &rusqlite::Connection,
-        actor: &Actor,
-        policy: &ActorPolicy,
-    ) -> StoreResult<()> {
-        match self {
-            AppStore::Sqlite(s) => s.fence_profile_actor(connection, actor, policy),
-            #[cfg(feature = "postgres")]
-            AppStore::Postgres(_) => Err(unported("profile publication")),
         }
     }
 }

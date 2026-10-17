@@ -6,8 +6,8 @@ use super::{
     receipt_key_store,
     receipt_keys::{Key, Refused, Registry},
 };
+use crate::store::meta::{MetaDb, MetaTx};
 use arc_swap::ArcSwapOption;
-use rusqlite::Connection;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -99,8 +99,8 @@ fn replay_key(issuer: &str, claims: &super::receipt::Claims) -> [u8; 32] {
     hash.finalize().into()
 }
 impl Authority {
-    pub fn load(connection: &Connection, minimum_revision: u64) -> Result<Self, Refused> {
-        let registry = receipt_key_store::load(connection, minimum_revision)?.map(Arc::new);
+    pub fn load(db: &dyn MetaTx, minimum_revision: u64) -> Result<Self, Refused> {
+        let registry = receipt_key_store::load(db, minimum_revision)?.map(Arc::new);
         Ok(Self {
             available: Arc::new(AtomicBool::new(true)),
             snapshot: Arc::new(ArcSwapOption::from(registry)),
@@ -114,12 +114,12 @@ impl Authority {
     }
     /// Startup/configuration reconciliation preserves the exact reader on an
     /// unchanged set. Durable retirement floors still govern every transition.
-    pub fn reconcile(
+    pub fn reconcile<D: MetaDb>(
         &mut self,
-        connection: &mut Connection,
+        db: &mut D,
         desired: &[Key],
         actor: &str,
-        guard: &dyn Fn(&Connection) -> Result<(), Refused>,
+        guard: &dyn Fn(&dyn MetaTx) -> Result<(), Refused>,
     ) -> Result<u64, Refused> {
         if !self.available.load(Ordering::Acquire)
             || actor.is_empty()
@@ -134,17 +134,14 @@ impl Authority {
             registry.active_matches(desired)
         });
         if !unchanged {
-            return self.publish(connection, revision, desired, actor, guard);
+            return self.publish(db, revision, desired, actor, guard);
         }
         let expected = current
             .as_ref()
             .map(|registry| registry.encode())
             .transpose()?;
-        let transaction = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|_| Refused)?;
-        let matches = |db: &Connection| -> Result<(), Refused> {
-            let actual = receipt_key_store::load(db, revision)?
+        let matches = |tx: &dyn MetaTx| -> Result<(), Refused> {
+            let actual = receipt_key_store::load(tx, revision)?
                 .map(|registry| registry.encode())
                 .transpose()?;
             if actual != expected {
@@ -152,22 +149,23 @@ impl Authority {
             }
             Ok(())
         };
-        guard(&transaction)?;
-        matches(&transaction)?;
-        guard(&transaction)?;
-        matches(&transaction)?;
-        transaction.commit().map_err(|_| Refused)?;
+        db.meta_write(&std::cell::Cell::new(false), |tx| {
+            guard(tx)?;
+            matches(tx)?;
+            guard(tx)?;
+            matches(tx)
+        })?;
         Ok(revision)
     }
     /// Exclusive mutable ownership serializes commit/install order. Caller must
     /// retain this authority rather than constructing independent DB writers.
-    pub fn publish(
+    pub fn publish<D: MetaDb>(
         &mut self,
-        connection: &mut Connection,
+        db: &mut D,
         expected: u64,
         desired: &[Key],
         actor: &str,
-        guard: &dyn Fn(&Connection) -> Result<(), Refused>,
+        guard: &dyn Fn(&dyn MetaTx) -> Result<(), Refused>,
     ) -> Result<u64, Refused> {
         let previous = self.snapshot.load_full();
         if previous.as_ref().map_or(0, |registry| registry.revision()) != expected
@@ -186,7 +184,7 @@ impl Authority {
         }
         let commit_attempted = std::cell::Cell::new(false);
         let registry = match receipt_key_store::publish_with_commit_state(
-            connection,
+            db,
             expected,
             desired,
             actor,
@@ -195,10 +193,14 @@ impl Authority {
         ) {
             Ok(registry) => registry,
             Err(error) => {
+                // A definite rollback to the exact prior registry reopens readers.
                 if !commit_attempted.get()
-                    && connection.is_autocommit()
-                    && receipt_key_store::load(connection, expected)
-                        .and_then(|registry| registry.map(|registry| registry.encode()).transpose())
+                    && db
+                        .meta_read(|tx| {
+                            receipt_key_store::load(tx, expected).and_then(|registry| {
+                                registry.map(|registry| registry.encode()).transpose()
+                            })
+                        })
                         .is_ok_and(|current| current == before)
                 {
                     self.available.store(true, Ordering::Release);
@@ -303,6 +305,7 @@ mod tests {
         receipt_binding::{self, Identity},
     };
     use super::*;
+    use rusqlite::Connection;
     fn descriptor(seed: u8, epoch: u64) -> Key {
         Key {
             issuer_ref: "owned".into(),
@@ -432,7 +435,9 @@ mod tests {
         assert!(
             owner
                 .publish(&mut db, 1, &[], "operator", &|tx| {
-                    tx.execute("INSERT INTO child(id) VALUES(42)", [])
+                    tx.sqlite()
+                        .unwrap()
+                        .execute("INSERT INTO child(id) VALUES(42)", [])
                         .map_err(|_| Refused)?;
                     Ok(())
                 })
@@ -556,7 +561,7 @@ mod tests {
         let calls = std::cell::Cell::new(0);
         assert!(owner.reconcile(&mut db,&[descriptor(7,1)],"startup",&|tx| {
             calls.set(calls.get()+1);
-            if calls.get()==2 {tx.execute("UPDATE meta SET value='null' WHERE key='projection_receipt_registry_v1'",[]).map_err(|_|Refused)?;}
+            if calls.get()==2 {tx.sqlite().unwrap().execute("UPDATE meta SET value='null' WHERE key='projection_receipt_registry_v1'",[]).map_err(|_|Refused)?;}
             Ok(())
         }).is_err());
         assert!(Arc::ptr_eq(&before, &owner.snapshot.load_full().unwrap()));
@@ -580,7 +585,7 @@ mod tests {
                 .reconcile(&mut db, &[descriptor(7, 1)], "startup", &|tx| {
                     calls.set(calls.get() + 1);
                     if calls.get() == 2 {
-                        tx.execute(
+                        tx.sqlite().unwrap().execute(
                             "UPDATE meta SET value=?1 WHERE key='projection_receipt_registry_v1'",
                             [&forged],
                         )

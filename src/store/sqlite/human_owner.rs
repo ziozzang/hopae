@@ -121,7 +121,7 @@ impl Ledger<'_> {
         ) -> Result<(), crate::auth_gateway::receipt_keys::Refused>,
         final_guard: &dyn Fn() -> Result<(), crate::auth_gateway::receipt_keys::Refused>,
         operation: impl FnOnce(
-            &rusqlite::Transaction<'_>,
+            &dyn crate::store::meta::MetaTx,
         ) -> Result<T, crate::auth_gateway::receipt_keys::Refused>,
     ) -> Result<T, crate::auth_gateway::receipt_keys::Refused> {
         let owner = &self.owner;
@@ -129,7 +129,12 @@ impl Ledger<'_> {
             self.connection,
             proofs,
             clock,
-            &|connection| guard(&LedgerSnapshot { connection, owner }),
+            &|tx| {
+                let connection = tx
+                    .sqlite()
+                    .ok_or(crate::auth_gateway::receipt_keys::Refused)?;
+                guard(&LedgerSnapshot { connection, owner })
+            },
             final_guard,
             operation,
         )

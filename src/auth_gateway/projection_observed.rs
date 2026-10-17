@@ -444,12 +444,12 @@ impl Admission {
             after_reply_allocation: None,
         })
     }
-    pub(crate) fn project(
+    pub(crate) fn project<D: crate::store::meta::MetaDb>(
         self,
         projector: &projection::Projector,
-        db: &mut rusqlite::Connection,
+        db: &mut D,
         clock: Arc<ReceiverClock>,
-        guard: &dyn Fn(&rusqlite::Connection) -> Result<(), Refused>,
+        guard: &dyn Fn(&dyn crate::store::meta::MetaTx) -> Result<(), Refused>,
         resolve: &dyn Fn(&str) -> Result<zeroize::Zeroizing<String>, Refused>,
     ) -> Result<Output, Refused> {
         let (name, value) = receipt_replay::consume_observed_pair(
@@ -872,40 +872,41 @@ mod tests {
         let fixture = Fixture::with_db(rusqlite::Connection::open(file.path()).unwrap());
         let admission = fixture.admission(130, 100, 9_000_000, 700);
         let barrier = std::sync::Barrier::new(8);
-        let successes = std::thread::scope(|scope| {
-            let mut workers = Vec::new();
-            for _ in 0..8 {
-                let barrier = &barrier;
-                let admission = &admission;
-                let clock = &fixture.clock;
-                let path = file.path();
-                workers.push(scope.spawn(move || {
-                    let mut db = rusqlite::Connection::open(path).unwrap();
-                    db.busy_timeout(std::time::Duration::from_secs(2)).unwrap();
-                    barrier.wait();
-                    receipt_replay::consume_observed_pair(
-                        &mut db,
-                        [&admission.authentication, &admission.permission],
-                        clock,
-                        &|_| Ok(()),
-                        |tx| {
-                            tx.execute(
+        let successes =
+            std::thread::scope(|scope| {
+                let mut workers = Vec::new();
+                for _ in 0..8 {
+                    let barrier = &barrier;
+                    let admission = &admission;
+                    let clock = &fixture.clock;
+                    let path = file.path();
+                    workers.push(scope.spawn(move || {
+                        let mut db = rusqlite::Connection::open(path).unwrap();
+                        db.busy_timeout(std::time::Duration::from_secs(2)).unwrap();
+                        barrier.wait();
+                        receipt_replay::consume_observed_pair(
+                            &mut db,
+                            [&admission.authentication, &admission.permission],
+                            clock,
+                            &|_| Ok(()),
+                            |tx| {
+                                tx.sqlite().unwrap().execute(
                                 "INSERT INTO meta(key,value) VALUES('observed-issued','once')",
                                 [],
                             )
                             .map_err(|_| Refused)?;
-                            Ok(())
-                        },
-                    )
-                    .is_ok()
-                }));
-            }
-            workers
-                .into_iter()
-                .map(|worker| worker.join().unwrap())
-                .filter(|success| *success)
-                .count()
-        });
+                                Ok(())
+                            },
+                        )
+                        .is_ok()
+                    }));
+                }
+                workers
+                    .into_iter()
+                    .map(|worker| worker.join().unwrap())
+                    .filter(|success| *success)
+                    .count()
+            });
         assert_eq!(successes, 1);
         assert_eq!(fixture.count(), 2);
         assert_eq!(
@@ -1000,11 +1001,13 @@ mod tests {
                     fixture.clock.clone(),
                     &|db| {
                         calls.set(calls.get() + 1);
-                        db.execute(
-                            "INSERT OR REPLACE INTO meta(key,value) VALUES('work','pending')",
-                            [],
-                        )
-                        .map_err(|_| Refused)?;
+                        db.sqlite()
+                            .unwrap()
+                            .execute(
+                                "INSERT OR REPLACE INTO meta(key,value) VALUES('work','pending')",
+                                [],
+                            )
+                            .map_err(|_| Refused)?;
                         if calls.get() == 2 {
                             Err(Refused)
                         } else {
