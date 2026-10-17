@@ -162,6 +162,9 @@ impl ProviderRow {
                 if let Some(allow) = c.allow_private_endpoints {
                     config["allow_private_endpoints"] = serde_json::json!(allow);
                 }
+                if let Some(tls) = &c.tls {
+                    config["tls"] = serde_json::json!(tls);
+                }
                 config
             },
             client_secret_env: c.client_secret_env.clone(),

@@ -14,6 +14,9 @@ pub mod discovery;
 pub mod http;
 pub mod idtoken;
 pub mod jwks;
+pub mod trust;
+#[cfg(test)]
+mod trust_tests;
 
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
@@ -78,6 +81,9 @@ pub struct OidcSettings {
     pub endpoints: EndpointPolicy,
     /// `groups.claim` of the row (default `groups`) when it syncs groups.
     pub groups_claim: Option<String>,
+    /// The provider's own TLS trust (a private CA, a client certificate);
+    /// `None` uses the built-in roots and presents no certificate.
+    pub trust_files: Option<trust::TrustFiles>,
 }
 
 fn cfg_str(cfg: &Value, key: &str) -> Option<String> {
@@ -156,13 +162,23 @@ impl OidcSettings {
         let endpoints = EndpointPolicy::new(&issuer, &hosts, allow_private);
         let issuer_ok =
             url::Url::parse(&issuer).is_ok_and(|u| endpoints.url_ok(&u) && u.query().is_none());
+        // File paths only from the configuration file, never from the admin API.
+        let trust_files = match trust::TrustFiles::of_config(cfg) {
+            Ok(Some(_)) if row.managed_by != crate::store::types::ManagedBy::File => Err(()),
+            Ok(files) => Ok(files),
+            Err(_) => Err(()),
+        };
         let mut client_secret = None;
         let mut disabled_reason = None;
         if row.deleted_at.is_some() {
             disabled_reason = Some("deleted");
         } else if !row.enabled {
             disabled_reason = Some("disabled");
-        } else if client_id.is_empty() || !issuer_ok || row.kind != ProviderKind::Oidc {
+        } else if client_id.is_empty()
+            || !issuer_ok
+            || row.kind != ProviderKind::Oidc
+            || trust_files.is_err()
+        {
             disabled_reason = Some("misconfigured");
         } else if let Some(name) = &row.client_secret_env {
             match env(name).filter(|v| !v.is_empty()) {
@@ -190,6 +206,7 @@ impl OidcSettings {
             endpoints,
             groups_claim: crate::groups::ProviderGroups::of_row(cfg)
                 .map(|g| g.claim_path().to_string()),
+            trust_files: trust_files.ok().flatten(),
         }
     }
 }
@@ -208,6 +225,7 @@ struct JwksState {
 pub struct OidcProvider {
     s: OidcSettings,
     fetcher: Fetcher,
+    trust: Option<Arc<trust::ProviderTrust>>,
     clock: Arc<dyn Clock>,
     reporter: Option<Reporter>,
     disc: Mutex<Cache<Discovery>>,
@@ -223,9 +241,47 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl OidcProvider {
-    pub fn new(s: OidcSettings, clock: Arc<dyn Clock>, reporter: Option<Reporter>) -> Arc<Self> {
+    pub fn new(
+        mut s: OidcSettings,
+        clock: Arc<dyn Clock>,
+        reporter: Option<Reporter>,
+    ) -> Arc<Self> {
+        let allow_private = s.endpoints.allow_private();
+        let mut fetcher = Fetcher::new(allow_private);
+        let mut provider_trust = None;
+        if let Some(files) = s
+            .trust_files
+            .clone()
+            .filter(|_| s.disabled_reason.is_none())
+        {
+            match trust::load(&files)
+                .and_then(|(m, digest)| Ok((Fetcher::with_material(allow_private, &m)?, m, digest)))
+            {
+                Ok((f, m, digest)) => {
+                    fetcher = f;
+                    provider_trust = Some(Arc::new(trust::ProviderTrust::new(
+                        s.provider_id.as_str(),
+                        files,
+                        &m,
+                        digest,
+                    )));
+                }
+                Err(e) => {
+                    // Never fall back to the built-in roots.
+                    tracing::warn!(provider = %s.provider_id, error = %e, "provider TLS material unusable; provider disabled");
+                    s.disabled_reason = Some("tls_invalid");
+                }
+            }
+        } else if s.disabled_reason.is_none() {
+            crate::telemetry::counters::set(
+                trust::PROVIDER_TLS_TRUST,
+                &[("provider", s.provider_id.as_str()), ("source", "system")],
+                1,
+            );
+        }
         Arc::new(OidcProvider {
-            fetcher: Fetcher::new(s.endpoints.allow_private()),
+            fetcher,
+            trust: provider_trust,
             s,
             clock,
             reporter,
@@ -414,12 +470,54 @@ impl OidcProvider {
         handle.spawn(async move {
             loop {
                 let Some(p) = weak.upgrade() else { break };
+                p.poll_tls().await;
                 p.refresh_discovery().await;
                 p.refresh_jwks().await;
                 drop(p);
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
         });
+    }
+
+    /// The token endpoint: with a client certificate, the provider's
+    /// mutual-TLS alias when it advertises one (RFC 8705 section 5).
+    fn token_endpoint<'d>(&self, disc: &'d Discovery) -> &'d url::Url {
+        match (&self.s.trust_files, &disc.mtls_token_endpoint) {
+            (Some(t), Some(alias)) if t.client.is_some() => alias,
+            _ => &disc.token_endpoint,
+        }
+    }
+
+    /// Re-read the provider's TLS files when a poll is due (on the blocking
+    /// pool) and swap the client when they changed and are valid.
+    pub async fn poll_tls(&self) -> Option<crate::reload::Outcome> {
+        let t = self.trust.clone()?;
+        if !t.due() {
+            return None;
+        }
+        self.reload_tls_now(t).await
+    }
+
+    async fn reload_tls_now(&self, t: Arc<trust::ProviderTrust>) -> Option<crate::reload::Outcome> {
+        let fetcher = self.fetcher.clone();
+        tokio::task::spawn_blocking(move || t.poll(|m| fetcher.install(m)))
+            .await
+            .ok()
+    }
+
+    /// Poll the TLS files now (tests).
+    #[cfg(test)]
+    pub(crate) async fn poll_tls_now(&self) -> Option<crate::reload::Outcome> {
+        let t = self.trust.clone()?;
+        self.reload_tls_now(t).await
+    }
+
+    /// The provider's TLS trust as the admin status shows it.
+    pub fn tls_status(&self) -> Value {
+        match &self.trust {
+            Some(t) => t.status(),
+            None => trust::system_status(),
+        }
     }
 
     // ---- JWKS ------------------------------------------------------------
@@ -565,7 +663,7 @@ impl OidcProvider {
                 .append_pair("code_verifier", verifier);
             let mut req = self
                 .fetcher
-                .post(&disc.token_endpoint)
+                .post(self.token_endpoint(disc))
                 .header("accept", "application/json")
                 .header("content-type", "application/x-www-form-urlencoded");
             match (&self.s.client_secret, disc.token_auth) {
@@ -884,6 +982,10 @@ impl Provider for OidcProvider {
         // Waits for an in-flight fetch, or starts one if the backoff allows.
         let _ = tokio::time::timeout(Duration::from_secs(2), self.refresh_discovery()).await;
         self.health().await
+    }
+
+    fn tls_status(&self) -> Option<Value> {
+        Some(OidcProvider::tls_status(self))
     }
 
     fn authorization_origin(&self) -> Option<url::Origin> {

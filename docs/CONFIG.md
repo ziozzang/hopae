@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 43 -->
+<!-- doc-rev: 44 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -151,6 +151,8 @@ is the existing OIDC provider; LDAP has owned LDAPS/StartTLS runtime qualificati
 | `providers[].scope` | string | `openid email profile` | Must not be empty. |
 | `providers[].endpoint_hosts` | array of hosts | `[]` | Hosts, besides the issuer's own, that the provider's discovery document may point to (authorization, token, user info and key endpoints must use `https` and name the issuer's host or one listed here; host names or IP addresses, no scheme or port). The `google` preset lists its own. |
 | `providers[].allow_private_endpoints` | boolean | unset (`false`) | Development and private identity providers only: lifts the connect-time refusal of loopback, private, link-local, CGNAT and multicast addresses and permits `http://` to a loopback issuer. Without it such addresses are refused and the connection goes only to a vetted address. An explicit `false` always wins, even in a `test-hooks` build. Provider requests never use `HTTP_PROXY`, `HTTPS_PROXY` or `ALL_PROXY`. |
+| `providers[].tls.ca_file` | string, absolute path | unset (built-in roots) | OIDC only, configuration file only (a provider created through the admin API cannot name files). PEM bundle (1 to 64 certificates) of the private CA that signs the provider's certificates, for an internal identity provider (Keycloak, Authentik, ADFS) behind corporate PKI. It **replaces** the built-in roots for this provider; certificate and host-name verification stay on. Discovery, JWKS, token and user-info requests all use it. Re-read every 10 s by content digest (see [TLS certificate renewal](OPERATIONS.md#tls-certificate-renewal)); an unreadable or invalid file at start disables the provider (`tls_invalid`), never a fallback to the built-in roots. |
+| `providers[].tls.client_certificate_file`, `providers[].tls.client_key_file` | string, absolute paths | unset | Together: a client certificate chain and its key presented to the provider (mutual TLS, RFC 8705 `tls_client_auth`; omit `client_secret_env` so the token request carries only `client_id`). When discovery advertises `mtls_endpoint_aliases.token_endpoint` it is used for the token request. The key must match the certificate. Reloaded like `ca_file`. |
 | `providers[].allowed_email_domains` | array of domains | `[]` | Plain domain names; non-empty restricts sign-in to those email domains. Enforced by the identity layer; only a verified email address is considered. |
 | `providers[].authoritative_domains` | array of domains | `[]` | Domains for which this provider is authoritative for email ([ADR-0011](adr/0011-account-linking-policy.md)). |
 | `providers[].auto_link` | boolean | `false` | Link a sign-in to an existing user without confirmation when the policy allows it. |

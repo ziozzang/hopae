@@ -257,6 +257,9 @@ pub async fn collect(st: &AdminState) -> Result<StatusData, StoreError> {
         if let Some(r) = reason {
             j["reason"] = json!(r);
         }
+        if let Some(tls) = live.as_ref().and_then(|p| p.tls_status()) {
+            j["tls"] = tls;
+        }
         providers_json.push(j);
         provider_views.push(ProviderView {
             provider_id: row.provider_id.to_string(),

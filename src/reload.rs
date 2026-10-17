@@ -55,7 +55,7 @@ pub fn read_bounded(path: &Path) -> io::Result<Vec<u8>> {
 
 /// The files' contents and one digest over all of them (length-prefixed, so
 /// moving bytes between files changes it).
-fn snapshot(paths: &[PathBuf]) -> io::Result<(Vec<Vec<u8>>, [u8; 32])> {
+pub(crate) fn snapshot(paths: &[PathBuf]) -> io::Result<(Vec<Vec<u8>>, [u8; 32])> {
     let mut hash = Sha256::new();
     let mut all = Vec::with_capacity(paths.len());
     for p in paths {
@@ -67,18 +67,18 @@ fn snapshot(paths: &[PathBuf]) -> io::Result<(Vec<Vec<u8>>, [u8; 32])> {
     Ok((all, hash.finalize().into()))
 }
 
-fn certificates(pem: &[u8]) -> anyhow::Result<Vec<CertificateDer<'static>>> {
+pub(crate) fn certificates(pem: &[u8]) -> anyhow::Result<Vec<CertificateDer<'static>>> {
     let certs = rustls_pemfile::certs(&mut &pem[..]).collect::<io::Result<Vec<_>>>()?;
     anyhow::ensure!(!certs.is_empty(), "no certificate in the certificate file");
     Ok(certs)
 }
 
-fn private_key(pem: &[u8]) -> anyhow::Result<PrivateKeyDer<'static>> {
+pub(crate) fn private_key(pem: &[u8]) -> anyhow::Result<PrivateKeyDer<'static>> {
     rustls_pemfile::private_key(&mut &pem[..])?
         .ok_or_else(|| anyhow::anyhow!("no private key in the key file"))
 }
 
-fn roots(pem: &[u8]) -> anyhow::Result<RootCertStore> {
+pub(crate) fn roots(pem: &[u8]) -> anyhow::Result<RootCertStore> {
     let mut roots = RootCertStore::empty();
     for cert in rustls_pemfile::certs(&mut &pem[..]) {
         roots.add(cert?)?;
@@ -96,7 +96,7 @@ pub fn fingerprint(leaf: &CertificateDer<'_>) -> String {
 }
 
 /// A certificate chain and its key, checked to belong together.
-fn identity(
+pub(crate) fn identity(
     cert: &[u8],
     key: &[u8],
     provider: &Arc<rustls::crypto::CryptoProvider>,
@@ -203,22 +203,19 @@ impl Status {
     }
 }
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-/// The shared bookkeeping of a poll result: metric, gauge, log, status.
-fn note(status: &Status, name: &str, outcome: &Outcome) {
+/// The metric, gauge and log of a poll result (no status entry): also used by
+/// material that keeps its own status, such as an OIDC provider's trust.
+/// `was_failing` says whether `Unchanged` clears a previous failure.
+pub(crate) fn note_metrics(name: &str, outcome: &Outcome, was_failing: bool) {
     match outcome {
         Outcome::Unchanged => {
-            // The files are back to the material in use (a failed rotation
-            // was reverted): no longer failing.
-            let mut map = status.entries.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(e) = map.get_mut(name).filter(|e| e.failing) {
-                e.failing = false;
-                e.error = None;
+            if was_failing {
                 counters::set(TLS_RELOAD_FAILING, &[("name", name)], 0);
                 tracing::info!(name, "TLS material is back to the material in use");
             }
@@ -227,23 +224,42 @@ fn note(status: &Status, name: &str, outcome: &Outcome) {
             counters::inc(TLS_RELOADS_TOTAL, &[("name", name), ("result", "reloaded")]);
             counters::set(TLS_RELOAD_FAILING, &[("name", name)], 0);
             tracing::info!(name, fingerprint = %print, "TLS material reloaded");
-            status.record(name, |e| {
-                e.fingerprint = print.clone();
-                e.failing = false;
-                e.error = None;
-                e.reloads += 1;
-                e.last_reload_unix = Some(unix_now());
-            });
         }
         Outcome::Invalid(why) => {
             counters::inc(TLS_RELOADS_TOTAL, &[("name", name), ("result", "invalid")]);
             counters::set(TLS_RELOAD_FAILING, &[("name", name)], 1);
             tracing::warn!(name, error = %why, "new TLS material is invalid; the previous material stays in use");
-            status.record(name, |e| {
-                e.failing = true;
-                e.error = Some(why.clone());
-            });
         }
+    }
+}
+
+/// The shared bookkeeping of a poll result: metric, gauge, log, status.
+fn note(status: &Status, name: &str, outcome: &Outcome) {
+    let was_failing = {
+        let map = status.entries.lock().unwrap_or_else(|p| p.into_inner());
+        map.get(name).is_some_and(|e| e.failing)
+    };
+    note_metrics(name, outcome, was_failing);
+    match outcome {
+        Outcome::Unchanged => {
+            if was_failing {
+                status.record(name, |e| {
+                    e.failing = false;
+                    e.error = None;
+                });
+            }
+        }
+        Outcome::Reloaded(print) => status.record(name, |e| {
+            e.fingerprint = print.clone();
+            e.failing = false;
+            e.error = None;
+            e.reloads += 1;
+            e.last_reload_unix = Some(unix_now());
+        }),
+        Outcome::Invalid(why) => status.record(name, |e| {
+            e.failing = true;
+            e.error = Some(why.clone());
+        }),
     }
 }
 

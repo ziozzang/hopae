@@ -639,6 +639,9 @@ pub struct ProviderEntry {
     /// issuer). Unset is `false`; development only.
     #[serde(default)]
     pub allow_private_endpoints: Option<bool>,
+    /// A private CA and a client certificate for this provider (OIDC).
+    #[serde(default)]
+    pub tls: Option<crate::policy::types::ProviderTls>,
     #[serde(default)]
     pub allowed_email_domains: Vec<String>,
     #[serde(default)]
@@ -1608,6 +1611,32 @@ impl Config {
                     "{at}.issuer uses http://: set {at}.allow_private_endpoints to true (development only)"
                 ));
             }
+            if let Some(tls) = &p.tls {
+                if p.kind != ProviderKind::Oidc {
+                    errs.push(format!("{at}.tls requires kind oidc (LDAP has ldap.ca)"));
+                }
+                let paths = [
+                    &tls.ca_file,
+                    &tls.client_certificate_file,
+                    &tls.client_key_file,
+                ];
+                if paths.iter().all(|p| p.is_none()) {
+                    errs.push(format!(
+                        "{at}.tls must name ca_file or a client certificate"
+                    ));
+                }
+                if paths
+                    .iter()
+                    .any(|p| p.as_ref().is_some_and(|p| !p.is_absolute()))
+                {
+                    errs.push(format!("{at}.tls file paths must be absolute"));
+                }
+                if tls.client_certificate_file.is_some() != tls.client_key_file.is_some() {
+                    errs.push(format!(
+                        "{at}.tls.client_certificate_file and client_key_file go together"
+                    ));
+                }
+            }
             for h in &p.endpoint_hosts {
                 let h = h.to_ascii_lowercase();
                 if !valid_domain(&h) && h.parse::<std::net::IpAddr>().is_err() {
@@ -1894,6 +1923,7 @@ impl Config {
                 scope: p.scope.clone(),
                 endpoint_hosts: lowered(&p.endpoint_hosts),
                 allow_private_endpoints: p.allow_private_endpoints,
+                tls: p.tls.clone(),
                 allowed_email_domains: lowered(&p.allowed_email_domains),
                 authoritative_domains: lowered(&p.authoritative_domains),
                 auto_link: p.auto_link,
@@ -2159,6 +2189,17 @@ fn check_issuer(u: &str) -> Result<(), &'static str> {
 /// error: see [`env_warnings`].
 pub fn check_env(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<String> {
     let mut out = Vec::new();
+    // Provider TLS files: readable, parseable, the key matching the certificate.
+    for p in cfg.providers.iter().filter(|p| p.enabled) {
+        if let Some(tls) = &p.tls
+            && let Ok(Some(files)) = crate::provider::oidc::trust::TrustFiles::of_config(
+                &serde_json::json!({ "tls": tls }),
+            )
+            && let Err(e) = crate::provider::oidc::trust::load(&files)
+        {
+            out.push(format!("provider {} tls: {e}", p.provider_id));
+        }
+    }
     if !cfg.gateway.allow_unauthenticated_caller {
         for (key, name) in [
             ("gateway.caller_key_env", &cfg.gateway.caller_key_env),
@@ -2683,6 +2724,37 @@ mod tests {
         assert!(problems[0].contains("B") && !problems[0].contains("value-a"));
         let w = env_warnings(&c, env);
         assert_eq!(w, ["provider mock disabled: S unset"]);
+    }
+
+    #[test]
+    fn provider_tls_files_are_validated_and_checked() {
+        let p = |tls: &str| {
+            format!(
+                r#"{{"providers": [{{"provider_id": "corp", "kind": "oidc", "client_id": "c", "issuer": "https://idp.corp.test", "tls": {tls}}}]}}"#
+            )
+        };
+        assert!(invalid(&p(r#"{"ca_file": "ca.pem"}"#)).contains("absolute"));
+        assert!(invalid(&p(r#"{}"#)).contains("must name ca_file"));
+        assert!(invalid(&p(r#"{"client_certificate_file": "/c.pem"}"#)).contains("go together"));
+        assert!(invalid(&p(r#"{"ca": "/c.pem"}"#)).contains("unknown"));
+        // `--check` reads the files: a missing one is a problem.
+        let c = with(&p(r#"{"ca_file": "/nonexistent/hopae-ca.pem"}"#)).unwrap();
+        let problems = check_env(&c, |_| None);
+        assert!(
+            problems.iter().any(|e| e.starts_with("provider corp tls:")),
+            "{problems:?}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        crate::reload::tests::pki(dir.path(), "ca1");
+        let ca = dir.path().join("ca1.pem");
+        let c = with(&p(&format!(r#"{{"ca_file": {:?}}}"#, ca.to_str().unwrap()))).unwrap();
+        assert!(check_env(&c, |_| None).iter().all(|e| !e.contains("tls")));
+        std::fs::write(&ca, b"garbage").unwrap();
+        assert!(
+            check_env(&c, |_| None)
+                .iter()
+                .any(|e| e.contains("provider corp tls:"))
+        );
     }
 
     // ---- the management console (ADR-0016) -------------------------------
