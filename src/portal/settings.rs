@@ -61,6 +61,10 @@ pub struct StepUpCeremony {
     /// without one (`page: None`) the user is told so instead of being sent
     /// to methods that cannot satisfy the rule.
     pub high_assurance: bool,
+    /// Only a passkey satisfies the target (AAL 3, or a `webauthn` factor
+    /// rule such as the console operator policy, ADR-0021): no other method
+    /// is offered, and without a passkey the user is sent to add one.
+    pub passkey_only: bool,
 }
 
 /// A refusal the page explains (the user can act on it), or a plain failure page.

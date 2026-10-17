@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 17 -->
+<!-- doc-rev: 18 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -240,6 +240,7 @@ value are omitted rather than sent empty.
 | `x-hopae-expires` | Unix seconds of the earlier of idle and absolute expiry | 20 B |
 | `x-hopae-aal` | `1` or `2`: the level the presented handle was issued at ([ADR-0008](adr/0008-second-factor-extension-point.md)); elevation reissues handles. `3` only for an application with `apps[].max_emitted_aal = 3` while the session's current elevation is a high-assurance passkey ([ADR-0018](adr/0018-aal3-emission.md)); compare it as a number | 1 B |
 | `x-hopae-factors` | Comma list of satisfied factors `kind[:provider]`, e.g. `oidc:google,totp` | 256 B |
+| `x-hopae-operator-assertion` | Only for the `console_operators` application: the signed operator assertion ([ADR-0021](adr/0021-console-operator-assurance.md)) the console verifies; not an identity header the gateway needs to relay | 2 KiB |
 
 Total identity header bytes ≤ 8 KiB (the gateway rejects more than 16 KiB).
 The set is the whole of contract v1; adding a header is a minor change,

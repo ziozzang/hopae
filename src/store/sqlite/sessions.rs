@@ -880,6 +880,18 @@ impl Sessions for Store {
         .await
     }
 
+    async fn user_has_passkey(&self, user: &crate::identity::types::UserId) -> StoreResult<bool> {
+        let user = user.clone();
+        self.read("user_has_passkey", move |c| {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM webauthn_credentials WHERE user_id=?1 AND state='active')",
+                [user.as_str()],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+    }
+
     async fn sweep(&self, now: Timestamp, retention: Duration) -> StoreResult<SweepReport> {
         self.write("sweep", move |env| {
             let shared = env.shared.clone();

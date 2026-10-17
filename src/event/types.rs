@@ -165,6 +165,9 @@ pub enum EventKind {
     WorkloadKeysRotated,
     /// A workload revocation index became stale or current again (diagnostic).
     WorkloadRevocationStale,
+    /// A console operator was admitted to the console application (ADR-0021,
+    /// required; once per session and credential generation per process).
+    OperatorConsoleAdmitted,
     /// `authentication.source = config`: a start reconciled the stored
     /// authentication profiles or projection plan to the file (required).
     AuthenticationReconciled,
@@ -232,6 +235,7 @@ impl EventKind {
         EventKind::WorkloadKeysRotated,
         EventKind::WorkloadRevocationStale,
         EventKind::AuthenticationReconciled,
+        EventKind::OperatorConsoleAdmitted,
     ];
 
     /// Required kinds travel in the transaction of the state change they
@@ -313,6 +317,7 @@ impl EventKind {
             EventKind::WorkloadKeysRotated => "workload.keys_rotated",
             EventKind::WorkloadRevocationStale => "workload.revocation_stale",
             EventKind::AuthenticationReconciled => "authentication.reconciled",
+            EventKind::OperatorConsoleAdmitted => "operator.console_admitted",
         }
     }
 

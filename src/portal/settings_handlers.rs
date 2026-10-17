@@ -188,6 +188,29 @@ fn high_assurance_page(rq: &Rq, plant: &[String]) -> Response {
         pages::StepUpHighAssurancePage {
             t: rq.t(),
             request_id: rq.rid(),
+            title_key: "stepup.high_assurance_title",
+            body_key: "stepup.high_assurance_missing",
+            setup_key: "stepup.high_assurance_setup",
+            setup_href: "/security/passkeys",
+        },
+        plant,
+        &[],
+    )
+}
+
+/// A passkey-only step-up (ADR-0021: console operators) for a user without
+/// a passkey: add one first.
+fn passkey_required_page(rq: &Rq, plant: &[String]) -> Response {
+    render_page_status(
+        rq,
+        StatusCode::FORBIDDEN,
+        pages::StepUpHighAssurancePage {
+            t: rq.t(),
+            request_id: rq.rid(),
+            title_key: "stepup.passkey_required_title",
+            body_key: "stepup.passkey_required_missing",
+            setup_key: "stepup.passkey_required_setup",
+            setup_href: "/security/passkeys/new",
         },
         plant,
         &[],
@@ -852,8 +875,12 @@ pub(super) async fn stepup_passkey_page(
     {
         Ok(entry) => {
             let Some(page) = entry.page else {
-                // AAL 3 without a qualifying key: nothing else can satisfy it.
-                return entry.high_assurance.then(|| high_assurance_page(rq, plant));
+                // AAL 3 without a qualifying key, or a passkey rule without a
+                // passkey: nothing else can satisfy it.
+                if entry.high_assurance {
+                    return Some(high_assurance_page(rq, plant));
+                }
+                return entry.passkey_only.then(|| passkey_required_page(rq, plant));
             };
             let binding = stepup_csrf_binding(rq, transaction)?;
             let csrf = token_for(st, &binding, Purpose::PasskeyStepUp);
@@ -870,9 +897,10 @@ pub(super) async fn stepup_passkey_page(
                     ceremony: page.ceremony.expose(),
                     options: &page.options,
                     totp: entry.totp,
-                    choices: if entry.high_assurance { &[] } else { choices },
+                    choices: if entry.passkey_only { &[] } else { choices },
                     integrity: pages::script_integrity(),
                     high_assurance: entry.high_assurance,
+                    passkey_only: entry.passkey_only,
                 },
                 plant,
                 &[entry.form_origin],

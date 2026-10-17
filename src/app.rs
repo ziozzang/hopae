@@ -278,6 +278,10 @@ impl Services {
             self.config.verify_limits(),
         )
         .with_events(self.emitter.clone(), self.events())
+        .with_operator(crate::verify::operator::OperatorRuntime::from_config(
+            &self.config,
+            |n| std::env::var(n).ok(),
+        ))
     }
 
     /// The session service (portal flows) for this process.

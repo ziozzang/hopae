@@ -782,6 +782,27 @@ impl Service {
             .max(Aal::Two)
     }
 
+    /// Whether only a passkey can satisfy the step-up transaction: an AAL 3
+    /// rule, or a rule that requires the `webauthn` factor (ADR-0021).
+    pub(crate) fn stepup_passkey_only(&self, row: &TransactionRow) -> bool {
+        use crate::session::types::{Aal, FactorKind};
+        let snapshot = self.snapshot.load_full();
+        let Ok(host) = host_of(&row.return_target) else {
+            return false;
+        };
+        let Ok(app) = crate::policy::apps::resolve(&snapshot, &host) else {
+            return false;
+        };
+        let raw = row.return_target.path();
+        let path = crate::gateway::canonical::canonical_path(raw)
+            .map(|p| p.as_str().to_owned())
+            .unwrap_or_else(|_| raw.to_owned());
+        app.step_up
+            .iter()
+            .filter(|r| crate::policy::step_up::rule_matches(r, &path))
+            .any(|r| r.aal == Aal::Three || r.factor == Some(FactorKind::Webauthn))
+    }
+
     /// Record portal activity on the handle and its session, coalesced like
     /// verify's touches (at most one write per `touch_coalesce`). Best effort:
     /// a lost touch only makes the next visit retry it.

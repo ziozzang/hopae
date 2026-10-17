@@ -292,10 +292,35 @@ async fn flow(
             // AAL 3. A failed read is no evidence (never more than stored).
             let handle_aal = authed.view.handle.issued_aal.min(authed.view.session.aal);
             let path = cx.input.canonical_path.as_str();
+            // ADR-0021: the console operator application. During the
+            // enrollment grace an operator without a passkey is admitted
+            // without the factor rule (never on the step-up path); a failed
+            // read grants no grace.
+            let operator = cx.ctx.operator.as_ref().filter(|o| o.app_id == app.app_id);
+            let grace = match operator {
+                Some(o) if o.grace_active(cx.now) => !cx
+                    .ctx
+                    .sessions
+                    .user_has_passkey(&authed.view.session.user_id)
+                    .await
+                    .unwrap_or(true),
+                _ => false,
+            };
+            let rules: std::borrow::Cow<'_, [crate::policy::types::StepUpRule]> = if grace {
+                std::borrow::Cow::Owned(
+                    app.step_up
+                        .iter()
+                        .filter(|r| !r.enrollment_grace)
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                std::borrow::Cow::Borrowed(&app.step_up)
+            };
             let wants_aal3 = handle_aal == crate::session::Aal::Two
                 && (app.max_emitted_aal == crate::session::Aal::Three
-                    || step_up::required_level(&app.step_up, path)
-                        == Some(crate::session::Aal::Three));
+                    || operator.is_some()
+                    || step_up::required_level(&rules, path) == Some(crate::session::Aal::Three));
             let aal3_evidence = wants_aal3
                 && cx
                     .ctx
@@ -307,7 +332,7 @@ async fn flow(
                     .await
                     .unwrap_or(false);
             if let step_up::StepUpVerdict::Required { aal, max_age } = step_up::evaluate(
-                &app.step_up,
+                &rules,
                 path,
                 handle_aal,
                 aal3_evidence,
@@ -392,9 +417,95 @@ async fn flow(
             let aal3 = app.max_emitted_aal == crate::session::Aal::Three
                 && authed.view.handle.issued_aal == crate::session::Aal::Two
                 && aal3_evidence;
-            Ok((allow(cx, app, *authed, aal3), witness))
+            let assertion = operator.map(|o| {
+                let v = &authed.view;
+                admitted(cx, app, v, handle_aal, aal3_evidence, grace);
+                o.assertion(
+                    cx.input.host.as_str(),
+                    v.session.user_id.as_str(),
+                    v.session.session_id.as_str(),
+                    handle_aal,
+                    &v.session.factors,
+                    aal3_evidence,
+                    v.session.auth_time,
+                    grace,
+                    cx.now,
+                )
+            });
+            let mut decision = allow(cx, app, *authed, aal3);
+            if let Decision::Allow { identity, .. } = &mut decision {
+                identity.operator_assertion = assertion;
+            }
+            Ok((decision, witness))
         }
     }
+}
+
+/// `operator.console_admitted` (ADR-0021): recorded once per session and
+/// credential generation per process when a console operator is admitted,
+/// with the level, the factor and whether the enrollment grace applied.
+fn admitted(
+    cx: &Cx<'_>,
+    app: &AppPolicy,
+    view: &HandleView,
+    aal: crate::session::Aal,
+    high_assurance: bool,
+    grace: bool,
+) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<(String, u64)>>> = OnceLock::new();
+    let key = (view.session.session_id.to_string(), view.session.cred_gen);
+    {
+        let mut seen = SEEN
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if seen.len() >= 8192 {
+            seen.clear();
+        }
+        if !seen.insert(key) {
+            return;
+        }
+    }
+    let Some(events) = cx.ctx.events.clone() else {
+        return;
+    };
+    let factor = view
+        .session
+        .factors
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.kind,
+                crate::session::FactorKind::Webauthn
+                    | crate::session::FactorKind::Totp
+                    | crate::session::FactorKind::External
+            )
+        })
+        .max_by_key(|f| f.at)
+        .map_or("none", |f| f.kind.as_str());
+    let ev = cx
+        .event(EventKind::OperatorConsoleAdmitted, Outcome::Success, app)
+        .user(&view.session.user_id)
+        .session(&view.session.session_id)
+        .attr("aal", aal.as_i64())
+        .attr("kind", factor)
+        .attr("assurance", if high_assurance { "aal3" } else { "aal2" })
+        .attr(
+            "cause",
+            if grace {
+                "enrollment_grace"
+            } else {
+                "policy_met"
+            },
+        )
+        .build();
+    tokio::spawn(async move {
+        if let Err(e) = events.append_required(vec![ev]).await {
+            tracing::warn!(error = %e, "operator.console_admitted could not be recorded");
+        }
+    });
 }
 
 /// The session is too old (or its age is not provider-verified) for the
@@ -649,6 +760,7 @@ fn allow(cx: &Cx<'_>, app: &AppPolicy, authed: Authed, aal3: bool) -> Decision {
             view.handle.issued_aal
         },
         factors: view.session.factors.clone(),
+        operator_assertion: None,
         generations: Generations {
             session: view.session.cred_gen,
             user: view.user.authz_version,

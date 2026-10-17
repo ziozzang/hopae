@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 43 -->
+<!-- doc-rev: 45 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -344,6 +344,30 @@ With no keyring, these routes return 404. Enrollment alone does not raise AAL. A
 The deployment must expose the portal through its existing trusted HTTPS ingress.
 
 AAL 1 primary-freshness rules use provider reauthentication even without a keyring.
+
+## Console operators
+
+Optional `console_operators` makes a management console's operators sign in
+with a passkey ([ADR-0021](adr/0021-console-operator-assurance.md)):
+
+```json
+{"console_operators":{"app_id":"console","require_aal":2,"require_factor":"webauthn","step_up_path":"/ui/step-up","step_up_max_age_secs":300,"enrollment_grace_until":1793750400,"assertion_seed_env":"HOPAE_CONSOLE_ASSERTION_SEED","assertion_public_key":"<base64 Ed25519 public key>","assertion_key_id":"op-2026-10"}}
+```
+
+| Key | Default | Constraint |
+| --- | --- | --- |
+| `console_operators.app_id` | required | A configured application (not `default`): the console's host |
+| `console_operators.require_aal` | `2` | `2` or `3` (needs `webauthn.high_assurance`) |
+| `console_operators.require_factor` | `webauthn` | `webauthn` (needs `webauthn`) or `any` |
+| `console_operators.step_up_path` | `/ui/step-up` | Starts with `/`; requires the factor used within `step_up_max_age_secs` |
+| `console_operators.step_up_max_age_secs` | `300` | 30 to 3600 |
+| `console_operators.enrollment_grace_until` | none | Unix seconds; until then an operator without any passkey is admitted without the factor (never on the step-up path) |
+| `console_operators.assertion_seed_env` | required | Variable holding the base64 32-byte Ed25519 seed that signs `x-hopae-operator-assertion`; dedicated to it |
+| `console_operators.assertion_public_key` | required | The seed's base64 Ed25519 public key; a mismatch refuses the configuration. The console pins it |
+| `console_operators.assertion_key_id` | required | 1 to 64 of `A-Za-z0-9._-`; the assertion's `kid`, under which the console pins the key (current and next during a rotation) |
+
+The policy adds two step-up rules to the application; `apps[].step_up[]` of the
+same application still apply.
 
 ## WebAuthn passkeys
 

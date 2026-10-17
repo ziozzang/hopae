@@ -76,6 +76,12 @@ pub struct Config {
     /// Polling of mounted material that changes while Hopae runs.
     #[serde(default)]
     pub reload: ReloadCfg,
+    /// Console operators (ADR-0021): the application a management console
+    /// (the Hangang console) signs its operators in through, the
+    /// phishing-resistant factor it requires and the signed operator
+    /// assertion verify answers with.
+    #[serde(default)]
+    pub console_operators: Option<ConsoleOperatorsCfg>,
     /// The file this configuration was read from (set by [`load`]; never
     /// configured). Live reconciliation polls it.
     #[serde(skip)]
@@ -181,6 +187,152 @@ pub struct AuthenticationCfg {
     /// reconciliation off, so only a restart applies a change).
     #[serde(default)]
     pub reload_interval_ms: Option<u64>,
+}
+
+/// `console_operators.require_factor`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorFactorCfg {
+    /// A passkey (default): phishing resistant.
+    #[default]
+    Webauthn,
+    /// Any second factor (TOTP, external, passkey).
+    Any,
+}
+
+/// `console_operators` (ADR-0021).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsoleOperatorsCfg {
+    /// The application (`apps[].app_id`) whose host the console runs on.
+    pub app_id: String,
+    /// `2` (default) or `3` (needs `webauthn.high_assurance`).
+    #[serde(default)]
+    pub require_aal: Option<u8>,
+    #[serde(default)]
+    pub require_factor: OperatorFactorCfg,
+    /// The console path a sensitive action re-authenticates on (default
+    /// `/ui/step-up`): it requires the factor used within `step_up_max_age_secs`.
+    #[serde(default)]
+    pub step_up_path: Option<String>,
+    /// Freshness of the factor on `step_up_path` (default 300, 30 to 3600).
+    #[serde(default)]
+    pub step_up_max_age_secs: Option<u64>,
+    /// Until this time (unix seconds) an operator without a passkey is
+    /// admitted to the console without the factor (and the assertion says
+    /// `grace: true`); `step_up_path` is never waived.
+    #[serde(default)]
+    pub enrollment_grace_until: Option<i64>,
+    /// The variable holding the Ed25519 seed (base64, 32 bytes) the operator
+    /// assertion is signed with; dedicated to the assertion.
+    pub assertion_seed_env: String,
+    /// The public key of that seed (base64, 32 bytes); a mismatch refuses the
+    /// configuration. The console pins it.
+    pub assertion_public_key: String,
+    /// The key id the assertion names (`kid`) so the console can pin the
+    /// current and the next key during a rotation (1 to 64 of `A-Za-z0-9._-`).
+    pub assertion_key_id: String,
+}
+
+impl ConsoleOperatorsCfg {
+    pub fn require_aal(&self) -> Aal {
+        if self.require_aal == Some(3) {
+            Aal::Three
+        } else {
+            Aal::Two
+        }
+    }
+    pub fn step_up_path(&self) -> String {
+        self.step_up_path
+            .clone()
+            .unwrap_or_else(|| "/ui/step-up".into())
+    }
+    pub fn step_up_max_age(&self) -> Duration {
+        Duration::from_secs(self.step_up_max_age_secs.unwrap_or(300))
+    }
+    fn factor(&self) -> Option<crate::session::types::FactorKind> {
+        match self.require_factor {
+            OperatorFactorCfg::Webauthn => Some(crate::session::types::FactorKind::Webauthn),
+            OperatorFactorCfg::Any => None,
+        }
+    }
+    /// The step-up rules the console application gets: the whole host at the
+    /// required level and factor (waived during the enrollment grace for an
+    /// operator without a passkey), and the step-up path with freshness.
+    pub fn rules(&self) -> Vec<StepUpRule> {
+        vec![
+            StepUpRule {
+                path_prefix: None,
+                aal: self.require_aal(),
+                max_age: None,
+                factor: self.factor(),
+                enrollment_grace: true,
+            },
+            StepUpRule {
+                path_prefix: Some(self.step_up_path()),
+                aal: self.require_aal(),
+                max_age: Some(self.step_up_max_age()),
+                factor: self.factor(),
+                enrollment_grace: false,
+            },
+        ]
+    }
+    fn validate(&self, cfg: &Config, errs: &mut Vec<String>) {
+        if self.app_id == "default" || !cfg.apps.iter().any(|a| a.app_id == self.app_id) {
+            errs.push(format!(
+                "console_operators.app_id {:?} must name a configured application (not default)",
+                self.app_id
+            ));
+        }
+        match self.require_aal {
+            None | Some(2) => {}
+            Some(3)
+                if cfg
+                    .webauthn
+                    .as_ref()
+                    .is_some_and(|w| w.high_assurance.is_some()) => {}
+            Some(3) => {
+                errs.push("console_operators.require_aal 3 needs webauthn.high_assurance".into())
+            }
+            Some(_) => errs.push("console_operators.require_aal must be 2 or 3".into()),
+        }
+        if self.require_factor == OperatorFactorCfg::Webauthn && cfg.webauthn.is_none() {
+            errs.push("console_operators.require_factor webauthn needs webauthn".into());
+        }
+        if !self.step_up_path().starts_with('/') || self.step_up_path().len() > 256 {
+            errs.push("console_operators.step_up_path must start with '/'".into());
+        }
+        if !(30..=3600).contains(&self.step_up_max_age().as_secs()) {
+            errs.push("console_operators.step_up_max_age_secs must be between 30 and 3600".into());
+        }
+        if !valid_env_name(&self.assertion_seed_env) {
+            errs.push(
+                "console_operators.assertion_seed_env must be an environment variable name".into(),
+            );
+        }
+        let pk = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            self.assertion_public_key.trim(),
+        );
+        if !pk.is_ok_and(|k| {
+            k.as_slice()
+                .try_into()
+                .is_ok_and(|k| ed25519_dalek::VerifyingKey::from_bytes(k).is_ok())
+        }) {
+            errs.push(
+                "console_operators.assertion_public_key must be a base64 Ed25519 public key".into(),
+            );
+        }
+        if self.assertion_key_id.is_empty()
+            || self.assertion_key_id.len() > 64
+            || !self
+                .assertion_key_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        {
+            errs.push("console_operators.assertion_key_id must be 1 to 64 of A-Za-z0-9._-".into());
+        }
+    }
 }
 
 /// Default poll of the configuration file in `authentication.source = config`.
@@ -914,6 +1066,9 @@ impl Config {
     /// Check every constraint that does not need the environment.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let mut errs = Vec::new();
+        if let Some(c) = &self.console_operators {
+            c.validate(self, &mut errs);
+        }
         if let Some(n) = self.reload.tls_interval_secs
             && n > 3600
         {
@@ -1798,6 +1953,8 @@ impl Config {
                     path_prefix: Some("/".into()),
                     aal: limits.require_aal,
                     max_age: None,
+                    factor: None,
+                    enrollment_grace: false,
                 }]
             } else {
                 Vec::new()
@@ -2051,8 +2208,16 @@ fn resolve_app(entry: Option<&AppEntry>, base: &AppPolicy, cfg: &Config, id: &st
                     path_prefix: r.path_prefix.clone(),
                     aal: aal_requirement(r.require.aal)?,
                     max_age: r.require.max_age.map(Duration::from_secs),
+                    factor: None,
+                    enrollment_grace: false,
                 })
             })
+            .chain(
+                cfg.console_operators
+                    .iter()
+                    .filter(|c| c.app_id == id)
+                    .flat_map(ConsoleOperatorsCfg::rules),
+            )
             .collect(),
         max_auth_age: None,
         // Never inherited from `default`: AAL 3 is opted in per application (review F11).
@@ -2196,6 +2361,11 @@ pub fn check_env(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<S
         && let Err(error) = crate::auth_gateway::runtime::Runtime::compile(config, &lookup)
     {
         out.push(format!("authentication_gateway: {error}"));
+    }
+    if let Some(c) = &cfg.console_operators
+        && let Err(error) = crate::verify::operator::signing_key(c, &lookup)
+    {
+        out.push(error);
     }
     out
 }
@@ -2823,7 +2993,9 @@ mod tests {
             vec![StepUpRule {
                 path_prefix: Some("/".into()),
                 aal: Aal::Two,
-                max_age: None
+                max_age: None,
+                factor: None,
+                enrollment_grace: false,
             }]
         );
         assert!(c.warnings().iter().any(|w| w == "admin.require_aal: no second factor exists yet; every console request will be refused"), "{:?}", c.warnings());
