@@ -67,6 +67,15 @@ pub fn unported(what: &'static str) -> StoreError {
 }
 
 impl AppStore {
+    /// This store's identity for prepared native owner values.
+    pub(crate) fn owner_ref(&self) -> super::owner_ref::OwnerRef {
+        match self {
+            AppStore::Sqlite(s) => s.owner_ref(),
+            #[cfg(feature = "postgres")]
+            AppStore::Postgres(p) => super::owner_ref::OwnerRef::postgres(p),
+        }
+    }
+
     pub fn backend(&self) -> &'static str {
         match self {
             AppStore::Sqlite(_) => "sqlite",
@@ -1115,7 +1124,12 @@ impl AppStore {
                     .await
             }
             #[cfg(feature = "postgres")]
-            AppStore::Postgres(_) => Err(unported("the native Human snapshot")),
+            AppStore::Postgres(p) => {
+                super::sqlite::human_owner::postgres::require_human_snapshot(
+                    p, prepared, materials, witness, now, deadline,
+                )
+                .await
+            }
         }
     }
 
@@ -1125,11 +1139,12 @@ impl AppStore {
         materials: &super::sqlite::material_owner::Published,
         witness: &crate::verify::human::Witness,
     ) -> StoreResult<super::sqlite::human_owner::SnapshotCheck> {
-        match self {
-            AppStore::Sqlite(s) => s.prepare_human_snapshot(prepared, materials, witness),
-            #[cfg(feature = "postgres")]
-            AppStore::Postgres(_) => Err(unported("the native Human snapshot")),
-        }
+        super::sqlite::human_owner::prepare_human_snapshot(
+            &self.owner_ref(),
+            prepared,
+            materials,
+            witness,
+        )
     }
 
     pub(crate) async fn human_ledger<T: Send + 'static>(
@@ -1142,7 +1157,9 @@ impl AppStore {
         match self {
             AppStore::Sqlite(s) => s.human_ledger(deadline, operation).await,
             #[cfg(feature = "postgres")]
-            AppStore::Postgres(_) => Err(unported("the native Human ledger")),
+            AppStore::Postgres(p) => {
+                super::sqlite::human_owner::postgres::human_ledger(p, deadline, operation).await
+            }
         }
     }
 
@@ -1154,7 +1171,7 @@ impl AppStore {
         match self {
             AppStore::Sqlite(s) => s.create_session_primary(req, primary).await,
             #[cfg(feature = "postgres")]
-            AppStore::Postgres(_) => Err(unported("native primary sessions")),
+            AppStore::Postgres(p) => p.create_session_primary(req, primary).await,
         }
     }
 
@@ -1193,7 +1210,23 @@ impl AppStore {
                 .await
             }
             #[cfg(feature = "postgres")]
-            AppStore::Postgres(_) => Err(unported("native primary reauthentication")),
+            AppStore::Postgres(p) => {
+                p.reauthenticate_primary(
+                    id,
+                    provider,
+                    configuration.as_ref(),
+                    auth_time,
+                    source,
+                    &factor,
+                    &new_portal_handle,
+                    &consume_txn,
+                    deadline,
+                    &events,
+                    mk_revoked_event,
+                    &primary,
+                )
+                .await
+            }
         }
     }
 }

@@ -597,8 +597,28 @@ pub struct Bound {
 }
 
 /// Digest of the effective configuration (not its content) for `config.loaded`.
+/// The digest of the configuration replicas share. Where this process keeps
+/// its files and which addresses it binds are placement, not policy: two
+/// replicas of one deployment on one PostgreSQL store differ there and must
+/// still share the configuration generation (ADR-0020 slice 5). Listener TLS
+/// and every policy setting stay in the digest.
 fn config_digest(cfg: &Config) -> String {
-    sha256(format!("{cfg:?}").as_bytes()).to_hex()
+    let mut shared = cfg.clone();
+    shared.state_dir = std::path::PathBuf::new();
+    let listen = &mut shared.listen;
+    listen.portal.clear();
+    listen.gateway.clear();
+    for address in [
+        &mut listen.native_gateway,
+        &mut listen.grpc_gateway,
+        &mut listen.admin,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        address.clear();
+    }
+    sha256(format!("{shared:?}").as_bytes()).to_hex()
 }
 
 fn unix_secs(t: Timestamp) -> i64 {
@@ -1779,23 +1799,6 @@ fn refuse_incomplete_backend(cfg: &Config) -> anyhow::Result<()> {
     }
     if !cfg!(feature = "postgres") {
         anyhow::bail!("store.kind = \"postgres\" needs a binary built with the postgres feature");
-    }
-    let mut unported = Vec::new();
-    if cfg.human_material_key_env.is_some() {
-        unported.push("human_material_key_env");
-    }
-    if cfg
-        .receipt_issuer
-        .as_ref()
-        .is_some_and(|r| r.human_receipts.is_some())
-    {
-        unported.push("receipt_issuer.human_receipts");
-    }
-    if !unported.is_empty() {
-        anyhow::bail!(
-            "store.kind = \"postgres\": {} still need the SQLite store (ADR-0020 slice 5: the native Human owners are not ported yet)",
-            unported.join(", ")
-        );
     }
     Ok(())
 }
@@ -3285,27 +3288,41 @@ mod tests {
 
 #[cfg(test)]
 mod postgres_backend_tests {
-    /// S600-6: a PostgreSQL configuration is never served by a slice-1 binary
-    /// and never silently falls back to SQLite.
+    /// S610-2: replicas share one configuration generation when they differ
+    /// only in placement (state directory, listener addresses).
     #[test]
-    fn s600_6_serving_refuses_unported_postgres_features() {
+    fn s610_2_replicas_differing_only_in_placement_share_the_configuration_digest() {
+        let parse = |state: &str, port: u16, providers: &str| {
+            crate::config::parse(&format!(
+                r#"{{"state_dir": "{state}", "listen": {{"portal": "127.0.0.1:{port}", "gateway": "127.0.0.1:{}"}}, "portal": {{"public_url": "https://auth.example.test"}}, "gateway": {{"kind": "hangang", "caller_key_env": "K"}}{providers}}}"#,
+                port + 1
+            ))
+            .unwrap()
+        };
+        let a = super::config_digest(&parse("/srv/a", 8700, ""));
+        assert_eq!(a, super::config_digest(&parse("/srv/b", 9700, "")));
+        let other = parse(
+            "/srv/a",
+            8700,
+            r#", "providers": [{"provider_id": "x", "kind": "oidc", "client_id": "c", "client_secret_env": "S", "issuer": "https://idp.example.test"}]"#,
+        );
+        assert_ne!(a, super::config_digest(&other), "policy is in the digest");
+    }
+
+    /// S600-6: a PostgreSQL configuration is served only by a binary with the
+    /// postgres feature, and never silently falls back to SQLite.
+    #[test]
+    fn s600_6_serving_accepts_postgres_only_in_a_postgres_build() {
         let mut cfg = crate::config::parse(
             r#"{"state_dir": "/tmp/hopae-unused", "portal": {"public_url": "https://auth.example.test"}, "gateway": {"kind": "hangang", "caller_key_env": "K"}}"#,
         )
         .unwrap();
         assert!(super::refuse_incomplete_backend(&cfg).is_ok());
         cfg.store.kind = crate::config::StoreKind::Postgres;
+        // The native Human owners run on PostgreSQL too (slice 5).
+        cfg.human_material_key_env = Some("HOPAE_MATERIAL_KEY".into());
         if cfg!(feature = "postgres") {
-            // Serving on PostgreSQL is enabled; the native Human owner paths are not.
             assert!(super::refuse_incomplete_backend(&cfg).is_ok());
-            cfg.human_material_key_env = Some("HOPAE_MATERIAL_KEY".into());
-            let e = super::refuse_incomplete_backend(&cfg)
-                .unwrap_err()
-                .to_string();
-            assert!(
-                e.contains("human_material_key_env") && e.contains("slice 5"),
-                "{e}"
-            );
         } else {
             let e = super::refuse_incomplete_backend(&cfg)
                 .unwrap_err()

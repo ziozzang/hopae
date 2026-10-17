@@ -33,12 +33,24 @@ fn wait<F: Future>(handle: &tokio::runtime::Handle, f: F) -> F::Output {
 pub struct PgMeta {
     store: Arc<PgStore>,
     handle: tokio::runtime::Handle,
+    deadline: Option<crate::store::Deadline>,
 }
 
 impl PgMeta {
     pub fn new(store: Arc<PgStore>) -> Self {
         let handle = store.handle.clone();
-        Self { store, handle }
+        Self {
+            store,
+            handle,
+            deadline: None,
+        }
+    }
+
+    /// Every transaction of this handle ends by `deadline`: its statements
+    /// time out, and past it nothing commits.
+    pub fn within(mut self, deadline: crate::store::Deadline) -> Self {
+        self.deadline = Some(deadline);
+        self
     }
 }
 
@@ -47,11 +59,46 @@ pub struct PgMetaTx<'a> {
     tx: &'a Transaction<'a>,
     store: &'a PgStore,
     handle: &'a tokio::runtime::Handle,
+    write: bool,
+}
+
+impl<'a> PgMetaTx<'a> {
+    /// A view of an open transaction (`write`: an owner write transaction,
+    /// whose reads lock what they rely on until commit).
+    pub(super) fn view(
+        tx: &'a Transaction<'a>,
+        store: &'a PgStore,
+        handle: &'a tokio::runtime::Handle,
+        write: bool,
+    ) -> Self {
+        Self {
+            tx,
+            store,
+            handle,
+            write,
+        }
+    }
 }
 
 impl PgMetaTx<'_> {
     fn run<F: Future>(&self, f: F) -> F::Output {
         wait(self.handle, f)
+    }
+
+    /// The row-lock suffix for a decision read in this transaction: inside
+    /// an owner write, `FOR SHARE` keeps the rows as read until commit (a
+    /// read snapshot is consistent by itself: `REPEATABLE READ`).
+    pub(crate) fn lock(&self) -> &'static str {
+        if self.write { " FOR SHARE" } else { "" }
+    }
+
+    /// One row of a query in this transaction (blocking).
+    pub(crate) fn query_opt(
+        &self,
+        sql: &str,
+        params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+    ) -> StoreResult<Option<tokio_postgres::Row>> {
+        self.run(self.tx.query_opt(sql, params)).map_err(super::pg)
     }
 
     /// The administrator fence (ADR-0016) inside this transaction.
@@ -156,22 +203,40 @@ impl PgMeta {
         let handle = self.handle.clone();
         let store = self.store.clone();
         let mut client = wait(&handle, store.client()).map_err(|_| MetaError)?;
-        let tx = wait(&handle, store.begin(&mut client)).map_err(|_| MetaError)?;
+        // A read is one consistent snapshot, as SQLite's deferred
+        // transaction; it can never write.
+        let tx = if write {
+            wait(&handle, store.begin(&mut client))
+        } else {
+            wait(&handle, store.begin_snapshot(&mut client))
+        }
+        .map_err(|_| MetaError)?;
+        if let Some(deadline) = self.deadline {
+            let ms = super::admin::deadline_ms(deadline).min(store.statement_timeout_ms);
+            wait(
+                &handle,
+                tx.batch_execute(&format!("SET LOCAL statement_timeout = {ms}")),
+            )
+            .map_err(|_| MetaError)?;
+        }
         if write {
             wait(
                 &handle,
-                tx.execute("SELECT pg_advisory_xact_lock($1)", &[&META_LOCK]),
+                tx.execute(super::ADVISORY_XACT_LOCK, &[&META_LOCK]),
             )
             .map_err(|_| MetaError)?;
         }
         let out = {
-            let view = PgMetaTx {
-                tx: &tx,
-                store: &store,
-                handle: &handle,
-            };
+            let view = PgMetaTx::view(&tx, &store, &handle, write);
             f(&view)?
         };
+        if self
+            .deadline
+            .is_some_and(|d| std::time::Instant::now() >= d.0)
+        {
+            // Past the deadline nothing commits (nothing was attempted).
+            return Err(MetaError.into());
+        }
         attempted.set(true);
         wait(&handle, tx.commit()).map_err(|_| MetaError)?;
         Ok(out)

@@ -322,6 +322,11 @@ pub struct Store {
 }
 
 impl Store {
+    /// This store's identity for prepared native owner values.
+    pub(crate) fn owner_ref(&self) -> crate::store::owner_ref::OwnerRef {
+        crate::store::owner_ref::OwnerRef::sqlite(&self.inner)
+    }
+
     /// Create the parent directory (0700 when newly created) and the database
     /// file (0600), open it, run pending migrations and start the writer.
     /// `sinks` names the event sinks that get a delivery row per required event.

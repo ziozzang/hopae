@@ -690,7 +690,7 @@ impl Directory for PgStore {
             tx.batch_execute(&format!("SET LOCAL statement_timeout = {ms}"))
                 .await
                 .map_err(pg)?;
-            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&GRANTS_LOCK])
+            tx.execute(super::ADVISORY_XACT_LOCK, &[&GRANTS_LOCK])
                 .await
                 .map_err(pg)?;
             let mut imp = Import {
@@ -967,6 +967,7 @@ impl Sessions for PgStore {
             deadline,
             &events,
             mk_revoked_event,
+            None,
         )
         .await
     }
@@ -1104,7 +1105,7 @@ impl Sessions for PgStore {
         super::retry(|| async {
             let mut client = self.client().await?;
             let tx = self.begin(&mut client).await?;
-            tx.execute("SELECT pg_advisory_xact_lock(7008)", &[]).await.map_err(pg)?;
+            tx.execute(super::ADVISORY_XACT_LOCK, &[&super::LOGIN_TXN_LOCK]).await.map_err(pg)?;
             let total: i64 = tx.query_one("SELECT count(*) FROM login_txns", &[]).await.map_err(pg)?.get(0);
             let excess = total - i64::from(max_rows);
             let n = if excess > 0 {
@@ -1187,6 +1188,7 @@ impl PgStore {
         deadline: Deadline,
         events: &[Event],
         mk_revoked_event: &(dyn for<'a> Fn(&'a HandleRow) -> Event + Sync),
+        primary: Option<&crate::session::service::VerifiedPrimary>,
     ) -> StoreResult<()> {
         if new_portal_handle.session_id != *id {
             return Err(StoreError::Conflict("portal handle names another session"));
@@ -1242,9 +1244,26 @@ impl PgStore {
             let mut h = new_portal_handle.clone();
             h.issued_aal = h.issued_aal.min(s.aal);
             write::insert_handle(&tx, &h).await?;
-            // An unqualified reauthentication cannot keep an earlier primary proof.
-            tx.execute("DELETE FROM session_primary_provenance WHERE session_id=$1", &[&id.as_str()]).await.map_err(pg)?;
+            match primary {
+                Some(primary) => {
+                    // The proof names the new factor and credential generation.
+                    let current = live_session_locked(&tx, id).await?;
+                    let index = current
+                        .factors
+                        .len()
+                        .checked_sub(1)
+                        .ok_or(StoreError::Conflict("primary factor missing"))?;
+                    primary.write_postgres(self, &tx, &current, index).await?;
+                }
+                None => {
+                    // An unqualified reauthentication cannot keep an earlier primary proof.
+                    tx.execute("DELETE FROM session_primary_provenance WHERE session_id=$1", &[&id.as_str()]).await.map_err(pg)?;
+                }
+            }
             self.insert_events(&tx, &all).await?;
+            if let Some(primary) = primary {
+                primary.publication()?;
+            }
             check_deadline(deadline)?;
             tx.commit().await.map_err(pg)
         })
@@ -1254,6 +1273,41 @@ impl PgStore {
 }
 
 impl PgStore {
+    /// Reauthentication with the native primary provenance recorded in the
+    /// same transaction (ADR-0020 slice 5).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn reauthenticate_primary(
+        &self,
+        id: &SessionId,
+        provider: &ProviderId,
+        configuration: Option<&(ProviderKind, serde_json::Value)>,
+        auth_time: Timestamp,
+        source: AuthTimeSource,
+        factor: &FactorEntry,
+        new_portal_handle: &HandleRow,
+        consume_txn: &(Digest, Reason),
+        deadline: Deadline,
+        events: &[Event],
+        mk_revoked_event: &(dyn for<'a> Fn(&'a HandleRow) -> Event + Sync),
+        primary: &crate::session::service::VerifiedPrimary,
+    ) -> StoreResult<()> {
+        self.reauthenticate(
+            id,
+            provider,
+            configuration,
+            auth_time,
+            source,
+            factor,
+            new_portal_handle,
+            consume_txn,
+            deadline,
+            events,
+            mk_revoked_event,
+            Some(primary),
+        )
+        .await
+    }
+
     /// Mirror the configured applications into `apps` (informational: verify
     /// reads the in-memory snapshot), as SQLite's `mirror_apps`.
     pub async fn mirror_apps(&self, apps: &[crate::policy::types::AppPolicy]) -> StoreResult<()> {

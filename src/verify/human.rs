@@ -672,12 +672,7 @@ impl ProjectionCurrent {
         ledger: &crate::store::sqlite::human_owner::LedgerSnapshot<'_>,
     ) -> StoreResult<()> {
         let result = (|| {
-            if !self
-                .owner
-                .store
-                .sqlite()
-                .is_some_and(|s| ledger.belongs_to(s))
-            {
+            if !ledger.belongs_to(&self.owner.store) {
                 return Err(refused());
             }
             let now = self.sample_for(checked)?;

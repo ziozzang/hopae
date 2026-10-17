@@ -183,7 +183,7 @@ impl PgStore {
             check_deadline(deadline)?;
             let mut client = self.client().await?;
             let tx = self.begin(&mut client).await?;
-            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&MATERIAL_LOCK]).await.map_err(pg)?;
+            tx.execute(super::ADVISORY_XACT_LOCK, &[&MATERIAL_LOCK]).await.map_err(pg)?;
             if !generation_is(&tx, prepared.generation).await? {
                 return Err(material_refused());
             }

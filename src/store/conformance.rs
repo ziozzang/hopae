@@ -5144,6 +5144,40 @@ async fn provider_owners(b: &Backend) {
         .await
         .unwrap();
     assert!(again.same(&published) || again.contains("mock"), "{name}");
+    // A different compiled fingerprint (same rows, another secret) republishes
+    // as the next revision: an upsert of an existing owner row is accepted.
+    let other_key = crate::provider::material::Key::resolve(Some("K"), &|_| {
+        Some(data_encoding::BASE64URL_NOPAD.encode(&[4u8; 32]))
+    })
+    .unwrap();
+    let mut replaced = desired.clone();
+    let mock = prepared
+        .rows()
+        .iter()
+        .find(|r| r.provider_id.as_str() == "mock")
+        .unwrap();
+    replaced.insert("mock".into(), other_key.start(mock).unwrap().finish());
+    let fresh = b
+        .app
+        .prepare_registry_providers(generation, deadline())
+        .await
+        .unwrap();
+    let moved = b
+        .app
+        .publish_materials(&fresh, &replaced, deadline())
+        .await
+        .unwrap();
+    let owner = b.app.owner_ref();
+    assert_eq!(
+        moved.expected(&owner, "mock").unwrap().revision(),
+        published.expected(&owner, "mock").unwrap().revision() + 1,
+        "{name}: a changed fingerprint is the next revision"
+    );
+    assert_eq!(
+        moved.expected(&owner, "two").unwrap().revision(),
+        published.expected(&owner, "two").unwrap().revision(),
+        "{name}"
+    );
     // A material change of a provider moves its owner: the preparation is stale.
     let mut changed = provider("mock", true);
     changed.config =
@@ -5403,4 +5437,153 @@ async fn publication_notifications(pg: Arc<super::postgres::PgStore>, app: super
     publish(current + 1).await.unwrap();
     woken("notified after reconnect").await;
     listener.abort();
+}
+
+// ---- a PostgreSQL schema for whole-subsystem suites --------------------------
+
+/// The backend the native Human suites run on: SQLite, or PostgreSQL when
+/// `HOPAE_TEST_HUMAN_BACKEND=postgres` and `HOPAE_TEST_POSTGRES_URL` are set
+/// (`make test-postgres` runs them both ways).
+pub(crate) fn human_suite_on_postgres() -> bool {
+    cfg!(feature = "postgres")
+        && std::env::var("HOPAE_TEST_HUMAN_BACKEND").as_deref() == Ok("postgres")
+        && std::env::var("HOPAE_TEST_POSTGRES_URL").is_ok()
+}
+
+/// A fresh schema on `HOPAE_TEST_POSTGRES_URL`, dropped when this value is.
+/// Stores open on it (and reopen, like a SQLite file); SQL runs
+/// synchronously from any thread or runtime on its own connection.
+#[cfg(feature = "postgres")]
+pub(crate) struct PgSchema {
+    url: String,
+    schema: String,
+}
+
+#[cfg(feature = "postgres")]
+impl PgSchema {
+    pub(crate) fn new() -> Option<Self> {
+        let url = std::env::var("HOPAE_TEST_POSTGRES_URL").ok()?;
+        let schema = format!(
+            "hopae_h_{}",
+            random_id(&crate::crypto::OsRng, "").to_ascii_lowercase()
+        );
+        Some(Self { url, schema })
+    }
+
+    /// Open (or reopen) a store on this schema.
+    pub(crate) async fn store(
+        &self,
+        clock: Arc<dyn crate::crypto::Clock>,
+        rng: Arc<dyn crate::crypto::Rng>,
+    ) -> super::Store {
+        let store = super::postgres::PgStore::connect(
+            super::postgres::PgOptions {
+                url: self.url.clone(),
+                ca_pem: None,
+                // Whole suites run many fixtures in parallel on one server.
+                pool_size: 3,
+                connect_timeout: Duration::from_secs(5),
+                statement_timeout: Duration::from_secs(5),
+                search_path: Some(self.schema.clone()),
+            },
+            clock,
+            rng,
+            vec![],
+        )
+        .await
+        .expect("connect to HOPAE_TEST_POSTGRES_URL");
+        store.ensure_realm().await.expect("store realm");
+        super::Store::Postgres(Arc::new(store))
+    }
+
+    fn on_own_runtime<T: Send + 'static>(
+        &self,
+        search_path: bool,
+        f: impl for<'c> FnOnce(
+            &'c tokio_postgres::Client,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'c>>
+        + Send
+        + 'static,
+    ) -> T {
+        let mut cfg: tokio_postgres::Config = self.url.parse().expect("postgres url");
+        if search_path {
+            cfg.options(format!("-c search_path={}", self.schema));
+        }
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let (client, connection) =
+                    cfg.connect(tokio_postgres::NoTls).await.expect("connect");
+                tokio::spawn(connection);
+                f(&client).await
+            })
+        })
+        .join()
+        .expect("postgres helper thread")
+    }
+
+    /// Run statements (a `;`-separated batch) in this schema.
+    pub(crate) fn exec(&self, sql: &str) {
+        let sql = sql.to_string();
+        self.on_own_runtime(true, move |c| {
+            Box::pin(async move { c.batch_execute(&sql).await.expect(&sql) })
+        })
+    }
+
+    /// One statement with one text parameter.
+    pub(crate) fn exec_text(&self, sql: &str, value: &str) {
+        let (sql, value) = (sql.to_string(), value.to_string());
+        self.on_own_runtime(true, move |c| {
+            Box::pin(async move {
+                c.execute(&sql, &[&value]).await.expect(&sql);
+            })
+        })
+    }
+
+    /// Run statements; the error text if they fail.
+    pub(crate) fn try_exec(&self, sql: &str) -> Result<(), String> {
+        let sql = sql.to_string();
+        self.on_own_runtime(true, move |c| {
+            Box::pin(async move { c.batch_execute(&sql).await.map_err(|e| e.to_string()) })
+        })
+    }
+
+    /// The first column of the first row, as text.
+    pub(crate) fn text(&self, sql: &str) -> String {
+        let sql = sql.to_string();
+        self.on_own_runtime(true, move |c| {
+            Box::pin(async move {
+                c.query_one(&sql, &[])
+                    .await
+                    .expect(&sql)
+                    .get::<_, String>(0)
+            })
+        })
+    }
+
+    /// The first column of the first row, as a 64-bit integer.
+    pub(crate) fn scalar(&self, sql: &str) -> i64 {
+        let sql = sql.to_string();
+        self.on_own_runtime(true, move |c| {
+            Box::pin(async move { c.query_one(&sql, &[]).await.expect(&sql).get::<_, i64>(0) })
+        })
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl Drop for PgSchema {
+    fn drop(&mut self) {
+        let schema = self.schema.clone();
+        self.on_own_runtime(false, move |c| {
+            Box::pin(async move {
+                let _ = c
+                    .batch_execute(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
+                    .await;
+            })
+        })
+    }
 }

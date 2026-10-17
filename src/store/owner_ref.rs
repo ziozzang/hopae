@@ -24,6 +24,11 @@ impl OwnerRef {
     pub(crate) fn is_postgres(&self, store: &Arc<super::postgres::PgStore>) -> bool {
         matches!(self, OwnerRef::Postgres(w) if Weak::ptr_eq(w, &Arc::downgrade(store)))
     }
+    /// Whether this names `store` (by identity, without its `Arc`).
+    #[cfg(feature = "postgres")]
+    pub(crate) fn is_postgres_store(&self, store: &super::postgres::PgStore) -> bool {
+        matches!(self, OwnerRef::Postgres(w) if std::ptr::eq(w.as_ptr(), store))
+    }
     pub(crate) fn same(&self, other: &Self) -> bool {
         match (self, other) {
             (OwnerRef::Sqlite(a), OwnerRef::Sqlite(b)) => Weak::ptr_eq(a, b),

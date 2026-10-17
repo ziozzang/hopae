@@ -24,13 +24,17 @@ pub(super) struct Facts {
     config: i64,
 }
 
+/// The provenance facts, the session's factor list and the configuration
+/// generation in force, as one row reads them.
+type Found = (Facts, Option<String>, Option<String>);
+
 fn refused() -> StoreError {
     StoreError::Conflict("WebAuthn establishing owner unavailable")
 }
 
-pub(super) fn current(c: &rusqlite::Connection, session: &str) -> StoreResult<Facts> {
-    let found = c
-        .query_row(
+pub(super) fn current(tx: &dyn crate::store::meta::MetaTx, session: &str) -> StoreResult<Facts> {
+    let found: Option<Found> = if let Some(c) = tx.sqlite() {
+        c.query_row(
             "SELECT p.user_id,p.credential_generation,p.credential_id,p.assurance,p.factor_index,p.verified_at_ms,p.config_generation,\
              CASE WHEN length(s.factors)<=65536 THEN s.factors ELSE NULL END,(SELECT value FROM meta WHERE key='config_generation') \
              FROM session_webauthn_provenance p JOIN sessions s ON s.session_id=p.session_id AND s.user_id=p.user_id AND s.cred_gen=p.credential_generation \
@@ -54,7 +58,10 @@ pub(super) fn current(c: &rusqlite::Connection, session: &str) -> StoreResult<Fa
             },
         )
         .optional()?
-        .ok_or_else(refused)?;
+    } else {
+        postgres_current(tx, session)?
+    };
+    let found = found.ok_or_else(refused)?;
     let (facts, factors, config) = found;
     let config = config
         .and_then(|s| s.parse::<i64>().ok())
@@ -72,6 +79,45 @@ pub(super) fn current(c: &rusqlite::Connection, session: &str) -> StoreResult<Fa
         return Err(refused());
     }
     Ok(facts)
+}
+
+#[cfg(feature = "postgres")]
+fn postgres_current(
+    tx: &dyn crate::store::meta::MetaTx,
+    session: &str,
+) -> StoreResult<Option<Found>> {
+    let tx = tx.postgres().ok_or_else(refused)?;
+    Ok(
+        crate::store::postgres::human::webauthn_row(tx, session)?.map(
+            |(
+                (user, generation, credential, assurance, index, at_ms, config),
+                factors,
+                current,
+            )| {
+                (
+                    Facts {
+                        user,
+                        generation,
+                        credential,
+                        assurance,
+                        index,
+                        at_ms,
+                        config,
+                    },
+                    factors,
+                    current,
+                )
+            },
+        ),
+    )
+}
+
+#[cfg(not(feature = "postgres"))]
+fn postgres_current(
+    _tx: &dyn crate::store::meta::MetaTx,
+    _session: &str,
+) -> StoreResult<Option<Found>> {
+    Err(refused())
 }
 
 /// Record the establishing passkey of a native elevation in its transaction.

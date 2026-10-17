@@ -1172,7 +1172,7 @@ impl Passkeys for PgStore {
                 return Err(conflict("login transaction unavailable"));
             }
             // The caps count every replica's rows: one admission at a time.
-            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOGIN_CEREMONY_LOCK])
+            tx.execute(super::ADVISORY_XACT_LOCK, &[&LOGIN_CEREMONY_LOCK])
                 .await
                 .map_err(pg)?;
             tx.execute(

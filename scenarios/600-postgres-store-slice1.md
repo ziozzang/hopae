@@ -187,8 +187,8 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 ### S600-29 Provider and compiled-material owners agree (slice 5)
 
 - Given: providers `mock` and `two` imported through the application handle.
-- When: providers are prepared for a generation that is not in force, then for the current one; the preparation is required whole and per provider; compiled material fingerprints are published twice; `mock`'s configuration changes; the generation moves; another store is asked to accept the preparation.
-- Then: `Conflict`; both rows in order; both requirements pass; both fingerprints recorded and the republish stable; the stale preparation is refused whole, for `mock` and for a material publication while `two` still passes; refused after the new generation; refused by the foreign store.
+- When: providers are prepared for a generation that is not in force, then for the current one; the preparation is required whole and per provider; compiled material fingerprints are published twice, then with another fingerprint for `mock`; `mock`'s configuration changes; the generation moves; another store is asked to accept the preparation.
+- Then: `Conflict`; both rows in order; both requirements pass; both fingerprints recorded and the republish stable; the changed fingerprint is `mock`'s next revision and `two` keeps its own (an upsert of an existing owner row is accepted on PostgreSQL too); the stale preparation is refused whole, for `mock` and for a material publication while `two` still passes; refused after the new generation; refused by the foreign store.
 
 ### S600-5 PostgreSQL ledger, migrations and newer schema
 
@@ -200,13 +200,31 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 
 - Given: `store.backend = "postgres"` with `store.postgres`.
 - When: the configuration is validated and a serve/store command starts.
-- Then: invalid or inline settings are refused; without the feature the configuration is refused; with it, `serve` and the store commands run on PostgreSQL (slice 5; two serving replicas are S610), except that settings needing the native Human owners (`human_material_key_env`, `receipt_issuer.human_receipts`) are refused at start with a slice message; nothing falls back to SQLite.
+- Then: invalid or inline settings are refused; without the feature the configuration is refused; with it, `serve` and the store commands run on PostgreSQL (slice 5; two serving replicas are S610), the native Human owners included; nothing falls back to SQLite.
 
 ### S600-30 Published snapshots follow other replicas
 
 - Given: two profile owners and two projection owners on one store, standing for two replicas.
 - When: one publishes; the other refreshes; one publishes a profile revision the other cannot compile; a PostgreSQL listener is dropped.
 - Then: the follower installs the newer durable revision and never an older one, and its own publication on the old revision conflicts until it followed; a revision it cannot compile installs as unavailable (verify answers unavailable) and a failed publication leaves it so; projection plans that exceed the follower's declared capabilities are not installed; on PostgreSQL a committed publication wakes the listener (`NOTIFY` on commit) and a dropped listener reconnects and wakes once more so the follower catches up.
+
+### S600-31 Native Human snapshot and primary owner agree
+
+- Given: a native OIDC provider with published compiled material, on each backend.
+- When: a user logs in, a native witness is captured and checked; a second session is captured; the provider row moves (disabled and enabled); the registry is prepared and published again and a fresh login is captured; the user is disabled.
+- Then: the login records exactly one primary provenance row in its own transaction; the capture is current; the provider move retires both captures; after re-preparation a new login is qualified again; the disabled user retires it.
+
+### S600-32 Native factor provenance agrees
+
+- Given: a native session elevated by TOTP, and one elevated by a passkey, on each backend.
+- When: the TOTP counter moves, then the enrollment is revoked; the passkey's counter and revision move, then it is revoked.
+- Then: a counter move keeps the capture current (another use of the same factor); a revocation retires it.
+
+### S600-33 The native Human ledger checks inside its own transaction
+
+- Given: a captured Human check prepared for the ledger, on each backend.
+- When: another store's ledger runs the check; the same store's ledger runs it, disables the user inside the same transaction and runs it again; the transaction rolls back.
+- Then: the other store is refused; the first check passes, the second is refused; the user is still active afterwards.
 
 ## Abuse cases
 
@@ -261,9 +279,12 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-28 | `s600_28_postgres_connections_admit_exactly_one_concurrent_consumer` | `src/auth_gateway/receipt_replay.rs` | unit | passing |
 | S600-29 | `s600_29_provider_and_material_owners_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-30 | `s600_30_published_snapshots_follow_other_replicas_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-31 | `s600_31_native_human_snapshot_and_primary_owner_agree_on_both_backends` | `src/verify/human_tests.rs` | unit | passing |
+| S600-32 | `s600_32_native_human_factor_provenance_agrees_on_both_backends` | `src/verify/human_tests.rs` | unit | passing |
+| S600-33 | `s600_33_native_human_ledger_checks_inside_its_own_transaction_on_both_backends` | `src/verify/human_tests.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
-| S600-6 | `s600_6_serving_refuses_unported_postgres_features` | `src/app.rs` | unit | passing |
+| S600-6 | `s600_6_serving_accepts_postgres_only_in_a_postgres_build` | `src/app.rs` | unit | passing |
 
 ## Live verification
 
@@ -274,7 +295,7 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 
 ## Open questions
 
-- Slice 5 (ADR-0020): `serve` runs on PostgreSQL and the HTTP two-replica qualification is S610. The native Human owners remain to be ported. Hosted CI stays disabled; `make test-postgres` and `make qualify-postgres` are the PostgreSQL runs.
+- Slice 5 (ADR-0020): `serve` runs on PostgreSQL and the HTTP two-replica qualification is S610. The native Human owners run on PostgreSQL too (S600-31 to S600-33, and the whole native Human suite with `HOPAE_TEST_HUMAN_BACKEND=postgres` in `make test-postgres`). Hosted CI stays disabled; `make test-postgres` and `make qualify-postgres` are the PostgreSQL runs.
 
 ## 한국어 요약
 

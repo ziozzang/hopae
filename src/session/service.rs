@@ -94,6 +94,26 @@ impl VerifiedPrimary {
             index,
         )
     }
+    /// The PostgreSQL write, in the session's own transaction.
+    #[cfg(feature = "postgres")]
+    pub(crate) async fn write_postgres(
+        &self,
+        store: &crate::store::postgres::PgStore,
+        tx: &deadpool_postgres::Transaction<'_>,
+        session: &SessionRow,
+        index: usize,
+    ) -> Result<(), StoreError> {
+        self.source
+            .write_postgres(
+                store,
+                tx,
+                session,
+                &self.subject,
+                self.authentication,
+                index,
+            )
+            .await
+    }
 }
 
 /// `consumed_reason` of a transaction that completed a login (text column).
@@ -1500,6 +1520,9 @@ impl Service {
             registry
                 .primary_credential(store, &provider, self.snapshot.load_full())
                 .await
+                .inspect_err(|e| {
+                    tracing::warn!("native primary owner unavailable for this login ({e}): the session is unqualified")
+                })
                 .ok()
         } else {
             None
@@ -1685,6 +1708,9 @@ impl Service {
             registry
                 .primary_oidc(store, &provider, self.snapshot.load_full())
                 .await
+                .inspect_err(|e| {
+                    tracing::warn!("native primary owner unavailable for this login ({e}): the session is unqualified")
+                })
                 .ok()
         } else {
             None

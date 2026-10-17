@@ -396,7 +396,7 @@ impl PgStore {
         tx.batch_execute("SET LOCAL statement_timeout = 0")
             .await
             .map_err(pg)?;
-        tx.execute("SELECT pg_advisory_xact_lock($1)", &[&IMPORT_LOCK])
+        tx.execute(super::ADVISORY_XACT_LOCK, &[&IMPORT_LOCK])
             .await
             .map_err(pg)?;
         // The target must be empty.

@@ -169,10 +169,10 @@ impl PreparedProviders {
     }
     pub(crate) fn human_expected(
         &self,
-        store: &Store,
+        store: &crate::store::owner_ref::OwnerRef,
         provider: &crate::provider::types::ProviderId,
     ) -> StoreResult<(u64, i64)> {
-        if !self.store.is_sqlite(&store.inner) {
+        if !self.store.same(store) {
             return Err(StoreError::Conflict("provider store changed"));
         }
         Ok((

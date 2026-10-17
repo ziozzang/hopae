@@ -11,6 +11,7 @@ mod events;
 mod factors;
 mod groups;
 mod handoff;
+pub(crate) mod human;
 pub mod import;
 pub mod meta;
 mod owners;
@@ -73,8 +74,27 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "0008_slice5_meta",
         include_str!("migrations/0008_slice5_meta.sql"),
     ),
+    (
+        9,
+        "0009_slice5_material_upsert",
+        include_str!("migrations/0009_slice5_material_upsert.sql"),
+    ),
+    (
+        10,
+        "0010_slice5_lock_namespace",
+        include_str!("migrations/0010_slice5_lock_namespace.sql"),
+    ),
 ];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;
+/// Take the transaction-scoped advisory lock `$1` (an `i64` key below 2^31)
+/// in this store's namespace: its schema. Stores in different schemas of
+/// one database never contend, and the two-key space never meets other
+/// applications' single-key locks. Only the migration runner's lock spans
+/// the database.
+pub(crate) const ADVISORY_XACT_LOCK: &str =
+    "SELECT pg_advisory_xact_lock(hashtext(current_schema()), ($1::bigint)::int4)";
+/// Advisory lock key serializing login-transaction admission (count, evict, insert).
+pub(crate) const LOGIN_TXN_LOCK: i64 = 7008;
 /// `pg_advisory_xact_lock` key of the migration runner ("hopae-mi").
 const MIGRATION_LOCK: i64 = 0x686f_7061_652d_6d69;
 const RAW_CLAIMS_MAX: usize = 8192;
@@ -360,6 +380,27 @@ impl PgStore {
         Ok(tx)
     }
 
+    /// One read-only snapshot (`REPEATABLE READ`) with the statement timeout.
+    pub(super) async fn begin_snapshot<'a>(
+        &self,
+        client: &'a mut deadpool_postgres::Object,
+    ) -> StoreResult<Transaction<'a>> {
+        let tx = client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .await
+            .map_err(pg)?;
+        tx.batch_execute(&format!(
+            "SET LOCAL statement_timeout = {}",
+            self.statement_timeout_ms
+        ))
+        .await
+        .map_err(pg)?;
+        Ok(tx)
+    }
+
     pub(crate) async fn client(&self) -> StoreResult<deadpool_postgres::Object> {
         self.pool.get().await.map_err(pool_err)
     }
@@ -396,7 +437,7 @@ impl PgStore {
             .map_err(pg)?;
             if events::in_feed(ev.kind) {
                 // Feed positions in commit order: only these writes take the lock.
-                tx.execute("SELECT pg_advisory_xact_lock($1)", &[&events::FEED_LOCK])
+                tx.execute(ADVISORY_XACT_LOCK, &[&events::FEED_LOCK])
                     .await
                     .map_err(pg)?;
                 tx.execute(
@@ -743,7 +784,21 @@ impl PgStore {
         })
     }
 
-    async fn try_create_session(&self, req: &CreateSession) -> StoreResult<()> {
+    /// A login session whose native primary authentication is recorded in
+    /// the same transaction (ADR-0020 slice 5).
+    pub(crate) async fn create_session_primary(
+        &self,
+        req: CreateSession,
+        primary: crate::session::service::VerifiedPrimary,
+    ) -> StoreResult<()> {
+        retry(|| self.try_create_session(&req, Some(&primary))).await
+    }
+
+    async fn try_create_session(
+        &self,
+        req: &CreateSession,
+        primary: Option<&crate::session::service::VerifiedPrimary>,
+    ) -> StoreResult<()> {
         if req.portal_handle.handle_sha256 != req.portal_handle_digest {
             return Err(StoreError::Conflict("portal handle digest mismatch"));
         }
@@ -773,6 +828,9 @@ impl PgStore {
         }
         write::insert_session(&tx, s).await?;
         write::insert_handle(&tx, &req.portal_handle).await?;
+        if let Some(primary) = primary {
+            primary.write_postgres(self, &tx, s, 0).await?;
+        }
         tx.execute(
             "UPDATE users SET last_login_at=$2 WHERE user_id=$1",
             &[&s.user_id.as_str(), &s.created_at.secs()],
@@ -792,6 +850,9 @@ impl PgStore {
             }
         }
         self.insert_events(&tx, &req.events).await?;
+        if let Some(primary) = primary {
+            primary.publication()?;
+        }
         tx.commit().await.map_err(pg)
     }
 
@@ -1041,7 +1102,7 @@ impl CoreStore for PgStore {
     }
 
     async fn create_session(&self, req: CreateSession) -> StoreResult<()> {
-        retry(|| self.try_create_session(&req)).await
+        retry(|| self.try_create_session(&req, None)).await
     }
 
     async fn session(&self, id: &SessionId) -> StoreResult<Option<SessionRow>> {

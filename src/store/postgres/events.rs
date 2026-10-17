@@ -849,7 +849,7 @@ impl Events for PgStore {
             let mut client = self.client().await?;
             let tx = self.begin(&mut client).await?;
             // One pass at a time across replicas.
-            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&PRUNE_LOCK])
+            tx.execute(super::ADVISORY_XACT_LOCK, &[&PRUNE_LOCK])
                 .await
                 .map_err(pg)?;
             let report = self.prune_in(&tx, now, policy).await?;

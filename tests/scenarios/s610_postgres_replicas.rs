@@ -27,6 +27,10 @@ const IP: &str = "192.0.2.10";
 const SVC: &str = "svc.example.test";
 const SERVICE_KEY_ENV: &str = "HOPAE_QUALIFY_SERVICE_KEY";
 const SERVICE_KEY: &str = "qualify-service-credential-0123456789abcdef";
+/// The dedicated key of the native Human compiled-material owner: with it,
+/// every login records its native primary provenance (ADR-0020 slice 5).
+const MATERIAL_KEY_ENV: &str = "HOPAE_QUALIFY_MATERIAL_KEY";
+const MATERIAL_KEY: &str = "WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo";
 
 fn plans(revision: u64) -> serde_json::Value {
     json!({"revision": revision, "plans": [{"service": "app", "audience": "app-api", "resource": "app",
@@ -277,6 +281,7 @@ impl Stack {
                         {"app_id": "default", "display_name": "default"}
                     ],
                     "authentication_gateway": profiles(),
+                    "human_material_key_env": MATERIAL_KEY_ENV,
                     "credential_projection": plans(1),
                 }),
             )
@@ -286,6 +291,7 @@ impl Stack {
             (MOCK_SECRET_ENV, secret.as_str()),
             ("HOPAE_QUALIFY_PG", db.url.as_str()),
             (SERVICE_KEY_ENV, SERVICE_KEY),
+            (MATERIAL_KEY_ENV, MATERIAL_KEY),
         ];
         let a = Hopae::spawn(fixture(), &idp, &env);
         let b = Hopae::spawn(fixture(), &idp, &env);
@@ -692,5 +698,27 @@ fn s610_1_two_replicas_share_logins_handoffs_fences_and_survive_a_killed_replica
     // The survivor keeps signing people in.
     let _ = s.login("after-kill");
     assert_eq!(s.db.query_i64("SELECT count(*) FROM users"), 10);
+    // The native Human path: every login on either replica recorded its
+    // primary provenance once, bound to its live identity link, against the
+    // one compiled-material owner both replicas published.
+    assert_eq!(
+        s.db.query_i64("SELECT count(*) FROM sessions s LEFT JOIN session_primary_provenance p ON p.session_id = s.session_id WHERE s.terminated_at IS NULL AND p.session_id IS NULL"),
+        0,
+        "a live session without primary provenance"
+    );
+    assert!(s.db.query_i64("SELECT count(*) FROM session_primary_provenance") >= 10);
+    assert_eq!(
+        s.db.query_i64("SELECT count(*) FROM session_primary_provenance p LEFT JOIN identities i ON i.provider_id = p.provider_id AND i.subject = p.subject AND i.user_id = p.user_id WHERE i.user_id IS NULL"),
+        0
+    );
+    assert_eq!(
+        s.db.query_i64("SELECT count(*) FROM session_primary_provenance p JOIN human_provider_material_owners m ON m.provider_id = p.provider_id WHERE m.revision <> p.material_revision OR m.fingerprint IS NULL"),
+        0
+    );
+    assert_eq!(
+        s.db.query_i64("SELECT count(*) FROM human_provider_material_owners WHERE provider_id = 'mock' AND revision = 1"),
+        1,
+        "two replicas publishing the same material leave one revision"
+    );
     s.a.kill();
 }

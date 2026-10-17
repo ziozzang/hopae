@@ -134,12 +134,23 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   (scenario 610). Profile and projection publications follow across
   replicas within about one second (`NOTIFY` on commit plus a poll; a
   replica that missed the notification catches up by polling).
-  The native Human owners are not ported yet:
-  `human_material_key_env` and `receipt_issuer.human_receipts` are refused
-  on PostgreSQL at start.
+  The native Human owners (Human snapshot and ledger, native primary
+  sessions and reauthentication, TOTP and WebAuthn provenance, Human
+  receipts) run on PostgreSQL: decision rows are read `FOR SHARE` inside
+  owner writes and read snapshots are `REPEATABLE READ`; the native Human
+  suite runs on both backends (`make test-postgres`). PostgreSQL schema 9
+  accepts a compiled-material republish of an existing provider (the
+  insert trigger fired on upserts), and schema 10 scopes advisory locks to
+  the store's schema.
 
 ### Changed
 
+- The configuration digest behind the configuration generation ignores
+  placement (`state_dir`, listener addresses), so replicas of one
+  deployment share a generation; an upgraded instance moves its generation
+  once.
+- A login whose native primary owner is unavailable logs a warning (the
+  session stays unqualified for native Human receipts, as before).
 - A recovery factor entry no longer counts as AAL 2 evidence in step-up
   evaluation (no such entry existed before).
 - With a passkey enrolled, adding an authenticator app needs a second factor

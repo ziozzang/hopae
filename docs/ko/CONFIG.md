@@ -63,7 +63,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `listen.portal` | 문자열, 소켓 주소 | `127.0.0.1:8700` | 포털 리스너(로그인, 콜백, 로그아웃, `/healthz`). 게이트웨이의 포털 라우트가 프록시합니다. |
 | `listen.gateway` | 문자열, 소켓 주소 | `127.0.0.1:8701` | 게이트웨이 리스너(`/_hopae/verify`). `listen.portal`과 달라야 합니다. 루프백이 아닌 주소는 경고를 냅니다. 이 리스너는 공개적으로 접근할 수 있어서는 안 됩니다([게이트웨이 계약](GATEWAY_CONTRACT.md#전제-조건과-설정)). |
 | `state_dir` | 문자열, 경로 | 필수 | 런타임 상태(데이터베이스, 인스턴스 잠금, 백업)를 위한 쓰기 가능한 디렉터리이며 모드 `0700`으로 생성됩니다. 비어 있으면 안 됩니다. |
-| `store.kind`(별칭 `store.backend`) | `sqlite`, `postgres` | `sqlite` | 기본 저장소 백엔드([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md), [ADR-0020](../adr/0020-postgresql-store-backend.md)). `postgres`는 `postgres` feature로 빌드한 바이너리와 `store.postgres`가 필요합니다. `serve`, `providers import`, `hopae store migrate-to-postgres`가 사용합니다. 여러 복제본이 데이터베이스 하나를 함께 서비스할 수 있습니다. 프로필과 프로젝션 게시는 약 1초 안에 모든 복제본에 반영됩니다. 네이티브 Human 소유자가 이식되기 전까지(ADR-0020 슬라이스 5) 이 설정에서는 `human_material_key_env`와 `receipt_issuer.human_receipts`를 시작할 때 거부합니다. SQLite로 대체하지 않습니다. |
+| `store.kind`(별칭 `store.backend`) | `sqlite`, `postgres` | `sqlite` | 기본 저장소 백엔드([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md), [ADR-0020](../adr/0020-postgresql-store-backend.md)). `postgres`는 `postgres` feature로 빌드한 바이너리와 `store.postgres`가 필요합니다. `serve`, `providers import`, `hopae store migrate-to-postgres`가 사용합니다. 여러 복제본이 데이터베이스 하나를 함께 서비스할 수 있습니다. 프로필과 프로젝션 게시는 약 1초 안에 모든 복제본에 반영됩니다. 네이티브 Human 소유자(`human_material_key_env`, `receipt_issuer.human_receipts`)도 이 설정에서 동작합니다. 복제본은 같은 구성으로 실행해야 합니다. 공유 구성 세대는 배치(`state_dir`, 리스너 주소)만 무시하므로, 이전 정책으로 실행 중인 복제본은 재시작할 때까지 네이티브 Human 세션을 인정하지 않습니다. SQLite로 대체하지 않습니다. |
 | `store.postgres.url_env` | 환경 변수 이름 | — | 연결 문자열(libpq URL 또는 key/value). 파일이 아니라 환경에서 읽습니다 |
 | `store.postgres.ca_file` | 절대 경로 | 없음 | TLS용 PEM CA 묶음. 없으면 루프백이나 Unix 소켓만 허용합니다 |
 | `store.postgres.pool_size`, `connect_timeout_ms`, `statement_timeout_ms` | 정수 | `16`, `5000`, `2000` | 풀 크기 1~128, 연결 제한 시간 100~60,000 ms, 트랜잭션별 문장 제한 시간 10~600,000 ms |
@@ -241,7 +241,6 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `gateway.rate_limit_status` | HC-8 이후 | `403` | 게이트웨이가 중계하면 `429`([ADR-0005](../adr/0005-gateway-contract-and-versioning.md)) |
 | `oidc` 또는 `ldap`가 아닌 `providers[].kind` | M3 | — | 카카오, 네이버, 이메일 링크, 비밀번호([ADR-0010](../adr/0010-provider-abstraction.md)) |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, 없음, 없음 | 로컬 캐시와 Redis 버스([ADR-0006](../adr/0006-verify-caching-and-invalidation.md)) |
-| `store.kind = postgres`의 네이티브 Human 소유자 | ADR-0020 슬라이스 5(M2) | — | `serve`는 여러 복제본으로 PostgreSQL에서 동작합니다(시나리오 610). Human 스냅샷과 원장, 네이티브 기본 세션, TOTP·WebAuthn 출처는 아직 SQLite가 필요합니다 |
 
 ## 동작
 

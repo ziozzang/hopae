@@ -52,8 +52,12 @@ impl Published {
     pub(crate) fn same(&self, other: &Self) -> bool {
         self.store.same(&other.store) && self.entries == other.entries
     }
-    pub(crate) fn expected(&self, store: &Store, id: &str) -> StoreResult<Expected> {
-        if !self.store.is_sqlite(&store.inner) {
+    pub(crate) fn expected(
+        &self,
+        store: &crate::store::owner_ref::OwnerRef,
+        id: &str,
+    ) -> StoreResult<Expected> {
+        if !self.store.same(store) {
             return Err(refused());
         }
         let row = self.entries.get(id).ok_or_else(refused)?;
@@ -72,8 +76,21 @@ impl Expected {
     pub(crate) fn revision(&self) -> i64 {
         self.revision
     }
-    pub(crate) fn require(&self, c: &rusqlite::Connection, id: &str) -> StoreResult<()> {
-        let row:Option<(i64,Vec<u8>)>=c.query_row("SELECT revision,fingerprint FROM human_provider_material_owners WHERE provider_id=?1 AND fingerprint IS NOT NULL",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    pub(crate) fn require(&self, tx: &dyn crate::store::meta::MetaTx, id: &str) -> StoreResult<()> {
+        let row: Option<(i64, Vec<u8>)> = if let Some(c) = tx.sqlite() {
+            c.query_row("SELECT revision,fingerprint FROM human_provider_material_owners WHERE provider_id=?1 AND fingerprint IS NOT NULL",[id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?
+        } else {
+            #[cfg(feature = "postgres")]
+            {
+                crate::store::postgres::human::material_row(tx.postgres().ok_or_else(refused)?, id)?
+            }
+            #[cfg(not(feature = "postgres"))]
+            return Err(refused());
+        };
+        self.require_row(row)
+    }
+    /// The comparison itself, for a row read elsewhere (PostgreSQL writes).
+    pub(crate) fn require_row(&self, row: Option<(i64, Vec<u8>)>) -> StoreResult<()> {
         if row != Some((self.revision, self.fingerprint.clone())) {
             return Err(refused());
         }

@@ -196,7 +196,7 @@ against both backends.
 | 2c | Factors and passkeys: the existing `Factors` and `Passkeys` traits on PostgreSQL (sealed TOTP enrollments and monotonic counters, the external factor registry and single-use proofs, WebAuthn credentials and ceremonies, recovery codes, portal and application elevation, passwordless sign-in, the factor reset); every factor write locks the subject user's row `FOR UPDATE` before re-checking the acting session (`FOR UPDATE`) and handle (`FOR SHARE`), registry and passwordless-cap changes take advisory locks; the configuration generation moves into `CoreStore`; PostgreSQL schema 4 — implemented |
 | 3 | Console listings (`ConsoleStore`; the ADR-0016 candidate window evaluated as a CTE on one `REPEATABLE READ` snapshot instead of `INDEXED BY` temp tables), the event relay (`Events`; claims with `FOR UPDATE SKIP LOCKED` and a 60-second lease, prune behind an advisory lock), groups and the projection journal (`GroupStore`; one advisory lock per group write, gapless journal revisions committed in order), the subject directory and its feeds (`SubjectDirectoryStore`; ledger and lifecycle-feed positions numbered under advisory locks so they become visible in commit order), PostgreSQL schema 5 — implemented. Differences that remain: no inline prune at commit (the relay's periodic prune bounds the outbox), diagnostics are written synchronously behind a bounded semaphore instead of SQLite's batch queue, and the Human realm read (`admin_human_realm`) moves with the slice-4 owner tables |
 | 4 | Implemented: the Human owner foundation (realm with `admin_human_realm`/`admin_human_subjects`, provider and material owner revisions by trigger, primary provenance; schema 6) and the application mirror (schema 7); `hopae store migrate-to-postgres` (one way, empty target only, per-table counts and digests compared before commit, `store.migrated` audit, SQLite opened read-only and kept); `make qualify-postgres`: the migration through the CLI and a two-process store qualification (two replicas on shared keys, one killed with SIGKILL mid-traffic and replaced, then verification that no transaction, code, sign-up, nonce, termination or status change took effect twice, that relay first claims are unique and that the user-ID ledger is unique) |
-| 5 | `serve` on PostgreSQL (ROADMAP M2 exit). Implemented: the `Directory` and `Sessions` traits complete on PostgreSQL; `crate::store::Store` is the backend-neutral `AppStore` (SQLite or PostgreSQL, unported operations fail closed with a slice error, never a fallback); the raw-connection owners (`receipt_key_store`, `receipt_authority`, `receipt_replay`, `publication`, `authority`, `projection_authority`, `projection_admission`, `projection_observed`, `projection_receiver`, `app::state`) run on the `store::meta` contract (`MetaTx`/`MetaDb`; PostgreSQL writes take advisory lock 7070, schema 8); provider and material owner preparation binds prepared values to their store (`OwnerRef`); the portal CSRF and console MAC keys are created once in the store and shared by replicas; scenario S610 runs two `hopae serve` replicas behind a TCP round-robin in `make qualify-postgres` (logins, verify, raced handoffs, concurrent console writes, a revoked administrator, SIGKILL). Profile and projection publications follow across replicas (`NOTIFY` plus a one-second poll, S600-30, S610). Remaining: the native Human owners (Human snapshot and ledger, primary sessions and reauthentication, TOTP/WebAuthn provenance), refused at start through `human_material_key_env` and `receipt_issuer.human_receipts` |
+| 5 | `serve` on PostgreSQL (ROADMAP M2 exit). Implemented: the `Directory` and `Sessions` traits complete on PostgreSQL; `crate::store::Store` is the backend-neutral `AppStore` (SQLite or PostgreSQL, unported operations fail closed with a slice error, never a fallback); the raw-connection owners (`receipt_key_store`, `receipt_authority`, `receipt_replay`, `publication`, `authority`, `projection_authority`, `projection_admission`, `projection_observed`, `projection_receiver`, `app::state`) run on the `store::meta` contract (`MetaTx`/`MetaDb`; PostgreSQL writes take advisory lock 7070, schema 8); provider and material owner preparation binds prepared values to their store (`OwnerRef`); the portal CSRF and console MAC keys are created once in the store and shared by replicas; scenario S610 runs two `hopae serve` replicas behind a TCP round-robin in `make qualify-postgres` (logins, verify, raced handoffs, concurrent console writes, a revoked administrator, SIGKILL). Profile and projection publications follow across replicas (`NOTIFY` plus a one-second poll, S600-30, S610). The native Human owners (Human snapshot and ledger, primary sessions and reauthentication, TOTP/WebAuthn provenance, Human receipts) run on both backends: their comparisons are shared and only the reads differ (`store::postgres::human`); a read snapshot is `REPEATABLE READ`, and inside an owner write every row a decision rests on is read `FOR SHARE`, so a concurrent change waits for the commit or is seen before the decision (S600-31 to S600-33; the whole native Human suite runs on PostgreSQL in `make test-postgres`). Schema 9 fixes the compiled-material trigger for upserts, schema 10 and the application scope every advisory lock to the store's schema (two-key form), and the configuration digest ignores placement so replicas share one generation (S610-2) |
 
 ## Consequences
 
@@ -214,18 +214,19 @@ against both backends.
 - `READ COMMITTED` plus explicit locks puts a burden on reviewers: each new
   write must name the rows it locks. The conformance suite catches lost
   updates only where a test races them.
-- Until the native Human owners are ported, a PostgreSQL deployment cannot
-  use `human_material_key_env` or `receipt_issuer.human_receipts`: `serve`
-  refuses them at start. A replica may lag a profile or projection
-  publication by about one second (the poll bound when a `NOTIFY` is
-  missed).
+- A replica may lag a profile or projection publication by about one
+  second (the poll bound when a `NOTIFY` is missed).
+- Replicas must run the same policy: the configuration generation is
+  shared, so during a rolling configuration change a replica on the older
+  policy stops qualifying native Human sessions (fail closed) until it
+  restarts.
 
 ### Neutral
 
 - New config keys: `store.kind = postgres` (alias `store.backend`) and
   `store.postgres.{url_env, ca_file, pool_size, connect_timeout_ms,
   statement_timeout_ms}`.
-- Slices 2a to 5 extend scenario 600 (S600-7 to S600-30); the HTTP
+- Slices 2a to 5 extend scenario 600 (S600-7 to S600-33); the HTTP
   two-replica qualification is scenario 610.
 
 ## Alternatives considered
@@ -261,3 +262,4 @@ HA 배포(한강 ADR 0022)를 위해 호패 저장소에 PostgreSQL 백엔드를
 - **연결:** deadpool 풀과 rustls TLS를 쓰고, 장애 조치 중에는 503(실패 시 닫힘)으로 응답합니다.
 - **공유 상태:** 정확해야 하는 상태는 PostgreSQL에, 무효화 버스와 best-effort 카운터는 Redis(대체로 LISTEN/NOTIFY)에 둡니다. 권고성 비율 제한은 프로세스별로 남기고, 복제본 수만큼 곱해지는 점을 문서화합니다.
 - **슬라이스 1:** 사용자, 신원, 세션, 핸들, 이벤트의 `CoreStore` 계약과 양쪽 백엔드 적합성 테스트입니다.
+- **슬라이스 5:** `serve`가 PostgreSQL에서 여러 복제본으로 동작합니다. 프로필·프로젝션 게시는 `NOTIFY`와 1초 폴링으로 모든 복제본에 반영되고, 네이티브 Human 소유자도 양쪽 백엔드에서 같은 비교로 동작합니다(읽기는 `REPEATABLE READ`, 소유자 쓰기 안의 결정 행은 `FOR SHARE`). advisory lock은 저장소 스키마 단위로 나뉘고, 구성 세대는 배치(`state_dir`, 리스너 주소)를 무시해 복제본이 공유합니다.
