@@ -8,6 +8,8 @@ routes += [(v+'/query','POST',False) for v in ('users','sessions','events')]
 routes += [(v,'POST',True) for v in ('users/disable','users/enable','users/sessions-terminate','sessions/terminate')]
 # Audited reads with a JSON body (subject directory, authentication explain): never mutations.
 routes += [(v,'POST',False) for v in ('subjects/resolve','subjects/search','subjects/lifecycle','subjects/lifecycle/snapshot','explain/authentication')]
+# Workload principals snapshot (console package 0.1.11; the console Workloads section).
+routes += [('subjects/workloads/snapshot','POST',False)]
 # Groups (ADR-0019): audited reads, and local group writes (reason + expected_revision in the body).
 routes += [(v,'POST',False) for v in ('groups/search','groups/get','subjects/groups')]
 routes += [(v,'POST',True) for v in ('groups/create','groups/update','groups/delete','groups/members/add','groups/members/remove')]
@@ -15,7 +17,7 @@ routes += [(v,'POST',True) for v in ('groups/create','groups/update','groups/del
 # factor reset and bulk disable (writes; reason in the body), dry-run profile validation.
 routes += [(v,'POST',False) for v in ('users/get','users/factors','authentication/profiles/validate')]
 routes += [(v,'POST',True) for v in ('users/factors/reset','users/bulk-disable')]
-manifest={'id':'hopae','name':'Hopae','version':'0.1.10','api_version':1,'entry':'index.js','assets':{f:hashlib.sha256((root/f).read_bytes()).hexdigest() for f in ('index.js','style.css')},'routes':[{'path':p,'method':m,'mutation':w} for p,m,w in routes]}
+manifest={'id':'hopae','name':'Hopae','version':'0.1.11','api_version':1,'entry':'index.js','assets':{f:hashlib.sha256((root/f).read_bytes()).hexdigest() for f in ('index.js','style.css')},'routes':[{'path':p,'method':m,'mutation':w} for p,m,w in routes]}
 (root/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
 for f in root.iterdir():f.chmod(0o644)
 print('Hopae console manifest SHA-256:',hashlib.sha256((root/'manifest.json').read_bytes()).hexdigest())
