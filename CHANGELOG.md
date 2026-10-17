@@ -131,7 +131,10 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   projection owners run on a shared `meta` contract (PostgreSQL schema 8);
   the portal CSRF and console MAC keys are shared through the store.
   `make qualify-postgres` adds two serving replicas behind a TCP round-robin
-  (scenario 610). The native Human owners are not ported yet:
+  (scenario 610). Profile and projection publications follow across
+  replicas within about one second (`NOTIFY` on commit plus a poll; a
+  replica that missed the notification catches up by polling).
+  The native Human owners are not ported yet:
   `human_material_key_env` and `receipt_issuer.human_receipts` are refused
   on PostgreSQL at start.
 

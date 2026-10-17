@@ -202,6 +202,12 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - When: the configuration is validated and a serve/store command starts.
 - Then: invalid or inline settings are refused; without the feature the configuration is refused; with it, `serve` and the store commands run on PostgreSQL (slice 5; two serving replicas are S610), except that settings needing the native Human owners (`human_material_key_env`, `receipt_issuer.human_receipts`) are refused at start with a slice message; nothing falls back to SQLite.
 
+### S600-30 Published snapshots follow other replicas
+
+- Given: two profile owners and two projection owners on one store, standing for two replicas.
+- When: one publishes; the other refreshes; one publishes a profile revision the other cannot compile; a PostgreSQL listener is dropped.
+- Then: the follower installs the newer durable revision and never an older one, and its own publication on the old revision conflicts until it followed; a revision it cannot compile installs as unavailable (verify answers unavailable) and a failed publication leaves it so; projection plans that exceed the follower's declared capabilities are not installed; on PostgreSQL a committed publication wakes the listener (`NOTIFY` on commit) and a dropped listener reconnects and wakes once more so the follower catches up.
+
 ## Abuse cases
 
 | Category | Case | Applies |
@@ -254,6 +260,7 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-28 | `s600_28_native_meta_owners_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-28 | `s600_28_postgres_connections_admit_exactly_one_concurrent_consumer` | `src/auth_gateway/receipt_replay.rs` | unit | passing |
 | S600-29 | `s600_29_provider_and_material_owners_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
+| S600-30 | `s600_30_published_snapshots_follow_other_replicas_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
 | S600-6 | `s600_6_serving_refuses_unported_postgres_features` | `src/app.rs` | unit | passing |

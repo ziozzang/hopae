@@ -15,7 +15,10 @@ TCP round-robin, behave as one deployment over HTTP. A login can start on one
 replica and finish on the other. A handoff code is redeemed exactly once even
 when the same code races to both replicas. Concurrent administrator writes
 through both consoles take effect once. A revoked administrator is fenced on
-both replicas. Killing one replica with SIGKILL during verify traffic loses no
+both replicas. A profile or projection publication made through one replica
+is enforced by the other within two seconds, also when the other replica's
+`LISTEN` connection was dropped and it missed the notification. Killing one
+replica with SIGKILL during verify traffic loses no
 request that the balancer can route to the survivor, and leaves no duplicate
 effect in the store.
 
@@ -30,6 +33,9 @@ effect in the store.
   same caller key and mock provider secret for both replicas, a mock OIDC
   provider and two in-process round-robin balancers (gateway and portal)
   that skip a backend that refuses connections.
+- A service application `svc.example.test` with a bootstrap authentication
+  profile (one API key from the environment of both replicas) and bootstrap
+  credential-projection plans (revision 1).
 
 ## Main flow
 
@@ -47,7 +53,12 @@ effect in the store.
      sends the same session termination and the same user disable to A's and
      B's admin listeners at once; the grant is then revoked and the
      administrator tries another disable on each replica;
-  4. verify traffic runs from several threads while B is killed with
+  4. before that revocation, the administrator publishes profiles: a
+     tombstone through A; then, with every `hopae-listen` connection
+     terminated (`pg_terminate_backend`), the profile again through A; then
+     a tombstone through B and the profile through A; and projection plans:
+     a tombstone through A, new plans through B, a tombstone through A;
+  5. verify traffic runs from several threads while B is killed with
      SIGKILL; one more user logs in afterwards.
 - Then:
   1. every login completes and verify allows it on either replica;
@@ -56,7 +67,15 @@ effect in the store.
   3. one termination reports a change and one `session.terminated` event and
      one `admin.user_disable` event exist; the revoked administrator is
      refused on both replicas and the user stays active;
-  4. verify traffic keeps succeeding with no failed request; the store holds
+  4. the API-key service call on the other replica follows each profile
+     publication in under two seconds, whether by `NOTIFY` or (listeners
+     dropped, none connected at publish time) by the one-second poll; the
+     publishing replica enforces its own publication at once; a stale
+     `If-Match` revision is refused (409) on either replica; five profile
+     audit rows exist (bootstrap and four publications); a projection PUT on
+     the other replica succeeds within two seconds of the previous one,
+     that is, once it followed;
+  5. verify traffic keeps succeeding with no failed request; the store holds
      ten users, unique identities, a complete and unique user-ID ledger, and
      no duplicate event or delivery.
 
@@ -66,16 +85,16 @@ effect in the store.
 | --- | --- | --- |
 | Replay | S610-1 | yes: a handoff code raced to two replicas mints one session |
 | Race / timing | S610-1 | yes: concurrent console writes on two replicas take effect once; a replica killed mid-traffic leaves no partial effect |
-| Confused deputy | S610-1 | yes: a revoked administrator is refused by both replicas, not only the one that saw the revocation |
+| Confused deputy | S610-1 | yes: a revoked administrator is refused by both replicas, not only the one that saw the revocation; a removed profile stops admitting its API key on every replica within the bound |
 | Tampering | S610-1 | yes: CSRF and console MAC keys are shared through the store, so a token minted by one replica verifies on the other and nowhere else |
 | Spoofed or duplicated headers | — | no: the forwarded headers are those of the existing gateway scenarios |
 | Downgrade | — | no: schema checks are S600-5 |
 | Enumeration | — | no: no new listing surface |
-| Resource exhaustion | — | no: limits are per process (ADR-0020 decision 7) |
+| Resource exhaustion | — | no: login-transaction and handoff-failure limits are counted in the store (shared); console read buckets, service-credential buckets and gateway concurrency are per replica (ADR-0020 decision 7) |
 
 ## Observability expectations
 
-- Log: unchanged; a replica that loses the database fails closed (verify 503).
+- Log: unchanged; a replica that loses the database fails closed (verify 503). A follower logs `followed a publication from another replica` when it installs one, and a warning when its listener disconnects (it keeps polling).
 - Audit: one `admin.user_disable` and one `session.terminated` event per fenced write, written in the same transaction as the change.
 - Metrics: none new.
 
@@ -90,12 +109,12 @@ effect in the store.
 | Date | Hopae version | Gateway version | Provider | Environment label | Result | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-10-17 | 0.0.10 | — | mock OIDC | local-postgres-17-alpine | pass | `make qualify-postgres` step 3: two `hopae serve` processes behind TCP round-robin; 4 of 8 raced handoffs minted; one termination and one disable; revoked administrator refused on both; B killed with SIGKILL under verify load with no failed request. |
+| 2026-10-17 | 0.0.10 | — | mock OIDC | local-postgres-17-alpine | pass | Publication following: profile and projection publications enforced by the other replica in under two seconds, by `NOTIFY` and, with the listeners terminated, by poll. With the follower disabled the case fails (mutation check). |
 
 ## Open questions
 
-- Profile and projection publications are loaded per process. A publication made through one replica is not seen by the other until it restarts, and until then the other replica fails closed on the newer state. A shared invalidation channel (ADR-0020 decision 7) closes this gap.
 - The native Human owners (Human snapshot and ledger, native primary sessions, TOTP and WebAuthn provenance) are not on PostgreSQL yet: `human_material_key_env` and `receipt_issuer.human_receipts` are refused at start, and a native primary provider fails closed.
 
 ## 한국어 요약
 
-PostgreSQL 데이터베이스 하나에 실제 `hopae serve` 프로세스 두 개를 띄우고 TCP 라운드로빈 뒤에 둡니다. HTTP로 보면 두 복제본은 하나의 배포처럼 동작합니다. 로그인은 한 복제본에서 시작해 다른 복제본에서 끝낼 수 있습니다. 같은 핸드오프 코드를 두 복제본에 동시에 보내도 세션은 한 번만 발급됩니다. 두 콘솔로 동시에 보낸 관리자 쓰기는 한 번만 적용되고, 권한을 회수당한 관리자는 두 복제본 모두에서 거부됩니다. verify 트래픽 중에 한 복제본을 SIGKILL로 죽여도 남은 복제본이 요청을 받고, 저장소에는 중복된 효과가 남지 않습니다. CSRF 키와 콘솔 MAC 키는 저장소에 한 번 만들어 공유합니다. 남은 한계는 두 가지입니다. 게시(프로필·프로젝션) 스냅샷은 프로세스별이라 다른 복제본은 재시작할 때까지 새 상태에서 닫힌 쪽으로 실패합니다. 네이티브 Human 소유자는 아직 이식되지 않아 해당 설정은 시작할 때 거부됩니다.
+PostgreSQL 데이터베이스 하나에 실제 `hopae serve` 프로세스 두 개를 띄우고 TCP 라운드로빈 뒤에 둡니다. HTTP로 보면 두 복제본은 하나의 배포처럼 동작합니다. 로그인은 한 복제본에서 시작해 다른 복제본에서 끝낼 수 있습니다. 같은 핸드오프 코드를 두 복제본에 동시에 보내도 세션은 한 번만 발급됩니다. 두 콘솔로 동시에 보낸 관리자 쓰기는 한 번만 적용되고, 권한을 회수당한 관리자는 두 복제본 모두에서 거부됩니다. verify 트래픽 중에 한 복제본을 SIGKILL로 죽여도 남은 복제본이 요청을 받고, 저장소에는 중복된 효과가 남지 않습니다. CSRF 키와 콘솔 MAC 키는 저장소에 한 번 만들어 공유합니다. 한 복제본에서 게시한 프로필이나 프로젝션은 다른 복제본이 2초 안에 적용합니다. 다른 복제본의 `LISTEN` 연결이 끊겨 알림을 놓쳤어도 1초 주기 폴링으로 따라잡습니다. 네이티브 Human 소유자는 아직 이식되지 않아 해당 설정은 시작할 때 거부됩니다.

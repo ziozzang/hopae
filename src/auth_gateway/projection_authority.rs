@@ -15,6 +15,8 @@ use std::sync::{
 };
 use zeroize::Zeroizing;
 const KEY: &str = "projection_plan_authority_v1";
+/// The publication topic other replicas follow (`MetaTx::announce`).
+pub const TOPIC: &str = "projections";
 const LIMIT: usize = 128 * 1024;
 const MAX_REVISION: u64 = 9_007_199_254_740_991;
 #[derive(Clone, Serialize, Deserialize)]
@@ -251,6 +253,47 @@ impl Authority {
     pub fn reader(&self) -> Arc<ArcSwap<Snapshot>> {
         self.snapshot.clone()
     }
+    /// Follow a publication another replica committed (ADR-0020 slice 5).
+    /// Installs the durable document when it differs from the live one, or
+    /// reopens readers fenced by an uncertain commit once the durable state
+    /// is known. Never moves backwards. A durable document this process
+    /// cannot accept (`capabilities`) is refused and the live readers stay
+    /// as they are; they already refuse to issue against a changed row.
+    /// Runs under the same owner lock as `publish`. True when installed.
+    pub fn refresh<D: MetaDb>(
+        &mut self,
+        db: &mut D,
+        capabilities: &dyn Fn(&Configuration) -> Result<(), Refused>,
+    ) -> Result<bool, Refused> {
+        let current = self.snapshot.load_full();
+        let Some((document, bytes)) = db.meta_read(|tx| read_encoded(tx))? else {
+            return Ok(false);
+        };
+        if document.revision < current.revision
+            || (current.available()
+                && current.revision == document.revision
+                && current.document.as_deref() == Some(bytes.as_str()))
+        {
+            return Ok(false);
+        }
+        if let Some(config) = &document.configuration {
+            capabilities(config)?;
+        }
+        let projector = document
+            .configuration
+            .as_ref()
+            .map(|c| Projector::compile(c.clone()))
+            .transpose()?;
+        // Close readers of the replaced snapshot before installing.
+        current.available.store(false, Ordering::Release);
+        self.snapshot.store(Arc::new(Snapshot {
+            available: AtomicBool::new(true),
+            revision: document.revision,
+            document: Some(bytes),
+            projector,
+        }));
+        Ok(true)
+    }
     /// Exclusive native owner must remain the sole publisher. Desired revision
     /// must equal expected+1; None creates a durable disabled tombstone.
     pub fn publish<D: MetaDb>(
@@ -309,6 +352,8 @@ impl Authority {
             }
             tx.put(KEY, &value).map_err(|_| Refused)?;
             tx.insert(&audit_key, &audit).map_err(|_| Refused)?;
+            tx.announce(&format!("{TOPIC}:{revision}"))
+                .map_err(|_| Refused)?;
             guard(tx)?;
             if tx.get(KEY).map_err(|_| Refused)?.as_deref() != Some(value.as_str()) {
                 return Err(Refused);

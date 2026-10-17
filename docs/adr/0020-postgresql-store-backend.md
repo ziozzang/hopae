@@ -175,6 +175,16 @@ against both backends.
      configured.
    - Provider, JWKS and workload caches remain per process (their staleness
      bounds are per process by design).
+   - Published owner state (authentication profiles, credential-projection
+     plans) follows across replicas: the publishing transaction sends
+     `NOTIFY hopae_publication` on commit, and every replica listens on a
+     dedicated connection and also polls every second, reloading the
+     durable document under its owner lock (never backwards). A replica is
+     at most about one second behind, also when its listener was dropped;
+     a revision it cannot compile installs as unavailable, never as the old
+     state. Login-transaction and handoff-failure limits are counted in the
+     store and so shared; console read buckets, service-credential buckets
+     and gateway concurrency stay per replica.
 
 **Slice plan.**
 
@@ -186,7 +196,7 @@ against both backends.
 | 2c | Factors and passkeys: the existing `Factors` and `Passkeys` traits on PostgreSQL (sealed TOTP enrollments and monotonic counters, the external factor registry and single-use proofs, WebAuthn credentials and ceremonies, recovery codes, portal and application elevation, passwordless sign-in, the factor reset); every factor write locks the subject user's row `FOR UPDATE` before re-checking the acting session (`FOR UPDATE`) and handle (`FOR SHARE`), registry and passwordless-cap changes take advisory locks; the configuration generation moves into `CoreStore`; PostgreSQL schema 4 — implemented |
 | 3 | Console listings (`ConsoleStore`; the ADR-0016 candidate window evaluated as a CTE on one `REPEATABLE READ` snapshot instead of `INDEXED BY` temp tables), the event relay (`Events`; claims with `FOR UPDATE SKIP LOCKED` and a 60-second lease, prune behind an advisory lock), groups and the projection journal (`GroupStore`; one advisory lock per group write, gapless journal revisions committed in order), the subject directory and its feeds (`SubjectDirectoryStore`; ledger and lifecycle-feed positions numbered under advisory locks so they become visible in commit order), PostgreSQL schema 5 — implemented. Differences that remain: no inline prune at commit (the relay's periodic prune bounds the outbox), diagnostics are written synchronously behind a bounded semaphore instead of SQLite's batch queue, and the Human realm read (`admin_human_realm`) moves with the slice-4 owner tables |
 | 4 | Implemented: the Human owner foundation (realm with `admin_human_realm`/`admin_human_subjects`, provider and material owner revisions by trigger, primary provenance; schema 6) and the application mirror (schema 7); `hopae store migrate-to-postgres` (one way, empty target only, per-table counts and digests compared before commit, `store.migrated` audit, SQLite opened read-only and kept); `make qualify-postgres`: the migration through the CLI and a two-process store qualification (two replicas on shared keys, one killed with SIGKILL mid-traffic and replaced, then verification that no transaction, code, sign-up, nonce, termination or status change took effect twice, that relay first claims are unique and that the user-ID ledger is unique) |
-| 5 | `serve` on PostgreSQL (ROADMAP M2 exit). Implemented: the `Directory` and `Sessions` traits complete on PostgreSQL; `crate::store::Store` is the backend-neutral `AppStore` (SQLite or PostgreSQL, unported operations fail closed with a slice error, never a fallback); the raw-connection owners (`receipt_key_store`, `receipt_authority`, `receipt_replay`, `publication`, `authority`, `projection_authority`, `projection_admission`, `projection_observed`, `projection_receiver`, `app::state`) run on the `store::meta` contract (`MetaTx`/`MetaDb`; PostgreSQL writes take advisory lock 7070, schema 8); provider and material owner preparation binds prepared values to their store (`OwnerRef`); the portal CSRF and console MAC keys are created once in the store and shared by replicas; scenario S610 runs two `hopae serve` replicas behind a TCP round-robin in `make qualify-postgres` (logins, verify, raced handoffs, concurrent console writes, a revoked administrator, SIGKILL). Remaining: the native Human owners (Human snapshot and ledger, primary sessions and reauthentication, TOTP/WebAuthn provenance), refused at start through `human_material_key_env` and `receipt_issuer.human_receipts` |
+| 5 | `serve` on PostgreSQL (ROADMAP M2 exit). Implemented: the `Directory` and `Sessions` traits complete on PostgreSQL; `crate::store::Store` is the backend-neutral `AppStore` (SQLite or PostgreSQL, unported operations fail closed with a slice error, never a fallback); the raw-connection owners (`receipt_key_store`, `receipt_authority`, `receipt_replay`, `publication`, `authority`, `projection_authority`, `projection_admission`, `projection_observed`, `projection_receiver`, `app::state`) run on the `store::meta` contract (`MetaTx`/`MetaDb`; PostgreSQL writes take advisory lock 7070, schema 8); provider and material owner preparation binds prepared values to their store (`OwnerRef`); the portal CSRF and console MAC keys are created once in the store and shared by replicas; scenario S610 runs two `hopae serve` replicas behind a TCP round-robin in `make qualify-postgres` (logins, verify, raced handoffs, concurrent console writes, a revoked administrator, SIGKILL). Profile and projection publications follow across replicas (`NOTIFY` plus a one-second poll, S600-30, S610). Remaining: the native Human owners (Human snapshot and ledger, primary sessions and reauthentication, TOTP/WebAuthn provenance), refused at start through `human_material_key_env` and `receipt_issuer.human_receipts` |
 
 ## Consequences
 
@@ -206,16 +216,16 @@ against both backends.
   updates only where a test races them.
 - Until the native Human owners are ported, a PostgreSQL deployment cannot
   use `human_material_key_env` or `receipt_issuer.human_receipts`: `serve`
-  refuses them at start. Profile and projection publications stay per
-  process until the invalidation channel lands, so a replica that did not
-  publish fails closed on the newer state until it restarts.
+  refuses them at start. A replica may lag a profile or projection
+  publication by about one second (the poll bound when a `NOTIFY` is
+  missed).
 
 ### Neutral
 
 - New config keys: `store.kind = postgres` (alias `store.backend`) and
   `store.postgres.{url_env, ca_file, pool_size, connect_timeout_ms,
   statement_timeout_ms}`.
-- Slices 2a to 5 extend scenario 600 (S600-7 to S600-29); the HTTP
+- Slices 2a to 5 extend scenario 600 (S600-7 to S600-30); the HTTP
   two-replica qualification is scenario 610.
 
 ## Alternatives considered

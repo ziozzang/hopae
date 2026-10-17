@@ -23,6 +23,21 @@ use crate::support::{Fixture, Hopae, Jar, KEY_ENV, MockIdp, Response};
 
 const APP: &str = "app.example.test";
 const IP: &str = "192.0.2.10";
+/// The service host whose authentication profile is published at run time.
+const SVC: &str = "svc.example.test";
+const SERVICE_KEY_ENV: &str = "HOPAE_QUALIFY_SERVICE_KEY";
+const SERVICE_KEY: &str = "qualify-service-credential-0123456789abcdef";
+
+fn plans(revision: u64) -> serde_json::Value {
+    json!({"revision": revision, "plans": [{"service": "app", "audience": "app-api", "resource": "app",
+        "action": "read", "minimum_aal": 1,
+        "credential": {"type": "bearer_reference", "secret_ref": "vault:qualify"}}]})
+}
+
+fn profiles() -> serde_json::Value {
+    json!({"authority_id": "qualify", "profiles": [{"service_id": "svc", "host": SVC, "ports": [443],
+        "realm": "services", "api_keys": [{"token_env": SERVICE_KEY_ENV, "subject": "worker"}]}]})
+}
 
 /// A TCP round-robin balancer over the live backends: each connection goes
 /// to the next backend that accepts it (a dead one is skipped).
@@ -251,13 +266,26 @@ impl Stack {
         let fixture = || {
             Fixture::with(
                 "m4-admin",
-                json!({"store": {"kind": "postgres", "postgres": {"url_env": "HOPAE_QUALIFY_PG", "pool_size": 8}}}),
+                json!({
+                    "store": {"kind": "postgres", "postgres": {"url_env": "HOPAE_QUALIFY_PG", "pool_size": 8}},
+                    "apps": [
+                        {"app_id": "app", "display_name": "app", "hosts": [APP], "ports": [443],
+                         "session": {"idle": "12h", "absolute": "7d"},
+                         "binding": {"ip": "strict", "ua": "off", "on_mismatch": "terminate_session"},
+                         "on_authz_change": "refresh", "verify_cache_seconds": 0},
+                        {"app_id": "svc", "display_name": "svc", "hosts": [SVC], "ports": [443]},
+                        {"app_id": "default", "display_name": "default"}
+                    ],
+                    "authentication_gateway": profiles(),
+                    "credential_projection": plans(1),
+                }),
             )
         };
         let env = [
             (KEY_ENV, key.as_str()),
             (MOCK_SECRET_ENV, secret.as_str()),
             ("HOPAE_QUALIFY_PG", db.url.as_str()),
+            (SERVICE_KEY_ENV, SERVICE_KEY),
         ];
         let a = Hopae::spawn(fixture(), &idp, &env);
         let b = Hopae::spawn(fixture(), &idp, &env);
@@ -278,8 +306,20 @@ impl Stack {
 
     /// A console JSON write as the gateway forwards it, to one replica's admin listener.
     fn console_post(&self, admin: SocketAddr, handle: &str, path: &str) -> Response {
+        self.console_send("POST", admin, handle, path, None, b"{}")
+    }
+
+    fn console_send(
+        &self,
+        method: &str,
+        admin: SocketAddr,
+        handle: &str,
+        path: &str,
+        if_match: Option<u64>,
+        body: &[u8],
+    ) -> Response {
         let host = self.a.console_host();
-        let mut raw = RawReq::new("POST", path, &host)
+        let mut raw = RawReq::new(method, path, &host)
             .header("x-forwarded-host", &host)
             .header("x-forwarded-proto", "https")
             .header("x-forwarded-for", IP)
@@ -287,8 +327,46 @@ impl Stack {
             .header("content-type", "application/json")
             .header("x-hopae-admin-request", "1")
             .timeout(Duration::from_secs(20));
-        raw.body = b"{}".to_vec();
+        if let Some(revision) = if_match {
+            raw = raw.header("if-match", &format!("\"{revision}\""));
+        }
+        raw.body = body.to_vec();
         send(admin, raw)
+    }
+
+    /// A service call with the profile's API credential, straight to one replica.
+    fn service_verify(&self, gateway: SocketAddr) -> Response {
+        let url = format!("https://{SVC}/jobs");
+        let raw = RawReq::new("GET", "/_hopae/verify", SVC)
+            .header("x-original-url", &url)
+            .header("x-forwarded-host", SVC)
+            .header("x-forwarded-proto", "https")
+            .header("x-forwarded-for", IP)
+            .header("x-real-ip", IP)
+            .header("x-original-method", "GET")
+            .header("accept", "application/json")
+            .header("authorization", &format!("Bearer {SERVICE_KEY}"))
+            .header("x-hopae-gateway-key", &self.key)
+            .timeout(Duration::from_secs(20));
+        send(gateway, raw)
+    }
+
+    fn service_allowed(&self, gateway: SocketAddr) -> bool {
+        let r = self.service_verify(gateway);
+        r.status == 200 && r.header("x-hopae-principal-kind") == Some("service")
+    }
+
+    /// Wait until `gateway` enforces `allowed`; the time it took.
+    fn converge(&self, gateway: SocketAddr, allowed: bool) -> Duration {
+        let start = std::time::Instant::now();
+        while self.service_allowed(gateway) != allowed {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "replica never followed the publication"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        start.elapsed()
     }
 
     fn query_string(&self, sql: &str, arg: &str) -> String {
@@ -457,6 +535,97 @@ fn s610_1_two_replicas_share_logins_handoffs_fences_and_survive_a_killed_replica
     assert!(disabled.iter().all(|r| r.status == 200), "{disabled:?}");
     assert_eq!(s.db.query_i64(&format!("SELECT count(*) FROM events WHERE kind = 'admin.user_disable' AND user_id = '{target_id}'")), 1, "one status change");
     assert_eq!(s.db.query_i64(&format!("SELECT count(*) FROM events WHERE kind = 'session.terminated' AND session_id = '{target_session}'")), 1);
+    // 4. A profile publication through A is enforced by B within the bound:
+    //    once with the NOTIFY delivered, once with B's listener dropped so B
+    //    learns it only from its poll.
+    let (ga, gb) = (s.a.gateway, s.b.gateway);
+    assert!(
+        s.service_allowed(ga) && s.service_allowed(gb),
+        "bootstrap profile on both"
+    );
+    let (aa, ab) = (s.a.admin.unwrap(), s.b.admin.unwrap());
+    let path = "/v1/authentication/profiles";
+    let put = |admin, revision, configuration: serde_json::Value| {
+        let body = json!({ "configuration": configuration }).to_string();
+        s.console_send("PUT", admin, &handle, path, Some(revision), body.as_bytes())
+    };
+    let r = put(aa, 1, serde_json::Value::Null);
+    assert_eq!(r.status, 200, "{r:?}");
+    let notified = s.converge(gb, false);
+    assert!(
+        notified < Duration::from_secs(2),
+        "B followed in {notified:?}"
+    );
+    assert!(
+        !s.service_allowed(ga),
+        "A enforces its own publication at once"
+    );
+    s.db.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'hopae-listen'");
+    assert_eq!(
+        s.db.query_i64(
+            "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'hopae-listen'"
+        ),
+        0,
+        "no replica listens: the next NOTIFY is missed"
+    );
+    let r = put(aa, 2, profiles());
+    assert_eq!(r.status, 200, "{r:?}");
+    let polled = s.converge(gb, true);
+    assert!(
+        polled < Duration::from_secs(2),
+        "B followed by polling in {polled:?}"
+    );
+    assert!(s.service_allowed(ga));
+    // B publishes on the revision it followed; a stale revision is refused on either.
+    assert_eq!(put(ab, 1, serde_json::Value::Null).status, 409);
+    let r = put(ab, 3, serde_json::Value::Null);
+    assert_eq!(r.status, 200, "{r:?}");
+    let back = s.converge(ga, false);
+    assert!(back < Duration::from_secs(2), "A followed B in {back:?}");
+    assert_eq!(put(aa, 3, profiles()).status, 409);
+    let r = put(aa, 4, profiles());
+    assert_eq!(r.status, 200, "{r:?}");
+    s.converge(gb, true);
+    assert_eq!(
+        s.db.query_i64(
+            "SELECT count(*) FROM meta WHERE key LIKE 'authentication_profile_publication_audit:%'"
+        ),
+        5,
+        "bootstrap and four publications, each audited once"
+    );
+
+    // Projection plans: B can publish on top of A's publication only once it
+    // followed it (until then its owner holds the old revision: 409).
+    let projections = "/v1/authentication/projections";
+    let put_plans = |admin, revision, configuration: serde_json::Value| {
+        let body = json!({ "configuration": configuration }).to_string();
+        s.console_send(
+            "PUT",
+            admin,
+            &handle,
+            projections,
+            Some(revision),
+            body.as_bytes(),
+        )
+    };
+    // Retried while the publisher's replica has not followed yet (409).
+    let followed = |admin, revision, configuration: serde_json::Value| {
+        let start = std::time::Instant::now();
+        loop {
+            let r = put_plans(admin, revision, configuration.clone());
+            if r.status != 409 || start.elapsed() >= Duration::from_secs(2) {
+                return r;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    };
+    let r = put_plans(aa, 1, serde_json::Value::Null);
+    assert_eq!(r.status, 200, "{r:?}");
+    let r = followed(ab, 2, plans(3));
+    assert_eq!(r.status, 200, "B followed A's plans: {r:?}");
+    let r = followed(aa, 3, serde_json::Value::Null);
+    assert_eq!(r.status, 200, "A followed B's plans: {r:?}");
+
     // A revoked administrator is fenced out on either replica.
     s.db.execute(&format!("UPDATE admin_grants SET revoked_at = extract(epoch from now())::bigint, revoked_by = 'qualify' WHERE user_id = '{admin_id}'"));
     let other = s.query_string(

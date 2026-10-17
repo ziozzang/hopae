@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const KEY: &str = "authentication_profile_authority_v1";
+/// The publication topic other replicas follow (`MetaTx::announce`).
+pub const TOPIC: &str = "profiles";
 const LIMIT: usize = 262_144;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -102,6 +104,7 @@ pub fn publish_guarded<D: MetaDb>(
             &format!("authentication_profile_publication_audit:{revision}"),
             &audit,
         )?;
+        tx.announce(&format!("{TOPIC}:{revision}"))?;
         guard(tx)?;
         Ok(document)
     })

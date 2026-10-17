@@ -63,7 +63,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `listen.portal` | 문자열, 소켓 주소 | `127.0.0.1:8700` | 포털 리스너(로그인, 콜백, 로그아웃, `/healthz`). 게이트웨이의 포털 라우트가 프록시합니다. |
 | `listen.gateway` | 문자열, 소켓 주소 | `127.0.0.1:8701` | 게이트웨이 리스너(`/_hopae/verify`). `listen.portal`과 달라야 합니다. 루프백이 아닌 주소는 경고를 냅니다. 이 리스너는 공개적으로 접근할 수 있어서는 안 됩니다([게이트웨이 계약](GATEWAY_CONTRACT.md#전제-조건과-설정)). |
 | `state_dir` | 문자열, 경로 | 필수 | 런타임 상태(데이터베이스, 인스턴스 잠금, 백업)를 위한 쓰기 가능한 디렉터리이며 모드 `0700`으로 생성됩니다. 비어 있으면 안 됩니다. |
-| `store.kind`(별칭 `store.backend`) | `sqlite`, `postgres` | `sqlite` | 기본 저장소 백엔드([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md), [ADR-0020](../adr/0020-postgresql-store-backend.md)). `postgres`는 `postgres` feature로 빌드한 바이너리와 `store.postgres`가 필요합니다. `serve`, `providers import`, `hopae store migrate-to-postgres`가 사용합니다. 여러 복제본이 데이터베이스 하나를 함께 서비스할 수 있습니다. 네이티브 Human 소유자가 이식되기 전까지(ADR-0020 슬라이스 5) 이 설정에서는 `human_material_key_env`와 `receipt_issuer.human_receipts`를 시작할 때 거부합니다. SQLite로 대체하지 않습니다. |
+| `store.kind`(별칭 `store.backend`) | `sqlite`, `postgres` | `sqlite` | 기본 저장소 백엔드([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md), [ADR-0020](../adr/0020-postgresql-store-backend.md)). `postgres`는 `postgres` feature로 빌드한 바이너리와 `store.postgres`가 필요합니다. `serve`, `providers import`, `hopae store migrate-to-postgres`가 사용합니다. 여러 복제본이 데이터베이스 하나를 함께 서비스할 수 있습니다. 프로필과 프로젝션 게시는 약 1초 안에 모든 복제본에 반영됩니다. 네이티브 Human 소유자가 이식되기 전까지(ADR-0020 슬라이스 5) 이 설정에서는 `human_material_key_env`와 `receipt_issuer.human_receipts`를 시작할 때 거부합니다. SQLite로 대체하지 않습니다. |
 | `store.postgres.url_env` | 환경 변수 이름 | — | 연결 문자열(libpq URL 또는 key/value). 파일이 아니라 환경에서 읽습니다 |
 | `store.postgres.ca_file` | 절대 경로 | 없음 | TLS용 PEM CA 묶음. 없으면 루프백이나 Unix 소켓만 허용합니다 |
 | `store.postgres.pool_size`, `connect_timeout_ms`, `statement_timeout_ms` | 정수 | `16`, `5000`, `2000` | 풀 크기 1~128, 연결 제한 시간 100~60,000 ms, 트랜잭션별 문장 제한 시간 10~600,000 ms |
@@ -91,8 +91,8 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `linking.on_conflict` | `link_required`, `separate`, `deny` | `link_required` | 로그인의 검증된 이메일이 다른 제공자를 통한 기존 사용자와 일치할 때의 동작([ADR-0011](../adr/0011-account-linking-policy.md)). |
 | `linking.mode` | `verified_email`, `off` | `verified_email` | 계정 연결 정책. |
 | `txn.max_rows` | 정수, 1 이상 | `1000` | 살아 있는 로그인 트랜잭션 수 상한([ADR-0004](../adr/0004-session-model-and-cross-domain-handoff.md)). 트랜잭션 수명은 상수 600초이며 키가 없습니다. |
-| `txn.per_ip_per_minute` | 정수, 1 이상 | `30` | 클라이언트 IP 하나가 분당 시작할 수 있는 로그인 트랜잭션 수. |
-| `handoff.per_ip_failures_per_minute` | 정수, 1 이상 | `10` | 클라이언트 IP 하나가 분당 일으킬 수 있는 핸드오프 코드 실패 수. 넘으면 속도 제한됩니다. |
+| `txn.per_ip_per_minute` | 정수, 1 이상 | `30` | 클라이언트 IP 하나가 분당 시작할 수 있는 로그인 트랜잭션 수(저장소에서 세므로 PostgreSQL에서는 복제본이 공유). |
+| `handoff.per_ip_failures_per_minute` | 정수, 1 이상 | `10` | 클라이언트 IP 하나가 분당 일으킬 수 있는 핸드오프 코드 실패 수. 넘으면 속도 제한됩니다(저장소에서 세므로 PostgreSQL에서는 복제본이 공유). |
 | `handoff.max_recoveries` | 정수 | `3` | 알려진 핸드오프 코드가 거부되었을 때(첫 사용 바인딩 쿠키 경쟁 등) 브라우저를 포털로 되돌려 보내 복구하는 횟수. 넘으면 중계된 `403` 페이지로 루프가 끝납니다([ADR-0014](../adr/0014-handoff-recovery-on-any-rejected-code.md)). 범위 검사는 하지 않습니다. |
 
 #### 게이트웨이

@@ -22,6 +22,7 @@ pub mod lock;
 #[cfg(feature = "postgres")]
 pub mod pg;
 pub mod preflight;
+pub mod publications;
 pub mod state;
 
 use std::future::Future;
@@ -1296,6 +1297,10 @@ impl Bound {
                 .run(bg_rx.clone()),
         ));
         workers.push(tokio::spawn(pruner.run(bg_rx.clone())));
+        workers.push(tokio::spawn(publications::run(
+            self.services.clone(),
+            bg_rx.clone(),
+        )));
         workers.push(tokio::spawn(self.services.groups.clone().run(
             self.services.directory(),
             self.services.registry.clone(),

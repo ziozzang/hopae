@@ -116,6 +116,18 @@ pub struct PgStore {
     diag: Arc<tokio::sync::Semaphore>,
     /// The runtime the pool's connections live on (blocking owner calls use it).
     handle: tokio::runtime::Handle,
+    /// How to open the dedicated `LISTEN` connection (outside the pool).
+    listen: Listen,
+}
+
+/// The connection settings of the publication listener.
+#[derive(Clone)]
+enum Listen {
+    Plain(tokio_postgres::Config),
+    Tls(
+        tokio_postgres::Config,
+        tokio_postgres_rustls::MakeRustlsConnect,
+    ),
 }
 
 /// Map a driver error to the store's error classes; never echo values.
@@ -185,6 +197,9 @@ impl PgStore {
         let manager_config = ManagerConfig {
             recycling_method: RecyclingMethod::Verified,
         };
+        let mut listen_cfg = cfg.clone();
+        listen_cfg.application_name("hopae-listen");
+        let listen;
         let manager = match &options.ca_pem {
             Some(pem) => {
                 let mut roots = rustls::RootCertStore::empty();
@@ -201,11 +216,10 @@ impl PgStore {
                 .with_root_certificates(roots)
                 .with_no_client_auth();
                 cfg.ssl_mode(tokio_postgres::config::SslMode::Require);
-                Manager::from_config(
-                    cfg,
-                    tokio_postgres_rustls::MakeRustlsConnect::new(tls),
-                    manager_config,
-                )
+                listen_cfg.ssl_mode(tokio_postgres::config::SslMode::Require);
+                let connector = tokio_postgres_rustls::MakeRustlsConnect::new(tls);
+                listen = Listen::Tls(listen_cfg, connector.clone());
+                Manager::from_config(cfg, connector, manager_config)
             }
             None => {
                 if !loopback_only(&cfg) {
@@ -213,6 +227,7 @@ impl PgStore {
                         "postgres without TLS is allowed only on loopback or a Unix socket".into(),
                     ));
                 }
+                listen = Listen::Plain(listen_cfg);
                 Manager::from_config(cfg, tokio_postgres::NoTls, manager_config)
             }
         };
@@ -233,6 +248,7 @@ impl PgStore {
                 crate::store::sqlite::DIAGNOSTIC_QUEUE_CAP,
             )),
             handle: tokio::runtime::Handle::current(),
+            listen,
         };
         if let Some(schema) = &options.search_path {
             let client = store.pool.get().await.map_err(pool_err)?;
@@ -344,7 +360,7 @@ impl PgStore {
         Ok(tx)
     }
 
-    async fn client(&self) -> StoreResult<deadpool_postgres::Object> {
+    pub(crate) async fn client(&self) -> StoreResult<deadpool_postgres::Object> {
         self.pool.get().await.map_err(pool_err)
     }
 
@@ -1200,5 +1216,77 @@ impl CoreStore for PgStore {
 impl PgStore {
     pub(crate) async fn raw(&self) -> deadpool_postgres::Object {
         self.pool.get().await.expect("pool")
+    }
+}
+
+/// Wait on the publication channel (ADR-0020 slice 5).
+impl PgStore {
+    /// Follow `NOTIFY` on the publication channel over a dedicated
+    /// connection and wake `wake` for each one, and once after every
+    /// (re)connect so a follower catches up on what it missed. A dropped
+    /// connection is reopened after `retry`; notifications sent meanwhile
+    /// are lost, which is why followers also poll. Runs until the process
+    /// exits.
+    pub async fn follow_publications(
+        self: Arc<Self>,
+        wake: Arc<tokio::sync::Notify>,
+        retry: std::time::Duration,
+    ) {
+        loop {
+            let result = match &self.listen {
+                Listen::Plain(cfg) => listen_once(cfg, tokio_postgres::NoTls, &wake).await,
+                Listen::Tls(cfg, tls) => listen_once(cfg, tls.clone(), &wake).await,
+            };
+            if let Err(e) = result {
+                tracing::warn!(
+                    "publication listener disconnected ({}); polling until it reconnects",
+                    pg(e)
+                );
+            }
+            tokio::time::sleep(retry).await;
+        }
+    }
+}
+
+async fn listen_once<T>(
+    cfg: &tokio_postgres::Config,
+    tls: T,
+    wake: &tokio::sync::Notify,
+) -> Result<(), tokio_postgres::Error>
+where
+    T: tokio_postgres::tls::MakeTlsConnect<tokio_postgres::Socket>,
+    T::Stream: Send + 'static,
+{
+    let (client, mut connection) = cfg.connect(tls).await?;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let driver = tokio::spawn(async move {
+        loop {
+            match std::future::poll_fn(|cx| connection.poll_message(cx)).await {
+                Some(Ok(tokio_postgres::AsyncMessage::Notification(_))) => {
+                    if tx.send(()).is_err() {
+                        return Ok(());
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => return Err(e),
+                None => return Ok(()),
+            }
+        }
+    });
+    let listened = client
+        .batch_execute(&format!("LISTEN {}", meta::PUBLICATION_CHANNEL))
+        .await;
+    if let Err(e) = listened {
+        driver.abort();
+        return Err(e);
+    }
+    wake.notify_one();
+    while rx.recv().await.is_some() {
+        wake.notify_one();
+    }
+    drop(client);
+    match driver.await {
+        Ok(result) => result,
+        Err(_) => Ok(()),
     }
 }

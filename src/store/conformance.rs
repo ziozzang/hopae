@@ -5215,3 +5215,192 @@ async fn s600_29_provider_and_material_owners_agree_on_both_backends() {
         b.cleanup().await;
     }
 }
+
+// ---- slice 5: published snapshots follow other replicas ---------------------
+
+/// Two owners on one store stand for two replicas: what one publishes the
+/// other installs on refresh, never backwards, and a revision this process
+/// cannot compile closes its profile readers instead of serving stale state.
+fn followed_publications(app: super::Store, name: &'static str) {
+    use crate::auth_gateway::{authority::Authority, projection_authority as projection};
+    use crate::store::meta::MetaDb as _;
+    let key = "follow-service-credential-at-least-32-bytes";
+    let env = |n: &str| (n == "FOLLOW_KEY").then(|| key.to_string());
+    let none = |_: &str| None;
+    let ok = |_: &crate::auth_gateway::runtime::Config| Ok(());
+    let profile: crate::auth_gateway::runtime::Config = serde_json::from_value(serde_json::json!({
+        "authority_id": "owned", "profiles": [{"service_id": "app", "host": "app.example.test",
+        "ports": [443], "realm": "owned", "api_keys": [{"token_env": "FOLLOW_KEY", "subject": "worker"}]}]}))
+    .unwrap();
+    let mut a = Authority::load(&mut app.meta(), Some(profile.clone()), &env, &ok).unwrap();
+    let mut b = Authority::load(&mut app.meta(), None, &env, &ok).unwrap();
+    assert_eq!(
+        (a.snapshot().revision, b.snapshot().revision),
+        (1, 1),
+        "{name}"
+    );
+    assert!(
+        !b.refresh(&mut app.meta(), &env, &ok).unwrap(),
+        "{name}: nothing new"
+    );
+    a.publish(&mut app.meta(), 1, None, "operator", &env, &ok)
+        .unwrap();
+    // B has not followed yet: its own publication on the old revision conflicts.
+    assert!(matches!(
+        b.publish(&mut app.meta(), 1, None, "operator", &env, &ok),
+        Err(crate::auth_gateway::publication::Error::Conflict)
+    ));
+    assert!(b.refresh(&mut app.meta(), &env, &ok).unwrap(), "{name}");
+    let followed = b.snapshot();
+    assert_eq!(followed.revision, 2, "{name}");
+    assert!(
+        followed.available() && followed.runtime.is_none(),
+        "{name}: tombstone followed"
+    );
+    // A revision B cannot compile (credential absent here) closes B's readers.
+    a.publish(
+        &mut app.meta(),
+        2,
+        Some(profile.clone()),
+        "operator",
+        &env,
+        &ok,
+    )
+    .unwrap();
+    assert!(b.refresh(&mut app.meta(), &none, &ok).unwrap(), "{name}");
+    assert!(
+        !b.snapshot().available(),
+        "{name}: uncompilable revision fails closed"
+    );
+    // A failed publication from the closed state leaves it closed.
+    assert!(
+        b.publish(&mut app.meta(), 1, None, "operator", &env, &ok)
+            .is_err()
+    );
+    assert!(!b.snapshot().available(), "{name}");
+    // B publishes on the followed revision; A follows it in turn.
+    b.publish(&mut app.meta(), 3, Some(profile), "operator", &env, &ok)
+        .unwrap();
+    assert!(b.snapshot().available(), "{name}");
+    assert!(a.refresh(&mut app.meta(), &env, &ok).unwrap(), "{name}");
+    assert_eq!(a.snapshot().revision, 4, "{name}");
+    assert!(a.snapshot().runtime.is_some(), "{name}");
+
+    // Projection plans: a follower's stale reader refuses, refresh installs.
+    let plans = |revision: u64| -> crate::auth_gateway::projection::Configuration {
+        serde_json::from_value(
+            serde_json::json!({"revision": revision, "plans": [{"service": "app",
+            "audience": "app-api", "resource": "app", "action": "read", "minimum_aal": 1,
+            "credential": {"type": "bearer_reference", "secret_ref": "vault:follow"}}]}),
+        )
+        .unwrap()
+    };
+    let any = |_: &crate::auth_gateway::projection::Configuration| Ok(());
+    let mut pa = app
+        .meta()
+        .meta_read(|tx| projection::Authority::load(tx, 0))
+        .unwrap();
+    let mut pb = app
+        .meta()
+        .meta_read(|tx| projection::Authority::load(tx, 0))
+        .unwrap();
+    pa.publish(&mut app.meta(), 0, Some(plans(1)), "operator", &|_| Ok(()))
+        .unwrap();
+    let reader = pb.reader();
+    assert_eq!(reader.load().revision(), 0, "{name}");
+    let refuse = |_: &crate::auth_gateway::projection::Configuration| {
+        Err(crate::auth_gateway::receipt_keys::Refused)
+    };
+    assert!(
+        pb.refresh(&mut app.meta(), &refuse).is_err(),
+        "{name}: capabilities checked"
+    );
+    assert_eq!(reader.load().revision(), 0, "{name}");
+    assert!(pb.refresh(&mut app.meta(), &any).unwrap(), "{name}");
+    assert_eq!(reader.load().revision(), 1, "{name}");
+    assert!(
+        reader.load().enabled() && reader.load().available(),
+        "{name}"
+    );
+    assert!(
+        !pb.refresh(&mut app.meta(), &any).unwrap(),
+        "{name}: idempotent"
+    );
+    pb.publish(&mut app.meta(), 1, None, "operator", &|_| Ok(()))
+        .unwrap();
+    assert!(pa.refresh(&mut app.meta(), &any).unwrap(), "{name}");
+    assert!(!pa.reader().load().enabled(), "{name}: tombstone followed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_30_published_snapshots_follow_other_replicas_on_both_backends() {
+    for b in backends().await {
+        let (app, name) = (b.app.clone(), b.store.backend());
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            let _guard = handle.enter();
+            followed_publications(app, name)
+        })
+        .await
+        .unwrap();
+        #[cfg(feature = "postgres")]
+        if let Some((pg, _)) = &b.pg {
+            publication_notifications(pg.clone(), b.app.clone()).await;
+        }
+        b.cleanup().await;
+    }
+}
+
+/// A committed publication wakes a listener; a dropped listener reconnects
+/// and wakes once more so its follower catches up on what it missed.
+#[cfg(feature = "postgres")]
+async fn publication_notifications(pg: Arc<super::postgres::PgStore>, app: super::Store) {
+    let wake = Arc::new(tokio::sync::Notify::new());
+    let listener = tokio::spawn(
+        pg.clone()
+            .follow_publications(wake.clone(), Duration::from_millis(100)),
+    );
+    let woken = |what: &'static str| {
+        let wake = wake.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(5), wake.notified())
+                .await
+                .unwrap_or_else(|_| panic!("postgres: {what}"));
+        }
+    };
+    woken("connected").await;
+    let publish = |expected: u64| {
+        let app = app.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::auth_gateway::publication::publish(&mut app.meta(), expected, None, "operator")
+                .unwrap()
+        })
+    };
+    let current = {
+        let app = app.clone();
+        tokio::task::spawn_blocking(move || {
+            use crate::store::meta::MetaDb as _;
+            app.meta()
+                .meta_read(|tx| crate::auth_gateway::publication::read(tx))
+                .unwrap()
+                .map_or(0, |d| d.revision)
+        })
+        .await
+        .unwrap()
+    };
+    publish(current).await.unwrap();
+    woken("notified on commit").await;
+    // Drop every listener connection: the follower reconnects and wakes.
+    let client = pg.client().await.unwrap();
+    client
+        .execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'hopae-listen'",
+            &[],
+        )
+        .await
+        .unwrap();
+    woken("woken after reconnect").await;
+    publish(current + 1).await.unwrap();
+    woken("notified after reconnect").await;
+    listener.abort();
+}

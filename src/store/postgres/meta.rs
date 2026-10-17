@@ -18,6 +18,9 @@ use crate::store::types::{Actor, ActorPolicy};
 /// `pg_advisory_xact_lock` key every owner write transaction takes.
 pub(crate) const META_LOCK: i64 = 7070;
 
+/// The `LISTEN`/`NOTIFY` channel of published owner state.
+pub(crate) const PUBLICATION_CHANNEL: &str = "hopae_publication";
+
 fn wait<F: Future>(handle: &tokio::runtime::Handle, f: F) -> F::Output {
     match tokio::runtime::Handle::try_current() {
         // On a runtime thread: let the runtime move other tasks away first.
@@ -127,6 +130,15 @@ impl MetaTx for PgMetaTx<'_> {
             &[&key, &expected],
         ))
         .map(|r| r.is_some_and(|r| r.get::<_, bool>(0)))
+        .map_err(|_| MetaError)
+    }
+    fn announce(&self, topic: &str) -> Result<(), MetaError> {
+        // Delivered by the server only if and when this transaction commits.
+        self.run(
+            self.tx
+                .execute("SELECT pg_notify($1, $2)", &[&PUBLICATION_CHANNEL, &topic]),
+        )
+        .map(|_| ())
         .map_err(|_| MetaError)
     }
     fn postgres(&self) -> Option<&PgMetaTx<'_>> {

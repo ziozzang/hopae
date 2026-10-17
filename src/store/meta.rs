@@ -42,6 +42,13 @@ pub trait MetaTx {
     /// Whether `key` holds exactly `expected` (false when absent), compared
     /// in the database without copying the stored value out.
     fn value_equals(&self, key: &str, expected: &str) -> Result<bool, MetaError>;
+    /// Tell the other replicas, when this transaction commits, that the
+    /// published state named by `topic` changed (PostgreSQL `NOTIFY`). A
+    /// hint only: followers also poll, and a single SQLite writer has no
+    /// other replica to tell.
+    fn announce(&self, _topic: &str) -> Result<(), MetaError> {
+        Ok(())
+    }
     /// The SQLite connection behind this transaction (its native fences).
     fn sqlite(&self) -> Option<&Connection> {
         None

@@ -231,9 +231,10 @@ impl Authority {
             revision: expected.checked_add(1).ok_or(publication::Error::Invalid)?,
             runtime,
         });
-        previous
+        // A snapshot a refresh installed as unavailable stays so on failure.
+        let was_closed = previous
             .publication
-            .store(true, std::sync::atomic::Ordering::Release);
+            .swap(true, std::sync::atomic::Ordering::AcqRel);
         let result = publication::publish_guarded(
             connection,
             expected,
@@ -246,7 +247,7 @@ impl Authority {
             Err(error) => {
                 previous
                     .publication
-                    .store(false, std::sync::atomic::Ordering::Release);
+                    .store(was_closed, std::sync::atomic::Ordering::Release);
                 return Err(error);
             }
         };
@@ -255,6 +256,51 @@ impl Authority {
             .publication
             .store(false, std::sync::atomic::Ordering::Release);
         Ok(document)
+    }
+    /// Follow a publication another replica committed (ADR-0020 slice 5).
+    /// Installs a newer durable revision, never an older one. When this
+    /// process cannot compile it (a referenced credential missing here, or a
+    /// configuration it does not accept), it installs that revision as
+    /// unavailable: verify answers unavailable for every profile request
+    /// until a later revision compiles. Runs under the same owner lock as
+    /// `publish`. True when a snapshot was installed.
+    pub fn refresh<D: MetaDb>(
+        &mut self,
+        connection: &mut D,
+        env: &dyn Fn(&str) -> Option<String>,
+        validate: &dyn Fn(&runtime::Config) -> Result<(), publication::Error>,
+    ) -> Result<bool, publication::Error> {
+        let previous = self.snapshot.load_full();
+        let Some(document) = connection.meta_read(|tx| publication::read(tx))? else {
+            return Ok(false);
+        };
+        if document.revision <= previous.revision {
+            return Ok(false);
+        }
+        let compiled = document
+            .configuration
+            .as_ref()
+            .map(|config| {
+                validate(config)?;
+                runtime::Runtime::compile_resuming(config, env, previous.runtime.as_ref())
+                    .map_err(|_| publication::Error::Invalid)
+            })
+            .transpose();
+        let (runtime, closed) = match compiled {
+            Ok(mut runtime) => {
+                if let Some(runtime) = &mut runtime {
+                    runtime.observed_time = self.observed_time.clone();
+                }
+                (runtime, false)
+            }
+            Err(_) => (None, true),
+        };
+        self.snapshot.store(Arc::new(Snapshot {
+            publication: Arc::new(std::sync::atomic::AtomicBool::new(closed)),
+            revision: document.revision,
+            runtime,
+        }));
+        Ok(true)
     }
     pub fn reader(&self) -> Arc<ArcSwap<Snapshot>> {
         self.snapshot.clone()
