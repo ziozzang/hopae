@@ -1742,7 +1742,23 @@ fn s489_a1_aal3_requirements_need_high_assurance_configuration() {
 
 // ---- 490: console operators (ADR-0021) ---------------------------------------
 
-const OPERATOR_KEY: &str = "console-operator-assertion-key-0123456789";
+/// The operator assertion key: the seed (environment) and the public key
+/// (pinned by the configuration and the console), base64.
+const OPERATOR_SEED: [u8; 32] = [42; 32];
+
+fn operator_seed() -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(OPERATOR_SEED)
+}
+
+fn operator_public_key() -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(
+        ed25519_dalek::SigningKey::from_bytes(&OPERATOR_SEED)
+            .verifying_key()
+            .to_bytes(),
+    )
+}
 
 /// `app` is the console operators' application: a passkey on the whole host,
 /// a fresh one (300 s) on `/ui/step-up`; `grace` sets an enrollment grace.
@@ -1750,14 +1766,16 @@ fn operator_stack(grace: bool) -> Pk {
     let mut ops = json!({
         "app_id": "app",
         "require_factor": "webauthn",
-        "assertion_key_env": "HOPAE_TEST_OPERATOR_KEY"
+        "assertion_seed_env": "HOPAE_TEST_OPERATOR_SEED",
+        "assertion_public_key": operator_public_key(),
+        "assertion_key_id": "op-1"
     });
     if grace {
         ops["enrollment_grace_until"] = json!(4_102_444_800i64);
     }
     Pk::start_with_env(
         passkey_config(json!({"console_operators": ops})),
-        &[("HOPAE_TEST_OPERATOR_KEY", OPERATOR_KEY)],
+        &[("HOPAE_TEST_OPERATOR_SEED", operator_seed().as_str())],
     )
 }
 
@@ -1765,7 +1783,8 @@ fn operator_claims(r: &Response, now: i64) -> hopae::verify::operator::Claims {
     let token = r
         .header("x-hopae-operator-assertion")
         .unwrap_or_else(|| panic!("no operator assertion: {r:?}"));
-    hopae::verify::operator::verify(OPERATOR_KEY.as_bytes(), token, now).expect("valid assertion")
+    let pinned = ed25519_dalek::SigningKey::from_bytes(&OPERATOR_SEED).verifying_key();
+    hopae::verify::operator::verify(&[("op-1", pinned)], token, now).expect("valid assertion")
 }
 
 fn now_s(p: &Pk) -> i64 {
@@ -1881,18 +1900,58 @@ fn s490_2_the_enrollment_grace_admits_without_the_factor_but_not_for_sensitive_a
 fn s490_a1_operator_policy_configuration_is_checked() {
     let idp = MockIdp::start("default");
     let dir = tempfile::tempdir().unwrap();
-    for over in [
-        json!({"console_operators": {"app_id": "app", "assertion_key_env": "K"}}),
-        json!({"webauthn": {}, "console_operators": {"app_id": "nope", "assertion_key_env": "K"}}),
-        json!({"webauthn": {}, "console_operators": {"app_id": "app", "require_aal": 3, "assertion_key_env": "K"}}),
-        json!({"webauthn": {}, "console_operators": {"app_id": "app", "step_up_max_age_secs": 5, "assertion_key_env": "K"}}),
+    let ok = |extra: serde_json::Value| {
+        let mut ops = json!({"app_id": "app", "assertion_seed_env": "K", "assertion_public_key": operator_public_key(), "assertion_key_id": "op-1"});
+        for (k, v) in extra.as_object().unwrap() {
+            ops[k] = v.clone();
+        }
+        ops
+    };
+    let other = {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(
+            ed25519_dalek::SigningKey::from_bytes(&[1; 32])
+                .verifying_key()
+                .to_bytes(),
+        )
+    };
+    for (over, seed) in [
+        (json!({"console_operators": ok(json!({}))}), operator_seed()),
+        (
+            json!({"webauthn": {}, "console_operators": ok(json!({"app_id": "nope"}))}),
+            operator_seed(),
+        ),
+        (
+            json!({"webauthn": {}, "console_operators": ok(json!({"require_aal": 3}))}),
+            operator_seed(),
+        ),
+        (
+            json!({"webauthn": {}, "console_operators": ok(json!({"step_up_max_age_secs": 5}))}),
+            operator_seed(),
+        ),
+        (
+            json!({"webauthn": {}, "console_operators": ok(json!({"assertion_key_id": "a b"}))}),
+            operator_seed(),
+        ),
+        (
+            json!({"webauthn": {}, "console_operators": ok(json!({"assertion_public_key": "short"}))}),
+            operator_seed(),
+        ),
+        (
+            json!({"webauthn": {}, "console_operators": ok(json!({"assertion_public_key": other}))}),
+            operator_seed(),
+        ),
+        (
+            json!({"webauthn": {}, "console_operators": ok(json!({}))}),
+            "short".to_string(),
+        ),
     ] {
         let cfg = Fixture::with("m1-basic", over.clone()).render(dir.path(), &idp);
         let path = crate::support::write_config(dir.path(), &cfg.to_string());
         let out = std::process::Command::new(env!("CARGO_BIN_EXE_hopae"))
             .args(["--check", "--config"])
             .arg(&path)
-            .env("K", "short")
+            .env("K", &seed)
             .output()
             .unwrap();
         assert!(
@@ -1927,11 +1986,11 @@ fn g8_hold_operator_stack() {
                 "webauthn": {},
                 "apps": [{"app_id": "console", "display_name": "Hangang console", "hosts": ["console.example.test"], "ports": [443]}],
                 "listen": {"native_gateway": native.to_string()},
-                "console_operators": {"app_id": "console", "step_up_max_age_secs": 30, "assertion_key_env": "HOPAE_TEST_OPERATOR_KEY"}
+                "console_operators": {"app_id": "console", "step_up_max_age_secs": 30, "assertion_seed_env": "HOPAE_TEST_OPERATOR_SEED", "assertion_public_key": operator_public_key(), "assertion_key_id": "op-1"}
             }),
         ),
         &idp,
-        &[("HOPAE_TEST_OPERATOR_KEY", OPERATOR_KEY)],
+        &[("HOPAE_TEST_OPERATOR_SEED", operator_seed().as_str())],
     );
     let wall = || {
         std::time::SystemTime::now()
@@ -1945,7 +2004,8 @@ fn g8_hold_operator_stack() {
         "gateway": h.gateway.to_string(),
         "native": native.to_string(),
         "gateway_key": h.key_value(&crate::support::KeySlot::Current),
-        "operator_key": OPERATOR_KEY,
+        "operator_public_key": operator_public_key(),
+        "operator_key_id": "op-1",
         "cookie": h.config()["cookie"]["name"],
     });
     std::fs::write(&file, info.to_string()).unwrap();

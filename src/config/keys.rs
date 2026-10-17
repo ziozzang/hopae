@@ -203,7 +203,9 @@ pub(super) const ROOT: Node = Obj(&[
             ("step_up_path", Leaf),
             ("step_up_max_age_secs", Leaf),
             ("enrollment_grace_until", Leaf),
-            ("assertion_key_env", Leaf),
+            ("assertion_seed_env", Leaf),
+            ("assertion_public_key", Leaf),
+            ("assertion_key_id", Leaf),
         ]),
     ),
     (

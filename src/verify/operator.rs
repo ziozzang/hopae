@@ -8,20 +8,22 @@
 //! passkey; the same with freshness on the step-up path), and every allowed
 //! verify for it carries `x-hopae-operator-assertion`: a short-lived claim of
 //! the session's level and the factor that established it, HMAC-signed with
-//! a key the console shares, so the console can enforce its own minimum for
+//! Hopae's dedicated Ed25519 key (the console pins the public key, the
+//! current and the next one during a rotation), so the console can enforce its own minimum for
 //! sign-in and for sensitive actions without trusting anything in between.
 //!
-//! Wire form: `v1.<base64url(JSON claims)>.<base64url(HMAC-SHA256(key,
-//! "hopae-operator-assertion.v1." + <base64url(JSON claims)>))>`.
+//! Wire form: `v2.<base64url(JSON claims)>.<base64url(Ed25519 signature over
+//! "hopae-operator-assertion.v2." + <base64url(JSON claims)>)>`; the claims
+//! name the signing key (`kid`).
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use hmac::{Hmac, Mac};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use zeroize::Zeroizing;
 
 use crate::crypto::Timestamp;
 use crate::policy::types::AppId;
@@ -32,13 +34,15 @@ use crate::session::types::{Aal, FactorEntry, FactorKind};
 pub const ASSERTION_LIFETIME: Duration = Duration::from_secs(60);
 /// The audience the console checks.
 pub const AUDIENCE: &str = "hangang-console";
-const DOMAIN: &str = "hopae-operator-assertion.v1.";
+const DOMAIN: &str = "hopae-operator-assertion.v2.";
 
 /// The claims of an operator assertion.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Claims {
     pub v: u8,
+    /// The signing key's id (the console pins the public key under it).
+    pub kid: String,
     pub aud: String,
     /// The console application and the host the request was for.
     pub app: String,
@@ -72,7 +76,8 @@ pub struct OperatorRuntime {
     pub require_aal: Aal,
     pub require_webauthn: bool,
     pub grace_until: Option<Timestamp>,
-    key: Vec<u8>,
+    key: SigningKey,
+    kid: String,
 }
 
 impl std::fmt::Debug for OperatorRuntime {
@@ -83,11 +88,38 @@ impl std::fmt::Debug for OperatorRuntime {
     }
 }
 
-fn mac(key: &[u8], payload: &str) -> Hmac<Sha256> {
-    let mut m = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC takes any key");
-    m.update(DOMAIN.as_bytes());
-    m.update(payload.as_bytes());
-    m
+fn signed_bytes(payload: &str) -> Vec<u8> {
+    [DOMAIN.as_bytes(), payload.as_bytes()].concat()
+}
+
+/// A base64 (standard) Ed25519 seed (32 bytes) or public key.
+fn key_bytes(value: &str) -> Option<Zeroizing<[u8; 32]>> {
+    use base64::engine::general_purpose::STANDARD;
+    let bytes = Zeroizing::new(STANDARD.decode(value.trim().as_bytes()).ok()?);
+    Some(Zeroizing::new(bytes.as_slice().try_into().ok()?))
+}
+
+/// The signing key of `console_operators`: the seed from the environment,
+/// matching the pinned public key. Errors name the problem, never the seed.
+pub fn signing_key(
+    cfg: &crate::config::ConsoleOperatorsCfg,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<SigningKey, String> {
+    let seed = lookup(&cfg.assertion_seed_env)
+        .and_then(|v| key_bytes(&v))
+        .ok_or_else(|| {
+            format!(
+                "environment variable {} (console_operators.assertion_seed_env) is not a base64 Ed25519 seed",
+                cfg.assertion_seed_env
+            )
+        })?;
+    let key = SigningKey::from_bytes(&seed);
+    let pinned = key_bytes(&cfg.assertion_public_key)
+        .ok_or("console_operators.assertion_public_key is not a base64 Ed25519 public key")?;
+    if key.verifying_key().to_bytes() != *pinned {
+        return Err("console_operators.assertion_public_key does not match the seed".into());
+    }
+    Ok(key)
 }
 
 impl OperatorRuntime {
@@ -98,13 +130,14 @@ impl OperatorRuntime {
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Option<Arc<OperatorRuntime>> {
         let c = cfg.console_operators.as_ref()?;
-        let key = lookup(&c.assertion_key_env).filter(|k| (32..=4096).contains(&k.len()))?;
+        let key = signing_key(c, lookup).ok()?;
         Some(Arc::new(OperatorRuntime {
             app_id: AppId::new(c.app_id.clone()),
             require_aal: c.require_aal(),
             require_webauthn: c.require_factor == crate::config::OperatorFactorCfg::Webauthn,
             grace_until: c.enrollment_grace_until.map(Timestamp::from_secs),
-            key: key.into_bytes(),
+            key,
+            kid: c.assertion_key_id.clone(),
         }))
     }
 
@@ -113,14 +146,16 @@ impl OperatorRuntime {
         require_aal: Aal,
         require_webauthn: bool,
         grace_until: Option<Timestamp>,
-        key: &[u8],
+        key: SigningKey,
+        kid: &str,
     ) -> OperatorRuntime {
         OperatorRuntime {
             app_id: AppId::new(app_id),
             require_aal,
             require_webauthn,
             grace_until,
-            key: key.to_vec(),
+            key,
+            kid: kid.to_string(),
         }
     }
 
@@ -158,7 +193,8 @@ impl OperatorRuntime {
             required => presented >= required,
         };
         let claims = Claims {
-            v: 1,
+            v: 2,
+            kid: self.kid.clone(),
             aud: AUDIENCE.into(),
             app: self.app_id.to_string(),
             host: host.to_string(),
@@ -186,8 +222,8 @@ impl OperatorRuntime {
         };
         let payload =
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).expect("claims serialize"));
-        let tag = URL_SAFE_NO_PAD.encode(mac(&self.key, &payload).finalize().into_bytes());
-        format!("v1.{payload}.{tag}")
+        let sig = self.key.sign(&signed_bytes(&payload));
+        format!("v2.{payload}.{}", URL_SAFE_NO_PAD.encode(sig.to_bytes()))
     }
 }
 
@@ -200,30 +236,36 @@ pub enum Refused {
     Audience,
 }
 
-/// Check an assertion (the console's side, also used by tests): format,
-/// signature in constant time, audience and lifetime (`now` within
+/// Check an assertion (the console's side, also used by tests): format, the
+/// Ed25519 signature under the pinned key its `kid` names (the current and
+/// the next key during a rotation), audience and lifetime (`now` within
 /// `[iat - 5 s, exp]`).
-pub fn verify(key: &[u8], token: &str, now: i64) -> Result<Claims, Refused> {
+pub fn verify(keys: &[(&str, VerifyingKey)], token: &str, now: i64) -> Result<Claims, Refused> {
     if token.len() > 4096 {
         return Err(Refused::Malformed);
     }
     let mut parts = token.split('.');
-    let (Some("v1"), Some(payload), Some(tag), None) =
+    let (Some("v2"), Some(payload), Some(sig), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
     else {
         return Err(Refused::Malformed);
     };
-    let tag = URL_SAFE_NO_PAD
-        .decode(tag)
+    let sig = URL_SAFE_NO_PAD
+        .decode(sig)
         .map_err(|_| Refused::Malformed)?;
-    mac(key, payload)
-        .verify_slice(&tag)
-        .map_err(|_| Refused::Signature)?;
+    let sig = Signature::from_slice(&sig).map_err(|_| Refused::Malformed)?;
     let bytes = URL_SAFE_NO_PAD
         .decode(payload)
         .map_err(|_| Refused::Malformed)?;
     let claims: Claims = serde_json::from_slice(&bytes).map_err(|_| Refused::Malformed)?;
-    if claims.v != 1 || claims.aud != AUDIENCE {
+    let key = keys
+        .iter()
+        .find(|(kid, _)| *kid == claims.kid)
+        .ok_or(Refused::Signature)?;
+    key.1
+        .verify(&signed_bytes(payload), &sig)
+        .map_err(|_| Refused::Signature)?;
+    if claims.v != 2 || claims.aud != AUDIENCE {
         return Err(Refused::Audience);
     }
     if now > claims.exp || now + 5 < claims.iat {
@@ -236,7 +278,12 @@ pub fn verify(key: &[u8], token: &str, now: i64) -> Result<Claims, Refused> {
 mod tests {
     use super::*;
 
-    const KEY: &[u8] = b"operator-assertion-key-of-at-least-32-bytes";
+    fn key() -> SigningKey {
+        SigningKey::from_bytes(&[11; 32])
+    }
+    fn pinned() -> Vec<(&'static str, VerifyingKey)> {
+        vec![("k1", key().verifying_key())]
+    }
 
     fn entry(kind: FactorKind, at: i64) -> FactorEntry {
         FactorEntry {
@@ -248,7 +295,7 @@ mod tests {
 
     #[test]
     fn assertions_are_signed_short_lived_and_state_the_factor() {
-        let rt = OperatorRuntime::new("console", Aal::Two, true, None, KEY);
+        let rt = OperatorRuntime::new("console", Aal::Two, true, None, key(), "k1");
         let now = Timestamp::from_secs(1_000);
         let factors = [
             entry(FactorKind::Oidc, 900),
@@ -266,7 +313,7 @@ mod tests {
             false,
             now,
         );
-        let c = verify(KEY, &t, 1_000).unwrap();
+        let c = verify(&pinned(), &t, 1_000).unwrap();
         assert_eq!(
             (c.aal, c.factor.as_deref(), c.factor_at, c.satisfied),
             (2, Some("webauthn"), Some(950), true)
@@ -278,13 +325,20 @@ mod tests {
         // Tampering, another key, expiry.
         let mut forged = t.clone();
         forged.replace_range(5..6, if &t[5..6] == "A" { "B" } else { "A" });
-        assert!(verify(KEY, &forged, 1_000).is_err());
+        assert!(verify(&pinned(), &forged, 1_000).is_err());
+        let other = SigningKey::from_bytes(&[12; 32]).verifying_key();
+        assert_eq!(verify(&[("k1", other)], &t, 1_000), Err(Refused::Signature));
         assert_eq!(
-            verify(b"another-key-of-at-least-thirty-two-bytes!", &t, 1_000),
+            verify(&[("k0", other), ("k1", key().verifying_key())], &t, 1_000).map(|c| c.kid),
+            Ok("k1".to_string()),
+            "the next key pinned beside the current one"
+        );
+        assert_eq!(
+            verify(&[("k2", key().verifying_key())], &t, 1_000),
             Err(Refused::Signature)
         );
-        assert_eq!(verify(KEY, &t, 1_061), Err(Refused::Expired));
-        assert_eq!(verify(KEY, "v2.a.b", 1_000), Err(Refused::Malformed));
+        assert_eq!(verify(&pinned(), &t, 1_061), Err(Refused::Expired));
+        assert_eq!(verify(&pinned(), "v1.a.b", 1_000), Err(Refused::Malformed));
         // A TOTP-elevated session does not meet a webauthn policy.
         let t = rt.assertion(
             "h",
@@ -297,13 +351,13 @@ mod tests {
             false,
             now,
         );
-        let c = verify(KEY, &t, 1_000).unwrap();
+        let c = verify(&pinned(), &t, 1_000).unwrap();
         assert_eq!((c.factor.as_deref(), c.satisfied), (Some("totp"), false));
         // AAL 3 needs the high-assurance evidence.
-        let rt3 = OperatorRuntime::new("console", Aal::Three, true, None, KEY);
+        let rt3 = OperatorRuntime::new("console", Aal::Three, true, None, key(), "k1");
         let ok = |ha| {
             verify(
-                KEY,
+                &pinned(),
                 &rt3.assertion(
                     "h",
                     "u",
@@ -325,7 +379,14 @@ mod tests {
 
     #[test]
     fn the_grace_window_is_bounded() {
-        let rt = OperatorRuntime::new("c", Aal::Two, true, Some(Timestamp::from_secs(100)), KEY);
+        let rt = OperatorRuntime::new(
+            "c",
+            Aal::Two,
+            true,
+            Some(Timestamp::from_secs(100)),
+            key(),
+            "k1",
+        );
         assert!(rt.grace_active(Timestamp::from_secs(99)));
         assert!(!rt.grace_active(Timestamp::from_secs(100)));
     }

@@ -15,8 +15,9 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   console's application, fresh on its step-up path, with an optional
   enrollment grace; step-up rules can require a factor kind (`webauthn`), for
   which the portal offers only passkeys and sends users without one to add
-  it; allowed console verifies carry the HMAC-signed
-  `x-hopae-operator-assertion`; `operator.console_admitted` records
+  it; allowed console verifies carry
+  `x-hopae-operator-assertion`, signed with a dedicated Ed25519 key whose
+  public key the console pins by key id (current and next for rotation); `operator.console_admitted` records
   admissions.
 
 - Live reload without a restart (scenario 320,

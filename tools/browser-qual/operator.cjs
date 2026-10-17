@@ -149,7 +149,7 @@ async function startHangang(userId) {
   const system = crypto.randomBytes(32).toString("hex");
   const [pub, admin] = [await freePort(), await freePort()];
   consolePort = await freePort();
-  const env = Object.assign({}, process.env, { HANGANG_ADMIN_TOKEN: system, OPERATOR_SSO_GATEWAY_KEY: stack.gateway_key, OPERATOR_SSO_SYSTEM: system, OPERATOR_ASSERTION_KEY: stack.operator_key });
+  const env = Object.assign({}, process.env, { HANGANG_ADMIN_TOKEN: system, OPERATOR_SSO_GATEWAY_KEY: stack.gateway_key, OPERATOR_SSO_SYSTEM: system });
   const log = fs.openSync(path.join(WORK, "hangang.log"), "a");
   const authority = spawn(path.join(BIN, "hangang"), ["--config", path.join(dir, "config.json"), "--listen", `127.0.0.1:${pub}`, "--admin", `127.0.0.1:${admin}`, "--threads", "2", "--lua-workers", "1"], { env, stdio: ["ignore", log, log] });
   children.push(authority);
@@ -164,7 +164,7 @@ async function startHangang(userId) {
     upstream_token_env: "OPERATOR_SSO_SYSTEM",
     cookie: stack.cookie,
     accounts: { [userId]: "operator" },
-    operator_policy: { assertion_key_env: "OPERATOR_ASSERTION_KEY", minimum_aal: 2, require_factor: "webauthn", sensitive_max_age_seconds: 30 },
+    operator_policy: { assertion_public_keys: { [stack.operator_key_id]: stack.operator_public_key }, minimum_aal: 2, require_factor: "webauthn", sensitive_max_age_seconds: 30 },
   }), { mode: 0o600 });
   const con = spawn(path.join(BIN, "hangang-console"), ["--listen", `127.0.0.1:${consolePort}`, "--upstream", `http://127.0.0.1:${admin}`, "--plugins", path.join(dir, "plugins.json"), "--hopae-sso", path.join(dir, "sso.json"), "--audit-log", path.join(WORK, "console-audit.jsonl")], { env, stdio: ["ignore", log, log] });
   children.push(con);

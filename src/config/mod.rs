@@ -223,9 +223,15 @@ pub struct ConsoleOperatorsCfg {
     /// `grace: true`); `step_up_path` is never waived.
     #[serde(default)]
     pub enrollment_grace_until: Option<i64>,
-    /// The variable holding the HMAC key (at least 32 bytes) the operator
-    /// assertion is signed with; the console holds the same key.
-    pub assertion_key_env: String,
+    /// The variable holding the Ed25519 seed (base64, 32 bytes) the operator
+    /// assertion is signed with; dedicated to the assertion.
+    pub assertion_seed_env: String,
+    /// The public key of that seed (base64, 32 bytes); a mismatch refuses the
+    /// configuration. The console pins it.
+    pub assertion_public_key: String,
+    /// The key id the assertion names (`kid`) so the console can pin the
+    /// current and the next key during a rotation (1 to 64 of `A-Za-z0-9._-`).
+    pub assertion_key_id: String,
 }
 
 impl ConsoleOperatorsCfg {
@@ -299,10 +305,32 @@ impl ConsoleOperatorsCfg {
         if !(30..=3600).contains(&self.step_up_max_age().as_secs()) {
             errs.push("console_operators.step_up_max_age_secs must be between 30 and 3600".into());
         }
-        if !valid_env_name(&self.assertion_key_env) {
+        if !valid_env_name(&self.assertion_seed_env) {
             errs.push(
-                "console_operators.assertion_key_env must be an environment variable name".into(),
+                "console_operators.assertion_seed_env must be an environment variable name".into(),
             );
+        }
+        let pk = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            self.assertion_public_key.trim(),
+        );
+        if !pk.is_ok_and(|k| {
+            k.as_slice()
+                .try_into()
+                .is_ok_and(|k| ed25519_dalek::VerifyingKey::from_bytes(k).is_ok())
+        }) {
+            errs.push(
+                "console_operators.assertion_public_key must be a base64 Ed25519 public key".into(),
+            );
+        }
+        if self.assertion_key_id.is_empty()
+            || self.assertion_key_id.len() > 64
+            || !self
+                .assertion_key_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        {
+            errs.push("console_operators.assertion_key_id must be 1 to 64 of A-Za-z0-9._-".into());
         }
     }
 }
@@ -2335,12 +2363,9 @@ pub fn check_env(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<S
         out.push(format!("authentication_gateway: {error}"));
     }
     if let Some(c) = &cfg.console_operators
-        && lookup(&c.assertion_key_env).is_none_or(|v| !(32..=4096).contains(&v.len()))
+        && let Err(error) = crate::verify::operator::signing_key(c, &lookup)
     {
-        out.push(format!(
-            "environment variable {} (console_operators.assertion_key_env) is not set or is not 32 to 4096 bytes",
-            c.assertion_key_env
-        ));
+        out.push(error);
     }
     out
 }
