@@ -23,7 +23,7 @@ fn openssl(dir: &Path, args: &[&str]) {
 
 /// `ca1`/`ca2` with clients (from the reload tests' PKI), and `<ca>-ip`, a
 /// server certificate for IP 127.0.0.1 signed by `<ca>`.
-fn pki(dir: &Path) {
+pub(super) fn pki(dir: &Path) {
     for ca in ["ca1", "ca2"] {
         crate::reload::tests::pki(dir, ca);
         let name = format!("{ca}-ip");
@@ -75,7 +75,24 @@ fn pki(dir: &Path) {
 
 /// Serve discovery over HTTPS with `cert`/`key`; with `client_ca`, a client
 /// certificate signed by it is mandatory. Returns the issuer.
+/// What the fixture's token endpoint answers for a form (status, body).
+pub(super) type TokenCheck = Arc<
+    dyn Fn(&std::collections::HashMap<String, String>) -> (u16, serde_json::Value) + Send + Sync,
+>;
+
 async fn idp(dir: &Path, cert: &str, key: &str, client_ca: Option<&str>) -> String {
+    idp_with(dir, cert, key, client_ca, serde_json::json!({}), None).await
+}
+
+/// As [`idp`], with `extra` discovery members and a token endpoint.
+pub(super) async fn idp_with(
+    dir: &Path,
+    cert: &str,
+    key: &str,
+    client_ca: Option<&str>,
+    extra: serde_json::Value,
+    token: Option<TokenCheck>,
+) -> String {
     let read = |f: &str| std::fs::read(dir.join(f)).unwrap();
     let config = match client_ca {
         Some(ca) => {
@@ -109,20 +126,39 @@ async fn idp(dir: &Path, cert: &str, key: &str, client_ca: Option<&str>) -> Stri
         "https://127.0.0.1:{}",
         listener.local_addr().unwrap().port()
     );
-    let doc = serde_json::json!({
+    let mut doc = serde_json::json!({
         "issuer": issuer,
         "authorization_endpoint": format!("{issuer}/authorize"),
         "token_endpoint": format!("{issuer}/token"),
         "jwks_uri": format!("{issuer}/jwks"),
         "mtls_endpoint_aliases": {"token_endpoint": format!("{issuer}/mtls/token")},
     });
-    let router = axum::Router::new().route(
+    for (k, v) in extra.as_object().unwrap() {
+        doc[k] = v.clone();
+    }
+    let mut router = axum::Router::new().route(
         "/.well-known/openid-configuration",
         axum::routing::get(move || {
             let doc = doc.clone();
             async move { axum::Json(doc) }
         }),
     );
+    if let Some(check) = token {
+        router = router.route(
+            "/token",
+            axum::routing::post(
+                move |axum::Form(form): axum::Form<std::collections::HashMap<String, String>>| {
+                    let (status, body) = check(&form);
+                    async move {
+                        (
+                            axum::http::StatusCode::from_u16(status).unwrap(),
+                            axum::Json(body),
+                        )
+                    }
+                },
+            ),
+        );
+    }
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     tokio::spawn(async move {
         loop {
@@ -147,7 +183,7 @@ async fn idp(dir: &Path, cert: &str, key: &str, client_ca: Option<&str>) -> Stri
     issuer
 }
 
-fn row(issuer: &str, tls: serde_json::Value, managed_by: ManagedBy) -> ProviderRow {
+pub(super) fn row(issuer: &str, tls: serde_json::Value, managed_by: ManagedBy) -> ProviderRow {
     ProviderRow {
         provider_id: crate::provider::types::ProviderId::new("corp"),
         kind: ProviderKind::Oidc,
@@ -165,28 +201,28 @@ fn row(issuer: &str, tls: serde_json::Value, managed_by: ManagedBy) -> ProviderR
     }
 }
 
-fn provider(row: &ProviderRow, clock: Arc<TestClock>) -> Arc<OidcProvider> {
+pub(super) fn provider(row: &ProviderRow, clock: Arc<TestClock>) -> Arc<OidcProvider> {
     OidcProvider::from_row(row, &|_| None, clock, None)
 }
 
-async fn discovered(p: &OidcProvider, clock: &TestClock) -> bool {
+pub(super) async fn discovered(p: &OidcProvider, clock: &TestClock) -> bool {
     // Past any backoff of an earlier failure.
     clock.advance(Duration::from_secs(120));
     p.refresh_discovery().await;
     p.health().await == ProviderHealth::Ok
 }
 
-fn path(dir: &Path, f: &str) -> String {
+pub(super) fn path(dir: &Path, f: &str) -> String {
     dir.join(f).to_string_lossy().into_owned()
 }
 
-fn copy(dir: &Path, from: &str, to: &str) {
+pub(super) fn copy(dir: &Path, from: &str, to: &str) {
     let tmp = dir.join(format!("{to}.tmp"));
     std::fs::copy(dir.join(from), &tmp).unwrap();
     std::fs::rename(&tmp, dir.join(to)).unwrap();
 }
 
-fn clock() -> Arc<TestClock> {
+pub(super) fn clock() -> Arc<TestClock> {
     Arc::new(TestClock::new(crate::crypto::Timestamp::from_secs(
         1_800_000_000,
     )))

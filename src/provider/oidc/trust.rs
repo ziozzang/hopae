@@ -6,7 +6,8 @@
 //! these settings. Certificate and host-name verification always stay on.
 //!
 //! The files are read like the other reloadable TLS material
-//! ([`crate::reload`]): polled by content digest every [`POLL_INTERVAL`],
+//! ([`crate::reload`]): polled by content digest every
+//! `reload.tls_interval_secs` (default 10 s, `0` turns polling off),
 //! parsed and checked completely before anything changes, then the client is
 //! swapped; invalid material keeps the previous client and raises
 //! `hopae_tls_reload_failing{name="provider:<id>"}`.
@@ -23,8 +24,48 @@ use serde_json::{Value, json};
 use crate::reload::{Outcome, note_metrics};
 use crate::telemetry::counters;
 
-/// How often the files are re-read.
+/// How often the files are re-read by default (`reload.tls_interval_secs`).
 pub const POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+/// The poll interval in seconds, `0` = off; set from
+/// `reload.tls_interval_secs` at start (process-wide, like the TLS poller).
+static POLL_SECS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(POLL_INTERVAL.as_secs());
+
+/// Follow `reload.tls_interval_secs` (`None`: polling off).
+pub fn set_poll_interval(interval: Option<Duration>) {
+    POLL_SECS.store(
+        interval.map_or(0, |d| d.as_secs().max(1)),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The current poll interval, `None` when polling is off.
+pub fn poll_interval() -> Option<Duration> {
+    match POLL_SECS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        n => Some(Duration::from_secs(n)),
+    }
+}
+
+/// Whether a poll is due by `next` (and, if so, schedule the next one).
+pub(crate) fn due(next: &Mutex<Instant>) -> bool {
+    due_every(next, poll_interval())
+}
+
+/// [`due`] for a given interval (`None`: never).
+pub(crate) fn due_every(next: &Mutex<Instant>, interval: Option<Duration>) -> bool {
+    let Some(interval) = interval else {
+        return false;
+    };
+    let mut next = next.lock().unwrap_or_else(|p| p.into_inner());
+    let now = Instant::now();
+    if now < *next {
+        return false;
+    }
+    *next = now + interval;
+    true
+}
 
 /// `1` for the trust source a provider's client uses
 /// (`provider`, `source` = `ca_file` or `system`).
@@ -202,7 +243,7 @@ impl ProviderTrust {
             provider: provider.to_string(),
             files,
             digest: Mutex::new(digest),
-            next_poll: Mutex::new(Instant::now() + POLL_INTERVAL),
+            next_poll: Mutex::new(Instant::now()),
             state: Mutex::new(State {
                 ca_fingerprint: material.ca_fingerprint.clone(),
                 client_fingerprint: material.client_fingerprint.clone(),
@@ -218,13 +259,7 @@ impl ProviderTrust {
 
     /// Whether a poll is due (and, if so, the next one is scheduled).
     pub fn due(&self) -> bool {
-        let mut next = self.next_poll.lock().unwrap_or_else(|p| p.into_inner());
-        let now = Instant::now();
-        if now < *next {
-            return false;
-        }
-        *next = now + POLL_INTERVAL;
-        true
+        due(&self.next_poll)
     }
 
     /// Re-read the files; when they changed and are valid, `install` the new

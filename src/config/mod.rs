@@ -642,6 +642,9 @@ pub struct ProviderEntry {
     /// A private CA and a client certificate for this provider (OIDC).
     #[serde(default)]
     pub tls: Option<crate::policy::types::ProviderTls>,
+    /// `private_key_jwt` client authentication (OIDC).
+    #[serde(default)]
+    pub client_assertion: Option<crate::policy::types::ProviderClientAssertion>,
     #[serde(default)]
     pub allowed_email_domains: Vec<String>,
     #[serde(default)]
@@ -1637,6 +1640,21 @@ impl Config {
                     ));
                 }
             }
+            if let Some(a) = &p.client_assertion {
+                if p.kind != ProviderKind::Oidc {
+                    errs.push(format!("{at}.client_assertion requires kind oidc"));
+                }
+                if p.client_secret_env.is_some() {
+                    errs.push(format!(
+                        "{at}.client_assertion and client_secret_env are exclusive"
+                    ));
+                }
+                if let Err(e) = crate::provider::oidc::assertion::AssertionCfg::of_config(
+                    &serde_json::json!({ "client_assertion": a }),
+                ) {
+                    errs.push(format!("{at}: {e}"));
+                }
+            }
             for h in &p.endpoint_hosts {
                 let h = h.to_ascii_lowercase();
                 if !valid_domain(&h) && h.parse::<std::net::IpAddr>().is_err() {
@@ -1924,6 +1942,7 @@ impl Config {
                 endpoint_hosts: lowered(&p.endpoint_hosts),
                 allow_private_endpoints: p.allow_private_endpoints,
                 tls: p.tls.clone(),
+                client_assertion: p.client_assertion.clone(),
                 allowed_email_domains: lowered(&p.allowed_email_domains),
                 authoritative_domains: lowered(&p.authoritative_domains),
                 auto_link: p.auto_link,
@@ -2189,8 +2208,17 @@ fn check_issuer(u: &str) -> Result<(), &'static str> {
 /// error: see [`env_warnings`].
 pub fn check_env(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<String> {
     let mut out = Vec::new();
-    // Provider TLS files: readable, parseable, the key matching the certificate.
+    // Provider TLS files: readable, parseable, the key matching the certificate;
+    // client assertion keys: readable, a supported key for the algorithms.
     for p in cfg.providers.iter().filter(|p| p.enabled) {
+        if let Some(a) = &p.client_assertion
+            && let Ok(Some(c)) = crate::provider::oidc::assertion::AssertionCfg::of_config(
+                &serde_json::json!({ "client_assertion": a }),
+            )
+            && let Err(e) = crate::provider::oidc::assertion::load(&c)
+        {
+            out.push(format!("provider {} client_assertion: {e}", p.provider_id));
+        }
         if let Some(tls) = &p.tls
             && let Ok(Some(files)) = crate::provider::oidc::trust::TrustFiles::of_config(
                 &serde_json::json!({ "tls": tls }),
@@ -2754,6 +2782,41 @@ mod tests {
             check_env(&c, |_| None)
                 .iter()
                 .any(|e| e.contains("provider corp tls:"))
+        );
+    }
+
+    #[test]
+    fn provider_client_assertion_is_validated_and_checked() {
+        let p = |a: &str, secret: bool| {
+            format!(
+                r#"{{"providers": [{{"provider_id": "corp", "kind": "oidc", "client_id": "c", "issuer": "https://idp.corp.test", {}"client_assertion": {a}}}]}}"#,
+                if secret {
+                    r#""client_secret_env": "S", "#
+                } else {
+                    ""
+                }
+            )
+        };
+        assert!(
+            invalid(&p(r#"{"key_file": "/k.pem", "key_id": "k"}"#, true)).contains("exclusive")
+        );
+        assert!(invalid(&p(r#"{"key_file": "k.pem", "key_id": "k"}"#, false)).contains("absolute"));
+        assert!(
+            invalid(&p(
+                r#"{"key_file": "/k.pem", "key_id": "k", "algorithms": ["HS256"]}"#,
+                false
+            ))
+            .contains("algorithms")
+        );
+        let c = with(&p(
+            r#"{"key_file": "/nonexistent/hopae-key.pem", "key_id": "k"}"#,
+            false,
+        ))
+        .unwrap();
+        assert!(
+            check_env(&c, |_| None)
+                .iter()
+                .any(|e| e.starts_with("provider corp client_assertion:"))
         );
     }
 

@@ -586,6 +586,8 @@ async fn bind_environment(
         })
         .transpose()?;
     let reload_status = Arc::new(crate::reload::Status::default());
+    // Provider TLS and client assertion files follow the same interval.
+    crate::provider::oidc::trust::set_poll_interval(cfg.tls_reload_interval());
     let mut client_tls = Vec::new();
     if let (Some(configuration), Some(prepared)) = (&cfg.projection_receiver, &projection_resources)
     {

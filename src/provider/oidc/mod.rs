@@ -9,6 +9,9 @@
 //! No secret reaches an error value, a log line or an event: errors are
 //! reason codes, transports are logged by class, and bodies are never logged.
 
+pub mod assertion;
+#[cfg(test)]
+mod assertion_tests;
 pub mod claims;
 pub mod discovery;
 pub mod http;
@@ -84,6 +87,8 @@ pub struct OidcSettings {
     /// The provider's own TLS trust (a private CA, a client certificate);
     /// `None` uses the built-in roots and presents no certificate.
     pub trust_files: Option<trust::TrustFiles>,
+    /// `private_key_jwt` client authentication (RFC 7523) instead of a secret.
+    pub client_assertion: Option<assertion::AssertionCfg>,
 }
 
 fn cfg_str(cfg: &Value, key: &str) -> Option<String> {
@@ -168,6 +173,16 @@ impl OidcSettings {
             Ok(files) => Ok(files),
             Err(_) => Err(()),
         };
+        let client_assertion = match assertion::AssertionCfg::of_config(cfg) {
+            Ok(Some(_))
+                if row.managed_by != crate::store::types::ManagedBy::File
+                    || row.client_secret_env.is_some() =>
+            {
+                Err(())
+            }
+            Ok(a) => Ok(a),
+            Err(_) => Err(()),
+        };
         let mut client_secret = None;
         let mut disabled_reason = None;
         if row.deleted_at.is_some() {
@@ -178,6 +193,7 @@ impl OidcSettings {
             || !issuer_ok
             || row.kind != ProviderKind::Oidc
             || trust_files.is_err()
+            || client_assertion.is_err()
         {
             disabled_reason = Some("misconfigured");
         } else if let Some(name) = &row.client_secret_env {
@@ -207,6 +223,7 @@ impl OidcSettings {
             groups_claim: crate::groups::ProviderGroups::of_row(cfg)
                 .map(|g| g.claim_path().to_string()),
             trust_files: trust_files.ok().flatten(),
+            client_assertion: client_assertion.ok().flatten(),
         }
     }
 }
@@ -226,6 +243,7 @@ pub struct OidcProvider {
     s: OidcSettings,
     fetcher: Fetcher,
     trust: Option<Arc<trust::ProviderTrust>>,
+    assertion: Option<Arc<assertion::ClientAssertion>>,
     clock: Arc<dyn Clock>,
     reporter: Option<Reporter>,
     disc: Mutex<Cache<Discovery>>,
@@ -279,9 +297,31 @@ impl OidcProvider {
                 1,
             );
         }
+        let mut client_assertion = None;
+        if let Some(cfg) = s
+            .client_assertion
+            .clone()
+            .filter(|_| s.disabled_reason.is_none())
+        {
+            match assertion::load(&cfg) {
+                Ok((key, digest)) => {
+                    client_assertion = Some(Arc::new(assertion::ClientAssertion::new(
+                        s.provider_id.as_str(),
+                        cfg,
+                        key,
+                        digest,
+                    )));
+                }
+                Err(e) => {
+                    tracing::warn!(provider = %s.provider_id, error = %e, "client assertion key unusable; provider disabled");
+                    s.disabled_reason = Some("client_assertion_invalid");
+                }
+            }
+        }
         Arc::new(OidcProvider {
             fetcher,
             trust: provider_trust,
+            assertion: client_assertion,
             s,
             clock,
             reporter,
@@ -491,11 +531,25 @@ impl OidcProvider {
     /// Re-read the provider's TLS files when a poll is due (on the blocking
     /// pool) and swap the client when they changed and are valid.
     pub async fn poll_tls(&self) -> Option<crate::reload::Outcome> {
+        if let Some(a) = self.assertion.clone().filter(|a| a.due()) {
+            let _ = tokio::task::spawn_blocking(move || a.poll()).await;
+        }
         let t = self.trust.clone()?;
         if !t.due() {
             return None;
         }
         self.reload_tls_now(t).await
+    }
+
+    /// Poll the client assertion key now (tests).
+    #[cfg(test)]
+    pub(crate) fn poll_assertion_now(&self) -> Option<crate::reload::Outcome> {
+        self.assertion.as_ref().map(|a| a.poll())
+    }
+
+    /// The public client assertion key as a JWK set (`hopae providers jwk`).
+    pub fn client_assertion_jwks(&self) -> Option<Value> {
+        self.assertion.as_ref().map(|a| a.jwks())
     }
 
     async fn reload_tls_now(&self, t: Arc<trust::ProviderTrust>) -> Option<crate::reload::Outcome> {
@@ -514,10 +568,14 @@ impl OidcProvider {
 
     /// The provider's TLS trust as the admin status shows it.
     pub fn tls_status(&self) -> Value {
-        match &self.trust {
+        let mut v = match &self.trust {
             Some(t) => t.status(),
             None => trust::system_status(),
+        };
+        if let Some(a) = &self.assertion {
+            v["client_assertion"] = a.status();
         }
+        v
     }
 
     // ---- JWKS ------------------------------------------------------------
@@ -667,6 +725,31 @@ impl OidcProvider {
                 .header("accept", "application/json")
                 .header("content-type", "application/x-www-form-urlencoded");
             match (&self.s.client_secret, disc.token_auth) {
+                _ if self.assertion.is_some() => {
+                    let a = self.assertion.as_ref().unwrap();
+                    let audience = match a.cfg().audience {
+                        assertion::Audience::TokenEndpoint => disc.token_endpoint.as_str(),
+                        assertion::Audience::Issuer => self.s.issuer.as_str(),
+                    };
+                    let jwt = a
+                        .assertion(
+                            &self.s.client_id,
+                            audience,
+                            disc.token_auth_methods.as_deref(),
+                            disc.token_auth_signing_algs.as_deref(),
+                            self.clock.now().secs(),
+                        )
+                        .map_err(|why| {
+                            tracing::warn!(provider = %self.s.provider_id, ?why, "no client assertion for the token request");
+                            ProviderError::ProviderUnavailable
+                        })?;
+                    form.append_pair("client_id", &self.s.client_id)
+                        .append_pair(
+                            "client_assertion_type",
+                            "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                        )
+                        .append_pair("client_assertion", &jwt);
+                }
                 (Some(secret), TokenAuth::Basic) => {
                     let enc =
                         |v: &str| form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>();

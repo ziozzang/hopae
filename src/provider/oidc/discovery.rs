@@ -42,6 +42,10 @@ pub struct Discovery {
     /// `mtls_endpoint_aliases.token_endpoint` (RFC 8705 section 5), used
     /// when the provider presents a client certificate.
     pub mtls_token_endpoint: Option<url::Url>,
+    /// `token_endpoint_auth_methods_supported`, when listed.
+    pub token_auth_methods: Option<Vec<String>>,
+    /// `token_endpoint_auth_signing_alg_values_supported`, when listed.
+    pub token_auth_signing_algs: Option<Vec<String>>,
 }
 
 /// `<issuer>/.well-known/openid-configuration` (OpenID Connect Discovery 4).
@@ -130,8 +134,24 @@ impl Discovery {
             },
             Some(_) => return Err(ProviderError::ProviderResponseInvalid),
         };
+        let strings = |key: &str| -> Result<Option<Vec<String>>, ProviderError> {
+            match doc.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::Array(a)) if a.len() <= 64 => a
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>()
+                    .map(Some)
+                    .ok_or(ProviderError::ProviderResponseInvalid),
+                Some(_) => Err(ProviderError::ProviderResponseInvalid),
+            }
+        };
+        let token_auth_methods = strings("token_endpoint_auth_methods_supported")?;
+        let token_auth_signing_algs = strings("token_endpoint_auth_signing_alg_values_supported")?;
         Ok(Discovery {
             mtls_token_endpoint,
+            token_auth_methods,
+            token_auth_signing_algs,
             issuer: configured_issuer.to_string(),
             authorization_endpoint: endpoint(&doc, "authorization_endpoint", policy)?,
             token_endpoint: endpoint(&doc, "token_endpoint", policy)?,

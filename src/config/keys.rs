@@ -75,6 +75,15 @@ const PROVIDER: Node = Obj(&[
             ("client_key_file", Leaf),
         ]),
     ),
+    (
+        "client_assertion",
+        Obj(&[
+            ("key_file", Leaf),
+            ("key_id", Leaf),
+            ("algorithms", Leaf),
+            ("audience", Leaf),
+        ]),
+    ),
     ("allowed_email_domains", Leaf),
     ("authoritative_domains", Leaf),
     ("auto_link", Leaf),
