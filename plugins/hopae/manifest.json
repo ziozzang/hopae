@@ -1,7 +1,7 @@
 {
   "id": "hopae",
   "name": "Hopae",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "api_version": 1,
   "entry": "index.js",
   "assets": {
@@ -96,6 +96,11 @@
     },
     {
       "path": "explain/authentication",
+      "method": "POST",
+      "mutation": false
+    },
+    {
+      "path": "subjects/workloads/snapshot",
       "method": "POST",
       "mutation": false
     },

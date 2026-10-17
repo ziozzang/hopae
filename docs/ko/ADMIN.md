@@ -453,7 +453,7 @@ API로 바뀐 제공자는 `managed_by = api`가
 ### Hangang 콘솔 라우트
 
 `admin.hangang_delegation`이 있으면 Hangang 콘솔 브로커는 콘솔 패키지
-(`plugins/hopae/manifest.json`, 버전 0.1.10)의 다음 라우트를 서명된 `POST`로
+(`plugins/hopae/manifest.json`, 버전 0.1.11)의 다음 라우트를 서명된 `POST`로
 호출합니다. 어댑터는 서명, 재생 창, 본문을 확인한 뒤 요청을 네이티브 엔드포인트로
 넘기며, 거기서 다른 콘솔 요청과 똑같이 부여(또는 Hangang 권한), JSON API 규칙,
 역할, 쓰기 펜스가 적용됩니다. 어댑터가 모르는 필드는 거부되고(`403
@@ -474,7 +474,7 @@ delegation_rejected`), 네이티브 엔드포인트가 거부하는 값은 그 �
 | `authentication/profiles`, `authentication/projections` | 아니오 | 없음(`GET`) | `GET /v1/authentication/profiles`, `/projections` |
 | `authentication/profiles/publish`, `authentication/projections/publish` | 예 | `{revision, configuration, reason}` | `If-Match`가 있는 `PUT …` |
 | `authentication/profiles/validate` | 아니오 | `{configuration}` | `POST /v1/authentication/profiles/validate` |
-| `subjects/resolve`, `subjects/search`, `subjects/lifecycle`, `subjects/lifecycle/snapshot`, `explain/authentication` | 아니오 | 네이티브 엔드포인트와 같음 | 같은 경로 |
+| `subjects/resolve`, `subjects/search`, `subjects/lifecycle`, `subjects/lifecycle/snapshot`, `subjects/workloads/snapshot`, `explain/authentication` | 아니오 | 네이티브 엔드포인트와 같음 | 같은 경로 |
 | `groups/search`, `groups/get`, `subjects/groups` | 아니오 | 네이티브 엔드포인트와 같음 | 같은 경로 |
 | `groups/create`, `groups/update`, `groups/delete`, `groups/members/add`, `groups/members/remove` | 예 | 네이티브 엔드포인트와 같음 | 같은 경로 |
 
