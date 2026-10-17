@@ -501,6 +501,8 @@ fn path_matches(prefix: &Option<String>, path: &str) -> bool {
             path_prefix: prefix.clone(),
             aal: Aal::One,
             max_age: None,
+            factor: None,
+            enrollment_grace: false,
         },
         path,
     )
@@ -558,6 +560,8 @@ pub fn evaluate(policy: &Policy, input: &Input, path: &str, seen: Option<&Seen>)
                     path_prefix: None,
                     aal: *aal,
                     max_age: Some(*max_age),
+                    factor: None,
+                    enrollment_grace: false,
                 });
             }
             return out;
@@ -585,6 +589,8 @@ pub fn evaluate(policy: &Policy, input: &Input, path: &str, seen: Option<&Seen>)
                     path_prefix: r.path_prefix.clone(),
                     aal: *aal,
                     max_age: Some(*max_age),
+                    factor: None,
+                    enrollment_grace: false,
                 });
                 if out.action != Action::Deny {
                     if out.deciding.is_none() {
