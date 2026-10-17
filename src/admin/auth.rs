@@ -370,6 +370,7 @@ pub async fn authenticate(
             which: KeySlot::Current,
         },
         request_id: rid.to_string(),
+        risk_context: Default::default(),
     };
     let ctx = st.verify.with_budget();
     let (decision, cause) = match tokio::time::timeout(

@@ -527,6 +527,14 @@ pub fn parse(
         )
     })?;
     let fetch_site = fetch_site(h).map_err(|()| violation("sec-fetch-site"))?;
+    let risk_context = match single(h, crate::policy::risk::HEADER) {
+        Err(()) => crate::verify::RiskHeader::Duplicate,
+        Ok(None) => crate::verify::RiskHeader::Absent,
+        Ok(Some(v)) => crate::verify::RiskHeader::Value {
+            value: v.as_bytes().to_vec(),
+            original_url: raw_url.to_string(),
+        },
+    };
     let user_agent = h
         .get("user-agent")
         .map(|v| crate::policy::binding::normalize_user_agent(v.as_bytes()));
@@ -570,6 +578,7 @@ pub fn parse(
         contract,
         caller,
         request_id,
+        risk_context,
     };
     Ok(Parsed { input, env })
 }

@@ -16,6 +16,7 @@ use crate::event::types::{EventBuilder, EventKind, Outcome, Reason, reasons};
 use crate::policy::apps;
 use crate::policy::binding::{self, BindingVerdict};
 use crate::policy::freshness;
+use crate::policy::risk;
 use crate::policy::step_up;
 use crate::policy::types::{AppPolicy, AuthzChange, ConfigSnapshot, OnMismatch};
 use crate::session::types::Generations;
@@ -269,6 +270,32 @@ async fn flow(
         Reserved::Entry(entry) => return entry_point(cx, app, entry).await.map(|d| (d, None)),
     }
 
+    // Risk (ADR-0023): a refused context, and the rules that need no session,
+    // decide before a handoff or a sign-in starts.
+    let risk_in = match &app.risk {
+        Some(_) => risk_input(cx),
+        None => risk::Input::NotConfigured,
+    };
+    if let Some(policy) = &app.risk {
+        if let risk::Input::Invalid(cause) = &risk_in {
+            crate::telemetry::counters::inc(risk::INVALID_TOTAL, &[("reason", cause)]);
+            risk_count(app, &risk_in, "invalid");
+            return Err(cx.deny(reasons::RISK_CONTEXT_INVALID, DenyKind::Forbidden));
+        }
+        let pre = risk::evaluate(policy, &risk_in, input.canonical_path.as_str(), None);
+        if pre.action == risk::Action::Deny {
+            risk_count(app, &risk_in, "deny");
+            return Err(cx.deny(
+                if pre.missing {
+                    reasons::RISK_CONTEXT_MISSING
+                } else {
+                    reasons::RISK_DENIED
+                },
+                DenyKind::Forbidden,
+            ));
+        }
+    }
+
     // Reserved handoff parameter.
     match (&input.handoff, cx.document()) {
         (Handoff::None, _) => {}
@@ -292,10 +319,35 @@ async fn flow(
             // AAL 3. A failed read is no evidence (never more than stored).
             let handle_aal = authed.view.handle.issued_aal.min(authed.view.session.aal);
             let path = cx.input.canonical_path.as_str();
+            // Risk rules with the session's memory (ADR-0023): a denial, or
+            // extra step-up rules evaluated with the static ones.
+            let session_id = authed.view.session.session_id.to_string();
+            let user_id = authed.view.session.user_id.to_string();
+            let risk_out = app.risk.as_ref().map(|policy| {
+                let seen = cx.ctx.risk_memory.seen(&session_id, &user_id, cx.now);
+                risk::evaluate(policy, &risk_in, path, Some(&seen))
+            });
+            if let Some(out) = &risk_out
+                && out.action == risk::Action::Deny
+            {
+                risk_count(app, &risk_in, "deny");
+                return Err(cx.deny(
+                    if out.missing {
+                        reasons::RISK_CONTEXT_MISSING
+                    } else {
+                        reasons::RISK_DENIED
+                    },
+                    DenyKind::Forbidden,
+                ));
+            }
+            let rules: std::borrow::Cow<'_, [crate::policy::types::StepUpRule]> =
+                match risk_out.as_ref().filter(|o| !o.step_up.is_empty()) {
+                    Some(o) => app.step_up.iter().chain(&o.step_up).cloned().collect(),
+                    None => std::borrow::Cow::Borrowed(&app.step_up),
+                };
             let wants_aal3 = handle_aal == crate::session::Aal::Two
                 && (app.max_emitted_aal == crate::session::Aal::Three
-                    || step_up::required_level(&app.step_up, path)
-                        == Some(crate::session::Aal::Three));
+                    || step_up::required_level(&rules, path) == Some(crate::session::Aal::Three));
             let aal3_evidence = wants_aal3
                 && cx
                     .ctx
@@ -306,15 +358,31 @@ async fn flow(
                     )
                     .await
                     .unwrap_or(false);
-            if let step_up::StepUpVerdict::Required { aal, max_age } = step_up::evaluate(
-                &app.step_up,
+            let verdict = step_up::evaluate(
+                &rules,
                 path,
                 handle_aal,
                 aal3_evidence,
                 authed.view.session.auth_time,
                 &authed.view.session.factors,
                 cx.now,
-            ) {
+            );
+            if let (step_up::StepUpVerdict::Required { .. }, Some(out)) = (&verdict, &risk_out)
+                && !out.step_up.is_empty()
+                && step_up::evaluate(
+                    &app.step_up,
+                    path,
+                    handle_aal,
+                    aal3_evidence,
+                    authed.view.session.auth_time,
+                    &authed.view.session.factors,
+                    cx.now,
+                ) == step_up::StepUpVerdict::NotRequired
+            {
+                risk_count(app, &risk_in, "step_up");
+                report_risk_step_up(cx, app, &authed.view, &risk_in, out);
+            }
+            if let step_up::StepUpVerdict::Required { aal, max_age } = verdict {
                 if cx.document() && aal == crate::session::Aal::One {
                     if authed.view.session.auth_time > cx.now {
                         return Err(cx.deny(
@@ -386,6 +454,11 @@ async fn flow(
                 ),
                 None => None,
             };
+            // Remember the coarse network of an allowed request (ADR-0023).
+            if let risk::Input::Valid(c) = &risk_in {
+                cx.ctx.risk_memory.observe(&session_id, &user_id, c, cx.now);
+                risk_count(app, &risk_in, "allow");
+            }
             // ADR-0018: an opted-in application sees AAL 3 while the
             // session's current elevation is a qualifying high-assurance
             // passkey. A failed read presents the stored level, never more.
@@ -905,6 +978,82 @@ struct NewTxn<'a> {
     recovery_depth: u32,
     reauth_max_age: Option<u32>,
     events: Vec<crate::event::types::Event>,
+}
+
+/// The request's risk context, verified against the request it is bound to
+/// (ADR-0023). Without configured keys it is not read at all.
+pub(super) fn risk_input(cx: &Cx<'_>) -> risk::Input {
+    let Some(keys) = &cx.ctx.risk_keys else {
+        return risk::Input::NotConfigured;
+    };
+    match &cx.input.risk_context {
+        RiskHeader::Absent => risk::Input::Absent,
+        RiskHeader::Duplicate => risk::Input::Invalid("duplicate"),
+        RiskHeader::Value {
+            value,
+            original_url,
+        } => match keys.verify(
+            value,
+            cx.input.method.as_str(),
+            cx.input.client_ip,
+            original_url,
+            cx.now,
+        ) {
+            Ok(c) => risk::Input::Valid(Box::new(c)),
+            Err(cause) => risk::Input::Invalid(cause),
+        },
+    }
+}
+
+fn risk_count(app: &AppPolicy, input: &risk::Input, action: &str) {
+    let level = match input {
+        risk::Input::Valid(c) => c.level.as_str(),
+        risk::Input::Invalid(_) => "invalid",
+        _ => "absent",
+    };
+    crate::telemetry::counters::inc(
+        risk::DECISIONS_TOTAL,
+        &[
+            ("app", app.app_id.as_str()),
+            ("level", level),
+            ("action", action),
+        ],
+    );
+}
+
+/// `risk.step_up_required`: a risk rule, not the static rules, asked for the step-up.
+fn report_risk_step_up(
+    cx: &Cx<'_>,
+    app: &AppPolicy,
+    view: &HandleView,
+    input: &risk::Input,
+    out: &risk::Outcome,
+) {
+    let Some(emitter) = cx.ctx.emitter.clone() else {
+        return;
+    };
+    let (level, reason, country, asn) = match input {
+        risk::Input::Valid(c) => (c.level.as_str(), c.reason.clone(), c.country.clone(), c.asn),
+        _ => ("absent", String::new(), None, None),
+    };
+    emitter.diagnostic(
+        EventKind::RiskStepUpRequired,
+        Outcome::Info,
+        cx.input.request_id.clone(),
+        |b| {
+            b.app(&app.app_id)
+                .ip(cx.input.client_ip)
+                .session(&view.session.session_id)
+                .user(&view.session.user_id)
+                .reason(reasons::STEP_UP_REQUIRED)
+                .attr("level", level)
+                .attr("risk_reason", reason)
+                .attr("country", country)
+                .attr("asn", asn)
+                .attr("rule", out.deciding)
+                .attr("missing", out.missing)
+        },
+    );
 }
 
 /// Report rows a transaction insert evicted (`txn.evicted`, a diagnostic).

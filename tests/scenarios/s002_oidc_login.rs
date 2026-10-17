@@ -558,6 +558,7 @@ pub(crate) mod kit {
                     which: KeySlot::Current,
                 },
                 request_id: "req-verify".into(),
+                risk_context: Default::default(),
             }
         }
 

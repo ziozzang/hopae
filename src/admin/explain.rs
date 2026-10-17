@@ -77,8 +77,26 @@ struct Request {
     at: Option<i64>,
     #[serde(default)]
     hypothetical: Option<Hypothetical>,
+    /// A hypothetical risk context and session memory (ADR-0023).
+    #[serde(default)]
+    risk: Option<RiskHypothesis>,
     #[serde(default)]
     privacy_profile: Privacy,
+}
+
+/// `risk` of the request: the context the gateway would send (absent: no
+/// context) and what the memory would know.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RiskHypothesis {
+    #[serde(default)]
+    context: Option<serde_json::Value>,
+    #[serde(default)]
+    session_country: Option<String>,
+    #[serde(default)]
+    session_asn: Option<u32>,
+    #[serde(default)]
+    user_countries: Vec<String>,
 }
 
 /// The answer a simulated request would get.
@@ -313,7 +331,64 @@ fn post_auth(
     handle_aal: Aal,
     aal3: bool,
 ) -> (Verdict, Value, Value) {
-    let (verdict, detail) = step_up_of(app, env.path.as_str(), session, handle_aal, aal3, env.now);
+    // Risk rules (ADR-0023): a denial, or extra step-up rules evaluated with
+    // the static ones, as the live flow does.
+    let mut risk_app = None;
+    let mut risk_json = Value::Null;
+    if let Some(policy) = &app.risk {
+        use crate::policy::risk;
+        let out = risk::evaluate(
+            policy,
+            &env.risk_input,
+            env.path.as_str(),
+            Some(&env.risk_seen),
+        );
+        risk_json = json!({
+            "context": match &env.risk_input {
+                risk::Input::Valid(c) => json!({"level": c.level.as_str(), "reason": c.reason, "country": c.country, "asn": c.asn, "zones": c.zones, "mode": format!("{:?}", c.mode).to_ascii_lowercase()}),
+                _ => Value::Null,
+            },
+            "memory": {"session_country": env.risk_seen.session_country, "session_asn": env.risk_seen.session_asn, "user_countries": env.risk_seen.user_countries},
+            "missing": out.missing,
+            "matched_rules": out.matched,
+            "deciding_rule": out.deciding,
+            "action": out.action.as_str(),
+        });
+        if out.action == risk::Action::Deny {
+            let code = if out.missing {
+                "risk_context_missing"
+            } else {
+                "risk_denied"
+            };
+            t.step("risk", "fail", Some(code), risk_json.clone());
+            return (
+                v(Outcome::Deny, code),
+                json!({"risk": risk_json}),
+                Value::Null,
+            );
+        }
+        t.step(
+            "risk",
+            if out.step_up.is_empty() {
+                "pass"
+            } else {
+                "info"
+            },
+            None,
+            risk_json.clone(),
+        );
+        if !out.step_up.is_empty() {
+            let mut a = app.clone();
+            a.step_up.extend(out.step_up);
+            risk_app = Some(a);
+        }
+    }
+    let app = risk_app.as_ref().unwrap_or(app);
+    let (verdict, mut detail) =
+        step_up_of(app, env.path.as_str(), session, handle_aal, aal3, env.now);
+    if !risk_json.is_null() {
+        detail["risk"] = risk_json;
+    }
     let mut freshness_json = Value::Null;
     if let step_up::StepUpVerdict::Required { aal, .. } = verdict {
         t.step("step_up", "fail", Some("step_up_required"), detail.clone());
@@ -374,6 +449,8 @@ struct Env<'a> {
     client_ip: Option<IpAddr>,
     user_agent: Option<String>,
     now: Timestamp,
+    risk_input: crate::policy::risk::Input,
+    risk_seen: crate::policy::risk::Seen,
 }
 
 /// The person a simulation is about.
@@ -813,6 +890,22 @@ async fn explain(st: &AdminState, c: &Ctx, req: Request) -> Result<Value, Fail> 
         client_ip: req.client_ip,
         user_agent,
         now,
+        risk_input: match req.risk.as_ref().and_then(|r| r.context.clone()) {
+            None => crate::policy::risk::Input::Absent,
+            Some(c) => match serde_json::from_value::<crate::policy::risk::Context>(c) {
+                Ok(c) => crate::policy::risk::Input::Valid(Box::new(c)),
+                Err(_) => return Err(reads::invalid()),
+            },
+        },
+        risk_seen: req
+            .risk
+            .as_ref()
+            .map(|r| crate::policy::risk::Seen {
+                session_country: r.session_country.clone(),
+                session_asn: r.session_asn,
+                user_countries: r.user_countries.clone(),
+            })
+            .unwrap_or_default(),
     };
     let mut application = Value::Null;
     let mut service_profile = Value::Null;

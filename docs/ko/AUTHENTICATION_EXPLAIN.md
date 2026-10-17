@@ -1,6 +1,6 @@
 # 인증 설명 API
 
-<!-- translation-status: source=../AUTHENTICATION_EXPLAIN.md source-rev=4 status=current -->
+<!-- translation-status: source=../AUTHENTICATION_EXPLAIN.md source-rev=5 status=current -->
 
 [문서 목차](README.md) · [English](../AUTHENTICATION_EXPLAIN.md)
 
@@ -49,6 +49,7 @@ Hangang ADR 0020 콘솔에서 Hopae가 맡는 부분입니다(그 문서에서�
 | `client_ip`, `user_agent` | 요청 클라이언트. `client_ip`가 없으면 세션 바인딩과 프로필 네트워크는 평가하지 않았다고 알립니다 |
 | `at` | 평가 시각(유닉스 초), 지금부터 최대 30일(기본값은 지금) |
 | `hypothetical` | 로그인이 만들 세션: `aal`(1 또는 2, 기본값 1), `factors`(`totp`, `webauthn`, `external` 같은 인증 수단 종류), `auth_age_seconds`, `provider_id`(기본값은 주체의 첫 연결 제공자, 없으면 첫 활성 제공자), `auth_time_source`(기본값 `hopae_completion`, `provider_claim`) |
+| `risk` | 가정한 위험 컨텍스트([ADR-0023](../adr/0023-risk-based-step-up.md)): `context`(게이트웨이가 서명할 클레임, [계약](GATEWAY_CONTRACT.md#위험-컨텍스트)과 같음. 없으면 컨텍스트 없음), `session_country`, `session_asn`, `user_countries`(세션 메모리가 알 내용). `apps[].risk`가 있는 애플리케이션에만 적용 |
 | `privacy_profile` | 주체 표시 정보에 쓸 `standard` 또는 `strict`. `admin.directory_privacy`가 더 엄격하면 그 값으로 올라감 |
 
 `session_id`와 `subject`는 함께 쓸 수 없으며, 둘 다 없으면 익명 요청입니다. 형식이
@@ -111,7 +112,7 @@ Hangang ADR 0020 콘솔에서 Hopae가 맡는 부분입니다(그 문서에서�
 | `session` | 평가한 세션: 제공자, `aal`, `handle_aal`, 인증 수단, `auth_time`과 그 출처 |
 | `providers` | 선택 화면 순서의 설정된 제공자. `enabled`, `reauth` 능력, 주체에 대한 `linked` 포함 |
 | `assurance` | `current_aal`, `required_aal`, `achievable_aal`, 설정된 2단계 인증 수단(`totp_configured`, `totp_enrolled`, `external`) |
-| `step_up` | `matched_rules`, `deciding_rule`(색인), `required_aal`, `verdict` |
+| `step_up` | `matched_rules`, `deciding_rule`(색인), `required_aal`, `verdict`. 위험 규칙이 있으면 `risk`(`context`, `memory`, `missing`, `matched_rules`, `deciding_rule`, `action`)도 담음(trace에는 `risk` 검사가 있고, 위험 단계 상승 규칙은 평가하는 단계 상승 규칙에 더해짐) |
 | `freshness` | `max_auth_age_seconds`, `auth_age_seconds`, `auth_time_source`, `provider_capability`, `fresh` |
 | `after_login` | 위에서 설명한 로그인 후 평가. 자체 `trace` 포함 |
 | `trace` | 수행한 모든 검사: `check`, `result`(`pass`, `fail`, `skip`, `info`), `reason`, `detail` |
@@ -145,6 +146,8 @@ Hangang ADR 0020 콘솔에서 Hopae가 맡는 부분입니다(그 문서에서�
 | `authz_change` | 로그인 이후 사용자의 권한 정보가 바뀌었고 이 애플리케이션은 그런 세션을 종료합니다. |
 | `step_up_required` | 단계 상향 규칙이 더 높은 보증 수준이나 더 최근의 2단계 인증을 요구합니다. |
 | `step_up_unavailable` | 단계 상향이 필요하지만 2단계 인증이 설정되어 있지 않아 요청을 거부합니다. |
+| `risk_denied` | 위험 규칙이 이 네트워크 상황의 요청을 거부합니다. |
+| `risk_context_missing` | 게이트웨이가 위험 컨텍스트를 보내지 않았고 이 애플리케이션은 그런 요청을 거부합니다. |
 | `reauth_required` | 이 경로에 비해 로그인이 오래되어 다시 로그인해야 합니다. |
 | `subject_unknown` | Hopae가 알지 못하는 주체이며, 로그인하면 계정이 만들어지거나 연결됩니다. |
 | `subject_deleted` | 삭제된 주체이며, 새로 로그인하면 다른 주체가 만들어집니다. |
