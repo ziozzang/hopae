@@ -246,6 +246,9 @@ impl Service {
             .body(Body::empty())
             .map_err(|_| Status::internal("verification request"))?;
         *request.headers_mut() = headers;
+        request
+            .extensions_mut()
+            .insert(crate::telemetry::metrics::Surface::Grpc);
         if let Some(attempt) = attempt {
             request.extensions_mut().insert(attempt);
         }
@@ -791,7 +794,8 @@ pub async fn serve_with_receipts(
     let mut server = match &tls {
         GrpcTls::Static(config) => hangang_runtime::server(config.clone())?,
         GrpcTls::Reloading(_) => plain_server(),
-    };
+    }
+    .layer(crate::telemetry::metrics::GrpcMetricsLayer);
     let routes = server
         .add_optional_service(human_service)
         .add_optional_service(human_projection_service)

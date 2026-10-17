@@ -1,6 +1,6 @@
 # 운영
 
-<!-- translation-status: source=../OPERATIONS.md source-rev=6 status=current -->
+<!-- translation-status: source=../OPERATIONS.md source-rev=7 status=current -->
 
 [문서 목차](README.md) · [English](../OPERATIONS.md)
 
@@ -255,12 +255,79 @@ Hopae는 **stderr**에 기록하며 stdout에는 위의 시작 줄만 나갑니�
 
 ### 카운터
 
-Hopae는 프로세스 내 카운터를 유지합니다. M7 이전에는 **운영용 노출이 없습니다**. 값은
-`test-hooks` 빌드의 루프백 테스트 훅 리스너로만 읽을 수 있으며 그 빌드는 운영에서
-절대 실행하면 안 됩니다. Prometheus 텍스트 노출은 M7입니다. 그때까지는 이벤트
-스트림(`verify.denied` 줄에 사유가 있습니다)과 게이트웨이 자체의 카운터(보호된
-라우트의 `503`, `403` 비율)를 보세요. 이후 노출을 위해 고정된 카운터 이름은 다음과
-같습니다.
+관리 리스너의 `GET /metrics`는 아래 카운터 전부와 다음 표의 패밀리를 OpenMetrics 텍스트
+형식(`application/openmetrics-text; version=1.0.0`, 끝에 `# EOF`)으로 제공합니다. 관리
+리스너의 상호 TLS(`listen.admin_tls`, Kubernetes 패키지에서는 8703 포트)로 스크레이프합니다.
+자격 증명은 다음 중 하나를 씁니다.
+
+- `--preset metrics`로 만든 라우트 한정 서비스 자격 증명. `GET /metrics`만 읽을 수 있습니다
+  ([서비스 자격 증명](SERVICE_CREDENTIALS.md) 참고).
+- 역할과 관계없는 관리자.
+
+이 엔드포인트는 감사 기록을 남기지 않습니다. 제공자나 게이트웨이에 연결하지 않습니다.
+저장소는 콘솔의 질의 예산으로 읽습니다. 저장소가 답하지 않으면 `hopae_store_up`이 `0`이 되고,
+프로세스 전역 시계열은 그대로 제공됩니다.
+
+주체, 사용자 id, 이메일, 주소를 담는 레이블은 없습니다. 레이블 값은 사유 코드, 설정된
+제공자·서비스 id, 정해진 surface·인자·프로필 이름처럼 범위가 정해진 집합에서만 옵니다.
+verify, gRPC, 이벤트 경로의 기록은 용량이 고정된 표에 대한 원자 증가입니다. 시계열이 한 번
+생기면 잠금도 메모리 할당도 하지 않습니다(`tests/metrics_no_alloc.rs`). 표가 가득 차면 표를
+늘리지 않고 `hopae_metrics_series_overflow_total`에 셉니다.
+
+Prometheus Operator 엔드포인트 예시입니다. 토큰은 `hsc1.` 자격 증명이고, 클라이언트 인증서는
+그 자격 증명에 묶인 인증서입니다.
+
+```yaml
+endpoints:
+  - port: admin
+    scheme: https
+    path: /metrics
+    bearerTokenSecret: {name: hopae-metrics, key: token}
+    tlsConfig:
+      ca: {secret: {name: hopae-admin-tls, key: ca.crt}}
+      cert: {secret: {name: hopae-scrape-client, key: tls.crt}}
+      keySecret: {name: hopae-scrape-client, key: tls.key}
+      serverName: hopae-admin.example.test
+```
+
+ServiceMonitor는 요청 헤더를 넣을 수 없으므로 `GET /metrics`에 한해서는
+`x-hopae-audience` 헤더를 생략할 수 있습니다. 이때 audience는 이 인스턴스의
+`admin.service_audience`로 정해지며, 자격 증명이 그 audience를 허용해야 합니다(CLI 기본값).
+인증서 바인딩과 비밀 값 검사는 그대로 적용됩니다.
+
+| 패밀리 | 형식 | 레이블 | 의미 |
+| --- | --- | --- | --- |
+| `hopae_auth_outcomes_total` | counter | `surface`(`forward_auth`, `hop1`, `grpc`), `provider`(허용일 때, 아니면 `none`), `outcome`(`allow`, `login`, `deny`, `handoff`, `redirect`, `switch`, `clean_redirect`), `reason` | 모든 인증 결정 |
+| `hopae_verify_duration_seconds` | histogram | `surface` | 결정 지연(gRPC는 호출 전체) |
+| `hopae_grpc_requests_total` | counter | `profile`(`verify`, `service_receipt`, `workload_receipt`, `human_receipt`, `projection_plan`, `service_projection`, `workload_projection`, `human_projection`, `other`), `code`(gRPC 상태 이름) | gRPC 호출 |
+| `hopae_logins_total` | counter | `provider`, `outcome`, `reason` | 포털 로그인(`login.succeeded`, `login.failed`) |
+| `hopae_sessions_created_total` | counter | `provider` | 만든 세션 |
+| `hopae_sessions_revoked_total` | counter | `reason` | 만료 전에 끝난 세션(로그아웃, 종료, 폐기) |
+| `hopae_handles_revoked_total` | counter | `reason` | 폐기된 애플리케이션 핸들 |
+| `hopae_sessions_active` | gauge | — | 살아 있는 세션 |
+| `hopae_stepup_results_total` | counter | `factor`(`totp`, `webauthn`, `external`, `recovery_code`), `outcome` | 2차 인증 검사(step-up과 로그인 MFA) |
+| `hopae_passkey_ceremonies_total` | counter | `ceremony`(`register`, `authenticate`, `revoke`), `outcome`(`success`, `failure`, `clone_suspected`) | 패스키 의식 |
+| `hopae_rate_limited_total` | counter | `surface`(`verify`, `login`, `settings`, `service_credential`) | 속도 제한으로 거부된 요청 |
+| `hopae_store_failures_total` | counter | `kind`(`busy`, `queue_full`, `conflict`, `other`) | SQLite 실패(`busy`는 busy 제한 시간을 넘긴 잠금) |
+| `hopae_store_up` | gauge | — | 스크레이프의 상태 읽기에 저장소가 답하면 `1` |
+| `hopae_users`, `hopae_event_rows` | gauge | — | 사용자, 보존된 이벤트 행 |
+| `hopae_event_relay_backlog` | gauge | `sink`, `state`(`pending`, `failed`) | 대기 중이거나 포기한 이벤트 전달 |
+| `hopae_projection_feed_rows` | gauge | — | 그룹 projection 변경 피드의 행 |
+| `hopae_lifecycle_feed_head` | gauge | `source`(`ledger`, `outbox`) | 주체 lifecycle 피드의 head 위치 |
+| `hopae_workload_principals` | gauge | — | 저장소의 workload 주체 |
+| `hopae_workload_jwks_last_success_timestamp_seconds` | gauge | `service` | 마지막 서명 키 조회 성공(staleness는 `time()`에서 이 값을 뺀 것) |
+| `hopae_provider_state` | gauge | `provider`, `kind`, `state`(`ok`, `degraded`, `disabled`) | 각 제공자의 현재 상태에 `1` |
+| `hopae_config_generation` | gauge | — | 설정 스냅샷 세대 |
+| `hopae_tls_leaf_expiry_seconds` | gauge | `name` | 쓰고 있는 leaf 인증서가 만료되기까지 남은 초 |
+| `hopae_authentication_gateway_available`, `hopae_authentication_profiles_revision` | gauge | — | 적용 중인 인증 프로필 |
+| `hopae_events_last_prune_timestamp_seconds` | gauge | — | 마지막 이벤트 정리 |
+| `hopae_metrics_series_overflow_total` | counter | — | 패밀리가 가득 차서 버린 기록 |
+
+이벤트에서 나온 패밀리(로그인, 세션, 인자, 패스키)는 이벤트 행을 쓸 때 셉니다. 쓴 뒤
+트랜잭션이 롤백되어도 세어지며, 드문 경우입니다.
+
+기존 카운터는 이름을 그대로 유지하고 그대로 노출됩니다(`*_total`은 counter, 나머지는
+gauge).
 
 | 카운터 | 레이블 | 세는 것 |
 | --- | --- | --- |
@@ -320,7 +387,7 @@ verify는 실패 시 차단합니다(fail closed). Hopae가 해결하지 못하�
 
 - 상태 디렉터리당 인스턴스 하나이며 페일오버가 없습니다. 재시작은 빠르고 세션은 재시작을 넘어 유지됩니다. 다중 인스턴스 배포에는 M2 저장소가 필요합니다.
 - M6 이전에는 설정, 제공자 비밀 값, 호출자 키의 핫 리로드가 없습니다. 모든 변경은 재시작이며, 재시작하는 동안 verify는 실패 시 차단합니다(게이트웨이가 `503`으로 답합니다).
-- M7 이전에는 메트릭 엔드포인트가 없고 카운터는 프로세스 내에만 있습니다. 관리 콘솔(M4-min)은 사용자와 세션을 읽고 끝낼 수 있으며, 제공자, 애플리케이션, 블랙리스트는 설정 파일, `hopae providers import`, `hopae admin`으로 관리합니다.
+- 메트릭은 관리 리스너에서만 노출합니다(`GET /metrics`, mTLS와 관리자 또는 `metrics` 서비스 자격 증명). 인증 없는 메트릭 포트는 없습니다. 관리 콘솔(M4-min)은 사용자와 세션을 읽고 끝낼 수 있으며, 제공자, 애플리케이션, 블랙리스트는 설정 파일, `hopae providers import`, `hopae admin`으로 관리합니다.
 - 백업은 멈춘(또는 체크포인트된) 데이터베이스의 파일 복사입니다. 온라인 백업 도구는 M7입니다.
 - Hopae는 TLS를 종료하지 않으며 설정된 ID 제공자(디스커버리, 키, 토큰, user-info 엔드포인트) 외에는 인터넷과 통신하지 않습니다. M6 이전에는 텔레메트리도 자가 업데이트도 없습니다. 제공자 트래픽은 `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`를 무시합니다. 프록시가 목적지를 직접 해석하므로 연결 시점 주소 검사를 우회하게 되기 때문입니다. 프록시 옵션은 없습니다.
 

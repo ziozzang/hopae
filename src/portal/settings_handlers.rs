@@ -706,6 +706,7 @@ async fn verify_post(st: PortalState, req: Request, method: &'static str) -> Res
     };
     let next = Next::parse(form.0.get("next"));
     if method != "passkey" && !st.password_attempts.admit(e.rq.ctx.client_ip) {
+        crate::telemetry::metrics::RATE_LIMITED.inc(["settings"]);
         return verify_page(&st, &e, next, refusal_key(Refusal::RateLimited)).await;
     }
     let result = match method {

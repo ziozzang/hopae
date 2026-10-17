@@ -77,12 +77,18 @@ impl From<rusqlite::Error> for StoreError {
             rusqlite::Error::SqliteFailure(f, _)
                 if matches!(f.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) =>
             {
+                crate::telemetry::metrics::STORE_FAILURES.inc(["busy"]);
                 StoreError::Busy
             }
             rusqlite::Error::SqliteFailure(f, _) if f.code == ErrorCode::ConstraintViolation => {
+                crate::telemetry::metrics::STORE_FAILURES.inc(["conflict"]);
                 StoreError::Conflict("constraint violated")
             }
-            _ => StoreError::Sqlite(e),
+            rusqlite::Error::QueryReturnedNoRows => StoreError::Sqlite(e),
+            _ => {
+                crate::telemetry::metrics::STORE_FAILURES.inc(["other"]);
+                StoreError::Sqlite(e)
+            }
         }
     }
 }

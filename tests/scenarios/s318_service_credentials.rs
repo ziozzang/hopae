@@ -21,9 +21,9 @@ use std::path::Path;
 use crate::support::*;
 use hopae::app::{AdminCommand, ServiceCredentialCommand};
 
-const ADMIN_HOST: &str = "hopae-admin.example.test";
-const AUDIENCE: &str = "https://hopae-admin.example.test";
-const SAN: &str = "spiffe://cluster.example.test/ns/world/sa/pumgye";
+pub(super) const ADMIN_HOST: &str = "hopae-admin.example.test";
+pub(super) const AUDIENCE: &str = "https://hopae-admin.example.test";
+pub(super) const SAN: &str = "spiffe://cluster.example.test/ns/world/sa/pumgye";
 
 fn key() -> PKey<Private> {
     PKey::from_ec_key(
@@ -83,9 +83,9 @@ fn cert(
     b.build()
 }
 
-struct Pki {
-    ca: X509,
-    client: (X509, PKey<Private>),
+pub(super) struct Pki {
+    pub(super) ca: X509,
+    pub(super) client: (X509, PKey<Private>),
     /// Same SAN, another key: matches a SAN binding, not an SPKI pin.
     other: (X509, PKey<Private>),
 }
@@ -124,23 +124,23 @@ fn pki(dir: &Path) -> Pki {
     Pki { ca, client, other }
 }
 
-fn spki_sha256(c: &X509) -> String {
+pub(super) fn spki_sha256(c: &X509) -> String {
     use sha2::Digest as _;
     let der = c.public_key().unwrap().public_key_to_der().unwrap();
     data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(&der))
 }
 
-struct Fx {
+pub(super) struct Fx {
     dir: tempfile::TempDir,
-    cfg: hopae::config::Config,
-    pki: Pki,
-    addr: std::net::SocketAddr,
+    pub(super) cfg: hopae::config::Config,
+    pub(super) pki: Pki,
+    pub(super) addr: std::net::SocketAddr,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
 }
 
 impl Fx {
-    async fn start(tls: bool) -> Fx {
+    pub(super) async fn start(tls: bool) -> Fx {
         let dir = tempfile::tempdir().unwrap();
         let pki = pki(dir.path());
         let mut json: Value = serde_json::from_str(&config_json(dir.path())).unwrap();
@@ -168,7 +168,7 @@ impl Fx {
         }
     }
 
-    async fn stop(mut self) {
+    pub(super) async fn stop(mut self) {
         let _ = self.stop.take().unwrap().send(());
         let _ = self.task.take().unwrap().await;
     }
@@ -179,7 +179,11 @@ impl Fx {
             .unwrap()
     }
 
-    async fn create(&self, id: &str, edit: impl FnOnce(&mut ServiceCredentialCommand)) -> String {
+    pub(super) async fn create(
+        &self,
+        id: &str,
+        edit: impl FnOnce(&mut ServiceCredentialCommand),
+    ) -> String {
         let mut cmd = ServiceCredentialCommand::Create {
             id: id.into(),
             routes: vec!["POST /v1/subjects/resolve".into()],
@@ -198,7 +202,7 @@ impl Fx {
         out.stdout.trim().to_string()
     }
 
-    fn client(&self, which: Option<&(X509, PKey<Private>)>) -> reqwest::Client {
+    pub(super) fn client(&self, which: Option<&(X509, PKey<Private>)>) -> reqwest::Client {
         let mut b = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())

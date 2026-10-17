@@ -1,6 +1,6 @@
 # 관리
 
-<!-- translation-status: source=../ADMIN.md source-rev=9 status=current -->
+<!-- translation-status: source=../ADMIN.md source-rev=10 status=current -->
 
 [문서 목차](README.md) · [English](../ADMIN.md)
 
@@ -315,6 +315,7 @@ img-src 'self'; form-action 'self'; frame-ancestors 'none'`을 가집니다. 어
 | `POST /v1/sessions/{session_id}/terminate` | admin | `{changed}` |
 | `GET /v1/events?kind=&kind_prefix=&outcome=&user_id=&session_id=&client_ip=&since=&until=&limit=&cursor=` | viewer | `{items: [로그 싱크가 쓰는 형식의 이벤트 JSON], next_cursor}` 최신순 |
 | `GET /v1/status` | viewer | [상태](#상태) 참조 |
+| `GET /metrics` | viewer 또는 `metrics` 서비스 자격 증명 | OpenMetrics 텍스트. [운영](OPERATIONS.md#카운터) 참조 |
 | `POST /v1/subjects/resolve` | viewer | 주체 참조 최대 100개를 표시 정보로 해석. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
 | `POST /v1/subjects/search` | viewer | 선택기를 위한 사람 또는 서비스 주체 검색. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
 | `POST /v1/subjects/lifecycle` | viewer | 지속 커서 이후의 주체 생성과 상태 변경. [주체 디렉터리](SUBJECT_DIRECTORY.md) 참조 |
@@ -447,7 +448,7 @@ API로 바뀐 제공자는 `managed_by = api`가
 | `hopae_admin_grants_imported_total` | `outcome`(`inserted`, `updated`, `revoked`, `unchanged`, `skipped`) | 시작할 때의 가져오기가 적용한 부여 |
 | `hopae_store_interrupts_total` | 없음 | 마감에서 SQLite 안에서 중단된 저장소 작업 |
 
-노출은 M7이며 그동안은 `test-hooks` 빌드가 보여 줍니다([운영](OPERATIONS.md#카운터)).
+이 리스너의 `GET /metrics`가 노출합니다([운영](OPERATIONS.md#카운터)).
 
 ### Hangang 콘솔 라우트
 

@@ -77,6 +77,7 @@ pub fn pattern_of(path: &str) -> &'static str {
         [""] if !api => "/",
         ["assets", "admin.css"] if !api => "/assets/admin.css",
         ["status"] if api => "/v1/status",
+        ["metrics"] if !api => "/metrics",
         ["authentication", "projections"] if api => "/v1/authentication/projections",
         ["authentication", "profiles"] if api => "/v1/authentication/profiles",
         ["authentication", "profiles", "validate"] if api => "/v1/authentication/profiles/validate",

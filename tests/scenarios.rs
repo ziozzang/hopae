@@ -75,6 +75,8 @@ mod scenarios {
     mod s320_live_reload;
     #[path = "s480_passkeys.rs"]
     mod s480_passkeys;
+    #[path = "s600_metrics.rs"]
+    mod s600_metrics;
     #[path = "s900_kubernetes_workload.rs"]
     mod s900_kubernetes_workload;
 }

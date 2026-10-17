@@ -70,6 +70,9 @@ pub const WORKLOAD_CACHE_ENTRIES: &str = "hopae_workload_cache_entries";
 /// Signing-key fetches of workload issuers, by service and result
 /// (`ok`, `rotated`, `kid_miss_rate_limited` or a failure reason).
 pub const WORKLOAD_JWKS_FETCH_TOTAL: &str = "hopae_workload_jwks_fetch_total";
+/// Gauge: unix seconds of the last successful signing-key fetch of a
+/// workload issuer, by service (staleness = now - value).
+pub const WORKLOAD_JWKS_LAST_SUCCESS: &str = "hopae_workload_jwks_last_success_timestamp_seconds";
 /// Gauge: usable signing keys of a workload issuer, by service.
 pub const WORKLOAD_JWKS_KEYS: &str = "hopae_workload_jwks_keys";
 /// Revocation watch events, by service, resource and event
