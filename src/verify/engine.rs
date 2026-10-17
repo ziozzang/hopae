@@ -337,10 +337,13 @@ async fn flow(
             // extra step-up rules evaluated with the static ones.
             let session_id = authed.view.session.session_id.to_string();
             let user_id = authed.view.session.user_id.to_string();
-            let risk_out = app.risk.as_ref().map(|policy| {
-                let seen = cx.ctx.risk_memory.seen(&session_id, &user_id, cx.now);
-                risk::evaluate(policy, &risk_in, path, Some(&seen))
-            });
+            let risk_out = match app.risk.as_ref() {
+                Some(policy) => {
+                    let seen = cx.ctx.risk_memory.seen(&session_id, &user_id, cx.now).await;
+                    Some(risk::evaluate(policy, &risk_in, path, Some(&seen)))
+                }
+                None => None,
+            };
             if let Some(out) = &risk_out
                 && out.action == risk::Action::Deny
             {
@@ -482,7 +485,10 @@ async fn flow(
             };
             // Remember the coarse network of an allowed request (ADR-0023).
             if let risk::Input::Valid(c) = &risk_in {
-                cx.ctx.risk_memory.observe(&session_id, &user_id, c, cx.now);
+                cx.ctx
+                    .risk_memory
+                    .observe(&session_id, &user_id, c, cx.now)
+                    .await;
                 risk_count(app, &risk_in, "allow");
             }
             // ADR-0018: an opted-in application sees AAL 3 while the

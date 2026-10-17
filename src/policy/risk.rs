@@ -677,12 +677,49 @@ impl<V> Lru<V> {
     }
 }
 
+/// A store shared by every replica that keeps the memory (PostgreSQL):
+/// with several replicas a session's requests land on any of them, so the
+/// per-process memory would see each replica's share only (ADR-0023
+/// follow-up, ADR-0020 slice 5).
+#[async_trait::async_trait]
+pub trait RiskLedger: Send + Sync {
+    async fn risk_seen(
+        &self,
+        session: &str,
+        user: &str,
+        now: Timestamp,
+        bounds: &MemoryBounds,
+    ) -> crate::store::StoreResult<Seen>;
+    async fn risk_observe(
+        &self,
+        session: &str,
+        user: &str,
+        country: Option<&str>,
+        asn: Option<u32>,
+        now: Timestamp,
+        bounds: &MemoryBounds,
+    ) -> crate::store::StoreResult<()>;
+    /// Enforce the entry caps (oldest first). Expired entries are pruned on
+    /// every write; the caps are enforced every [`MAINTAIN_EVERY`] writes.
+    async fn risk_maintain(&self, bounds: &MemoryBounds) -> crate::store::StoreResult<()>;
+}
+
+/// Shared-memory writes between two cap passes, per process.
+pub const MAINTAIN_EVERY: u64 = 256;
+
+/// Failed reads and writes of the shared memory (the request goes on with
+/// what the memory knows: nothing on a failed read).
+pub const MEMORY_FAILURES: &str = "hopae_risk_memory_failures_total";
+
 /// Coarse, bounded memory: per session the last country and ASN of an
-/// allowed request, per user the countries seen. No address is kept.
+/// allowed request, per user the countries seen. No address is kept. In
+/// this process, or in the shared store when one is attached.
 pub struct Memory {
     bounds: MemoryBounds,
     sessions: Mutex<Lru<(Option<String>, Option<u32>)>>,
     users: Mutex<Lru<Vec<String>>>,
+    shared: Option<std::sync::Arc<dyn RiskLedger>>,
+    writes: std::sync::atomic::AtomicU64,
 }
 
 impl Default for Memory {
@@ -705,10 +742,76 @@ impl Memory {
             bounds,
             sessions: Mutex::new(Lru::new()),
             users: Mutex::new(Lru::new()),
+            shared: None,
+            writes: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
-    pub fn seen(&self, session: &str, user: &str, now: Timestamp) -> Seen {
+    /// Another handle on the same shared ledger (tests: concurrent replicas).
+    #[cfg(test)]
+    pub fn clone_shared(&self) -> std::sync::Arc<Memory> {
+        let mut m = Memory::new(self.bounds);
+        m.shared = self.shared.clone();
+        std::sync::Arc::new(m)
+    }
+
+    /// Keep the memory in `ledger` (shared by the replicas) instead.
+    pub fn shared(mut self, ledger: std::sync::Arc<dyn RiskLedger>) -> Memory {
+        self.shared = Some(ledger);
+        self
+    }
+
+    pub fn bounds(&self) -> MemoryBounds {
+        self.bounds
+    }
+
+    pub async fn seen(&self, session: &str, user: &str, now: Timestamp) -> Seen {
+        match &self.shared {
+            Some(ledger) => match ledger.risk_seen(session, user, now, &self.bounds).await {
+                Ok(seen) => seen,
+                Err(_) => {
+                    crate::telemetry::counters::inc(MEMORY_FAILURES, &[("op", "read")]);
+                    Seen::default()
+                }
+            },
+            None => self.seen_local(session, user, now),
+        }
+    }
+
+    /// Remember an allowed request's coarse network.
+    pub async fn observe(&self, session: &str, user: &str, ctx: &Context, now: Timestamp) {
+        match &self.shared {
+            Some(ledger) => {
+                let country = ctx.country.as_deref().filter(|c| *c != "XX");
+                if ledger
+                    .risk_observe(session, user, country, ctx.asn, now, &self.bounds)
+                    .await
+                    .is_err()
+                {
+                    crate::telemetry::counters::inc(MEMORY_FAILURES, &[("op", "write")]);
+                }
+                let n = self
+                    .writes
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                if n.is_multiple_of(MAINTAIN_EVERY) {
+                    self.maintain().await;
+                }
+            }
+            None => self.observe_local(session, user, ctx, now),
+        }
+    }
+
+    /// Enforce the entry caps now (the process memory does on every write).
+    pub async fn maintain(&self) {
+        if let Some(ledger) = &self.shared
+            && ledger.risk_maintain(&self.bounds).await.is_err()
+        {
+            crate::telemetry::counters::inc(MEMORY_FAILURES, &[("op", "maintain")]);
+        }
+    }
+
+    fn seen_local(&self, session: &str, user: &str, now: Timestamp) -> Seen {
         let s = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
         let u = self.users.lock().unwrap_or_else(|p| p.into_inner());
         let (country, asn) = s
@@ -725,8 +828,7 @@ impl Memory {
         }
     }
 
-    /// Remember an allowed request's coarse network.
-    pub fn observe(&self, session: &str, user: &str, ctx: &Context, now: Timestamp) {
+    fn observe_local(&self, session: &str, user: &str, ctx: &Context, now: Timestamp) {
         let country = ctx.country.clone().filter(|c| c != "XX");
         {
             let mut s = self.sessions.lock().unwrap_or_else(|p| p.into_inner());
@@ -768,4 +870,4 @@ impl Memory {
 
 #[cfg(test)]
 #[path = "risk_tests.rs"]
-mod tests;
+pub(crate) mod tests;

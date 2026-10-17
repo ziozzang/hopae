@@ -17,6 +17,7 @@ pub mod import;
 pub mod meta;
 mod owners;
 mod passkeys;
+mod risk;
 mod service_credentials;
 pub mod sslmode;
 mod traits;
@@ -97,6 +98,11 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         12,
         "0012_attempt_windows",
         include_str!("migrations/0012_attempt_windows.sql"),
+    ),
+    (
+        13,
+        "0013_risk_memory",
+        include_str!("migrations/0013_risk_memory.sql"),
     ),
 ];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;

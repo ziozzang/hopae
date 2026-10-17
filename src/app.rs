@@ -1257,7 +1257,16 @@ async fn bind_environment(
                 .collect();
             Arc::new(crate::policy::risk::Keys::new(keys, r.max_skew()))
         }),
-        risk_memory: Arc::new(cfg.risk.as_ref().map(|r| r.memory()).unwrap_or_default()),
+        risk_memory: Arc::new({
+            let memory = cfg.risk.as_ref().map(|r| r.memory()).unwrap_or_default();
+            // With several replicas, the memory lives in the shared store.
+            #[cfg(feature = "postgres")]
+            let memory = match store.postgres() {
+                Some(pg) => memory.shared(pg.clone()),
+                None => memory,
+            };
+            memory
+        }),
     };
     #[cfg(feature = "test-hooks")]
     let hooks = match (&env.hooks_addr, &env.test_clock, &env.store_hooks) {

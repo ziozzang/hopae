@@ -276,50 +276,66 @@ fn policies_are_validated() {
     }
 }
 
-#[test]
-fn the_memory_is_bounded_coarse_and_expires() {
-    let m = Memory::new(MemoryBounds {
-        max_sessions: 2,
-        session_ttl: Duration::from_secs(60),
-        max_users: 2,
-        user_ttl: Duration::from_secs(3600),
-        countries_per_user: 2,
-    });
+/// The memory contract, on the process memory or a shared ledger: coarse,
+/// bounded, expiring (ADR-0023; S600-37 runs it on PostgreSQL).
+pub(crate) async fn memory_contract(m: &Memory) {
     let c = |country: &str, asn: u32| -> Context {
         let mut c: Context = serde_json::from_value(claims()).unwrap();
         c.country = Some(country.into());
         c.asn = Some(asn);
         c
     };
-    m.observe("s1", "u1", &c("KR", 1), at(NOW));
-    let seen = m.seen("s1", "u1", at(NOW + 1));
+    m.observe("s1", "u1", &c("KR", 1), at(NOW)).await;
+    let seen = m.seen("s1", "u1", at(NOW + 1)).await;
     assert_eq!(
         (seen.session_country.as_deref(), seen.session_asn),
         (Some("KR"), Some(1))
     );
     // The session entry expires; the user's countries stay longer.
-    let later = m.seen("s1", "u1", at(NOW + 61));
+    let later = m.seen("s1", "u1", at(NOW + 61)).await;
     assert_eq!(later.session_country, None);
     assert_eq!(later.user_countries, ["KR"]);
     // Per user, the most recent countries only; "XX" is never remembered.
-    m.observe("s1", "u1", &c("JP", 2), at(NOW + 2));
-    m.observe("s1", "u1", &c("US", 3), at(NOW + 3));
-    m.observe("s1", "u1", &c("XX", 4), at(NOW + 4));
-    assert_eq!(m.seen("s1", "u1", at(NOW + 5)).user_countries, ["JP", "US"]);
+    m.observe("s1", "u1", &c("JP", 2), at(NOW + 2)).await;
+    m.observe("s1", "u1", &c("US", 3), at(NOW + 3)).await;
+    m.observe("s1", "u1", &c("XX", 4), at(NOW + 4)).await;
     assert_eq!(
-        m.seen("s1", "u1", at(NOW + 5)).session_country,
+        m.seen("s1", "u1", at(NOW + 5)).await.user_countries,
+        ["JP", "US"]
+    );
+    assert_eq!(
+        m.seen("s1", "u1", at(NOW + 5)).await.session_country,
         None,
         "XX clears the session country"
     );
     // At most two sessions: the oldest goes.
-    m.observe("s2", "u2", &c("KR", 1), at(NOW + 6));
-    m.observe("s3", "u3", &c("KR", 1), at(NOW + 7));
-    assert_eq!(m.seen("s1", "u1", at(NOW + 8)).session_asn, None);
-    assert_eq!(m.seen("s3", "u3", at(NOW + 8)).session_asn, Some(1));
+    m.observe("s2", "u2", &c("KR", 1), at(NOW + 6)).await;
+    m.observe("s3", "u3", &c("KR", 1), at(NOW + 7)).await;
+    m.maintain().await;
+    assert_eq!(m.seen("s1", "u1", at(NOW + 8)).await.session_asn, None);
+    assert_eq!(m.seen("s3", "u3", at(NOW + 8)).await.session_asn, Some(1));
     assert!(
-        m.seen("s1", "u1", at(NOW + 8)).user_countries.is_empty(),
+        m.seen("s1", "u1", at(NOW + 8))
+            .await
+            .user_countries
+            .is_empty(),
         "u1 evicted by u2 and u3"
     );
+}
+
+pub(crate) fn contract_bounds() -> MemoryBounds {
+    MemoryBounds {
+        max_sessions: 2,
+        session_ttl: Duration::from_secs(60),
+        max_users: 2,
+        user_ttl: Duration::from_secs(3600),
+        countries_per_user: 2,
+    }
+}
+
+#[tokio::test]
+async fn the_memory_is_bounded_coarse_and_expires() {
+    memory_contract(&Memory::new(contract_bounds())).await;
 }
 
 /// The documented test vector (GATEWAY_CONTRACT.md "Risk context"), produced

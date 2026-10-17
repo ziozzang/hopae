@@ -6007,3 +6007,104 @@ async fn s600_35_postgres_attempt_windows_hold_across_replicas() {
     assert_eq!(rows, 4, "only the open windows remain");
     b.cleanup().await;
 }
+
+// ---- the ADR-0023 risk memory shared by replicas (PostgreSQL) ---------------
+
+#[cfg(feature = "postgres")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_37_postgres_risk_memory_keeps_the_contract_across_replicas() {
+    use crate::policy::risk::{
+        Memory,
+        tests::{contract_bounds, memory_contract},
+    };
+    let Some(b) = postgres().await else {
+        return;
+    };
+    let (pg, schema) = b.pg.clone().unwrap();
+    // The same contract as the process memory (coarse, bounded, expiring).
+    memory_contract(&Memory::new(contract_bounds()).shared(pg.clone())).await;
+    // Two replicas: what one observes, the other sees.
+    let other = Arc::new(
+        super::postgres::PgStore::connect(
+            super::postgres::PgOptions {
+                url: std::env::var("HOPAE_TEST_POSTGRES_URL").unwrap(),
+                ca_pem: None,
+                pool_size: 4,
+                connect_timeout: Duration::from_secs(5),
+                statement_timeout: Duration::from_secs(5),
+                search_path: Some(schema.clone()),
+            },
+            b.clock.clone(),
+            Arc::new(SeededRng::new(5)),
+            vec![],
+        )
+        .await
+        .unwrap(),
+    );
+    let bounds = crate::policy::risk::MemoryBounds::default();
+    let a = Memory::new(bounds).shared(pg.clone());
+    let c = Memory::new(bounds).shared(other);
+    let mut ctx: crate::policy::risk::Context = serde_json::from_value(serde_json::json!({
+        "iat": 1, "level": "low", "source": "sumunjang", "mode": "enforce", "reason": "ok",
+        "country": "KR", "asn": 64500}))
+    .unwrap();
+    let t = Timestamp(T0);
+    a.observe("s-x", "u-x", &ctx, t).await;
+    let seen = c.seen("s-x", "u-x", Timestamp(T0 + 1)).await;
+    assert_eq!(
+        (
+            seen.session_country.as_deref(),
+            seen.session_asn,
+            seen.user_countries.clone()
+        ),
+        (Some("KR"), Some(64500), vec!["KR".to_string()])
+    );
+    // Concurrent observations of one user on both replicas lose no country.
+    let mut tasks = Vec::new();
+    for (i, country) in ["JP", "US", "DE", "FR"].iter().enumerate() {
+        ctx.country = Some((*country).into());
+        let (m, ctx) = (
+            if i % 2 == 0 {
+                a.clone_shared()
+            } else {
+                c.clone_shared()
+            },
+            ctx.clone(),
+        );
+        tasks.push(tokio::spawn(async move {
+            m.observe(&format!("s-{i}"), "u-y", &ctx, Timestamp(T0 + 2))
+                .await
+        }));
+    }
+    for t in tasks {
+        t.await.unwrap();
+    }
+    let mut seen = a.seen("s-0", "u-y", Timestamp(T0 + 3)).await.user_countries;
+    seen.sort();
+    assert_eq!(seen, ["DE", "FR", "JP", "US"]);
+    // Nothing but country and ASN is kept.
+    let client = pg.raw().await;
+    let cols: Vec<String> = client
+        .query(
+            "SELECT column_name::text FROM information_schema.columns WHERE table_schema = $1 AND table_name IN ('risk_sessions','risk_users') ORDER BY 1",
+            &[&schema],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.get(0))
+        .collect();
+    assert_eq!(
+        cols,
+        [
+            "asn",
+            "countries",
+            "country",
+            "seen_ms",
+            "seen_ms",
+            "session_id",
+            "user_id"
+        ]
+    );
+    b.cleanup().await;
+}
