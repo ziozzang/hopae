@@ -1,6 +1,6 @@
 # Operations
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/OPERATIONS.md)
 
@@ -280,12 +280,84 @@ end-to-end check is a browser login on a protected host.
 
 ### Counters
 
-Hopae keeps in-process counters. There is **no production exposition** before M7:
-the values are readable only through the loopback test-hooks listener of a
-`test-hooks` build, which must never run in production. Prometheus text
-exposition is M7. Until then, watch the event stream (`verify.denied` lines
-carry the reason) and the gateway's own counters (`503` and `403` rates on
-protected routes). The counter names, fixed for the later exposition:
+`GET /metrics` on the admin listener serves every counter below and the
+families in the next table in the OpenMetrics text format
+(`application/openmetrics-text; version=1.0.0`, ending in `# EOF`). Scrape it
+on the admin listener (`listen.admin`, default `127.0.0.1:8702`; 8702 in the
+Kubernetes package too, where 8703 is the gRPC gateway) over its mutual TLS
+(`listen.admin_tls`). Use one of these credentials:
+
+- a route-scoped service credential created with `--preset metrics`, which
+  can read only `GET /metrics` (see [service credentials](SERVICE_CREDENTIALS.md)), or
+- an administrator of any role.
+
+The endpoint writes no audit record. It contacts no provider and no gateway.
+It reads the store with the console's query budget; if the store doesn't
+answer, `hopae_store_up` is `0` and the process-wide series are still served.
+
+No label carries a subject, a user id, an email or an address. Label values
+come from bounded sets: reason codes, configured provider and service ids,
+and fixed surface, factor and profile names. Recording on the verify, gRPC
+and event paths is an atomic increment into a fixed-capacity table. It takes
+no lock and allocates nothing once a series exists
+(`tests/metrics_no_alloc.rs`). A full table counts into
+`hopae_metrics_series_overflow_total` instead of growing.
+
+A Prometheus Operator endpoint (the token is the `hsc1.` credential; the
+client certificate is the one bound to it):
+
+```yaml
+endpoints:
+  - port: admin
+    scheme: https
+    path: /metrics
+    bearerTokenSecret: {name: hopae-metrics, key: token}
+    tlsConfig:
+      ca: {secret: {name: hopae-admin-tls, key: ca.crt}}
+      cert: {secret: {name: hopae-scrape-client, key: tls.crt}}
+      keySecret: {name: hopae-scrape-client, key: tls.key}
+      serverName: hopae-admin.example.test
+```
+
+A ServiceMonitor can't set request headers, so for `GET /metrics` alone the
+`x-hopae-audience` header may be left out. The audience then defaults to this
+instance's `admin.service_audience`, and the credential must allow it (the
+CLI default). The certificate binding and the secret still apply.
+
+| Family | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `hopae_auth_outcomes_total` | counter | `surface` (`forward_auth`, `hop1`, `grpc`), `provider` (on allow, else `none`), `outcome` (`allow`, `login`, `deny`, `handoff`, `redirect`, `switch`, `clean_redirect`), `reason` | Every authentication decision |
+| `hopae_verify_duration_seconds` | histogram | `surface` | Decision latency (gRPC: the whole call) |
+| `hopae_grpc_requests_total` | counter | `profile` (`verify`, `service_receipt`, `workload_receipt`, `human_receipt`, `projection_plan`, `service_projection`, `workload_projection`, `human_projection`, `other`), `code` (gRPC status name) | gRPC calls |
+| `hopae_logins_total` | counter | `provider`, `outcome`, `reason` | Portal logins (`login.succeeded`, `login.failed`) |
+| `hopae_sessions_created_total` | counter | `provider` | Sessions created |
+| `hopae_sessions_revoked_total` | counter | `reason` | Sessions ended before expiry (logout, termination, revocation) |
+| `hopae_handles_revoked_total` | counter | `reason` | Application handles revoked |
+| `hopae_sessions_active` | gauge | — | Live sessions |
+| `hopae_stepup_results_total` | counter | `factor` (`totp`, `webauthn`, `external`, `recovery_code`), `outcome` | Second-factor checks (step-up and login MFA) |
+| `hopae_passkey_ceremonies_total` | counter | `ceremony` (`register`, `authenticate`, `revoke`), `outcome` (`success`, `failure`, `clone_suspected`) | Passkey ceremonies |
+| `hopae_rate_limited_total` | counter | `surface` (`verify`, `login`, `settings`, `service_credential`) | Requests refused by a rate limit |
+| `hopae_store_failures_total` | counter | `kind` (`busy`, `queue_full`, `conflict`, `other`) | SQLite failures (`busy` = locked past the busy timeout) |
+| `hopae_store_up` | gauge | — | `1` when the store answered the scrape's status read |
+| `hopae_users`, `hopae_event_rows` | gauge | — | Users; retained event rows |
+| `hopae_event_relay_backlog` | gauge | `sink`, `state` (`pending`, `failed`) | Event deliveries waiting or given up |
+| `hopae_projection_feed_rows` | gauge | — | Rows of the group projection change feed |
+| `hopae_lifecycle_feed_head` | gauge | `source` (`ledger`, `outbox`) | Head positions of the subject lifecycle feed |
+| `hopae_workload_principals` | gauge | — | Workload principals in the store |
+| `hopae_workload_jwks_last_success_timestamp_seconds` | gauge | `service` | Last successful signing-key fetch (staleness = `time()` minus it) |
+| `hopae_provider_state` | gauge | `provider`, `kind`, `state` (`ok`, `degraded`, `disabled`) | `1` for each provider's current state |
+| `hopae_config_generation` | gauge | — | Configuration snapshot generation |
+| `hopae_tls_leaf_expiry_seconds` | gauge | `name` | Seconds until the leaf certificate in use expires |
+| `hopae_authentication_gateway_available`, `hopae_authentication_profiles_revision` | gauge | — | Authentication profiles in force |
+| `hopae_events_last_prune_timestamp_seconds` | gauge | — | Last event prune |
+| `hopae_metrics_series_overflow_total` | counter | — | Recordings dropped because a family was full |
+
+Event-derived families (logins, sessions, factors, passkeys) count event rows
+as they are written. A transaction that rolls back after the write is still
+counted, which is rare.
+
+The older counters keep their names and are exposed as they are
+(`*_total` as counters, the rest as gauges):
 
 | Counter | Labels | Counts |
 | --- | --- | --- |
@@ -345,7 +417,7 @@ counter per reason where counters exist, and no secret in any message.
 
 - Single instance per state directory; no failover. Restart is fast and sessions persist across it. Multi-instance deployments need the M2 store.
 - No hot reload of configuration, provider secrets or caller keys before M6; every change is a restart, during which verify fails closed (the gateway answers `503`) for the restart's duration.
-- No metrics endpoint before M7; counters are in-process only. The management console (M4-min) reads and ends users and sessions; providers, applications and blacklists are managed from the configuration file, `hopae providers import` and `hopae admin`.
+- Metrics are exposed on the admin listener only (`GET /metrics`, mTLS plus an administrator or a `metrics` service credential); there is no unauthenticated metrics port. The management console (M4-min) reads and ends users and sessions; providers, applications and blacklists are managed from the configuration file, `hopae providers import` and `hopae admin`.
 - Backups are file copies of a stopped (or checkpointed) database. An online backup tool is M7.
 - Hopae does not terminate TLS and does not talk to the internet except to the configured identity providers (discovery, keys, token and user-info endpoints); there is no telemetry and no self-update before M6. Provider traffic ignores `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY`: a proxy resolves the destination itself, which would bypass the connect-time address checks. There is no proxy option.
 

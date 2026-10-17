@@ -1,6 +1,6 @@
 # Service credentials for the admin listener
 
-<!-- doc-rev: 1 -->
+<!-- doc-rev: 2 -->
 
 [Documentation](README.md) · [한국어](ko/SERVICE_CREDENTIALS.md)
 
@@ -72,8 +72,12 @@ Grantable routes (no other route can be stored by the CLI):
 | `POST /v1/groups/search`, `POST /v1/groups/get` | Group reads |
 | `POST /v1/explain/authentication` | [Authentication explain](AUTHENTICATION_EXPLAIN.md) |
 | `GET /v1/status` | Status |
+| `GET /metrics` | OpenMetrics exposition ([operations](OPERATIONS.md#counters)) |
 
-The preset `pumgye-v2` grants exactly the first four.
+The preset `pumgye-v2` grants exactly the first four. The preset `metrics`
+grants `GET /metrics` alone. That route writes no `admin.read` record, and
+it may omit `x-hopae-audience`, which then defaults to this instance's
+`admin.service_audience`.
 
 ### Secrets, rotation and revocation
 
@@ -93,7 +97,7 @@ tombstone (the id is never reused) and refuses every later change.
 
 | Command | Effect |
 | --- | --- |
-| `hopae admin service-credentials create <id> (--preset pumgye-v2 \| --route "METHOD /path"…) [--audience A…] (--client-spki-sha256 HEX \| --client-san SAN)… [--expires-in-days 90] [--rate-per-minute 120] [--burst 30] [--note TEXT] --config <path>` | Create and print the token once (stdout); refused for a non-grantable route, no mTLS binding, a lifetime above 400 days, rate 1–6,000/min and burst 1–1,000 outside bounds, an existing id |
+| `hopae admin service-credentials create <id> (--preset pumgye-v2\|metrics \| --route "METHOD /path"…) [--audience A…] (--client-spki-sha256 HEX \| --client-san SAN)… [--expires-in-days 90] [--rate-per-minute 120] [--burst 30] [--note TEXT] --config <path>` | Create and print the token once (stdout); refused for a non-grantable route, no mTLS binding, a lifetime above 400 days, rate 1–6,000/min and burst 1–1,000 outside bounds, an existing id |
 | `hopae admin service-credentials rotate <id>` | Issue and print the next secret |
 | `hopae admin service-credentials promote <id>` | Next becomes current |
 | `hopae admin service-credentials revoke <id>` | Revoke (tombstone) |

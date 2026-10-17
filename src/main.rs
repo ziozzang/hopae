@@ -115,7 +115,8 @@ enum ServiceCredentialAction {
         /// An allowed route, "METHOD /path" (repeatable); only read routes.
         #[arg(long = "route", value_name = "ROUTE")]
         routes: Vec<String>,
-        /// `pumgye-v2`: the membership projection and subject lifecycle reads.
+        /// `pumgye-v2`: the membership projection and subject lifecycle reads;
+        /// `metrics`: `GET /metrics` (a Prometheus scraper).
         #[arg(long)]
         preset: Option<String>,
         /// An allowed audience (repeatable; default the console origin).

@@ -93,6 +93,9 @@ async fn connection<S: AsyncRead + AsyncWrite + Unpin>(
             .body(Body::empty())
             .map_err(|_| invalid())?;
         *request.headers_mut() = headers;
+        request
+            .extensions_mut()
+            .insert(crate::telemetry::metrics::Surface::Hop1);
         let response = tokio::select! {_=stop.wait_for(|v|*v)=>return Ok(()),r=router.clone().oneshot(request)=>r.map_err(|_|invalid())?};
         let (status, headers, body) = {
             let (parts, body) = response.into_parts();

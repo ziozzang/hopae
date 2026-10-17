@@ -754,6 +754,14 @@ pub struct StoreStatus {
     /// Per sink: `(sink, pending, failed)`.
     pub deliveries: Vec<(String, u64, u64)>,
     pub last_prune_at: Option<Timestamp>,
+    /// Rows of the group projection change feed (`group_changes`).
+    pub projection_changes: u64,
+    /// Head of the subject lifecycle ledger (`human_user_ids` rowid).
+    pub lifecycle_ledger_head: u64,
+    /// Head of the event outbox the lifecycle feed follows (`events` rowid).
+    pub outbox_head: u64,
+    /// Workload principals known to the store.
+    pub workload_principals: u64,
 }
 
 /// One configuration entry, with its ORIGINAL key preserved (P2-06); resolution happens inside the import transaction.

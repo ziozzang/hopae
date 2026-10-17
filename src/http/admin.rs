@@ -42,6 +42,7 @@ pub fn router(state: Arc<AdminState>) -> Router {
     let routes = Router::new()
         .route("/", get(status::page))
         .route("/v1/status", get(status::data))
+        .route("/metrics", get(crate::admin::metrics::get))
         .route(
             "/v1/authentication/profiles",
             get(crate::admin::profiles::get).put(crate::admin::profiles::put),
@@ -175,7 +176,7 @@ fn facts(req: &Request, rid: &str, client_ip: std::net::IpAddr) -> ReqInfo {
         https: false,
         method: req.method().clone(),
         pattern: auth::pattern_of(path),
-        api: path.starts_with("/v1/"),
+        api: path.starts_with("/v1/") || path == "/metrics",
     }
 }
 

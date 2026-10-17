@@ -32,6 +32,7 @@ mod explain_messages;
 pub mod factors;
 pub mod groups;
 pub mod me;
+pub mod metrics;
 pub mod pages;
 pub mod profiles;
 pub mod projections;

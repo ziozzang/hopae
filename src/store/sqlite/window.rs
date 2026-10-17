@@ -650,6 +650,11 @@ impl Store {
                 .optional()?;
             let schema_version: Option<u32> =
                 c.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| r.get(0))?;
+            let projection_changes = count("SELECT COUNT(*) FROM group_changes", &[])?;
+            let lifecycle_ledger_head =
+                count("SELECT COALESCE(MAX(rowid), 0) FROM human_user_ids", &[])?;
+            let outbox_head = count("SELECT COALESCE(MAX(rowid), 0) FROM events", &[])?;
+            let workload_principals = count("SELECT COUNT(*) FROM workload_principals", &[])?;
             Ok(StoreStatus {
                 schema_version: schema_version.unwrap_or(0),
                 users,
@@ -659,6 +664,10 @@ impl Store {
                 last_prune_at: last_prune
                     .and_then(|s| s.parse::<i64>().ok())
                     .map(Timestamp::from_secs),
+                projection_changes,
+                lifecycle_ledger_head,
+                outbox_head,
+                workload_principals,
             })
         })
         .await

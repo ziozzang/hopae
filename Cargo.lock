@@ -1169,6 +1169,7 @@ dependencies = [
  "mlua",
  "openssl",
  "percent-encoding",
+ "pin-project-lite",
  "prost",
  "pumgye-grpc",
  "rand 0.9.5",
