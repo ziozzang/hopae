@@ -134,6 +134,13 @@
 - Session memory is per process. With several replicas a change of country
   can go unnoticed until the same replica serves the session again. Sticky
   routing or a future shared store improves this.
+- **Follow-up (high availability):** move the session and user memory to the
+  shared store (the PostgreSQL backend of
+  ADR-0020, in review). Coarse values with the same
+  TTLs and bounds; writes coalesced like `last_seen_at`. Every replica then
+  sees a change of country, and a restart keeps the memory. Until then,
+  deployments with several replicas should treat `country_changed`,
+  `asn_changed` and `new_country` as best effort.
 
 ### Neutral
 
@@ -168,4 +175,5 @@ verify 요청의 `x-hopae-risk-context`에서 그 증거를 받습니다. 값은
 일치하면 신선도가 붙은 단계 상승 규칙을 더하거나(같은 단계 상승 엔진에서 평가) 요청을
 거부합니다(`risk_denied`). 세션별 국가·ASN과 사용자별 국가는 TTL과 개수 제한이 있는
 프로세스 메모리에 거친 값만 둡니다. explain, 이벤트(`risk.step_up_required`), 지표로
-입력과 결정을 확인할 수 있습니다.
+입력과 결정을 확인할 수 있습니다. 후속 작업: 여러 복제본(HA)에서도 국가 변화를 놓치지 않도록
+세션·사용자 메모리를 공유 저장소(ADR-0020의 PostgreSQL)로 옮깁니다.
