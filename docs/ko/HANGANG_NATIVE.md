@@ -489,6 +489,45 @@ lease가 아닌 관측이다. 접근자는 공개 서명 근거만 제공하며 
 소유자가 아니다.
 
 
+### 재적재되는 클라이언트 TLS (미릴리스)
+
+생성자는 `impl Into<ClientEndpoint>`를 받습니다. 그래서 `EndpointConfig`(고정 PEM
+바이트)를 넘기던 기존 호출자는 그대로 컴파일되고 이전과 똑같이 동작합니다. 해당
+생성자는 `Client::new`, `Client::new_service`, `Client::new_workload`,
+`Client::new_human`입니다.
+
+인증서를 교체하는 호출자(cert-manager)는 대신 `ReloadableEndpointConfig`를 넘길 수
+있습니다. 이 구성의 `tls: ClientConfigSource`는
+`Arc<dyn Fn() -> Arc<rustls::ClientConfig>>`입니다. SDK는 새 연결을 만들 때마다 이
+함수를 부르고, 요청마다 부르지는 않습니다. 이 함수는 `ArcSwap` load처럼 가벼워야
+합니다.
+
+```rust
+let tls = reloading.clone(); // 호출자의 재적재 보관자
+let client = Client::new_service(
+    ReloadableEndpointConfig {
+        address: "https://hopae:9443",
+        server_name: "hopae.internal",
+        tls: Arc::new(move || tls.current()),
+        caller_key: &token,
+    },
+    policy, clock, rates, limits,
+)?;
+```
+
+- SDK는 설정한 `server_name`을 검증하고, 설정에 없어도 `h2` ALPN 프로토콜을
+  강제하며, 서버가 h2를 선택하도록 요구합니다.
+- 주소, 서버 이름, 호출자 키, 한도의 범위 검사는 PEM 경로와 같습니다.
+- 교체한 뒤 새 연결은 새 클라이언트 인증서를 제시하고 새 CA를 신뢰합니다. 이미
+  맺은 HTTP/2 연결은 닫힐 때까지(서버 연결 수명, GOAWAY, 네트워크 오류) 기존 설정을
+  씁니다. 클라이언트를 새로 만들거나 retire하거나 재시작할 필요가 없습니다.
+- 새 인증서가 유효한지는 호출자가 검증합니다. 다시 만들지 못하면 이전 설정을 계속
+  돌려줘야 합니다.
+
+`tests/reloadable_tls.rs`는 연결 수명이 짧은 mTLS 서버를 상대로 클라이언트 하나 뒤의
+클라이언트 인증서를 교체합니다. 그리고 클라이언트를 다시 만들지 않아도 서버가 새
+인증서를 받는지 확인합니다.
+
 ### 안정적 네이티브 신뢰와 digest 준비
 
 `Client::new_service`는 정확 pin 생성자와 별도로 서버가 컴파일한
