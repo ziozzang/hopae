@@ -1,6 +1,6 @@
 # Operations
 
-<!-- doc-rev: 7 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/OPERATIONS.md)
 
@@ -283,8 +283,9 @@ end-to-end check is a browser login on a protected host.
 `GET /metrics` on the admin listener serves every counter below and the
 families in the next table in the OpenMetrics text format
 (`application/openmetrics-text; version=1.0.0`, ending in `# EOF`). Scrape it
-over the admin listener's mutual TLS (`listen.admin_tls`, port 8703 in the
-Kubernetes package). Use one of these credentials:
+on the admin listener (`listen.admin`, default `127.0.0.1:8702`; 8702 in the
+Kubernetes package too, where 8703 is the gRPC gateway) over its mutual TLS
+(`listen.admin_tls`). Use one of these credentials:
 
 - a route-scoped service credential created with `--preset metrics`, which
   can read only `GET /metrics` (see [service credentials](SERVICE_CREDENTIALS.md)), or

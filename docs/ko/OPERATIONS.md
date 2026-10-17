@@ -1,6 +1,6 @@
 # 운영
 
-<!-- translation-status: source=../OPERATIONS.md source-rev=7 status=current -->
+<!-- translation-status: source=../OPERATIONS.md source-rev=8 status=current -->
 
 [문서 목차](README.md) · [English](../OPERATIONS.md)
 
@@ -257,7 +257,8 @@ Hopae는 **stderr**에 기록하며 stdout에는 위의 시작 줄만 나갑니�
 
 관리 리스너의 `GET /metrics`는 아래 카운터 전부와 다음 표의 패밀리를 OpenMetrics 텍스트
 형식(`application/openmetrics-text; version=1.0.0`, 끝에 `# EOF`)으로 제공합니다. 관리
-리스너의 상호 TLS(`listen.admin_tls`, Kubernetes 패키지에서는 8703 포트)로 스크레이프합니다.
+리스너(`listen.admin`, 기본 `127.0.0.1:8702`. Kubernetes 패키지도 8702이며 8703은 gRPC 게이트웨이)의 상호
+TLS(`listen.admin_tls`)로 스크레이프합니다.
 자격 증명은 다음 중 하나를 씁니다.
 
 - `--preset metrics`로 만든 라우트 한정 서비스 자격 증명. `GET /metrics`만 읽을 수 있습니다
