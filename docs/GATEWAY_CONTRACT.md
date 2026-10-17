@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 18 -->
+<!-- doc-rev: 19 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -241,7 +241,7 @@ P = base64url-nopad(UTF-8 JSON claims)
 T = base64url-nopad(HMAC-SHA256(K, "hopae-risk-context.v1\n" || P || "\n" || M || "\n" || IP || "\n" || U))
 ```
 
-The whole value is at most 1,024 bytes.
+The whole value is at most 2,048 bytes.
 
 | Input | Value |
 | --- | --- |
@@ -262,7 +262,7 @@ The whole value is at most 1,024 bytes.
 | `score` | no | 0 to 100, the evidence score bucketed to tens |
 | `asn` | no | The client's ASN (u32) |
 | `country` | no | ISO 3166-1 alpha-2 upper case, `XX` when unknown |
-| `zones` | no | Up to 8 matched zone ids, `[a-z0-9._-]{1,64}` |
+| `zones` | no | Up to 8 matched zone ids, exactly Sumunjang's (Pumgye's) zone id alphabet `[A-Za-z0-9_.:-]{1,128}`, case-sensitive |
 | `rev` | no | Sumunjang's policy revision (u64) |
 
 **Level mapping (gateway).**
@@ -303,8 +303,14 @@ An enforced denial never reaches Hopae: the gateway refuses the request first.
 v1.eyJpYXQiOjE4MDAwMDAwMDAsImxldmVsIjoiZWxldmF0ZWQiLCJzb3VyY2UiOiJzdW11bmphbmciLCJtb2RlIjoiZW5mb3JjZSIsInJlYXNvbiI6InN1bXVuamFuZy5hc25fcmVwdXRhdGlvbiIsInNjb3JlIjo3MCwiYXNuIjo2NDUwMCwiY291bnRyeSI6IktSIiwiem9uZXMiOlsiY29ycC12cG4iXSwicmV2Ijo0MTh9.oIlJD45LbUbFg80GNO6g_delXTIQ_7m2lVOgtIPcDZQ
 ```
 
+**Test vector with zones.** Same key and inputs, claims `{"iat":1800000000,"level":"low","source":"sumunjang","mode":"observe","reason":"sumunjang.observe.mode","score":20,"country":"KR","zones":["Corp:VPN","legacy.orders.1"],"rev":5}`:
+
+```text
+v1.eyJpYXQiOjE4MDAwMDAwMDAsImxldmVsIjoibG93Iiwic291cmNlIjoic3VtdW5qYW5nIiwibW9kZSI6Im9ic2VydmUiLCJyZWFzb24iOiJzdW11bmphbmcub2JzZXJ2ZS5tb2RlIiwic2NvcmUiOjIwLCJjb3VudHJ5IjoiS1IiLCJ6b25lcyI6WyJDb3JwOlZQTiIsImxlZ2FjeS5vcmRlcnMuMSJdLCJyZXYiOjV9.MOFgcPWLbPgy37fmi01OJnwX7tm6enJ1T5b2lxlLGWA
+```
+
 The reference signer is `hopae::policy::risk::Keys::sign`; `policy::risk::tests`
-checks this vector.
+checks these vectors.
 
 ### Identity headers
 

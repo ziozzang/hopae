@@ -336,3 +336,70 @@ fn the_documented_vector_verifies() {
         (Level::Elevated, Some(418), &["corp-vpn".to_string()][..])
     );
 }
+
+/// The second documented vector: case-sensitive zone ids with `:` (the
+/// Sumunjang/Pumgye zone id alphabet).
+#[test]
+fn the_documented_zone_vector_verifies() {
+    let k = Keys::new(vec![K1.to_vec()], Duration::from_secs(30));
+    let v = "v1.eyJpYXQiOjE4MDAwMDAwMDAsImxldmVsIjoibG93Iiwic291cmNlIjoic3VtdW5qYW5nIiwibW9kZSI6Im9ic2VydmUiLCJyZWFzb24iOiJzdW11bmphbmcub2JzZXJ2ZS5tb2RlIiwic2NvcmUiOjIwLCJjb3VudHJ5IjoiS1IiLCJ6b25lcyI6WyJDb3JwOlZQTiIsImxlZ2FjeS5vcmRlcnMuMSJdLCJyZXYiOjV9.MOFgcPWLbPgy37fmi01OJnwX7tm6enJ1T5b2lxlLGWA";
+    let c = k.verify(v.as_bytes(), "GET", ip(), URL, at(NOW)).unwrap();
+    assert_eq!(c.zones, ["Corp:VPN", "legacy.orders.1"]);
+    assert_eq!(c.score, Some(20));
+}
+
+#[test]
+fn zone_ids_follow_the_sumunjang_alphabet() {
+    assert!(zone_ok("Corp:VPN") && zone_ok("legacy.orders.1") && zone_ok(&"a".repeat(128)));
+    assert!(
+        !zone_ok("") && !zone_ok(&"a".repeat(129)) && !zone_ok("corp vpn") && !zone_ok("corp/vpn")
+    );
+    let mut c = claims();
+    c["zones"] = json!(["Corp:VPN", "x".repeat(128)]);
+    let s = Keys::sign(K1, &c, "GET", ip(), URL);
+    assert!(
+        keys()
+            .verify(s.as_bytes(), "GET", ip(), URL, at(NOW))
+            .is_ok()
+    );
+    c["zones"] = json!(["corp vpn"]);
+    let s = Keys::sign(K1, &c, "GET", ip(), URL);
+    assert_eq!(
+        keys().verify(s.as_bytes(), "GET", ip(), URL, at(NOW)),
+        Err("malformed")
+    );
+    // Eight 128-byte zones fit the value bound.
+    c["zones"] = json!(
+        (0..8)
+            .map(|i| format!("{i}{}", "Z".repeat(127)))
+            .collect::<Vec<_>>()
+    );
+    let s = Keys::sign(K1, &c, "GET", ip(), URL);
+    assert!(s.len() <= MAX_VALUE, "{}", s.len());
+    assert!(
+        keys()
+            .verify(s.as_bytes(), "GET", ip(), URL, at(NOW))
+            .is_ok()
+    );
+    // Rules accept the same ids, and only them.
+    let ok: AppRiskCfg = serde_json::from_value(
+        json!({"rules": [{"when": {"zone_in": ["Corp:VPN"]}, "then": "deny"}]}),
+    )
+    .unwrap();
+    let mut errs = Vec::new();
+    ok.compile("apps[0]", false, &mut errs);
+    assert!(errs.is_empty(), "{errs:?}");
+    let bad: AppRiskCfg = serde_json::from_value(
+        json!({"rules": [{"when": {"outside_zones": ["corp vpn"]}, "then": "deny"}]}),
+    )
+    .unwrap();
+    bad.compile("apps[0]", false, &mut errs);
+    assert!(!errs.is_empty());
+    let reason: AppRiskCfg = serde_json::from_value(
+        json!({"rules": [{"when": {"reason_in": ["Sumunjang.X"]}, "then": "deny"}]}),
+    )
+    .unwrap();
+    let mut errs = Vec::new();
+    reason.compile("apps[0]", false, &mut errs);
+    assert!(!errs.is_empty(), "reason codes stay lower case");
+}

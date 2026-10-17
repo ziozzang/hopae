@@ -24,7 +24,7 @@ use crate::session::types::Aal;
 /// The verify request header carrying the context.
 pub const HEADER: &str = "x-hopae-risk-context";
 /// Largest header value.
-pub const MAX_VALUE: usize = 1024;
+pub const MAX_VALUE: usize = 2048;
 const DOMAIN: &str = "hopae-risk-context.v1\n";
 
 /// Decisions by application, level and action.
@@ -80,6 +80,14 @@ pub struct Context {
     pub rev: Option<u64>,
 }
 
+/// A Sumunjang (Pumgye) zone id: `[A-Za-z0-9_.:-]{1,128}`, case-sensitive.
+pub fn zone_ok(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+}
+
 fn token_ok(s: &str, max: usize) -> bool {
     !s.is_empty()
         && s.len() <= max
@@ -98,7 +106,7 @@ impl Context {
             && self.score.is_none_or(|s| s <= 100)
             && self.country.as_deref().is_none_or(country_ok)
             && self.zones.len() <= 8
-            && self.zones.iter().all(|z| token_ok(z, 64))
+            && self.zones.iter().all(|z| zone_ok(z))
     }
 }
 
@@ -438,13 +446,15 @@ impl AppRiskCfg {
                         errs.push(format!("{rat}.when: countries are 1 to 256 ISO 3166-1 alpha-2 codes (upper case)"));
                     }
                 }
-                for list in [&r.when.zone_in, &r.when.outside_zones, &r.when.reason_in]
-                    .into_iter()
-                    .flatten()
-                {
-                    if list.is_empty() || list.len() > 64 || !list.iter().all(|z| token_ok(z, 64)) {
-                        errs.push(format!("{rat}.when: zone and reason lists are 1 to 64 ids of [a-z0-9._-]"));
+                for list in [&r.when.zone_in, &r.when.outside_zones].into_iter().flatten() {
+                    if list.is_empty() || list.len() > 64 || !list.iter().all(|z| zone_ok(z)) {
+                        errs.push(format!("{rat}.when: zone lists are 1 to 64 Sumunjang zone ids ([A-Za-z0-9_.:-]{{1,128}})"));
                     }
+                }
+                if let Some(list) = &r.when.reason_in
+                    && (list.is_empty() || list.len() > 64 || !list.iter().all(|z| token_ok(z, 64)))
+                {
+                    errs.push(format!("{rat}.when: reason lists are 1 to 64 codes of [a-z0-9._-]"));
                 }
                 if r.path_prefix.as_ref().is_some_and(|p| !p.starts_with('/')) {
                     errs.push(format!("{rat}.path_prefix must start with '/'"));

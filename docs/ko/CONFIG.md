@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=44 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=45 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -367,7 +367,7 @@ AAL 1의 1차 인증 신선도 규칙은 keyring 없이도 제공자 재인증�
 | `apps[].risk.rules[]` | 없음 | 최대 32개. `path_prefix`(선택, 단계 상승 규칙과 같음), `when`(조건을 모두 만족해야 하며 하나 이상), `then` |
 | `when.level_at_least` | — | `low`, `elevated`, `high` |
 | `when.country_in`, `country_not_in` | — | ISO 3166-1 alpha-2 대문자 코드(1–256개). `country_not_in`은 국가를 알 때만 만족 |
-| `when.zone_in`, `outside_zones` | — | Sumunjang 영역 ID(1–64개). `outside_zones`는 어느 것도 일치하지 않을 때 만족 |
+| `when.zone_in`, `outside_zones` | — | Sumunjang 영역 ID(1–64개, `[A-Za-z0-9_.:-]{1,128}`, 대소문자 구분). `outside_zones`는 어느 것도 일치하지 않을 때 만족 |
 | `when.reason_in` | — | Sumunjang 사유 코드(1–64개) |
 | `when.country_changed`, `asn_changed` | — | `true`: 이 세션의 마지막 허용 요청과 다름(세션 메모리) |
 | `when.new_country` | — | `true`: TTL 안의 사용자 국가 목록에 없음(목록이 있을 때) |

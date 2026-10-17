@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=18 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=19 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -233,7 +233,7 @@ P = base64url-nopad(UTF-8 JSON 클레임)
 T = base64url-nopad(HMAC-SHA256(K, "hopae-risk-context.v1\n" || P || "\n" || M || "\n" || IP || "\n" || U))
 ```
 
-값 전체는 최대 1,024바이트입니다.
+값 전체는 최대 2,048바이트입니다.
 
 | 입력 | 값 |
 | --- | --- |
@@ -254,7 +254,7 @@ T = base64url-nopad(HMAC-SHA256(K, "hopae-risk-context.v1\n" || P || "\n" || M |
 | `score` | 아니요 | 0–100, 10 단위로 묶은 증거 점수 |
 | `asn` | 아니요 | 클라이언트 ASN(u32) |
 | `country` | 아니요 | ISO 3166-1 alpha-2 대문자, 모르면 `XX` |
-| `zones` | 아니요 | 일치한 영역 ID 최대 8개, `[a-z0-9._-]{1,64}` |
+| `zones` | 아니요 | 일치한 영역 ID 최대 8개. Sumunjang(Pumgye) 존 ID 문자 집합 `[A-Za-z0-9_.:-]{1,128}` 그대로이며 대소문자 구분 |
 | `rev` | 아니요 | Sumunjang 정책 리비전(u64) |
 
 **수준 대응(게이트웨이).**
@@ -293,7 +293,13 @@ T = base64url-nopad(HMAC-SHA256(K, "hopae-risk-context.v1\n" || P || "\n" || M |
 v1.eyJpYXQiOjE4MDAwMDAwMDAsImxldmVsIjoiZWxldmF0ZWQiLCJzb3VyY2UiOiJzdW11bmphbmciLCJtb2RlIjoiZW5mb3JjZSIsInJlYXNvbiI6InN1bXVuamFuZy5hc25fcmVwdXRhdGlvbiIsInNjb3JlIjo3MCwiYXNuIjo2NDUwMCwiY291bnRyeSI6IktSIiwiem9uZXMiOlsiY29ycC12cG4iXSwicmV2Ijo0MTh9.oIlJD45LbUbFg80GNO6g_delXTIQ_7m2lVOgtIPcDZQ
 ```
 
-참조 서명 구현은 `hopae::policy::risk::Keys::sign`이며 `policy::risk::tests`가 이 벡터를
+**존이 있는 테스트 벡터.** 키와 입력은 같고 클레임이 `{"iat":1800000000,"level":"low","source":"sumunjang","mode":"observe","reason":"sumunjang.observe.mode","score":20,"country":"KR","zones":["Corp:VPN","legacy.orders.1"],"rev":5}`이면 다음 값입니다.
+
+```text
+v1.eyJpYXQiOjE4MDAwMDAwMDAsImxldmVsIjoibG93Iiwic291cmNlIjoic3VtdW5qYW5nIiwibW9kZSI6Im9ic2VydmUiLCJyZWFzb24iOiJzdW11bmphbmcub2JzZXJ2ZS5tb2RlIiwic2NvcmUiOjIwLCJjb3VudHJ5IjoiS1IiLCJ6b25lcyI6WyJDb3JwOlZQTiIsImxlZ2FjeS5vcmRlcnMuMSJdLCJyZXYiOjV9.MOFgcPWLbPgy37fmi01OJnwX7tm6enJ1T5b2lxlLGWA
+```
+
+참조 서명 구현은 `hopae::policy::risk::Keys::sign`이며 `policy::risk::tests`가 두 벡터를
 검사합니다.
 
 ### 신원 헤더

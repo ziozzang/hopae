@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 44 -->
+<!-- doc-rev: 45 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -374,7 +374,7 @@ and `apps[].risk` turns it into a step-up or a denial:
 | `apps[].risk.rules[]` | none | At most 32. `path_prefix` (optional, as for step-up rules), `when` (all conditions must hold, at least one), `then` |
 | `when.level_at_least` | — | `low`, `elevated`, `high` |
 | `when.country_in`, `country_not_in` | — | ISO 3166-1 alpha-2 upper-case codes (1 to 256); `country_not_in` needs a known country |
-| `when.zone_in`, `outside_zones` | — | Sumunjang zone ids (1 to 64); `outside_zones` holds when none of them matched |
+| `when.zone_in`, `outside_zones` | — | Sumunjang zone ids (1 to 64, `[A-Za-z0-9_.:-]{1,128}`, case-sensitive); `outside_zones` holds when none of them matched |
 | `when.reason_in` | — | Sumunjang reason codes (1 to 64) |
 | `when.country_changed`, `asn_changed` | — | `true`: differs from this session's last allowed request (session memory) |
 | `when.new_country` | — | `true`: not among the user's countries within the TTL (and the user has some) |

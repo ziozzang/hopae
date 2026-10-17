@@ -33,7 +33,7 @@
    gateway sends one header on the verify call, `x-hopae-risk-context`,
    over HTTP or HOP1. The value is
    `v1.<base64url(JSON claims)>.<base64url(HMAC-SHA256)>`; the encoding has
-   no padding and the whole value is at most 1,024 bytes.
+   no padding and the whole value is at most 2,048 bytes.
    - **Claims.** Unknown claims are refused.
      - `iat`: unix seconds.
      - `level`: `low`, `elevated` or `high`.
@@ -43,7 +43,7 @@
      - Optional `score`: 0 to 100.
      - Optional `asn`: a u32.
      - Optional `country`: ISO 3166-1 alpha-2 upper case, or `XX` for unknown.
-     - Optional `zones`: up to 8 ids of `[a-z0-9._-]{1,64}`.
+     - Optional `zones`: up to 8 Sumunjang (Pumgye) zone ids, `[A-Za-z0-9_.:-]{1,128}`, case-sensitive.
      - Optional `rev`: the Sumunjang revision, a u64.
    - **MAC.** The MAC is computed over
      `"hopae-risk-context.v1\n" + <payload> + "\n" + <method> + "\n" + <client ip> + "\n" + <x-original-url>`,
