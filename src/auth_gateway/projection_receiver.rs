@@ -119,13 +119,13 @@ impl Admission {
     /// native local identity/caller owners, not request claims or a constant.
     /// Remote acknowledgement is point-in-time; it does not replace that guard.
     #[allow(clippy::too_many_arguments)]
-    pub fn project(
+    pub fn project<D: crate::store::meta::MetaDb>(
         self,
         client: &Client,
         plan: &projection_authority::Snapshot,
-        db: &mut rusqlite::Connection,
+        db: &mut D,
         clock: &dyn Fn() -> u64,
-        guard: &dyn Fn(&rusqlite::Connection) -> Result<(), Refused>,
+        guard: &dyn Fn(&dyn crate::store::meta::MetaTx) -> Result<(), Refused>,
         resolve: &dyn Fn(&str) -> Result<zeroize::Zeroizing<String>, Refused>,
     ) -> Result<projection::Output, Refused> {
         let Self {

@@ -1172,7 +1172,7 @@ impl Passkeys for PgStore {
                 return Err(conflict("login transaction unavailable"));
             }
             // The caps count every replica's rows: one admission at a time.
-            tx.execute("SELECT pg_advisory_xact_lock($1)", &[&LOGIN_CEREMONY_LOCK])
+            tx.execute(super::ADVISORY_XACT_LOCK, &[&LOGIN_CEREMONY_LOCK])
                 .await
                 .map_err(pg)?;
             tx.execute(
@@ -1500,5 +1500,182 @@ impl Passkeys for PgStore {
             Ok(report)
         })
         .await
+    }
+}
+
+impl PgStore {
+    /// The console's factor reset (ADR-0017), as SQLite's: the
+    /// administrator's write fence, then what `scope` names (the subject
+    /// user's row locked first, as every factor write), the sessions that
+    /// factor vouched for and the `admin.factor_reset` record with the
+    /// counts, in one transaction. Nothing to remove writes nothing.
+    pub async fn admin_reset_factors(
+        &self,
+        actor: &crate::store::Actor,
+        policy: &crate::store::ActorPolicy,
+        user: &UserId,
+        scope: FactorResetScope,
+        deadline: crate::store::Deadline,
+        admin_event: Event,
+    ) -> StoreResult<(bool, FactorResetReport)> {
+        let out = super::retry(|| async {
+            let mut client = self.client().await?;
+            let tx = self.begin_fenced(&mut client, actor, policy, deadline).await?;
+            let now = self.now();
+            let request_id = admin_event.request_id.clone();
+            if lock_user(&tx, user.as_str()).await?.is_none() {
+                return Err(conflict("unknown user"));
+            }
+            let count = |n: u64| u32::try_from(n).unwrap_or(u32::MAX);
+            let mut report = FactorResetReport::default();
+            let revoke_totp = || async {
+                tx.execute(
+                    "UPDATE totp_enrollments SET state='revoked', revision=revision+1, pending_expires_at=NULL, updated_at=$2 WHERE user_id=$1 AND state<>'revoked'",
+                    &[&user.as_str(), &now.secs()],
+                )
+                .await
+                .map_err(pg)
+                .map(count)
+            };
+            let drop_codes = || async {
+                tx.execute(
+                    "DELETE FROM recovery_codes WHERE user_id=$1 AND used_at IS NULL",
+                    &[&user.as_str()],
+                )
+                .await
+                .map_err(pg)
+                .map(count)
+            };
+            let end = |ids: Vec<String>| {
+                let tx = &tx;
+                let request_id = request_id.clone();
+                async move {
+                    let mut n = 0;
+                    for id in ids {
+                        let id = SessionId::new(id);
+                        let ev = event(self, EventKind::SessionTerminated, Outcome::Success, &request_id)
+                            .user(user)
+                            .session(&id)
+                            .reason(reasons::FACTOR_RESET)
+                            .build();
+                        if super::admin::terminate_in(self, tx, &id, reasons::FACTOR_RESET, now, &[ev]).await? {
+                            n += 1;
+                        }
+                    }
+                    Ok::<u32, StoreError>(n)
+                }
+            };
+            let live = |extra: &'static str| {
+                let tx = &tx;
+                async move {
+                    Ok::<Vec<String>, StoreError>(
+                        tx.query(
+                            &format!(
+                                "SELECT s.session_id FROM sessions s WHERE s.user_id=$1 AND s.terminated_at IS NULL{extra} ORDER BY s.session_id COLLATE \"C\""
+                            ),
+                            &[&user.as_str()],
+                        )
+                        .await
+                        .map_err(pg)?
+                        .iter()
+                        .map(|r| r.get(0))
+                        .collect(),
+                    )
+                }
+            };
+            match &scope {
+                FactorResetScope::All => {
+                    report.passkeys = count(
+                        tx.execute(
+                            "UPDATE webauthn_credentials SET state='revoked', revoked_at=$2, revoked_reason='factor_reset', revision=revision+1 WHERE user_id=$1 AND state='active'",
+                            &[&user.as_str(), &now.secs()],
+                        )
+                        .await
+                        .map_err(pg)?,
+                    );
+                    report.totp = revoke_totp().await?;
+                    report.recovery_codes = drop_codes().await?;
+                    let used = tx
+                        .execute("DELETE FROM recovery_codes WHERE user_id=$1", &[&user.as_str()])
+                        .await
+                        .map_err(pg)?;
+                    let flag = tx
+                        .execute(
+                            "UPDATE users SET factor_recovery_required_at=NULL WHERE user_id=$1 AND factor_recovery_required_at IS NOT NULL",
+                            &[&user.as_str()],
+                        )
+                        .await
+                        .map_err(pg)?;
+                    tx.execute("DELETE FROM webauthn_challenges WHERE user_id=$1", &[&user.as_str()])
+                        .await
+                        .map_err(pg)?;
+                    let changed = report.passkeys + report.totp + report.recovery_codes > 0 || used > 0 || flag > 0;
+                    let ids = live("").await?;
+                    if !changed && ids.is_empty() {
+                        return Ok((false, report));
+                    }
+                    report.sessions = end(ids).await?;
+                }
+                FactorResetScope::Passkey(wanted) => {
+                    let ids: Vec<Vec<u8>> = tx
+                        .query(
+                            "SELECT credential_id FROM webauthn_credentials WHERE user_id=$1 AND state='active'",
+                            &[&user.as_str()],
+                        )
+                        .await
+                        .map_err(pg)?
+                        .iter()
+                        .map(|r| r.get(0))
+                        .collect();
+                    let Some(credential) = ids
+                        .into_iter()
+                        .find(|c| crate::store::sqlite::webauthn::factor_id(c) == *wanted)
+                    else {
+                        return Err(conflict("unknown factor"));
+                    };
+                    tx.execute(
+                        "UPDATE webauthn_credentials SET state='revoked', revoked_at=$3, revoked_reason='factor_reset', revision=revision+1 WHERE credential_id=$1 AND user_id=$2 AND state='active'",
+                        &[&credential, &user.as_str(), &now.secs()],
+                    )
+                    .await
+                    .map_err(pg)?;
+                    tx.execute("DELETE FROM webauthn_challenges WHERE user_id=$1", &[&user.as_str()])
+                        .await
+                        .map_err(pg)?;
+                    report.passkeys = 1;
+                    report.sessions =
+                        end_elevated_sessions(self, &tx, user, &credential, None, reasons::FACTOR_RESET, &request_id).await?;
+                }
+                FactorResetScope::Totp => {
+                    report.totp = revoke_totp().await?;
+                    if report.totp == 0 {
+                        return Ok((false, report));
+                    }
+                    // The sessions a TOTP code elevated or refreshed.
+                    let ids = live(
+                        " AND EXISTS (SELECT 1 FROM jsonb_array_elements(s.factors::jsonb) f WHERE f->>'kind' = 'totp')",
+                    )
+                    .await?;
+                    report.sessions = end(ids).await?;
+                }
+                FactorResetScope::RecoveryCodes => {
+                    report.recovery_codes = drop_codes().await?;
+                    if report.recovery_codes == 0 {
+                        return Ok((false, report));
+                    }
+                }
+            }
+            super::admin::check_deadline(deadline)?;
+            let mut admin_event = admin_event.clone();
+            admin_event.attrs.insert(
+                "count".into(),
+                serde_json::json!(report.passkeys + report.totp + report.recovery_codes),
+            );
+            self.insert_events(&tx, &[admin_event]).await?;
+            tx.commit().await.map_err(pg)?;
+            Ok((true, report))
+        })
+        .await;
+        out.map_err(super::admin::deadline_err)
     }
 }

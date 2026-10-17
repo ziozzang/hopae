@@ -2,7 +2,6 @@
 //! auth-response adapter: only the bound upstream request may receive this output.
 use super::{projection_admission::Admission, receipt_keys::Refused};
 use http::{HeaderName, HeaderValue};
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use zeroize::Zeroizing;
@@ -196,12 +195,12 @@ impl Projector {
             }
         }
     }
-    pub fn project(
+    pub fn project<D: crate::store::meta::MetaDb>(
         &self,
         admission: Admission,
-        db: &mut Connection,
+        db: &mut D,
         clock: &dyn Fn() -> u64,
-        guard: &dyn Fn(&Connection) -> Result<(), Refused>,
+        guard: &dyn Fn(&dyn crate::store::meta::MetaTx) -> Result<(), Refused>,
         resolve: &dyn Fn(&str) -> Result<Zeroizing<String>, Refused>,
     ) -> Result<Output, Refused> {
         let begun = std::time::Instant::now();

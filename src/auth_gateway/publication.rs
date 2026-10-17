@@ -1,10 +1,12 @@
 //! Durable reference-only profile state. The caller owns compilation and runtime installation.
 use super::runtime::Config;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
+use crate::store::meta::{MetaDb, MetaError, MetaTx};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const KEY: &str = "authentication_profile_authority_v1";
+/// The publication topic other replicas follow (`MetaTx::announce`).
+pub const TOPIC: &str = "profiles";
 const LIMIT: usize = 262_144;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -47,19 +49,19 @@ fn decode(value: &str) -> Result<Document, Error> {
     }
     Ok(document)
 }
-pub fn read(connection: &Connection) -> Result<Option<Document>, Error> {
-    let value: Option<String> = connection
-        .query_row("SELECT value FROM meta WHERE key=?1", [KEY], |row| {
-            row.get(0)
-        })
-        .optional()
-        .map_err(|_| Error::Storage)?;
+impl From<MetaError> for Error {
+    fn from(_: MetaError) -> Self {
+        Error::Storage
+    }
+}
+pub fn read(db: &dyn MetaTx) -> Result<Option<Document>, Error> {
+    let value = db.get(KEY)?;
     value.as_deref().map(decode).transpose()
 }
 /// Persist authority and reference-only audit in one transaction; None is a durable tombstone.
 /// Must run in the serialized publication worker after complete runtime compilation.
-pub fn publish(
-    connection: &mut Connection,
+pub fn publish<D: MetaDb>(
+    connection: &mut D,
     expected: u64,
     configuration: Option<Config>,
     actor: &str,
@@ -67,63 +69,57 @@ pub fn publish(
     publish_guarded(connection, expected, configuration, actor, &|_| Ok(()))
 }
 /// Recheck the authenticated actor inside the same transaction as authority and audit writes.
-pub fn publish_guarded(
-    connection: &mut Connection,
+pub fn publish_guarded<D: MetaDb>(
+    connection: &mut D,
     expected: u64,
     configuration: Option<Config>,
     actor: &str,
-    guard: &dyn Fn(&Connection) -> Result<(), Error>,
+    guard: &dyn Fn(&dyn MetaTx) -> Result<(), Error>,
 ) -> Result<Document, Error> {
     if actor.is_empty() || actor.len() > 128 || actor.chars().any(char::is_control) {
         return Err(Error::Invalid);
     }
     let digest = format!("{:x}", Sha256::digest(encoded(&configuration)?));
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|_| Error::Storage)?;
-    guard(&transaction)?;
-    let previous = read(&transaction)?;
-    if previous.as_ref().map_or(0, |d| d.revision) != expected {
-        return Err(Error::Conflict);
-    }
-    let revision = expected
-        .checked_add(1)
-        .filter(|r| *r <= i64::MAX as u64)
-        .ok_or(Error::Invalid)?;
-    let document = Document {
-        revision,
-        digest,
-        configuration,
-    };
-    let value = serde_json::to_string(&document).map_err(|_| Error::Invalid)?;
-    let audit = serde_json::json!({"revision":revision,"actor":actor,"digest":document.digest,
-        "disabled":document.configuration.is_none()})
-    .to_string();
-    transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        rusqlite::params![KEY,value]).map_err(|_| Error::Storage)?;
-    transaction
-        .execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2)",
-            rusqlite::params![
-                format!("authentication_profile_publication_audit:{revision}"),
-                audit
-            ],
-        )
-        .map_err(|_| Error::Storage)?;
-    guard(&transaction)?;
-    transaction.commit().map_err(|_| Error::Storage)?;
-    Ok(document)
+    connection.meta_write(&std::cell::Cell::new(false), |tx| {
+        guard(tx)?;
+        let previous = read(tx)?;
+        if previous.as_ref().map_or(0, |d| d.revision) != expected {
+            return Err(Error::Conflict);
+        }
+        let revision = expected
+            .checked_add(1)
+            .filter(|r| *r <= i64::MAX as u64)
+            .ok_or(Error::Invalid)?;
+        let document = Document {
+            revision,
+            digest,
+            configuration,
+        };
+        let value = serde_json::to_string(&document).map_err(|_| Error::Invalid)?;
+        let audit = serde_json::json!({"revision":revision,"actor":actor,"digest":document.digest,
+            "disabled":document.configuration.is_none()})
+        .to_string();
+        tx.put(KEY, &value)?;
+        tx.insert(
+            &format!("authentication_profile_publication_audit:{revision}"),
+            &audit,
+        )?;
+        tx.announce(&format!("{TOPIC}:{revision}"))?;
+        guard(tx)?;
+        Ok(document)
+    })
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     #[test]
     fn revoked_actor_before_commit_rolls_back_authority_and_audit() {
         let mut db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT")
             .unwrap();
         let calls = std::cell::Cell::new(0);
-        let guard = |_: &Connection| {
+        let guard = |_: &dyn MetaTx| {
             calls.set(calls.get() + 1);
             if calls.get() == 2 {
                 Err(Error::Denied)

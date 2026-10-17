@@ -205,19 +205,8 @@ impl Reconciler {
                 Ok(None)
             };
         };
-        let mut connection = self.services.store.conn();
-        let durable = crate::auth_gateway::publication::read(&connection)
-            .map_err(|_| "the stored authentication profiles are unreadable".to_string())?;
-        let same = match &durable {
-            Some(d) => {
-                serde_json::to_value(&d.configuration).ok()
-                    == serde_json::to_value(&cfg.authentication_gateway).ok()
-            }
-            None => cfg.authentication_gateway.is_none(),
-        };
-        if same {
-            return Ok(None);
-        }
+        use crate::store::meta::MetaDb as _;
+        let mut connection = self.services.store.meta();
         let validate = |profiles: &crate::auth_gateway::runtime::Config| {
             let mut candidate = cfg.clone();
             candidate.authentication_gateway = Some(profiles.clone());
@@ -225,54 +214,101 @@ impl Reconciler {
                 .validate()
                 .map_err(|_| crate::auth_gateway::publication::Error::Invalid)
         };
+        let env = |name: &str| std::env::var(name).ok();
         let mut owner = owner
             .lock()
             .map_err(|_| "the authentication profile owner is unavailable".to_string())?;
-        let previous = durable.as_ref().map_or(0, |d| d.revision);
-        let document = owner
-            .publish(
+        // Several replicas reconcile the same file: whoever publishes first
+        // wins, the others find the store already equal (ADR-0020 slice 5).
+        for _ in 0..3 {
+            let durable = connection
+                .meta_read(|tx| crate::auth_gateway::publication::read(tx))
+                .map_err(|_| "the stored authentication profiles are unreadable".to_string())?;
+            let same = match &durable {
+                Some(d) => {
+                    serde_json::to_value(&d.configuration).ok()
+                        == serde_json::to_value(&cfg.authentication_gateway).ok()
+                }
+                None => cfg.authentication_gateway.is_none(),
+            };
+            if same {
+                // Another replica's publication: follow it at once.
+                let _ = owner.refresh(&mut connection, &env, &validate);
+                return Ok(None);
+            }
+            let previous = durable.as_ref().map_or(0, |d| d.revision);
+            let _ = owner.refresh(&mut connection, &env, &validate);
+            match owner.publish(
                 &mut connection,
                 previous,
                 cfg.authentication_gateway.clone(),
                 "config",
-                &|name| std::env::var(name).ok(),
+                &env,
                 &validate,
-            )
-            .map_err(|e| format!("the configured authentication profiles were refused: {e:?}"))?;
-        Ok(Some(("profiles", previous, document.revision)))
+            ) {
+                Ok(document) => return Ok(Some(("profiles", previous, document.revision))),
+                Err(crate::auth_gateway::publication::Error::Conflict) => continue,
+                Err(e) => {
+                    return Err(format!(
+                        "the configured authentication profiles were refused: {e:?}"
+                    ));
+                }
+            }
+        }
+        Err("the authentication profiles kept changing concurrently; retrying".into())
     }
 
     /// The projection plan, compared by its plans and published at the
     /// store's next revision (as a start does).
     fn projections(&self, cfg: &Config) -> Result<Option<(&'static str, u64, u64)>, String> {
-        let mut connection = self.services.store.conn();
-        let durable = crate::auth_gateway::projection_authority::read(&connection)
-            .map_err(|_| "the stored credential projection is unreadable".to_string())?;
+        use crate::store::meta::MetaDb as _;
+        let mut connection = self.services.store.meta();
         let plans = |c: &Option<crate::auth_gateway::projection::Configuration>| {
             serde_json::to_value(c.as_ref().map(|c| &c.plans)).ok()
         };
-        let current = durable.as_ref().and_then(|d| d.configuration.clone());
-        let same = match &durable {
-            Some(_) => plans(&current) == plans(&cfg.credential_projection),
-            None => cfg.credential_projection.is_none(),
-        };
-        if same {
-            return Ok(None);
-        }
-        let previous = durable.as_ref().map_or(0, |d| d.revision);
-        let mut desired = cfg.credential_projection.clone();
-        if let Some(d) = &mut desired {
-            d.revision = previous + 1;
-        }
         let mut owner = self
             .services
             .projection_authority
             .lock()
             .map_err(|_| "the credential projection owner is unavailable".to_string())?;
-        let document = owner
-            .publish(&mut connection, previous, desired, "config", &|_| Ok(()))
-            .map_err(|_| "the configured credential projection was refused".to_string())?;
-        Ok(Some(("projections", previous, document.revision)))
+        let accept = |_: &crate::auth_gateway::projection::Configuration| Ok(());
+        // As the profiles: concurrent replicas converge on one publication.
+        for _ in 0..3 {
+            let durable = connection
+                .meta_read(|tx| crate::auth_gateway::projection_authority::read(tx))
+                .map_err(|_| "the stored credential projection is unreadable".to_string())?;
+            let current = durable.as_ref().and_then(|d| d.configuration.clone());
+            let same = match &durable {
+                Some(_) => plans(&current) == plans(&cfg.credential_projection),
+                None => cfg.credential_projection.is_none(),
+            };
+            // The file is authoritative: its plans are the capabilities.
+            let _ = owner.refresh(&mut connection, &accept);
+            if same {
+                return Ok(None);
+            }
+            let previous = durable.as_ref().map_or(0, |d| d.revision);
+            let mut desired = cfg.credential_projection.clone();
+            if let Some(d) = &mut desired {
+                d.revision = previous + 1;
+            }
+            match owner.publish(&mut connection, previous, desired, "config", &|_| Ok(())) {
+                Ok(document) => return Ok(Some(("projections", previous, document.revision))),
+                Err(_) => {
+                    // A concurrent publication moved the revision, or the
+                    // plans are refused: re-read before deciding.
+                    let moved = connection
+                        .meta_read(|tx| crate::auth_gateway::projection_authority::read(tx))
+                        .ok()
+                        .flatten()
+                        .map_or(0, |d| d.revision);
+                    if moved == previous {
+                        return Err("the configured credential projection was refused".into());
+                    }
+                }
+            }
+        }
+        Err("the credential projection kept changing concurrently; retrying".into())
     }
 
     fn record(&self, done: &[(&'static str, u64, u64)]) {

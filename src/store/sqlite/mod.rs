@@ -319,7 +319,7 @@ fn commit_inner(
     Ok(())
 }
 
-struct Inner {
+pub(crate) struct Inner {
     shared: Arc<Shared>,
     tx: mpsc::Sender<Job>,
     path: PathBuf,
@@ -330,10 +330,15 @@ struct Inner {
 /// The SQLite store. Cheap to clone; clones share the writer thread.
 #[derive(Clone)]
 pub struct Store {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
 impl Store {
+    /// This store's identity for prepared native owner values.
+    pub(crate) fn owner_ref(&self) -> crate::store::owner_ref::OwnerRef {
+        crate::store::owner_ref::OwnerRef::sqlite(&self.inner)
+    }
+
     /// Create the parent directory (0700 when newly created) and the database
     /// file (0600), open it, run pending migrations and start the writer.
     /// `sinks` names the event sinks that get a delivery row per required event.

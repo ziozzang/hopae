@@ -5,8 +5,8 @@ use super::{
     projection_admission::Admission,
     receipt_keys::Refused,
 };
+use crate::store::meta::{MetaDb, MetaTx};
 use arc_swap::ArcSwap;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::sync::{
@@ -15,6 +15,8 @@ use std::sync::{
 };
 use zeroize::Zeroizing;
 const KEY: &str = "projection_plan_authority_v1";
+/// The publication topic other replicas follow (`MetaTx::announce`).
+pub const TOPIC: &str = "projections";
 const LIMIT: usize = 128 * 1024;
 const MAX_REVISION: u64 = 9_007_199_254_740_991;
 #[derive(Clone, Serialize, Deserialize)]
@@ -31,14 +33,11 @@ fn encoded(config: &Option<Configuration>) -> Result<Vec<u8>, Refused> {
     }
     Ok(bytes)
 }
-pub fn read(db: &Connection) -> Result<Option<Document>, Refused> {
+pub fn read(db: &dyn MetaTx) -> Result<Option<Document>, Refused> {
     Ok(read_encoded(db)?.map(|(document, _)| document))
 }
-fn read_encoded(db: &Connection) -> Result<Option<(Document, String)>, Refused> {
-    let bytes: Option<String> = db
-        .query_row("SELECT value FROM meta WHERE key=?1", [KEY], |r| r.get(0))
-        .optional()
-        .map_err(|_| Refused)?;
+fn read_encoded(db: &dyn MetaTx) -> Result<Option<(Document, String)>, Refused> {
+    let bytes: Option<String> = db.get(KEY).map_err(|_| Refused)?;
     bytes
         .map(|bytes| {
             if bytes.len() > LIMIT + 1024 {
@@ -100,12 +99,8 @@ impl Snapshot {
                 let expected = self.document.as_deref().ok_or(Refused)?;
                 let unchanged = snapshot
                     .connection()
-                    .prepare_cached("SELECT value FROM meta WHERE key=?1")
-                    .map_err(|_| Refused)?
-                    .query_row([KEY], |r| Ok(r.get_ref(0)?.as_str()? == expected))
-                    .optional()
-                    .map_err(|_| Refused)?
-                    .unwrap_or(false);
+                    .value_equals(KEY, expected)
+                    .map_err(|_| Refused)?;
                 if !self.available() || !unchanged {
                     return Err(Refused);
                 }
@@ -115,12 +110,12 @@ impl Snapshot {
             resolve,
         )
     }
-    pub(crate) fn project_observed(
+    pub(crate) fn project_observed<D: MetaDb>(
         &self,
         admission: super::projection_observed::Admission,
-        db: &mut Connection,
+        db: &mut D,
         clock: Arc<hangang_runtime::time::ReceiverClock>,
-        guard: &dyn Fn(&Connection) -> Result<(), Refused>,
+        guard: &dyn Fn(&dyn MetaTx) -> Result<(), Refused>,
         resolve: &dyn Fn(&str) -> Result<Zeroizing<String>, Refused>,
     ) -> Result<super::projection_observed::Output, Refused> {
         if !self.available() {
@@ -133,13 +128,7 @@ impl Snapshot {
             &|db| {
                 guard(db)?;
                 let expected = self.document.as_deref().ok_or(Refused)?;
-                let unchanged = db
-                    .prepare_cached("SELECT value FROM meta WHERE key=?1")
-                    .map_err(|_| Refused)?
-                    .query_row([KEY], |r| Ok(r.get_ref(0)?.as_str()? == expected))
-                    .optional()
-                    .map_err(|_| Refused)?
-                    .unwrap_or(false);
+                let unchanged = db.value_equals(KEY, expected).map_err(|_| Refused)?;
                 if !self.available() || !unchanged {
                     return Err(Refused);
                 }
@@ -150,12 +139,12 @@ impl Snapshot {
     }
     /// The captured reader cannot issue after a durable update/tombstone, even in
     /// the DB-commit/snapshot-install interval. External guard rechecks live owners.
-    pub fn project(
+    pub fn project<D: MetaDb>(
         &self,
         admission: Admission,
-        db: &mut Connection,
+        db: &mut D,
         clock: &dyn Fn() -> u64,
-        guard: &dyn Fn(&Connection) -> Result<(), Refused>,
+        guard: &dyn Fn(&dyn MetaTx) -> Result<(), Refused>,
         resolve: &dyn Fn(&str) -> Result<Zeroizing<String>, Refused>,
     ) -> Result<Output, Refused> {
         if !self.available.load(Ordering::Acquire) {
@@ -172,15 +161,9 @@ impl Snapshot {
                     return Err(Refused);
                 }
                 let expected = self.document.as_deref().ok_or(Refused)?;
-                // Borrow SQLite's row bytes: no JSON decoding, plan compilation
+                // Compared in the database: no JSON decoding, plan compilation
                 // or temporary document allocation on the request path.
-                let unchanged = db
-                    .prepare_cached("SELECT value FROM meta WHERE key=?1")
-                    .map_err(|_| Refused)?
-                    .query_row([KEY], |row| Ok(row.get_ref(0)?.as_str()? == expected))
-                    .optional()
-                    .map_err(|_| Refused)?
-                    .unwrap_or(false);
+                let unchanged = db.value_equals(KEY, expected).map_err(|_| Refused)?;
                 if !unchanged {
                     return Err(Refused);
                 }
@@ -244,7 +227,7 @@ pub struct Authority {
 impl Authority {
     /// No bootstrap overwrite. An absent DB row is disabled revision zero, unless
     /// an external minimum requires a prior publication to exist.
-    pub fn load(db: &Connection, minimum_revision: u64) -> Result<Self, Refused> {
+    pub fn load(db: &dyn MetaTx, minimum_revision: u64) -> Result<Self, Refused> {
         let (document, encoded_document) = match read_encoded(db)? {
             Some((document, bytes)) => (Some(document), Some(bytes)),
             None => (None, None),
@@ -270,15 +253,56 @@ impl Authority {
     pub fn reader(&self) -> Arc<ArcSwap<Snapshot>> {
         self.snapshot.clone()
     }
+    /// Follow a publication another replica committed (ADR-0020 slice 5).
+    /// Installs the durable document when it differs from the live one, or
+    /// reopens readers fenced by an uncertain commit once the durable state
+    /// is known. Never moves backwards. A durable document this process
+    /// cannot accept (`capabilities`) is refused and the live readers stay
+    /// as they are; they already refuse to issue against a changed row.
+    /// Runs under the same owner lock as `publish`. True when installed.
+    pub fn refresh<D: MetaDb>(
+        &mut self,
+        db: &mut D,
+        capabilities: &dyn Fn(&Configuration) -> Result<(), Refused>,
+    ) -> Result<bool, Refused> {
+        let current = self.snapshot.load_full();
+        let Some((document, bytes)) = db.meta_read(|tx| read_encoded(tx))? else {
+            return Ok(false);
+        };
+        if document.revision < current.revision
+            || (current.available()
+                && current.revision == document.revision
+                && current.document.as_deref() == Some(bytes.as_str()))
+        {
+            return Ok(false);
+        }
+        if let Some(config) = &document.configuration {
+            capabilities(config)?;
+        }
+        let projector = document
+            .configuration
+            .as_ref()
+            .map(|c| Projector::compile(c.clone()))
+            .transpose()?;
+        // Close readers of the replaced snapshot before installing.
+        current.available.store(false, Ordering::Release);
+        self.snapshot.store(Arc::new(Snapshot {
+            available: AtomicBool::new(true),
+            revision: document.revision,
+            document: Some(bytes),
+            projector,
+        }));
+        Ok(true)
+    }
     /// Exclusive native owner must remain the sole publisher. Desired revision
     /// must equal expected+1; None creates a durable disabled tombstone.
-    pub fn publish(
+    pub fn publish<D: MetaDb>(
         &mut self,
-        db: &mut Connection,
+        db: &mut D,
         expected: u64,
         desired: Option<Configuration>,
         actor: &str,
-        guard: &dyn Fn(&Connection) -> Result<(), Refused>,
+        guard: &dyn Fn(&dyn MetaTx) -> Result<(), Refused>,
     ) -> Result<Document, Refused> {
         if actor.is_empty()
             || actor.len() > 128
@@ -320,41 +344,32 @@ impl Authority {
             return Err(Refused);
         }
         let commit_attempted = std::cell::Cell::new(false);
-        let result = (|| -> Result<(), Refused> {
-            let tx = db
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(|_| Refused)?;
-            guard(&tx)?;
-            if read(&tx)?.as_ref().map_or(0, |d| d.revision) != expected {
+        let audit_key = format!("projection_plan_publication_audit:{revision}");
+        let result = db.meta_write(&commit_attempted, |tx| -> Result<(), Refused> {
+            guard(tx)?;
+            if read(tx)?.as_ref().map_or(0, |d| d.revision) != expected {
                 return Err(Refused);
             }
-            tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", rusqlite::params![KEY,value]).map_err(|_| Refused)?;
-            tx.execute(
-                "INSERT INTO meta(key,value) VALUES(?1,?2)",
-                rusqlite::params![
-                    format!("projection_plan_publication_audit:{revision}"),
-                    audit
-                ],
-            )
-            .map_err(|_| Refused)?;
-            guard(&tx)?;
-            let final_value: String = tx
-                .query_row("SELECT value FROM meta WHERE key=?1", [KEY], |r| r.get(0))
+            tx.put(KEY, &value).map_err(|_| Refused)?;
+            tx.insert(&audit_key, &audit).map_err(|_| Refused)?;
+            tx.announce(&format!("{TOPIC}:{revision}"))
                 .map_err(|_| Refused)?;
-            if final_value != value {
+            guard(tx)?;
+            if tx.get(KEY).map_err(|_| Refused)?.as_deref() != Some(value.as_str()) {
                 return Err(Refused);
             }
-            commit_attempted.set(true);
-            tx.commit().map_err(|_| Refused)?;
             Ok(())
-        })();
+        });
         if let Err(refusal) = result {
+            // Only a definite rollback to the exact prior document reopens readers.
             if !commit_attempted.get()
-                && db.is_autocommit()
-                && read_encoded(db).ok().is_some_and(|document| {
-                    document.as_ref().map(|(_, bytes)| bytes.as_str())
-                        == previous.document.as_deref()
-                })
+                && db
+                    .meta_read(|tx| read_encoded(tx))
+                    .ok()
+                    .is_some_and(|document| {
+                        document.as_ref().map(|(_, bytes)| bytes.as_str())
+                            == previous.document.as_deref()
+                    })
             {
                 previous.available.store(true, Ordering::Release);
             }
@@ -369,6 +384,7 @@ impl Authority {
 mod tests {
     use super::*;
     use crate::auth_gateway::projection::{Credential, Plan};
+    use rusqlite::Connection;
     fn config(revision: u64) -> Configuration {
         Configuration {
             revision,
@@ -442,7 +458,9 @@ mod tests {
         assert!(
             owner
                 .publish(&mut db, 1, None, "operator", &|tx| {
-                    tx.execute("INSERT INTO child(parent_id) VALUES(42)", [])
+                    tx.sqlite()
+                        .unwrap()
+                        .execute("INSERT INTO child(parent_id) VALUES(42)", [])
                         .map_err(|_| Refused)?;
                     Ok(())
                 })
@@ -546,7 +564,9 @@ mod tests {
                 .publish(&mut db, 0, Some(config(1)), "operator", &|db| {
                     calls.set(calls.get() + 1);
                     if calls.get() == 2 {
-                        db.execute("UPDATE meta SET value='null' WHERE key=?1", [KEY])
+                        db.sqlite()
+                            .unwrap()
+                            .execute("UPDATE meta SET value='null' WHERE key=?1", [KEY])
                             .map_err(|_| Refused)?;
                     }
                     Ok(())

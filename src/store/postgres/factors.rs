@@ -515,12 +515,9 @@ async fn apply_external_publication(
 }
 
 async fn registry_lock(tx: &Transaction<'_>) -> StoreResult<()> {
-    tx.execute(
-        "SELECT pg_advisory_xact_lock($1)",
-        &[&EXTERNAL_REGISTRY_LOCK],
-    )
-    .await
-    .map_err(pg)?;
+    tx.execute(super::ADVISORY_XACT_LOCK, &[&EXTERNAL_REGISTRY_LOCK])
+        .await
+        .map_err(pg)?;
     Ok(())
 }
 

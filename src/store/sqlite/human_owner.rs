@@ -4,6 +4,7 @@ use super::{
     provider_owner::PreparedProviders,
     rows::{self, HANDLE_COLS, SESSION_COLS, blob, cols},
 };
+use crate::store::owner_ref::OwnerRef;
 use crate::{
     crypto::Timestamp,
     policy::step_up,
@@ -89,28 +90,72 @@ fn same(a: &HandleView, b: &HandleView) -> bool {
         && a.user.authz_version == b.user.authz_version
         && a.user.groups == b.user.groups
 }
-/// Structurally binds the native Store writer connection to its owner identity.
+/// The store connection a native ledger operation writes through: the
+/// SQLite writer connection, or PostgreSQL owner transactions (advisory
+/// lock 7070, decision rows read `FOR SHARE`).
+pub(crate) enum LedgerDb<'a> {
+    Sqlite(&'a mut rusqlite::Connection),
+    #[cfg(feature = "postgres")]
+    Postgres(crate::store::postgres::meta::PgMeta),
+}
+
+impl crate::store::meta::MetaDb for LedgerDb<'_> {
+    fn meta_read<T, E: From<crate::store::meta::MetaError>>(
+        &mut self,
+        f: impl FnOnce(&dyn crate::store::meta::MetaTx) -> Result<T, E>,
+    ) -> Result<T, E> {
+        match self {
+            LedgerDb::Sqlite(c) => c.meta_read(f),
+            #[cfg(feature = "postgres")]
+            LedgerDb::Postgres(p) => p.meta_read(f),
+        }
+    }
+    fn meta_write<T, E: From<crate::store::meta::MetaError>>(
+        &mut self,
+        attempted: &std::cell::Cell<bool>,
+        f: impl FnOnce(&dyn crate::store::meta::MetaTx) -> Result<T, E>,
+    ) -> Result<T, E> {
+        match self {
+            LedgerDb::Sqlite(c) => c.meta_write(attempted, f),
+            #[cfg(feature = "postgres")]
+            LedgerDb::Postgres(p) => p.meta_write(attempted, f),
+        }
+    }
+}
+
+/// Structurally binds the native ledger connection to its owner identity.
 /// No constructor or mutable connection accessor leaves this module.
-#[allow(dead_code)] // H4 orchestration follows this separately qualified bridge.
 pub(crate) struct Ledger<'a> {
-    connection: &'a mut rusqlite::Connection,
-    owner: std::sync::Arc<super::Inner>,
+    db: LedgerDb<'a>,
+    owner: OwnerRef,
 }
-#[allow(dead_code)] // Constructed only by the native ledger bridge.
+/// One open ledger transaction, bound to the store it belongs to.
 pub(crate) struct LedgerSnapshot<'a> {
-    connection: &'a rusqlite::Connection,
-    owner: &'a std::sync::Arc<super::Inner>,
+    tx: &'a dyn crate::store::meta::MetaTx,
+    owner: &'a OwnerRef,
 }
-#[allow(dead_code)]
 impl LedgerSnapshot<'_> {
-    pub(crate) fn belongs_to(&self, store: &Store) -> bool {
-        std::sync::Arc::ptr_eq(self.owner, &store.inner)
+    pub(crate) fn belongs_to(&self, store: &crate::store::Store) -> bool {
+        self.owner.same(&store.owner_ref())
     }
-    pub(crate) fn connection(&self) -> &rusqlite::Connection {
-        self.connection
+    pub(crate) fn connection(&self) -> &dyn crate::store::meta::MetaTx {
+        self.tx
+    }
+    /// A statement inside this (test) transaction, on either backend.
+    #[cfg(test)]
+    pub(crate) fn execute_for_test(&self, sql: &str) -> StoreResult<()> {
+        if let Some(c) = self.tx.sqlite() {
+            c.execute(sql, [])?;
+            return Ok(());
+        }
+        #[cfg(feature = "postgres")]
+        if let Some(p) = self.tx.postgres() {
+            p.query_opt(sql, &[])?;
+            return Ok(());
+        }
+        Err(refused())
     }
 }
-#[allow(dead_code)]
 impl Ledger<'_> {
     pub(crate) fn consume_observed_pair<T>(
         &mut self,
@@ -121,31 +166,50 @@ impl Ledger<'_> {
         ) -> Result<(), crate::auth_gateway::receipt_keys::Refused>,
         final_guard: &dyn Fn() -> Result<(), crate::auth_gateway::receipt_keys::Refused>,
         operation: impl FnOnce(
-            &rusqlite::Transaction<'_>,
+            &dyn crate::store::meta::MetaTx,
         ) -> Result<T, crate::auth_gateway::receipt_keys::Refused>,
     ) -> Result<T, crate::auth_gateway::receipt_keys::Refused> {
         let owner = &self.owner;
         crate::auth_gateway::receipt_replay::consume_observed_pair_with_final(
-            self.connection,
+            &mut self.db,
             proofs,
             clock,
-            &|connection| guard(&LedgerSnapshot { connection, owner }),
+            &|tx| guard(&LedgerSnapshot { tx, owner }),
             final_guard,
             operation,
         )
     }
+    /// One ledger write transaction that is always rolled back.
     #[cfg(test)]
     pub(crate) fn test_transaction<T>(
         &mut self,
         operation: impl FnOnce(&LedgerSnapshot<'_>) -> StoreResult<T>,
     ) -> StoreResult<T> {
-        let tx = self.connection.transaction()?;
-        let value = operation(&LedgerSnapshot {
-            connection: &tx,
-            owner: &self.owner,
-        })?;
-        tx.rollback()?;
-        Ok(value)
+        let owner = &self.owner;
+        match &mut self.db {
+            LedgerDb::Sqlite(connection) => {
+                let tx = connection.transaction()?;
+                let value = operation(&LedgerSnapshot { tx: &tx, owner })?;
+                tx.rollback()?;
+                Ok(value)
+            }
+            #[cfg(feature = "postgres")]
+            LedgerDb::Postgres(db) => {
+                use crate::store::meta::MetaDb as _;
+                struct Rollback;
+                impl From<crate::store::meta::MetaError> for Rollback {
+                    fn from(_: crate::store::meta::MetaError) -> Self {
+                        Rollback
+                    }
+                }
+                let mut out = None;
+                let _ = db.meta_write(&std::cell::Cell::new(false), |tx| {
+                    out = Some(operation(&LedgerSnapshot { tx, owner }));
+                    Err::<(), _>(Rollback)
+                });
+                out.unwrap_or_else(|| Err(refused()))
+            }
+        }
     }
 }
 /// Prepared exclusively from actual native qualified owners and Witness.
@@ -162,53 +226,84 @@ pub(crate) struct SnapshotCheck {
     original: Option<Current>,
 }
 impl SnapshotCheck {
+    /// The configuration generation and the snapshot row on PostgreSQL
+    /// (locked `FOR SHARE` inside an owner write).
+    #[cfg(feature = "postgres")]
+    #[allow(clippy::type_complexity)]
+    fn postgres_rows(
+        &self,
+        tx: &dyn crate::store::meta::MetaTx,
+    ) -> StoreResult<(Option<String>, Option<(HandleView, i64, String)>)> {
+        use crate::store::postgres::human;
+        let tx = tx.postgres().ok_or_else(refused)?;
+        let config = human::config_generation(tx)?;
+        let found = human::snapshot_row(
+            tx,
+            &self.expected.handle.handle_sha256,
+            self.expected.handle.host.as_str(),
+        )?;
+        Ok((config, found))
+    }
+    #[cfg(not(feature = "postgres"))]
+    #[allow(clippy::type_complexity)]
+    fn postgres_rows(
+        &self,
+        _tx: &dyn crate::store::meta::MetaTx,
+    ) -> StoreResult<(Option<String>, Option<(HandleView, i64, String)>)> {
+        Err(refused())
+    }
     pub(crate) fn current_on(
         &self,
-        tx: &rusqlite::Connection,
+        tx: &dyn crate::store::meta::MetaTx,
         now: Timestamp,
     ) -> StoreResult<Current> {
         let app = self.app.policy();
-        let config: Option<String> = tx
-            .query_row(
-                "SELECT value FROM meta WHERE key='config_generation'",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?;
+        let (config, found) = if let Some(tx) = tx.sqlite() {
+            let config: Option<String> = tx
+                .query_row(
+                    "SELECT value FROM meta WHERE key='config_generation'",
+                    [],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let sql = format!(
+                "SELECT {}, {}, u.status,u.authz_version,u.groups,o.revision,a.realm FROM session_handles h JOIN sessions s ON s.session_id=h.session_id JOIN users u ON u.user_id=s.user_id JOIN providers p ON p.provider_id=s.provider_id AND p.enabled=1 AND p.deleted_at IS NULL JOIN human_provider_owners o ON o.provider_id=p.provider_id JOIN human_user_ids i ON i.user_id=u.user_id JOIN human_authority_realm a ON a.singleton=1 WHERE h.handle_sha256=?1 AND h.host=?2 AND length(s.factors)<=65536 AND length(s.snapshot)<=65536 AND length(u.groups)<=65536",
+                cols("h", HANDLE_COLS),
+                cols("s", SESSION_COLS)
+            );
+            let hn = HANDLE_COLS.len();
+            let sn = SESSION_COLS.len();
+            let found = tx
+                .query_row(
+                    &sql,
+                    params![
+                        blob(&self.expected.handle.handle_sha256),
+                        self.expected.handle.host.as_str()
+                    ],
+                    |r| {
+                        Ok((|| -> StoreResult<_> {
+                            Ok((
+                                HandleView {
+                                    handle: rows::handle(r, 0)?,
+                                    session: rows::session(r, hn)?,
+                                    user: rows::user_authz(r, hn + sn)?,
+                                },
+                                r.get::<_, i64>(hn + sn + 3)?,
+                                r.get::<_, String>(hn + sn + 4)?,
+                            ))
+                        })())
+                    },
+                )
+                .optional()?
+                .transpose()?;
+            (config, found)
+        } else {
+            self.postgres_rows(tx)?
+        };
         if config.and_then(|s| s.parse::<u64>().ok()) != Some(self.generation) {
             return Err(refused());
         }
-        let sql = format!(
-            "SELECT {}, {}, u.status,u.authz_version,u.groups,o.revision,a.realm FROM session_handles h JOIN sessions s ON s.session_id=h.session_id JOIN users u ON u.user_id=s.user_id JOIN providers p ON p.provider_id=s.provider_id AND p.enabled=1 AND p.deleted_at IS NULL JOIN human_provider_owners o ON o.provider_id=p.provider_id JOIN human_user_ids i ON i.user_id=u.user_id JOIN human_authority_realm a ON a.singleton=1 WHERE h.handle_sha256=?1 AND h.host=?2 AND length(s.factors)<=65536 AND length(s.snapshot)<=65536 AND length(u.groups)<=65536",
-            cols("h", HANDLE_COLS),
-            cols("s", SESSION_COLS)
-        );
-        let hn = HANDLE_COLS.len();
-        let sn = SESSION_COLS.len();
-        let found = tx
-            .query_row(
-                &sql,
-                params![
-                    blob(&self.expected.handle.handle_sha256),
-                    self.expected.handle.host.as_str()
-                ],
-                |r| {
-                    Ok((|| -> StoreResult<_> {
-                        Ok((
-                            HandleView {
-                                handle: rows::handle(r, 0)?,
-                                session: rows::session(r, hn)?,
-                                user: rows::user_authz(r, hn + sn)?,
-                            },
-                            r.get::<_, i64>(hn + sn + 3)?,
-                            r.get::<_, String>(hn + sn + 4)?,
-                        ))
-                    })())
-                },
-            )
-            .optional()?
-            .transpose()?
-            .ok_or_else(refused)?;
+        let found = found.ok_or_else(refused)?;
         let (current, provider_revision, realm) = found;
         if !super::identity_owner::valid_realm(&realm) {
             return Err(refused());
@@ -327,20 +422,19 @@ impl SnapshotCheck {
 impl Store {
     /// Serialized native writer; the canonical receipt ledger stays in this DB.
     /// Cancellation must be fenced by the retained request owner inside operation.
-    #[allow(dead_code)] // Default-off H4 adapter consumes this native bridge.
     pub(crate) async fn human_ledger<T: Send + 'static>(
         &self,
         deadline: Deadline,
         operation: impl FnOnce(&mut Ledger<'_>) -> StoreResult<T> + Send + 'static,
     ) -> StoreResult<T> {
-        let owner = self.inner.clone();
+        let owner = self.owner_ref();
         self.write_checked(
             "human_projection_ledger",
             Some(deadline),
             move |env, check| {
                 check.now()?;
                 let value = operation(&mut Ledger {
-                    connection: &mut env.conn,
+                    db: LedgerDb::Sqlite(&mut env.conn),
                     owner,
                 })?;
                 check.now()?;
@@ -357,7 +451,7 @@ impl Store {
         now: Timestamp,
         deadline: Deadline,
     ) -> StoreResult<Current> {
-        let prepared = self.prepare_human_snapshot(prepared, materials, witness)?;
+        let prepared = prepare_human_snapshot(&self.owner_ref(), prepared, materials, witness)?;
         self.read_checked(
             "require_human_snapshot",
             Some(deadline),
@@ -372,28 +466,96 @@ impl Store {
         )
         .await
     }
-    pub(crate) fn prepare_human_snapshot(
-        &self,
-        prepared: &PreparedProviders,
-        materials: &super::material_owner::Published,
-        witness: &Witness,
-    ) -> StoreResult<SnapshotCheck> {
-        let (generation, revision) =
-            prepared.human_expected(self, &witness.view.session.provider_id)?;
-        if generation != witness.snapshot.generation {
-            return Err(refused());
-        }
-        Ok(SnapshotCheck {
-            generation,
-            revision,
-            material: materials.expected(self, witness.view.session.provider_id.as_str())?,
-            expected: witness.view.clone(),
-            app: witness.retained_app(),
-            policy: witness.session_policy,
-            path: witness.path.clone(),
-            original_expiry: witness.expires,
-            original: witness.durable.clone(),
+}
+
+/// The durable comparison of a witness against the store `owner` its
+/// preparation was read from (any other store's values are refused).
+pub(crate) fn prepare_human_snapshot(
+    owner: &OwnerRef,
+    prepared: &PreparedProviders,
+    materials: &super::material_owner::Published,
+    witness: &Witness,
+) -> StoreResult<SnapshotCheck> {
+    let (generation, revision) =
+        prepared.human_expected(owner, &witness.view.session.provider_id)?;
+    if generation != witness.snapshot.generation {
+        return Err(refused());
+    }
+    Ok(SnapshotCheck {
+        generation,
+        revision,
+        material: materials.expected(owner, witness.view.session.provider_id.as_str())?,
+        expected: witness.view.clone(),
+        app: witness.retained_app(),
+        policy: witness.session_policy,
+        path: witness.path.clone(),
+        original_expiry: witness.expires,
+        original: witness.durable.clone(),
+    })
+}
+
+/// The native Human owners on PostgreSQL (ADR-0020 slice 5).
+#[cfg(feature = "postgres")]
+pub(crate) mod postgres {
+    use super::*;
+    use crate::store::meta::MetaDb as _;
+    use crate::store::postgres::{PgStore, meta::PgMeta};
+    use std::sync::Arc;
+
+    /// The ledger operation runs on a blocking thread over owner
+    /// transactions bound to `deadline`: their statements time out, and past
+    /// it nothing commits.
+    pub(crate) async fn human_ledger<T: Send + 'static>(
+        store: &Arc<PgStore>,
+        deadline: Deadline,
+        operation: impl FnOnce(&mut Ledger<'_>) -> StoreResult<T> + Send + 'static,
+    ) -> StoreResult<T> {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            if std::time::Instant::now() >= deadline.0 {
+                return Err(StoreError::Unavailable("deadline".into()));
+            }
+            let owner = OwnerRef::postgres(&store);
+            let value = operation(&mut Ledger {
+                db: LedgerDb::Postgres(PgMeta::new(store).within(deadline)),
+                owner,
+            })?;
+            if std::time::Instant::now() >= deadline.0 {
+                return Err(StoreError::Unavailable("deadline".into()));
+            }
+            Ok(value)
         })
+        .await
+        .map_err(|_| StoreError::Unavailable("Human ledger task failed".into()))?
+    }
+
+    /// One read snapshot (`REPEATABLE READ`), as SQLite's deferred read.
+    pub(crate) async fn require_human_snapshot(
+        store: &Arc<PgStore>,
+        prepared: &PreparedProviders,
+        materials: &super::super::material_owner::Published,
+        witness: &Witness,
+        now: Timestamp,
+        deadline: Deadline,
+    ) -> StoreResult<Current> {
+        let prepared =
+            prepare_human_snapshot(&OwnerRef::postgres(store), prepared, materials, witness)?;
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut db = PgMeta::new(store).within(deadline);
+            db.meta_read(|tx| prepared.current_on(tx, now).map_err(|e| HumanRead(Some(e))))
+                .map_err(|e: HumanRead| e.0.unwrap_or_else(refused))
+        })
+        .await
+        .map_err(|_| StoreError::Unavailable("Human snapshot task failed".into()))?
+    }
+
+    /// A store error, or a storage failure of the meta transaction.
+    struct HumanRead(Option<StoreError>);
+    impl From<crate::store::meta::MetaError> for HumanRead {
+        fn from(_: crate::store::meta::MetaError) -> Self {
+            HumanRead(Some(StoreError::Unavailable("postgres".into())))
+        }
     }
 }
 

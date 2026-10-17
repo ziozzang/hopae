@@ -27,9 +27,60 @@ use std::{
 fn deadline() -> Deadline {
     Deadline(Instant::now() + Duration::from_secs(5))
 }
+/// Raw SQL on a fixture's store, whichever backend it runs on (SQLite
+/// statements; the few SQLite-only forms are translated for PostgreSQL).
+#[derive(Clone)]
+enum Raw {
+    Sqlite(Store),
+    #[cfg(feature = "postgres")]
+    Postgres(Arc<crate::store::conformance::PgSchema>),
+}
+#[cfg(feature = "postgres")]
+fn pg_sql(sql: &str) -> String {
+    sql.replace("enabled=0", "enabled=false")
+        .replace("enabled=1", "enabled=true")
+        .replace("zeroblob(32)", "decode(repeat('00',32),'hex')")
+        .replace(
+            "json_set(factors,'$[#-1].kind','external')",
+            "jsonb_set(factors::jsonb,ARRAY[(jsonb_array_length(factors::jsonb)-1)::text,'kind'],'\"external\"')::text",
+        )
+        .replace("?1", "$1")
+        .replace("?2", "$2")
+}
+impl Raw {
+    fn exec(&self, sql: &str) {
+        match self {
+            Raw::Sqlite(s) => s.conn().execute_batch(sql).unwrap(),
+            #[cfg(feature = "postgres")]
+            Raw::Postgres(p) => p.exec(&pg_sql(sql)),
+        }
+    }
+    fn exec_text(&self, sql: &str, value: &str) {
+        match self {
+            Raw::Sqlite(s) => {
+                s.conn().execute(sql, [value]).unwrap();
+            }
+            #[cfg(feature = "postgres")]
+            Raw::Postgres(p) => p.exec_text(&pg_sql(sql), value),
+        }
+    }
+    fn count(&self, sql: &str) -> i64 {
+        match self {
+            Raw::Sqlite(s) => s.conn().query_row(sql, [], |r| r.get(0)).unwrap(),
+            #[cfg(feature = "postgres")]
+            Raw::Postgres(p) => p.scalar(&pg_sql(sql)),
+        }
+    }
+    fn postgres(&self) -> bool {
+        !matches!(self, Raw::Sqlite(_))
+    }
+}
 struct Fx {
     _dir: tempfile::TempDir,
     store: Store,
+    /// The PostgreSQL schema when the suite runs on PostgreSQL.
+    #[cfg(feature = "postgres")]
+    pg: Option<Arc<crate::store::conformance::PgSchema>>,
     clock: Arc<TestClock>,
     rng: Arc<SeededRng>,
     ctx: VerifyContext,
@@ -40,13 +91,37 @@ struct Fx {
     portal: std::sync::Mutex<Option<Secret>>,
 }
 impl Fx {
+    /// The suite's fixture: SQLite, or PostgreSQL when the suite is asked to
+    /// run there (`HOPAE_TEST_HUMAN_BACKEND=postgres`).
     async fn new(ldap: Option<serde_json::Value>) -> Self {
+        Self::new_on(ldap, crate::store::conformance::human_suite_on_postgres())
+            .await
+            .expect("PostgreSQL fixture without HOPAE_TEST_POSTGRES_URL")
+    }
+    /// A fixture on SQLite or on a fresh PostgreSQL schema (`None` when no
+    /// PostgreSQL server is configured).
+    async fn new_on(ldap: Option<serde_json::Value>, postgres: bool) -> Option<Self> {
+        #[cfg(not(feature = "postgres"))]
+        if postgres {
+            return None;
+        }
         let dir = tempfile::tempdir().unwrap();
         let clock = Arc::new(TestClock::new(Timestamp(59_000)));
         let rng = Arc::new(SeededRng::new(593));
-        let store =
-            Store::open(&dir.path().join("native.db"), clock.clone(), vec![], None).unwrap();
-        store.set_rng(rng.clone());
+        #[cfg(feature = "postgres")]
+        let pg = if postgres {
+            Some(Arc::new(crate::store::conformance::PgSchema::new()?))
+        } else {
+            None
+        };
+        let store = Self::open_store(
+            &dir,
+            #[cfg(feature = "postgres")]
+            &pg,
+            clock.clone(),
+            rng.clone(),
+        )
+        .await;
         store.bump_config_generation().await.unwrap();
         let oidc = ldap
             .is_none()
@@ -113,9 +188,11 @@ impl Fx {
             clock.clone(),
             rng.as_ref(),
         );
-        Self {
+        Some(Self {
             _dir: dir,
             store,
+            #[cfg(feature = "postgres")]
+            pg,
             clock,
             rng,
             ctx,
@@ -124,7 +201,7 @@ impl Fx {
             provider_config,
             _oidc: oidc,
             portal: std::sync::Mutex::new(None),
-        }
+        })
     }
     fn input(&self, cookie: &Secret) -> VerifyInput {
         VerifyInput {
@@ -177,10 +254,34 @@ impl Fx {
         witness.expect("ordinary Allow did not retain witness")
     }
     fn sql(&self, sql: &str) {
-        self.store.conn().execute_batch(sql).unwrap();
+        self.raw().exec(sql);
+    }
+    /// Raw SQL on this fixture's store, usable from any thread.
+    fn raw(&self) -> Raw {
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = &self.pg {
+            return Raw::Postgres(pg.clone());
+        }
+        Raw::Sqlite(self.store.clone())
+    }
+    /// Open (or, with the same directory or schema, reopen) the store.
+    async fn open_store(
+        dir: &tempfile::TempDir,
+        #[cfg(feature = "postgres")] pg: &Option<Arc<crate::store::conformance::PgSchema>>,
+        clock: Arc<TestClock>,
+        rng: Arc<SeededRng>,
+    ) -> Store {
+        #[cfg(feature = "postgres")]
+        if let Some(pg) = pg {
+            return pg.store(clock, rng).await;
+        }
+        let store =
+            Store::open(&dir.path().join("native.db"), clock.clone(), vec![], None).unwrap();
+        store.set_rng(rng);
+        store
     }
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_exact_allow_and_post_refresh_expected_snapshot() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -197,7 +298,7 @@ async fn native_human_engine_exact_allow_and_post_refresh_expected_snapshot() {
     let checked = witness.finish(&f.input(&cookie)).await.unwrap();
     checked.require_current(&f.input(&cookie)).await.unwrap();
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_durable_withdrawals_and_provider_aba_refuse_original() {
     for mutation in [
         "UPDATE session_handles SET revoked_at=59",
@@ -219,13 +320,10 @@ async fn native_human_engine_durable_withdrawals_and_provider_aba_refuse_origina
             .unwrap();
         if mutation == "MATERIAL_ABA" {
             f.sql("UPDATE providers SET config='{}'");
-            f.store
-                .conn()
-                .execute(
-                    "UPDATE providers SET config=?1",
-                    [f.provider_config.to_string()],
-                )
-                .unwrap();
+            f.raw().exec_text(
+                "UPDATE providers SET config=?1",
+                &f.provider_config.to_string(),
+            );
         } else {
             f.sql(mutation);
         }
@@ -235,7 +333,7 @@ async fn native_human_engine_durable_withdrawals_and_provider_aba_refuse_origina
         );
     }
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_scope_and_publication_failure_latch() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -263,7 +361,7 @@ async fn native_human_engine_scope_and_publication_failure_latch() {
     f.ctx.snapshot.store(original);
     assert!(checked.require_current(&f.input(&cookie)).await.is_err());
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_original_suspend_wall_rollback_and_clock_failure() {
     for mode in 0..4 {
         let mut f = Fx::new(None).await;
@@ -437,7 +535,7 @@ impl Fx {
         self.redeem(location, &bind).await
     }
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_real_totp_provenance_and_revocation() {
     let f = Fx::new(None).await;
     let (old, _) = f.login().await;
@@ -450,7 +548,7 @@ async fn native_human_engine_real_totp_provenance_and_revocation() {
     f.sql("UPDATE totp_enrollments SET state='revoked',revision=revision+1");
     assert!(checked.require_current(&f.input(&cookie)).await.is_err());
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_legacy_and_newer_unsupported_factor_cannot_supply_provenance_or_freshness()
  {
     for mutation in [
@@ -515,7 +613,11 @@ async fn native_human_engine_legacy_and_newer_unsupported_factor_cannot_supply_p
     let mut ctx = f.ctx.clone();
     ctx.snapshot = apps;
     f.clock.set(Timestamp(61_000));
-    f.sql("UPDATE sessions SET factors=json_insert(factors,'$[#]',json('{\"kind\":\"external\",\"at\":61000}'))");
+    if f.raw().postgres() {
+        f.sql("UPDATE sessions SET factors=(factors::jsonb || '[{\"kind\":\"external\",\"at\":61000}]'::jsonb)::text");
+    } else {
+        f.sql("UPDATE sessions SET factors=json_insert(factors,'$[#]',json('{\"kind\":\"external\",\"at\":61000}'))");
+    }
     assert!(matches!(
         decide(&ctx, f.input(&cookie)).await,
         Decision::Allow { .. }
@@ -530,7 +632,7 @@ async fn native_human_engine_legacy_and_newer_unsupported_factor_cannot_supply_p
     assert!(!matches!(decision, Decision::Allow { .. }));
     assert!(witness.is_none());
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires private owned LDAP TLS fixture, executed separately"]
 async fn native_human_owned_ldap_login_totp_engine_capture() {
     let ldap = serde_json::json!({"ldap":{"endpoint":std::env::var("OWNED_LDAP_ENDPOINT").unwrap(),"starttls":std::env::var("OWNED_LDAP_STARTTLS").is_ok_and(|s|s=="1"),"ca":std::env::var("OWNED_LDAP_CA").unwrap(),"base_dn":"dc=example,dc=test","bind_dn":"cn=reader,dc=example,dc=test","bind_password_env":"OWNED_LDAP_BIND_KEY","username_attribute":"uid","subject_attribute":"entryUUID","timeout_ms":1000}});
@@ -632,7 +734,7 @@ async fn assert_gateway_capture(f: &Fx, cookie: &Secret) {
     assert!(captured.status().is_success());
     assert!(captured.extensions().get::<Arc<human::Checked>>().is_some());
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_owning_gateway_marker_and_caller_gate() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -651,7 +753,7 @@ impl Clock for CallbackClock {
         self.base.now()
     }
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_clock_callback_withdrawal_precedes_joined_current_read() {
     let mut f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -673,17 +775,18 @@ async fn native_human_engine_clock_callback_withdrawal_precedes_joined_current_r
         .finish(&f.input(&cookie))
         .await
         .unwrap();
-    let store = f.store.clone();
+    let raw = f.raw();
     *clock.callback.lock().unwrap() = Some(Box::new(move || {
-        store
-            .conn()
-            .execute("UPDATE users SET status='disabled'", [])
-            .unwrap();
+        raw.exec("UPDATE users SET status='disabled'");
     }));
     assert!(checked.require_current(&f.input(&cookie)).await.is_err());
 }
 #[test]
 fn native_human_engine_cancellation_and_original_queue_deadline_fail_closed() {
+    if crate::store::conformance::human_suite_on_postgres() {
+        // A current-thread runtime and the SQLite writer queue: SQLite only.
+        return;
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(1)
@@ -900,6 +1003,19 @@ impl Fx {
     }
 }
 impl Fx {
+    /// Present an AAL 1 handle for an AAL 2 session (a downgrade fixture).
+    fn downgrade_handle(&self, cookie: &Secret) {
+        let hex = data_encoding::HEXLOWER.encode(&cookie.digest().0);
+        if self.raw().postgres() {
+            self.sql(&format!(
+                "UPDATE session_handles SET issued_aal=1 WHERE handle_sha256=decode('{hex}','hex')"
+            ));
+        } else {
+            self.sql(&format!(
+                "UPDATE session_handles SET issued_aal=1 WHERE handle_sha256=x'{hex}'"
+            ));
+        }
+    }
     async fn republish(&mut self, generation: u64, max_auth_age: Option<Duration>) {
         let mut snapshot = self.config.snapshot(generation);
         snapshot.apps[0].max_auth_age = max_auth_age;
@@ -950,7 +1066,7 @@ impl Fx {
         );
     }
     fn count(&self, sql: &str) -> i64 {
-        self.store.conn().query_row(sql, [], |r| r.get(0)).unwrap()
+        self.raw().count(sql)
     }
     async fn assert_unqualified(&self, cookie: &Secret) {
         let (decision, _, witness) = decide_for_human(
@@ -964,7 +1080,7 @@ impl Fx {
         assert!(witness.is_none());
     }
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_primary_legacy_and_new_registry_cannot_relabel_old_authentication() {
     let mut f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -992,7 +1108,7 @@ async fn native_human_engine_primary_legacy_and_new_registry_cannot_relabel_old_
         0
     );
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_restart_generation_requires_actual_native_primary_reauthentication() {
     let mut f = Fx::new(None).await;
     let (cookie, original) = f.login().await;
@@ -1030,41 +1146,20 @@ async fn native_human_engine_restart_generation_requires_actual_native_primary_r
         .await
         .unwrap();
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_primary_withdrawal_during_actual_token_verification_rolls_back() {
     for mode in 0..4 {
         let f = Fx::new(None).await;
-        let store = f.store.clone();
+        let raw = f.raw();
         let config = f.provider_config.clone();
         f._oidc.as_ref().unwrap().on_token(move || match mode {
-            0 => {
-                store
-                    .conn()
-                    .execute_batch("UPDATE providers SET enabled=0;UPDATE providers SET enabled=1")
-                    .unwrap();
-            }
+            0 => raw.exec("UPDATE providers SET enabled=0;UPDATE providers SET enabled=1"),
             1 => {
-                store
-                    .conn()
-                    .execute("UPDATE providers SET config='{}'", [])
-                    .unwrap();
-                store
-                    .conn()
-                    .execute("UPDATE providers SET config=?1", [config.to_string()])
-                    .unwrap();
+                raw.exec("UPDATE providers SET config='{}'");
+                raw.exec_text("UPDATE providers SET config=?1", &config.to_string());
             }
-            2 => {
-                store
-                    .conn()
-                    .execute(
-                        "UPDATE meta SET value='2' WHERE key='config_generation'",
-                        [],
-                    )
-                    .unwrap();
-            }
-            _ => {
-                store.conn().execute("UPDATE human_provider_material_owners SET revision=revision+1,fingerprint=zeroblob(32)",[]).unwrap();
-            }
+            2 => raw.exec("UPDATE meta SET value='2' WHERE key='config_generation'"),
+            _ => raw.exec("UPDATE human_provider_material_owners SET revision=revision+1,fingerprint=zeroblob(32)"),
         });
         let result = f.try_native_login(None).await;
         assert!(
@@ -1087,10 +1182,14 @@ async fn native_human_engine_primary_withdrawal_during_actual_token_verification
         );
     }
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_primary_insert_failure_rolls_back_session_and_login_consumption() {
     let f = Fx::new(None).await;
-    f.sql("CREATE TRIGGER owned_primary_abort BEFORE INSERT ON session_primary_provenance BEGIN SELECT RAISE(ABORT,'owned primary insertion failure'); END;");
+    if f.raw().postgres() {
+        f.sql("CREATE FUNCTION owned_primary_abort() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'owned primary insertion failure'; END $$; CREATE TRIGGER owned_primary_abort BEFORE INSERT ON session_primary_provenance FOR EACH ROW EXECUTE FUNCTION owned_primary_abort();");
+    } else {
+        f.sql("CREATE TRIGGER owned_primary_abort BEFORE INSERT ON session_primary_provenance BEGIN SELECT RAISE(ABORT,'owned primary insertion failure'); END;");
+    }
     assert!(matches!(
         f.try_native_login(None).await,
         Err(crate::session::service::SessionError::Refused(
@@ -1107,7 +1206,7 @@ async fn native_human_engine_primary_insert_failure_rolls_back_session_and_login
         0
     );
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_primary_ahead_generation_cannot_be_overwritten_by_reauthentication() {
     let mut f = Fx::new(None).await;
     let (cookie, original) = f.login().await;
@@ -1133,7 +1232,7 @@ async fn native_human_engine_primary_ahead_generation_cannot_be_overwritten_by_r
         0
     );
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_primary_schema_guard_and_subject_link_withdrawal() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -1145,11 +1244,19 @@ async fn native_human_engine_primary_schema_guard_and_subject_link_withdrawal() 
         .unwrap();
     f.sql("DELETE FROM identities");
     assert!(checked.require_current(&f.input(&cookie)).await.is_err());
+    if f.raw().postgres() {
+        // The schema guard is SQLite's (PostgreSQL schemas are migration-owned).
+        return;
+    }
     f.sql("DROP TABLE session_primary_provenance;CREATE TABLE session_primary_provenance(session_id TEXT PRIMARY KEY) STRICT;");
     assert!(crate::store::sqlite::validate_foundation(&f.store.conn(), 9).is_err());
 }
 #[test]
 fn native_human_engine_overlapping_current_check_cannot_return_after_retirement() {
+    if crate::store::conformance::human_suite_on_postgres() {
+        // A current-thread runtime and the SQLite writer queue: SQLite only.
+        return;
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(1)
@@ -1182,7 +1289,7 @@ fn native_human_engine_overlapping_current_check_cannot_return_after_retirement(
         assert!(pending.await.is_err());
     });
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_cold_store_reopen_and_new_owner_do_not_adopt_old_primary() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -1191,6 +1298,8 @@ async fn native_human_engine_cold_store_reopen_and_new_owner_do_not_adopt_old_pr
     let Fx {
         _dir,
         store,
+        #[cfg(feature = "postgres")]
+        pg,
         clock,
         rng,
         ctx,
@@ -1203,7 +1312,14 @@ async fn native_human_engine_cold_store_reopen_and_new_owner_do_not_adopt_old_pr
     drop(owner);
     drop(ctx);
     drop(store);
-    let store = Store::open(&_dir.path().join("native.db"), clock.clone(), vec![], None).unwrap();
+    let store = Fx::open_store(
+        &_dir,
+        #[cfg(feature = "postgres")]
+        &pg,
+        clock.clone(),
+        rng.clone(),
+    )
+    .await;
     assert_eq!(store.bump_config_generation().await.unwrap(), 2);
     let applications = Arc::new(arc_swap::ArcSwap::from_pointee(config.snapshot(2)));
     let registry = Arc::new(
@@ -1243,20 +1359,20 @@ async fn native_human_engine_cold_store_reopen_and_new_owner_do_not_adopt_old_pr
     .await;
     assert!(!matches!(decision, Decision::Allow { .. }));
     assert!(witness.is_none());
+    #[cfg(feature = "postgres")]
+    let raw = match pg.clone() {
+        Some(pg) => Raw::Postgres(pg),
+        None => Raw::Sqlite(store.clone()),
+    };
+    #[cfg(not(feature = "postgres"))]
+    let raw = Raw::Sqlite(store.clone());
     assert_eq!(
-        store
-            .conn()
-            .query_row(
-                "SELECT config_generation FROM session_primary_provenance",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
+        raw.count("SELECT config_generation FROM session_primary_provenance"),
         1
     );
     drop(_oidc);
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_legacy_primary_reauthentication_retires_even_equal_time_provenance() {
     let f = Fx::new(None).await;
     let (_, view) = f.login().await;
@@ -1331,7 +1447,7 @@ async fn native_human_engine_legacy_primary_reauthentication_retires_even_equal_
         2
     );
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_touch_cannot_extend_original_lifetime() {
     let mut f = Fx::new(None).await;
     let mut snapshot = f.config.snapshot(1);
@@ -1353,7 +1469,7 @@ async fn native_human_engine_touch_cannot_extend_original_lifetime() {
     ));
     assert!(checked.require_current(&f.input(&cookie)).await.is_err());
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_lower_handle_never_borrows_session_aal2() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -1459,7 +1575,7 @@ async fn native_human_engine_delayed_earlier_wall_sample_is_not_false_rollback()
     assert!(first.await.unwrap().is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_same_reference_material_restart_and_aba() {
     let mut f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -1498,7 +1614,7 @@ async fn native_human_engine_same_reference_material_restart_and_aba() {
     let _ = f.witness(&new).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_cold_store_unchanged_material_restores_original_native_primary() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -1507,6 +1623,8 @@ async fn native_human_engine_cold_store_unchanged_material_restores_original_nat
     let Fx {
         _dir,
         store,
+        #[cfg(feature = "postgres")]
+        pg,
         clock,
         rng,
         ctx,
@@ -1519,7 +1637,14 @@ async fn native_human_engine_cold_store_unchanged_material_restores_original_nat
     drop(owner);
     drop(ctx);
     drop(store);
-    let store = Store::open(&_dir.path().join("native.db"), clock.clone(), vec![], None).unwrap();
+    let store = Fx::open_store(
+        &_dir,
+        #[cfg(feature = "postgres")]
+        &pg,
+        clock.clone(),
+        rng.clone(),
+    )
+    .await;
 
     let applications = Arc::new(arc_swap::ArcSwap::from_pointee(config.snapshot(1)));
     let registry = Arc::new(
@@ -1560,21 +1685,21 @@ async fn native_human_engine_cold_store_unchanged_material_restores_original_nat
     assert!(matches!(decision, Decision::Allow { .. }));
     let checked = witness.unwrap().finish(&captured).await.unwrap();
     checked.require_current(&captured).await.unwrap();
+    #[cfg(feature = "postgres")]
+    let raw = match pg.clone() {
+        Some(pg) => Raw::Postgres(pg),
+        None => Raw::Sqlite(store.clone()),
+    };
+    #[cfg(not(feature = "postgres"))]
+    let raw = Raw::Sqlite(store.clone());
     assert_eq!(
-        store
-            .conn()
-            .query_row(
-                "SELECT config_generation FROM session_primary_provenance",
-                [],
-                |r| r.get::<_, i64>(0)
-            )
-            .unwrap(),
+        raw.count("SELECT config_generation FROM session_primary_provenance"),
         1
     );
     drop(_oidc);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_current_includes_same_transaction_realm_and_latches_retirement() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -1585,6 +1710,23 @@ async fn native_human_current_includes_same_transaction_realm_and_latches_retire
         .await
         .unwrap();
     checked.require_current(&f.input(&cookie)).await.unwrap();
+    if f.raw().postgres() {
+        // PostgreSQL: the same fault injection through its own trigger syntax.
+        #[cfg(feature = "postgres")]
+        {
+            let pg = f.pg.clone().unwrap();
+            let original = pg.text("SELECT realm FROM human_authority_realm");
+            assert!(
+                pg.try_exec("UPDATE human_authority_realm SET realm=md5('a')||md5('b')")
+                    .is_err()
+            );
+            pg.exec("DROP TRIGGER human_realm_update ON human_authority_realm;UPDATE human_authority_realm SET realm=md5('a')||md5('b')");
+            assert!(checked.require_current(&f.input(&cookie)).await.is_err());
+            pg.exec_text("UPDATE human_authority_realm SET realm=$1", &original);
+            assert!(checked.require_current(&f.input(&cookie)).await.is_err());
+        }
+        return;
+    }
     let original: String = f
         .store
         .conn()
@@ -1611,7 +1753,7 @@ async fn native_human_current_includes_same_transaction_realm_and_latches_retire
     assert!(checked.require_current(&f.input(&cookie)).await.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_generated_ingress_original_decode_age_and_caller_pause() {
     use prost::Message;
     use std::sync::atomic::AtomicUsize;
@@ -1782,7 +1924,7 @@ async fn native_human_generated_ingress_original_decode_age_and_caller_pause() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_original_admission_one_shot_wrong_owner_readiness_and_cancel() {
     let f = Fx::new(None).await;
     let ready = crate::app::Readiness::default();
@@ -1830,7 +1972,7 @@ async fn native_human_original_admission_one_shot_wrong_owner_readiness_and_canc
     assert!(weak.upgrade().is_none());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_readiness_retained_after_take_and_checked_current() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -1907,7 +2049,7 @@ fn native_human_readiness_withdrawn_while_actual_engine_store_awaits() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_retained_current_rechecks_actual_owner_without_cookie() {
     for withdrawal in [
         "UPDATE session_handles SET revoked_at=59",
@@ -1937,7 +2079,7 @@ async fn native_human_retained_current_rechecks_actual_owner_without_cookie() {
         );
     }
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_retained_current_cannot_revive_scope_retirement() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -1954,7 +2096,7 @@ async fn native_human_retained_current_cannot_revive_scope_retirement() {
     assert!(checked.require_current_retained().await.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_retained_current_keeps_original_clock_fence() {
     for mode in 0..3 {
         let mut f = Fx::new(None).await;
@@ -2022,9 +2164,11 @@ fn source_binding(
         )
         .unwrap()
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_facts_use_actual_native_user_and_same_owner_clock() {
     let f = Fx::new(None).await;
+    // Built first: a fixture's setup is not charged to the capture's budget.
+    let other = Fx::new(None).await;
     let (cookie, _) = f.login().await;
     let checked = f
         .witness(&cookie)
@@ -2044,7 +2188,6 @@ async fn native_human_source_facts_use_actual_native_user_and_same_owner_clock()
     assert!(facts.user_revision > 0 && facts.credential_generation > 0);
     assert_eq!(facts.application_generation, 1);
     assert!(checked.belongs_to(&f.owner));
-    let other = Fx::new(None).await;
     assert!(!checked.belongs_to(&other.owner));
     let first = checked.source_time().unwrap();
     let next = checked.source_time().unwrap();
@@ -2073,7 +2216,7 @@ async fn native_human_source_facts_use_actual_native_user_and_same_owner_clock()
     );
     assert!(checked.source_time().is_err());
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_facts_refuse_scope_substitution_and_latch() {
     for (app, route, method) in [
         ("other", "owned-route", "GET"),
@@ -2107,7 +2250,7 @@ async fn native_human_source_facts_refuse_scope_substitution_and_latch() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_final_clock_callback_cannot_hide_publication_withdrawal() {
     for final_read in [2, 3] {
         let mut f = Fx::new(None).await;
@@ -2142,7 +2285,7 @@ async fn native_human_source_final_clock_callback_cannot_hide_publication_withdr
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_publication_is_fixed_and_final_check_has_no_clock_callback() {
     let mut f = Fx::new(None).await;
     let calls = Arc::new(AtomicU64::new(0));
@@ -2182,20 +2325,14 @@ async fn native_human_source_publication_is_fixed_and_final_check_has_no_clock_c
     assert!(!publication.accepts(&checked));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_facts_never_promote_aal_from_session_alone() {
     let f = Fx::new(None).await;
     let (old, _) = f.login().await;
     let cookie = f.elevate(&old).await;
     // Deliberate downgrade fixture: retain actual native TOTP session but
     // present an AAL1 handle. A session's stronger level cannot promote it.
-    f.store
-        .conn()
-        .execute(
-            "UPDATE session_handles SET issued_aal=1 WHERE handle_sha256=?1",
-            [cookie.digest().0.as_slice()],
-        )
-        .unwrap();
+    f.downgrade_handle(&cookie);
     let witness = f.witness(&cookie).await;
     assert_eq!(witness.view.session.aal, Aal::Two);
     assert_eq!(witness.view.handle.issued_aal, Aal::One);
@@ -2210,7 +2347,7 @@ async fn native_human_source_facts_never_promote_aal_from_session_alone() {
     assert_eq!(facts.aal, 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_final_fences_do_not_call_wall_after_durable_check() {
     struct CountWall {
         base: Arc<TestClock>,
@@ -2436,7 +2573,7 @@ impl Fx {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_passkey_provenance_and_revocation() {
     let f = Fx::new(None).await;
     let (old, _) = f.login().await;
@@ -2453,7 +2590,7 @@ async fn native_human_engine_passkey_provenance_and_revocation() {
     assert!(checked.require_current(&f.input(&cookie)).await.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_engine_passkey_provenance_is_exact() {
     for mutation in [
         "DELETE FROM session_webauthn_provenance",
@@ -2476,5 +2613,179 @@ async fn native_human_engine_passkey_provenance_is_exact() {
         .await;
         assert!(!matches!(decision, Decision::Allow { .. }), "{mutation}");
         assert!(witness.is_none(), "{mutation}");
+    }
+}
+
+// ---- ADR-0020 slice 5: the native Human owners on both backends -------------
+
+/// SQLite always; PostgreSQL when `HOPAE_TEST_POSTGRES_URL` is set.
+async fn both_backends() -> Vec<Fx> {
+    let mut all = vec![Fx::new_on(None, false).await.unwrap()];
+    if let Some(pg) = Fx::new_on(None, true).await {
+        all.push(pg);
+    }
+    all
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s600_31_native_human_snapshot_and_primary_owner_agree_on_both_backends() {
+    for f in both_backends().await {
+        let name = if f.raw().postgres() {
+            "postgres"
+        } else {
+            "sqlite"
+        };
+        let (cookie, view) = f.login().await;
+        // The login recorded its native primary provenance in its transaction.
+        assert_eq!(
+            f.count(&format!(
+                "SELECT count(*) FROM session_primary_provenance WHERE session_id='{}'",
+                view.session.session_id.as_str()
+            )),
+            1,
+            "{name}"
+        );
+        let checked = f
+            .witness(&cookie)
+            .await
+            .finish(&f.input(&cookie))
+            .await
+            .unwrap();
+        checked.require_current(&f.input(&cookie)).await.unwrap();
+        // A second session's capture survives the first one's withdrawal.
+        let (other, _) = f.login().await;
+        let second = f
+            .witness(&other)
+            .await
+            .finish(&f.input(&other))
+            .await
+            .unwrap();
+        // A provider owner move retires every capture of that provider (and
+        // leaves the prepared registry stale until it is prepared again).
+        f.sql("UPDATE providers SET enabled=0;UPDATE providers SET enabled=1");
+        assert!(
+            checked.require_current(&f.input(&cookie)).await.is_err(),
+            "{name}: provider owner moved"
+        );
+        assert!(
+            second.require_current(&f.input(&other)).await.is_err(),
+            "{name}: provider owner moved"
+        );
+        // Prepared and published again, a fresh login is qualified; a disabled
+        // user then retires it.
+        let mut f = f;
+        assert_eq!(f.store.bump_config_generation().await.unwrap(), 2, "{name}");
+        f.republish(2, None).await;
+        let (cookie, _) = f.login().await;
+        let checked = f
+            .witness(&cookie)
+            .await
+            .finish(&f.input(&cookie))
+            .await
+            .unwrap();
+        f.sql("UPDATE users SET status='disabled'");
+        assert!(
+            checked.require_current(&f.input(&cookie)).await.is_err(),
+            "{name}: user disabled"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s600_32_native_human_factor_provenance_agrees_on_both_backends() {
+    for f in both_backends().await {
+        let name = if f.raw().postgres() {
+            "postgres"
+        } else {
+            "sqlite"
+        };
+        // TOTP: the establishing enrollment is the owner.
+        let (old, _) = f.login().await;
+        let cookie = f.elevate(&old).await;
+        let witness = f.witness(&cookie).await;
+        assert_eq!(witness.view.handle.issued_aal, Aal::Two, "{name}");
+        let checked = witness.finish(&f.input(&cookie)).await.unwrap();
+        f.sql("UPDATE totp_enrollments SET last_counter=last_counter+1");
+        checked.require_current(&f.input(&cookie)).await.unwrap();
+        f.sql("UPDATE totp_enrollments SET state='revoked',revision=revision+1");
+        assert!(
+            checked.require_current(&f.input(&cookie)).await.is_err(),
+            "{name}: TOTP revoked"
+        );
+        // Passkey: the establishing credential is the owner.
+        let (old, _) = f.login().await;
+        let cookie = f.elevate_passkey(&old).await;
+        let checked = f
+            .witness(&cookie)
+            .await
+            .finish(&f.input(&cookie))
+            .await
+            .unwrap();
+        f.sql("UPDATE webauthn_credentials SET sign_count=sign_count+1, revision=revision+1");
+        checked.require_current(&f.input(&cookie)).await.unwrap();
+        f.sql("UPDATE webauthn_credentials SET state='revoked', revoked_at=1, revoked_reason='removed'");
+        assert!(
+            checked.require_current(&f.input(&cookie)).await.is_err(),
+            "{name}: passkey revoked"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s600_33_native_human_ledger_checks_inside_its_own_transaction_on_both_backends() {
+    for f in both_backends().await {
+        let name = if f.raw().postgres() {
+            "postgres"
+        } else {
+            "sqlite"
+        };
+        let other = Fx::new_on(None, f.raw().postgres()).await.unwrap();
+        let (cookie, _) = f.login().await;
+        let checked = Arc::new(
+            f.witness(&cookie)
+                .await
+                .finish(&f.input(&cookie))
+                .await
+                .unwrap(),
+        );
+        let current = Arc::new(checked.prepare_projection_current().unwrap());
+        // Another store's ledger cannot supply the durable check.
+        let (c, k) = (current.clone(), checked.clone());
+        assert!(
+            other
+                .store
+                .human_ledger(deadline(), move |ledger| {
+                    ledger.test_transaction(|snapshot| c.current_on(&k, snapshot))
+                })
+                .await
+                .is_err(),
+            "{name}: other store"
+        );
+        // The same store: current, then withdrawn inside the transaction.
+        let checked = Arc::new(
+            f.witness(&cookie)
+                .await
+                .finish(&f.input(&cookie))
+                .await
+                .unwrap(),
+        );
+        let current = checked.prepare_projection_current().unwrap();
+        f.store
+            .human_ledger(deadline(), move |ledger| {
+                ledger.test_transaction(|snapshot| {
+                    current.current_on(&checked, snapshot)?;
+                    snapshot.execute_for_test("UPDATE users SET status='disabled'")?;
+                    assert!(current.current_on(&checked, snapshot).is_err());
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        // The withdrawal rolled back with the test transaction.
+        assert_eq!(
+            f.count("SELECT count(*) FROM users WHERE status='active'"),
+            1,
+            "{name}"
+        );
     }
 }

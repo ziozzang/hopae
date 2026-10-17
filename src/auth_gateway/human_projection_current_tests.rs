@@ -1,7 +1,7 @@
 //! Actual native witnesses checked inside the actual Store writer transaction.
 use super::*;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_projection_same_writer_current_and_in_transaction_withdrawal() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -14,9 +14,7 @@ async fn native_human_projection_same_writer_current_and_in_transaction_withdraw
             move |ledger| {
                 ledger.test_transaction(|snapshot| {
                     current.current_on(&retained, snapshot)?;
-                    snapshot
-                        .connection()
-                        .execute("UPDATE users SET status='disabled'", [])?;
+                    snapshot.execute_for_test("UPDATE users SET status='disabled'")?;
                     assert!(current.current_on(&retained, snapshot).is_err());
                     Ok(())
                 })
@@ -28,7 +26,7 @@ async fn native_human_projection_same_writer_current_and_in_transaction_withdraw
     assert!(checked.require_current_retained().await.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_projection_other_store_writer_cannot_supply_current() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -50,7 +48,7 @@ async fn native_human_projection_other_store_writer_cannot_supply_current() {
     assert!(checked.require_current_retained().await.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_projection_writer_never_calls_owner_clock_callback() {
     let mut f = Fx::new(None).await;
     let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -81,7 +79,7 @@ async fn native_human_projection_writer_never_calls_owner_clock_callback() {
         .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_projection_original_elapsed_expiry_and_reversal_latch() {
     for reverse in [false, true] {
         let f = Fx::new(None).await;
@@ -110,7 +108,7 @@ async fn native_human_projection_original_elapsed_expiry_and_reversal_latch() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_projection_post_prepare_application_and_provider_withdrawal() {
     for provider in [false, true] {
         let f = Fx::new(None).await;
@@ -135,7 +133,7 @@ async fn native_human_projection_post_prepare_application_and_provider_withdrawa
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_projection_post_prepare_original_readiness_withdrawal() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -168,7 +166,7 @@ async fn native_human_projection_post_prepare_original_readiness_withdrawal() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires private owned LDAP TLS fixture, executed separately"]
 async fn native_human_projection_actual_ldap_primary_totp_same_writer() {
     let ldap = serde_json::json!({"ldap":{"endpoint":std::env::var("OWNED_LDAP_ENDPOINT").unwrap(),"starttls":std::env::var("OWNED_LDAP_STARTTLS").is_ok_and(|s|s=="1"),"ca":std::env::var("OWNED_LDAP_CA").unwrap(),"base_dn":"dc=example,dc=test","bind_dn":"cn=reader,dc=example,dc=test","bind_password_env":"OWNED_LDAP_BIND_KEY","username_attribute":"uid","subject_attribute":"entryUUID","timeout_ms":1000}});
@@ -192,12 +190,13 @@ async fn native_human_projection_actual_ldap_primary_totp_same_writer() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_projection_retirement_is_observed_after_last_publication_load() {
     let f = Fx::new(None).await;
+    // Built first: a fixture's setup is not charged to the capture's budget.
+    let other = Fx::new(None).await;
     let (cookie, _) = f.login().await;
     let checked = Arc::new(captured(&f, &cookie).await);
-    let other = Fx::new(None).await;
     let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut prepared = checked.prepare_projection_current().unwrap();

@@ -366,19 +366,20 @@ impl Registry {
         application: Arc<crate::policy::types::ConfigSnapshot>,
     ) -> crate::store::StoreResult<crate::store::sqlite::primary_owner::Source> {
         let owners = self.owners()?;
+        let owner = store.owner_ref();
         if !Arc::ptr_eq(&application, &owners.application) {
             return Err(crate::store::StoreError::Conflict(
                 "primary app owner mismatch",
             ));
         }
-        let (generation, revision) = owners.prepared.human_expected(store, id)?;
+        let (generation, revision) = owners.prepared.human_expected(&owner, id)?;
         let material = owners
             .materials
             .get()
             .ok_or(crate::store::StoreError::Conflict(
                 "compiled material unqualified",
             ))?
-            .expected(store, id.as_str())?;
+            .expected(&owner, id.as_str())?;
         let fence = self
             .capture_provider_fence(
                 store,
@@ -388,7 +389,7 @@ impl Registry {
             .await?;
         self.require_human_publication(&fence, &application)?;
         Ok(crate::store::sqlite::primary_owner::Source::from_registry(
-            store,
+            owner,
             self.clone(),
             fence,
             application,

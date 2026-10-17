@@ -551,12 +551,28 @@ pub(crate) async fn password_post(
     {
         return response;
     }
-    if !st.password_attempts.admit(rq.ctx.client_ip) {
+    // Counted per address and per named account (before any provider work).
+    let account = form
+        .0
+        .get("username")
+        .filter(|u| u.len() <= 256)
+        .map(|u| super::password_attempts::PasswordAttempts::account(&provider, u));
+    if !st
+        .password_attempts
+        .admit(rq.ctx.client_ip, account.as_deref())
+        .await
+    {
         let mut response = error_response(rq.t(), rq.rid(), ErrorPage::Unavailable);
         *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
-        response
-            .headers_mut()
-            .insert(header::RETRY_AFTER, HeaderValue::from_static("60"));
+        let wait = st
+            .password_attempts
+            .retry_after()
+            .as_secs()
+            .max(1)
+            .to_string();
+        if let Ok(value) = HeaderValue::from_str(&wait) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
         return response;
     }
     let (Some(challenge), Some(username), Some(password)) = (
@@ -1199,7 +1215,7 @@ async fn totp_post(st: PortalState, req: Request, confirm: bool) -> Response {
     {
         return r;
     }
-    if !st.password_attempts.admit(rq.ctx.client_ip) {
+    if !st.password_attempts.admit(rq.ctx.client_ip, None).await {
         let mut r = error_response(rq.t(), rq.rid(), ErrorPage::Unavailable);
         *r.status_mut() = StatusCode::TOO_MANY_REQUESTS;
         r.headers_mut()
@@ -1438,7 +1454,7 @@ pub(crate) async fn stepup_post(State(st): State<PortalState>, req: Request) -> 
     if let Err(r) = guard(&st, &rq, &parts, &form, Purpose::TotpStepUp, Some(&binding)).await {
         return r;
     }
-    if !st.password_attempts.admit(rq.ctx.client_ip) {
+    if !st.password_attempts.admit(rq.ctx.client_ip, None).await {
         let mut r = error_response(rq.t(), rq.rid(), ErrorPage::Unavailable);
         *r.status_mut() = StatusCode::TOO_MANY_REQUESTS;
         r.headers_mut()
@@ -1597,7 +1613,7 @@ pub(crate) async fn external_stepup_post(State(st): State<PortalState>, req: Req
     {
         return r;
     }
-    if !st.password_attempts.admit(rq.ctx.client_ip) {
+    if !st.password_attempts.admit(rq.ctx.client_ip, None).await {
         let mut r = error_response(rq.t(), rq.rid(), ErrorPage::Unavailable);
         *r.status_mut() = StatusCode::TOO_MANY_REQUESTS;
         r.headers_mut()

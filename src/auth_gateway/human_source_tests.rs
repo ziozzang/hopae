@@ -52,10 +52,16 @@ fn source_rng(
             .load(&|_| Some(STANDARD.encode([0x45; 32])), f.clock.clone(), rng)
             .unwrap(),
     );
-    let mut authority = Authority::load(&f.store.conn(), 0).unwrap();
+    let mut authority = {
+        use crate::store::meta::MetaDb as _;
+        f.store
+            .meta()
+            .meta_read(|tx| Authority::load(tx, 0))
+            .unwrap()
+    };
     authority
         .reconcile(
-            &mut f.store.conn(),
+            &mut f.store.meta(),
             &[Key {
                 issuer_ref: "native-human".into(),
                 purpose: Purpose::Authentication,
@@ -78,7 +84,7 @@ async fn captured(f: &Fx, cookie: &Secret) -> human::Checked {
         .await
         .unwrap()
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_actual_oidc_signed_pair_independent_observation_and_totp() {
     let f = Fx::new(None).await;
     let (cookie, view) = f.login().await;
@@ -180,7 +186,7 @@ async fn native_human_source_actual_oidc_signed_pair_independent_observation_and
         .await
         .unwrap();
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_withdrawal_restart_hash_scope_and_type_refuse() {
     for mode in ["user", "app", "key", "retire", "hash", "kind", "scope"] {
         let f = Fx::new(None).await;
@@ -198,7 +204,7 @@ async fn native_human_source_withdrawal_restart_hash_scope_and_type_refuse() {
             "app" => f.ctx.snapshot.store(Arc::new(f.config.snapshot(2))),
             "key" => {
                 authority
-                    .reconcile(&mut f.store.conn(), &[], "withdraw", &|_| Ok(()))
+                    .reconcile(&mut f.store.meta(), &[], "withdraw", &|_| Ok(()))
                     .unwrap();
             }
             "retire" => source.retire(),
@@ -215,7 +221,7 @@ async fn native_human_source_withdrawal_restart_hash_scope_and_type_refuse() {
         );
     }
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_original_boottime_expiry_cannot_renew() {
     let mut f = Fx::new(None).await;
     let ticks = Arc::new(AtomicU64::new(100));
@@ -314,7 +320,7 @@ fn native_human_source_configuration_default_off_bounds_and_exact_manifest() {
     let _: Configuration = serde_json::from_value(configuration()).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_quota_record_loss_held_arc_and_oversize() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -377,8 +383,14 @@ async fn native_human_source_quota_record_loss_held_arc_and_oversize() {
     );
     assert_eq!(small.usage_for_test(), (0, small_base));
 }
+// Polled by hand on the current-thread runtime: the reservation must be
+// observed between polls.
 #[tokio::test]
 async fn native_human_source_cancelled_issuance_releases_reserved_quota() {
+    if crate::store::conformance::human_suite_on_postgres() {
+        // PostgreSQL owner calls block in place: a multi-threaded runtime only.
+        return;
+    }
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
     let (source, _, _) = source(&f, configuration());
@@ -406,7 +418,7 @@ async fn native_human_source_cancelled_issuance_releases_reserved_quota() {
     drop(pending);
     assert_eq!(source.usage_for_test(), (0, base));
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_fixed_native_method_and_default_off_refuse() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
@@ -435,7 +447,7 @@ async fn native_human_source_fixed_native_method_and_default_off_refuse() {
     );
     assert!(Source::new(f.owner.clone(), issuer, authority.verifier(), &native).is_err());
 }
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires private owned LDAP TLS fixture, executed separately"]
 async fn native_human_source_actual_ldap_primary_totp_sign_and_observe() {
     let ldap = serde_json::json!({"ldap":{"endpoint":std::env::var("OWNED_LDAP_ENDPOINT").unwrap(),"starttls":std::env::var("OWNED_LDAP_STARTTLS").is_ok_and(|s|s=="1"),"ca":std::env::var("OWNED_LDAP_CA").unwrap(),"base_dn":"dc=example,dc=test","bind_dn":"cn=reader,dc=example,dc=test","bind_password_env":"OWNED_LDAP_BIND_KEY","username_attribute":"uid","subject_attribute":"entryUUID","timeout_ms":1000}});
@@ -541,7 +553,7 @@ fn native_human_source_actual_configuration_separate_application_and_legacy_guar
     crate::config::parse(&legacy.to_string()).unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_signing_callback_withdrawal_cannot_publish_record() {
     struct CallbackRng {
         rng: Arc<SeededRng>,
@@ -585,7 +597,7 @@ async fn native_human_source_signing_callback_withdrawal_cannot_publish_record()
     assert_eq!(source.usage_for_test(), (0, base));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_final_constraint_refusal_and_publication_fence() {
     for mode in ["refuse", "publication"] {
         let mut f = Fx::new(None).await;
@@ -629,18 +641,12 @@ async fn native_human_source_final_constraint_refusal_and_publication_fence() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_signed_assurance_uses_downgraded_actual_handle() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;
     let elevated = f.elevate(&cookie).await;
-    f.store
-        .conn()
-        .execute(
-            "UPDATE session_handles SET issued_aal=1 WHERE handle_sha256=?1",
-            [elevated.digest().0.as_slice()],
-        )
-        .unwrap();
+    f.downgrade_handle(&elevated);
     let (source, _, _) = source(&f, configuration());
     let record = source
         .issue(
@@ -660,7 +666,7 @@ async fn native_human_source_signed_assurance_uses_downgraded_actual_handle() {
         .unwrap();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_same_sample_constraint_only_shortens_and_keeps_record() {
     let mut f = Fx::new(None).await;
     let ticks = Arc::new(AtomicU64::new(100));
@@ -768,7 +774,7 @@ async fn native_human_source_final_publication_then_other_observer_retirement_re
     assert!(pending.await.unwrap().is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_human_source_explicit_multiple_origins_share_route_without_scope_fallback() {
     let f = Fx::new(None).await;
     let (cookie, _) = f.login().await;

@@ -1,11 +1,13 @@
 //! Small facts kept in the `meta` table that belong to the process, not to a
 //! request: when the caller-key overlap began and the digest of the last
-//! configuration. Operator-level SQL on the store's utility connection; never
-//! used on a request path.
+//! configuration. Operator-level writes in a meta transaction; never used on
+//! a request path.
 
 use std::path::Path;
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags};
+
+use crate::store::meta::{MetaError, MetaTx};
 
 pub const CALLER_KEY_NEXT_SINCE: &str = "caller_key_next_since";
 pub const CONFIG_DIGEST: &str = "config_digest";
@@ -17,43 +19,33 @@ pub fn read_meta(path: &Path, key: &str) -> Option<String> {
     get(&conn, key)
 }
 
-pub fn get(conn: &Connection, key: &str) -> Option<String> {
-    conn.query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
-        .optional()
-        .ok()
-        .flatten()
+pub fn get(db: &dyn MetaTx, key: &str) -> Option<String> {
+    db.get(key).ok().flatten()
 }
 
-pub fn set(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT INTO meta (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        [key, value],
-    )?;
-    Ok(())
+pub fn set(db: &dyn MetaTx, key: &str, value: &str) -> Result<(), MetaError> {
+    db.put(key, value)
 }
 
 /// Note when `caller_key_next_env` was first seen configured; forget it when it is not.
 pub fn track_caller_key_next(
-    conn: &Connection,
+    db: &dyn MetaTx,
     configured: bool,
     now_secs: i64,
-) -> rusqlite::Result<()> {
+) -> Result<(), MetaError> {
     if configured {
-        conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES (?1, ?2)",
-            [CALLER_KEY_NEXT_SINCE, &now_secs.to_string()],
-        )?;
+        db.insert_if_absent(CALLER_KEY_NEXT_SINCE, &now_secs.to_string())?;
     } else {
-        conn.execute("DELETE FROM meta WHERE key=?1", [CALLER_KEY_NEXT_SINCE])?;
+        db.delete(CALLER_KEY_NEXT_SINCE)?;
     }
     Ok(())
 }
 
 /// Record the configuration digest; true when it differs from the stored one.
-pub fn config_changed(conn: &Connection, digest: &str) -> rusqlite::Result<bool> {
-    let changed = get(conn, CONFIG_DIGEST).as_deref() != Some(digest);
+pub fn config_changed(db: &dyn MetaTx, digest: &str) -> Result<bool, MetaError> {
+    let changed = db.get(CONFIG_DIGEST)?.as_deref() != Some(digest);
     if changed {
-        set(conn, CONFIG_DIGEST, digest)?;
+        set(db, CONFIG_DIGEST, digest)?;
     }
     Ok(changed)
 }

@@ -142,7 +142,7 @@ impl PgStore {
         let tx = self.begin(&mut client).await?;
         // One writer at a time per table bound: the advisory lock serializes
         // count + evict + insert across replicas, as SQLite's writer does.
-        tx.execute("SELECT pg_advisory_xact_lock(7008)", &[])
+        tx.execute(super::ADVISORY_XACT_LOCK, &[&super::LOGIN_TXN_LOCK])
             .await
             .map_err(pg)?;
         let n: i64 = tx
