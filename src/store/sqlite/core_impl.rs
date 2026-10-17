@@ -542,11 +542,12 @@ impl SubjectDirectoryStore for Store {
         after: super::subject_directory::OutboxPosition,
         limit: usize,
         groups: bool,
+        workloads: bool,
         deadline: Deadline,
     ) -> StoreResult<
         Result<super::subject_directory::StatusPage, super::subject_directory::PositionLost>,
     > {
-        Store::admin_feed_changes(self, after, limit, groups, deadline).await
+        Store::admin_feed_changes(self, after, limit, groups, workloads, deadline).await
     }
     async fn admin_live_handle(
         &self,

@@ -149,6 +149,51 @@ pub const MESSAGES: &[(&str, &str, &str)] = &[
         "서비스 자격 증명을 제시했지만 이 호스트와 포트를 처리하는 서비스 프로필이 없습니다.",
     ),
     (
+        "workload_subject_invalid",
+        "The workload is not a SPIFFE ID of this trust domain or a system:serviceaccount name.",
+        "워크로드가 이 신뢰 도메인의 SPIFFE ID나 system:serviceaccount 이름이 아닙니다.",
+    ),
+    (
+        "workload_namespace_not_allowed",
+        "The workload's namespace is not allowed by the service profile.",
+        "워크로드의 네임스페이스가 서비스 프로필에서 허용되지 않습니다.",
+    ),
+    (
+        "workload_service_account_not_allowed",
+        "The ServiceAccount is not in the profile's ServiceAccount allowlist.",
+        "ServiceAccount가 프로필의 ServiceAccount 허용 목록에 없습니다.",
+    ),
+    (
+        "workload_service_account_absent",
+        "The ServiceAccount does not exist in the current revocation index.",
+        "현재 폐기 인덱스에 ServiceAccount가 없습니다.",
+    ),
+    (
+        "workload_keys_unavailable",
+        "The issuer's signing keys are unavailable or older than the staleness bound.",
+        "발급자 서명 키를 사용할 수 없거나 허용된 경과 시간을 넘었습니다.",
+    ),
+    (
+        "workload_revocation_stale",
+        "The revocation index is not current within its staleness bound.",
+        "폐기 인덱스가 허용된 지연 범위 안에서 최신 상태가 아닙니다.",
+    ),
+    (
+        "workload_legacy_window_expired",
+        "The legacy Pod-bound subject compatibility window has ended.",
+        "레거시 Pod 기반 주체 호환 기간이 끝났습니다.",
+    ),
+    (
+        "workload_revocation_not_evaluated",
+        "No revocation watch is configured; deleted ServiceAccounts are refused only at token expiry.",
+        "폐기 감시가 구성되지 않아 삭제된 ServiceAccount는 토큰 만료 시에만 거부됩니다.",
+    ),
+    (
+        "workload_token_not_simulated",
+        "Token checks (signature, audience, lifetime, bound objects) need the real token and are not simulated.",
+        "토큰 검사(서명, 대상, 수명, 바인딩 객체)는 실제 토큰이 필요하여 모의 평가하지 않습니다.",
+    ),
+    (
         "service_principal_unknown",
         "The principal is not an API-key subject of this profile.",
         "주체가 이 프로필의 API 키 주체가 아닙니다.",

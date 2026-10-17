@@ -226,6 +226,12 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - When: another store's ledger runs the check; the same store's ledger runs it, disables the user inside the same transaction and runs it again; the transaction rolls back.
 - Then: the other store is refused; the first check passes, the second is refused; the user is still active afterwards.
 
+### S600-34 Identity-platform listings and the workload registry agree
+
+- Given: an administrator, a user with an active authenticator app, a user in a local group, and a live session, on each backend.
+- When: users are listed by `mfa`, `group` and `provider`, sessions by stored level, events by kind prefix; a workload principal is observed and retired with its `workload.*` events; the lifecycle feed is read with and without workloads.
+- Then: each filter selects exactly its users, sessions and events; the registry holds the retired principal; the feed reports `workload_observed` and `workload_retired` only when asked, with the reported workload keys only.
+
 ## Abuse cases
 
 | Category | Case | Applies |
@@ -282,6 +288,7 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-31 | `s600_31_native_human_snapshot_and_primary_owner_agree_on_both_backends` | `src/verify/human_tests.rs` | unit | passing |
 | S600-32 | `s600_32_native_human_factor_provenance_agrees_on_both_backends` | `src/verify/human_tests.rs` | unit | passing |
 | S600-33 | `s600_33_native_human_ledger_checks_inside_its_own_transaction_on_both_backends` | `src/verify/human_tests.rs` | unit | passing |
+| S600-34 | `s600_34_identity_platform_filters_and_workload_registry_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
 | S600-6 | `s600_6_serving_accepts_postgres_only_in_a_postgres_build` | `src/app.rs` | unit | passing |

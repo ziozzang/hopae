@@ -57,6 +57,29 @@ pub const CONFIG_LOADED_TIMESTAMP: &str = "hopae_config_loaded_timestamp";
 pub const GROUP_MEMBERSHIPS_STALE: &str = "hopae_group_memberships_stale";
 /// Counter: provider group memberships suspended for staleness.
 pub const GROUP_MEMBERSHIPS_SUSPENDED_TOTAL: &str = "hopae_group_memberships_suspended_total";
+/// Admin-listener service credential authentications, by result (`accepted`,
+/// `accepted_next` or the refusal code).
+pub const ADMIN_SERVICE_CREDENTIALS_TOTAL: &str = "hopae_admin_service_credentials_total";
+/// Kubernetes workload authentications, by service, verification
+/// (`offline_jwks`, `tokenreview`), result and reason (Hangang ADR 0022).
+pub const WORKLOAD_AUTHENTICATIONS_TOTAL: &str = "hopae_workload_authentications_total";
+/// Workload positive-cache lookups, by service and result (`hit`, `miss`).
+pub const WORKLOAD_CACHE_TOTAL: &str = "hopae_workload_cache_total";
+/// Gauge: workload positive-cache entries, by service.
+pub const WORKLOAD_CACHE_ENTRIES: &str = "hopae_workload_cache_entries";
+/// Signing-key fetches of workload issuers, by service and result
+/// (`ok`, `rotated`, `kid_miss_rate_limited` or a failure reason).
+pub const WORKLOAD_JWKS_FETCH_TOTAL: &str = "hopae_workload_jwks_fetch_total";
+/// Gauge: usable signing keys of a workload issuer, by service.
+pub const WORKLOAD_JWKS_KEYS: &str = "hopae_workload_jwks_keys";
+/// Revocation watch events, by service, resource and event
+/// (`relist`, `added`, `modified`, `deleted`, `bookmark`, `error`, `expired`).
+pub const WORKLOAD_REVOCATION_EVENTS_TOTAL: &str = "hopae_workload_revocation_events_total";
+/// Gauge: milliseconds since the revocation index of a service was last
+/// confirmed current (the bounded-staleness measure).
+pub const WORKLOAD_REVOCATION_STALENESS_MS: &str = "hopae_workload_revocation_staleness_ms";
+/// Workload lifecycle signals, by kind and result (`queued`, `dropped`, `recorded`, `failed`).
+pub const WORKLOAD_SIGNALS_TOTAL: &str = "hopae_workload_signals_total";
 
 fn table() -> &'static Mutex<BTreeMap<String, i64>> {
     static T: OnceLock<Mutex<BTreeMap<String, i64>>> = OnceLock::new();

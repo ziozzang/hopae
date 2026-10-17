@@ -72,6 +72,7 @@ fn open_applies_migration_and_sets_pragmas() {
             "providers",
             "recovery_codes",
             "schema_migrations",
+            "service_credentials",
             "session_handles",
             "session_primary_provenance",
             "session_totp_provenance",
@@ -84,7 +85,9 @@ fn open_applies_migration_and_sets_pragmas() {
             "users",
             "webauthn_challenges",
             "webauthn_credentials",
-            "webauthn_login_challenges"
+            "webauthn_login_challenges",
+            "workload_legacy_mappings",
+            "workload_principals"
         ]
     );
 }

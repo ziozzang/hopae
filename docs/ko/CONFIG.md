@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=41 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=44 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -130,7 +130,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `apps[].verify_cache_seconds` | 정수 | `0` | 게이트웨이가 허용을 캐시할 수 있는 최대 시간. 최대 `30`. `hopae --check`는 애플리케이션마다 값을 출력하고 **`false`이면 경고합니다**: `sec-fetch-site: same-origin`은 애플리케이션 자신의 출처 문서가 탐색을 시작했음을 증명할 뿐이므로, 애플리케이션 안의 탐색 가젯(자신의 쿼리에서 가져온 URL을 `location`에 대입하는 페이지, 예: `/continue?next=/_hopae/logout`)이 클릭 없이 사용자의 세션을 끝낼 수 있습니다. 이를 받아들이는 경우가 아니면 `true`를 유지하십시오. |
 | `apps[].logout_confirm` | 불리언 | `true`(`default` 애플리케이션이 설정했다면 그 값을 상속) | `true`: 애플리케이션 호스트의 `/_hopae/logout`은 포털의 확인 페이지로 리디렉션합니다. `false`: 유효한 핸들을 제시한 `sec-fetch-site: same-origin` 문서 탐색은 즉시 세션을 끝내고 포털의 로그아웃 완료 페이지로 리디렉션되며, 그 밖의 모든 요청은 여전히 확인을 거칩니다. 어느 쪽이든 포털은 보호된 대상으로 리디렉션하는 대신 "다시 로그인" 링크를 표시합니다([ADR-0015](../adr/0015-app-host-entry-points-and-upstream-cookie-stripping.md), [게이트웨이 계약](GATEWAY_CONTRACT.md#애플리케이션-호스트-진입점)). `--check`가 보고합니다. |
 | `apps[].max_emitted_aal` | 정수 | `2`(`default` 애플리케이션 값을 상속하지 않음) | 이 애플리케이션에 `x-hopae-aal`로 제시하고 영수증에 봉인하는 최고 수준: `2` 또는 `3`. `3`에는 `webauthn.high_assurance`가 필요하며 세션의 현재 상승이 고보증 패스키일 때만 제시합니다([ADR-0018](../adr/0018-aal3-emission.md)). 같은 세션이라도 다른 애플리케이션은 `2`를 봅니다. 애플리케이션과 피어가 `3`을 받을 때만 켜십시오. |
-| `apps[].step_up[]` | `{path_prefix, require: {aal, max_age}}` 배열 | 없음 | 실제 적용되는 세션 인증등급 규칙입니다(`aal`은 1 또는 2, `path_prefix`는 `/`로 시작, `max_age`는 양의 초). AAL 2는 실제 2차 인증 근거가 필요하며 근거 확인 시각으로 신선도를 검사합니다. `no-store`를 강제합니다. AAL 0 서비스 자격은 일치하는 규칙을 충족할 수 없습니다. TOTP keyring이 설정되면 문서 요청이 네이티브 OTP 단계 상승을 시작하고, 없으면 거절합니다. |
+| `apps[].step_up[]` | `{path_prefix, require: {aal, max_age}}` 배열 | 없음 | 실제 적용되는 세션 인증등급 규칙입니다(`aal`은 1, 2 또는 3, `path_prefix`는 `/`로 시작, `max_age`는 양의 초). AAL 2는 실제 2차 인증 근거가 필요하며 근거 확인 시각으로 신선도를 검사합니다. AAL 3은 `webauthn.high_assurance`가 필요하고, 세션의 현재 상향이 고보증 패스키(증명되고 허용 목록에 있으며 기기에 묶이고 여전히 활성)일 때만 충족됩니다. 신선도는 그 패스키 사용 시각이며 단계 상승은 그런 키만 제시합니다([ADR-0018](../adr/0018-aal3-emission.md#aal-3-requirements)). `no-store`를 강제합니다. AAL 0 서비스 자격은 일치하는 규칙을 충족할 수 없습니다. TOTP keyring이 설정되면 문서 요청이 네이티브 OTP 단계 상승을 시작하고, 없으면 거절합니다. |
 
 #### 제공자
 
@@ -185,7 +185,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `admin.binding.ua` | `strict`, `off` | `off` | User-Agent 바인딩. |
 | `admin.binding.on_mismatch` | `terminate_session`, `drop_handle` | `terminate_session` | 바인딩 불일치 시 동작. |
 | `admin.max_auth_age` | 기간 | `12h` | 콘솔 세션의 신선도 한도. `30m` 이상: 더 작은 값은 설정 오류(`admin.max_auth_age must be at least 30m`)이며, 한도가 재인증 콜백과 뒤따르는 콘솔 verify 사이에 600초의 여유를 지키기 때문입니다. 콘솔의 모든 verify에서 하나의 술어로 평가: `auth_time ≤ now + 60초` 그리고 `now − auth_time < N`. `reauth` 능력이 `max_age`인 제공자에서는 세션이 제공자가 검증한 `auth_time`을 가져야 하고 오래되면 세션 자신의 제공자가 수행하는 재인증으로 보내며, `unsupported` 제공자(`google` 프리셋)에서는 한도가 Hopae 로그인 경과 시간뿐임([ADR-0016](../adr/0016-management-console-minimum.md) 결정 15, [관리](ADMIN.md#신선도와-재인증)). |
-| `admin.require_aal` | `1`, `2` | `1` | 콘솔 핸들의 최소 보증 수준. `2`는 호스트 전체의 암묵적 애플리케이션에 단계 상승 규칙도 설정합니다. TOTP keyring이 없으면 콘솔 요청이 거부된다고 `--check`가 경고합니다. |
+| `admin.require_aal` | `1`, `2`, `3` | `1` | 콘솔 핸들의 최소 보증 수준. `2`나 `3`은 호스트 전체의 암묵적 애플리케이션에 단계 상승 규칙도 설정합니다. `3`은 `webauthn.high_assurance`가 필요하며, 이때 모든 콘솔 요청과 모든 콘솔 변경의 쓰기 펜스가 살아 있는 고보증 패스키 상향을 요구합니다. 콘솔 자체에는 여전히 AAL 2가 제시됩니다. TOTP keyring이 없으면 콘솔 요청이 거부된다고 `--check`가 경고합니다. |
 | `admin.untrusted_peers` | `refuse`, `as_client` | `refuse` | `trusted_proxies` 밖의 TCP 피어를 관리 리스너가 어떻게 다루는지: `refuse`는 쿠키를 읽기 전에 `403 untrusted_peer`로 답함(집계, 속도 제한된 경고). `as_client`는 포털처럼 피어를 클라이언트로 취급. |
 | `admin.query_budget_ms` | 정수, 100부터 30000 | `2000` | 콘솔 저장소 작업 하나(목록, 검색, 변경)의 마감. 마감은 저장소 작업에 전달되어 SQLite 안에서 문장을 중단하고 롤백한 뒤 `503`으로 답함. |
 | `admin.directory_privacy` | `standard`, `strict` | `standard` | 감사되는 디렉터리 읽기([주체 디렉터리](SUBJECT_DIRECTORY.md), [인증 explain](AUTHENTICATION_EXPLAIN.md))의 개인정보 프로필에 대한 운영자 하한. 요청의 `privacy_profile`은 더 엄격하게만 할 수 있음. `strict`이면 요청과 무관하게 어떤 읽기도 이메일 주소를 어떤 형태로도 돌려주지 않음. |
@@ -403,7 +403,13 @@ true도 인증된 HTTPS proof 검증과 네이티브 소유자의 원자적 완�
 
 ## 서비스 인증 Lua 사용 조건 (미릴리스)
 
-시작 JSON의 `authentication_gateway`는 비어 있는 authority만 초기화합니다. DB에
+`authentication.source`(`store` 기본값, `config`)가 인증 프로필과 자격 증명 투영
+계획의 소유자를 정합니다. `config` 모드에서는 시작할 때마다 저장소를 파일에 맞추고
+콘솔 편집을 거부합니다([설정 권위 모드](AUTH_PROFILE_PUBLICATION.md#설정-권위-모드)).
+`authentication.reload_interval_ms`(기본 `1000`, `0`은 끔, 그 밖에는 200–60000)는
+`config` 모드에서 실행 중인 Hopae가 파일을 확인하는 주기이며, 바뀐 프로필이나 투영 계획을
+재시작 없이 반영합니다([실행 중 맞춤](AUTH_PROFILE_PUBLICATION.md#실행-중-맞춤)).
+기본 `store` 모드에서는 시작 JSON의 `authentication_gateway`는 비어 있는 authority만 초기화합니다. DB에
 인증 profile 문서(비활성 tombstone 포함)가 있으면 DB·PAP 문서가 우선하며 시작 JSON을
 고치고 재시작해도 덮어쓰지 않습니다. 인증된 소유자 API로 변경을 게시하세요. 오프라인
 검증은 독립 `profile-publication-candidate.db`에 네이티브 소유자 transaction을
@@ -488,6 +494,14 @@ no-store를 제공합니다. `PUT /v1/authentication/projections`는 기존 관�
 ### gRPC 인증 확인 리스너
 
 선택 설정 `listen.grpc_gateway`는 리터럴 소켓 주소이며 루프백에서도 `listen.native_gateway_tls`와 게이트웨이 인증 자격이 필수다. HOP1은 비활성화할 수 있다. [gRPC 인증](GRPC.md) 참조.
+
+### TLS 자료 다시 읽기
+
+`reload.tls_interval_secs`(기본 `10`, `0`은 끔, 최대 3600)는 Hopae가
+`listen.admin_tls`, `listen.native_gateway_tls`(네이티브와 gRPC 게이트웨이),
+`projection_receiver.authority`(나가는 mTLS)의 인증서·키·CA 파일을 다시 읽는 주기입니다.
+갱신된 유효한 자료는 재시작 없이 새 핸드셰이크부터 쓰이고, 잘못된 자료는 현재 자료를
+유지합니다([운영](OPERATIONS.md#tls-인증서-갱신)).
 
 ### 관리자 리스너 mTLS
 

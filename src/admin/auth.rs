@@ -26,7 +26,7 @@ use crate::http::denials::{self, DenialCounters};
 use crate::identity::types::UserId;
 use crate::policy::types::Host;
 use crate::portal::clientinfo::{self, Client};
-use crate::session::types::SessionId;
+use crate::session::types::{Aal, SessionId};
 use crate::telemetry::counters;
 use crate::verify::types::{
     CallerAuth, CanonicalPath, Decision, DenyKind, EntryReturn, FetchSite, Handoff, KeySlot,
@@ -79,6 +79,7 @@ pub fn pattern_of(path: &str) -> &'static str {
         ["status"] if api => "/v1/status",
         ["authentication", "projections"] if api => "/v1/authentication/projections",
         ["authentication", "profiles"] if api => "/v1/authentication/profiles",
+        ["authentication", "profiles", "validate"] if api => "/v1/authentication/profiles/validate",
         ["me"] if api => "/v1/me",
         ["subjects", "resolve"] if api => "/v1/subjects/resolve",
         ["subjects", "search"] if api => "/v1/subjects/search",
@@ -95,6 +96,9 @@ pub fn pattern_of(path: &str) -> &'static str {
         ["groups", "members", "remove"] if api => "/v1/groups/members/remove",
         ["groups", "projection", "snapshot"] if api => "/v1/groups/projection/snapshot",
         ["groups", "projection", "changes"] if api => "/v1/groups/projection/changes",
+        ["users", "bulk", "disable"] if api => "/v1/users/bulk/disable",
+        ["users", _, "factors"] if api => "/v1/users/{id}/factors",
+        ["users", _, "factors", "reset"] if api => "/v1/users/{id}/factors/reset",
         ["users"] => p!("/users", "/v1/users"),
         ["users", _] => p!("/users/{id}", "/v1/users/{id}"),
         ["users", _, "disable"] => p!("/users/{id}/disable", "/v1/users/{id}/disable"),
@@ -133,6 +137,8 @@ pub fn is_mutation(method: &Method, pattern: &str) -> bool {
                     | "/v1/users/{id}/enable"
                     | "/v1/users/{id}/sessions/terminate"
                     | "/v1/sessions/{id}/terminate"
+                    | "/v1/users/{id}/factors/reset"
+                    | "/v1/users/bulk/disable"
                     | "/v1/groups/create"
                     | "/v1/groups/update"
                     | "/v1/groups/delete"
@@ -211,6 +217,25 @@ pub(crate) fn admit_delegated(
     let network =
         ipnet::IpNet::new(peer, if peer.is_ipv4() { 32 } else { 128 }).expect("host prefix");
     admit_with_trust(st, peer, headers, rid, std::slice::from_ref(&network))
+}
+/// A service-credential request over the admin mTLS listener: the TLS peer
+/// is the client (no forwarding header is trusted) and the addressed host
+/// must be the console. Whether the peer may call at all is the
+/// credential's mTLS binding, checked next.
+pub(crate) fn admit_service(
+    st: &AdminState,
+    peer: IpAddr,
+    headers: &HeaderMap,
+) -> Result<Client, Refused> {
+    let client = clientinfo::resolve(peer, headers, &[]);
+    if !addressed_host(headers, false).is_some_and(|h| host_is_console(h, &st.cfg.host)) {
+        return Err(Refused {
+            denial: Denial::WrongHost,
+            client_ip: Some(client.ip),
+            requester: None,
+        });
+    }
+    Ok(client)
 }
 fn admit_with_trust(
     st: &AdminState,
@@ -456,7 +481,10 @@ pub async fn authenticate(
             requester,
         });
     };
-    if identity.aal < st.cfg.limits.require_aal {
+    // The console is never presented AAL 3 (ADR-0018): an AAL 3 requirement
+    // is an AAL 2 session plus the live evidence checked below.
+    let stored_required = st.cfg.limits.require_aal.min(Aal::Two);
+    if identity.aal < stored_required {
         return Err(Refused {
             denial: Denial::AalInsufficient,
             client_ip: Some(client.ip),
@@ -472,6 +500,19 @@ pub async fn authenticate(
         // The handle ended between the engine's check and this one.
         return Err(refused(Denial::LoginRequired));
     };
+    if st.cfg.limits.require_aal == Aal::Three
+        && !st
+            .sessions
+            .session_aal3_evidence(&view.session.session_id, view.session.cred_gen)
+            .await
+            .map_err(unavailable)?
+    {
+        return Err(Refused {
+            denial: Denial::AalInsufficient,
+            client_ip: Some(client.ip),
+            requester,
+        });
+    }
     let user = st
         .directory
         .user_within(&identity.user_id, api::deadline(st))

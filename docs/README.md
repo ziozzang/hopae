@@ -1,6 +1,6 @@
 # Documentation
 
-<!-- doc-rev: 13 -->
+<!-- doc-rev: 14 -->
 
 [한국어 목차](ko/README.md)
 
@@ -27,6 +27,7 @@ translations of their English sources and are updated in the same change. The
 - [Administration](ADMIN.md) — the management console and `/v1` API (M4-min, specified): console host and route, grants and roles, pages, endpoints, audit events, limits
 - [Subject directory](SUBJECT_DIRECTORY.md) — subject resolution, search, lifecycle feed and reconcile snapshot for the console and policy authorities
 - [Groups](GROUPS.md) — local, LDAP and OIDC groups, provider sync rules, the groups API and the signed membership projection for Pumgye
+- [Service credentials](SERVICE_CREDENTIALS.md) — route-scoped, read-only, mTLS-bound credentials for machine callers of the admin listener (Pumgye policy v2)
 - [Authentication explain](AUTHENTICATION_EXPLAIN.md) — what the authentication check would answer for a URL and a subject, and why, without side effects
 - [Deployment template](../deploy/README.md) — hardened Docker Compose service and gateway route examples
 

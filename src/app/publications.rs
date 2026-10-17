@@ -53,10 +53,18 @@ pub fn refresh(services: &Services) -> Refreshed {
         }
     }
     let declared = cfg.credential_projection.as_ref();
+    // `authentication.source = config`: the file owns the plans, so the
+    // store holds what some replica's validated file published.
+    let config_authoritative =
+        cfg.authentication.source == crate::config::AuthenticationSource::Config;
     match services.projection_authority.lock() {
         Ok(mut owner) => {
             match owner.refresh(&mut services.store.meta(), &|config| {
-                crate::auth_gateway::projection::validate_capabilities(config, declared)
+                if config_authoritative {
+                    crate::auth_gateway::projection::Projector::compile(config.clone()).map(|_| ())
+                } else {
+                    crate::auth_gateway::projection::validate_capabilities(config, declared)
+                }
             }) {
                 Ok(installed) => out.projections = installed,
                 Err(_) => tracing::warn!("projection publication refresh failed; retrying"),

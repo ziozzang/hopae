@@ -30,8 +30,11 @@ fn bounded(n: usize) -> StoreResult<()> {
 }
 
 /// What a feed row reports, as SQLite's classification.
-fn classify(kind: &str, groups: bool) -> Option<&'static str> {
+fn classify(kind: &str, groups: bool, workloads: bool) -> Option<&'static str> {
     match kind {
+        "workload.principal_observed" if workloads => Some("workload_observed"),
+        "workload.principal_retired" if workloads => Some("workload_retired"),
+        "workload.legacy_subject_mapped" if workloads => Some("workload_legacy_mapped"),
         "admin.user_disable" => Some("disabled"),
         "admin.user_enable" => Some("enabled"),
         "group.created" if groups => Some("group_created"),
@@ -213,6 +216,7 @@ impl SubjectDirectoryStore for PgStore {
         after: OutboxPosition,
         limit: usize,
         groups: bool,
+        workloads: bool,
         deadline: Deadline,
     ) -> StoreResult<Result<StatusPage, PositionLost>> {
         let limit = limit.min(MAX_BATCH);
@@ -241,7 +245,7 @@ impl SubjectDirectoryStore for PgStore {
                 .get(0);
             let rows = tx
                 .query(
-                    "SELECT f.pos, e.event_id, e.at, e.kind, e.user_id, e.attrs->>'group_id' FROM outbox_feed f JOIN events e ON e.event_id = f.event_id \
+                    "SELECT f.pos, e.event_id, e.at, e.kind, e.user_id, e.attrs->>'group_id', CASE WHEN e.kind LIKE 'workload.%' THEN e.attrs::text END FROM outbox_feed f JOIN events e ON e.event_id = f.event_id \
                      WHERE f.pos > $1 ORDER BY f.pos LIMIT $2",
                     &[&after.row, &FEED_SCAN],
                 )
@@ -251,10 +255,25 @@ impl SubjectDirectoryStore for PgStore {
             let mut changes = Vec::new();
             let mut next = after.clone();
             for r in &rows {
-                let (row, id, at, kind, user, group): (i64, String, f64, String, Option<String>, Option<String>) =
-                    (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5));
-                let change = classify(&kind, groups);
+                let (row, id, at, kind, user, group, attrs): (i64, String, f64, String, Option<String>, Option<String>, Option<String>) =
+                    (r.get(0), r.get(1), r.get(2), r.get(3), r.get(4), r.get(5), r.get(6));
+                let change = classify(&kind, groups, workloads);
+                // As SQLite: the reported workload identifiers only.
+                let workload = attrs
+                    .filter(|_| change.is_some_and(|c| c.starts_with("workload_")))
+                    .and_then(|a| serde_json::from_str::<serde_json::Value>(&a).ok())
+                    .and_then(|v| v.as_object().cloned())
+                    .map(|mut m| {
+                        m.retain(|k, _| {
+                            crate::store::sqlite::subject_directory::WORKLOAD_CHANGE_KEYS
+                                .contains(&k.as_str())
+                        });
+                        m
+                    });
                 let wanted = match change {
+                    Some(c) if c.starts_with("workload_") => {
+                        workload.as_ref().is_some_and(|w| w.contains_key("principal"))
+                    }
                     Some("disabled" | "enabled") => user.is_some(),
                     Some("member_added" | "member_removed" | "member_suspended" | "member_restored") => {
                         user.is_some() && group.is_some()
@@ -272,7 +291,10 @@ impl SubjectDirectoryStore for PgStore {
                         at: at.floor() as i64,
                         change,
                         user_id: user,
-                        group_id: group.filter(|_| change != "disabled" && change != "enabled"),
+                        group_id: group.filter(|_| {
+                            change != "disabled" && change != "enabled" && !change.starts_with("workload_")
+                        }),
+                        workload,
                     });
                 }
                 next = OutboxPosition { row, event_id: Some(id) };

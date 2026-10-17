@@ -16,7 +16,9 @@ pub mod import;
 pub mod meta;
 mod owners;
 mod passkeys;
+mod service_credentials;
 mod traits;
+mod workloads;
 mod write;
 
 use std::sync::Arc;
@@ -71,18 +73,23 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
     ),
     (
         8,
-        "0008_slice5_meta",
-        include_str!("migrations/0008_slice5_meta.sql"),
+        "0008_identity_platform",
+        include_str!("migrations/0008_identity_platform.sql"),
     ),
     (
         9,
-        "0009_slice5_material_upsert",
-        include_str!("migrations/0009_slice5_material_upsert.sql"),
+        "0009_slice5_meta",
+        include_str!("migrations/0009_slice5_meta.sql"),
     ),
     (
         10,
-        "0010_slice5_lock_namespace",
-        include_str!("migrations/0010_slice5_lock_namespace.sql"),
+        "0010_slice5_material_upsert",
+        include_str!("migrations/0010_slice5_material_upsert.sql"),
+    ),
+    (
+        11,
+        "0011_slice5_lock_namespace",
+        include_str!("migrations/0011_slice5_lock_namespace.sql"),
     ),
 ];
 pub const LATEST_SCHEMA_VERSION: i32 = MIGRATIONS[MIGRATIONS.len() - 1].0;

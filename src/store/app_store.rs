@@ -933,6 +933,140 @@ impl AppStore {
         }
     }
 
+    /// Record required events on the caller's already-open meta (publication)
+    /// transaction: they commit or roll back with it.
+    pub(crate) fn record_in(
+        &self,
+        tx: &dyn super::meta::MetaTx,
+        events: &[crate::event::types::Event],
+    ) -> StoreResult<()> {
+        match self {
+            AppStore::Sqlite(s) => {
+                let c = tx
+                    .sqlite()
+                    .ok_or(StoreError::Unavailable("foreign meta transaction".into()))?;
+                s.record_in(c, events)
+            }
+            #[cfg(feature = "postgres")]
+            AppStore::Postgres(_) => tx
+                .postgres()
+                .ok_or(StoreError::Unavailable("foreign meta transaction".into()))?
+                .record(events),
+        }
+    }
+
+    // ---- identity platform: workload registry, service credentials, factor reset
+
+    pub async fn workload_record(
+        &self,
+        changes: Vec<super::sqlite::workloads::WorkloadChange>,
+        events: Vec<Event>,
+    ) -> StoreResult<()> {
+        match self {
+            AppStore::Sqlite(s) => s.workload_record(changes, events).await,
+            #[cfg(feature = "postgres")]
+            AppStore::Postgres(p) => p.workload_record(changes, events).await,
+        }
+    }
+
+    pub async fn workload_snapshot_after(
+        &self,
+        after: i64,
+        limit: usize,
+        deadline: Deadline,
+    ) -> StoreResult<Vec<super::sqlite::workloads::WorkloadRow>> {
+        match self {
+            AppStore::Sqlite(s) => s.workload_snapshot_after(after, limit, deadline).await,
+            #[cfg(feature = "postgres")]
+            AppStore::Postgres(p) => p.workload_snapshot_after(after, limit, deadline).await,
+        }
+    }
+
+    pub async fn workload_head(&self) -> StoreResult<i64> {
+        match self {
+            AppStore::Sqlite(s) => s.workload_head().await,
+            #[cfg(feature = "postgres")]
+            AppStore::Postgres(p) => p.workload_head().await,
+        }
+    }
+
+    pub async fn service_credential_get(
+        &self,
+        id: String,
+        deadline: Deadline,
+    ) -> StoreResult<Option<super::sqlite::service_credentials::ServiceCredentialRow>> {
+        match self {
+            AppStore::Sqlite(s) => s.service_credential_get(id, deadline).await,
+            #[cfg(feature = "postgres")]
+            AppStore::Postgres(p) => p.service_credential_get(id, deadline).await,
+        }
+    }
+
+    pub async fn service_credential_list(
+        &self,
+    ) -> StoreResult<Vec<super::sqlite::service_credentials::ServiceCredentialRow>> {
+        match self {
+            AppStore::Sqlite(s) => s.service_credential_list().await,
+            #[cfg(feature = "postgres")]
+            AppStore::Postgres(p) => p.service_credential_list().await,
+        }
+    }
+
+    pub async fn service_credential_create(
+        &self,
+        row: super::sqlite::service_credentials::ServiceCredentialRow,
+        events: Vec<Event>,
+    ) -> StoreResult<()> {
+        match self {
+            AppStore::Sqlite(s) => s.service_credential_create(row, events).await,
+            #[cfg(feature = "postgres")]
+            AppStore::Postgres(p) => p.service_credential_create(row, events).await,
+        }
+    }
+
+    pub async fn service_credential_change(
+        &self,
+        id: String,
+        change: super::sqlite::service_credentials::Change,
+        digest: Option<String>,
+        events: Vec<Event>,
+    ) -> StoreResult<super::sqlite::service_credentials::ServiceCredentialRow> {
+        match self {
+            AppStore::Sqlite(s) => {
+                s.service_credential_change(id, change, digest, events)
+                    .await
+            }
+            #[cfg(feature = "postgres")]
+            AppStore::Postgres(p) => {
+                p.service_credential_change(id, change, digest, events)
+                    .await
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn admin_reset_factors(
+        &self,
+        actor: &Actor,
+        policy: &ActorPolicy,
+        user: &UserId,
+        scope: FactorResetScope,
+        deadline: Deadline,
+        admin_event: Event,
+    ) -> StoreResult<(bool, FactorResetReport)> {
+        match self {
+            AppStore::Sqlite(s) => {
+                s.admin_reset_factors(actor, policy, user, scope, deadline, admin_event)
+                    .await
+            }
+            #[cfg(feature = "postgres")]
+            AppStore::Postgres(p) => {
+                p.admin_reset_factors(actor, policy, user, scope, deadline, admin_event)
+                    .await
+            }
+        }
+    }
+
     /// Wait until every write queued before this call has committed.
     pub async fn barrier(&self) -> StoreResult<()> {
         match self {
@@ -1405,9 +1539,10 @@ impl SubjectDirectoryStore for AppStore {
         after: directory::OutboxPosition,
         limit: usize,
         groups: bool,
+        workloads: bool,
         deadline: Deadline,
     ) -> StoreResult<Result<directory::StatusPage, directory::PositionLost>> {
-        on!(self, s => SubjectDirectoryStore::admin_feed_changes(s, after, limit, groups, deadline).await)
+        on!(self, s => SubjectDirectoryStore::admin_feed_changes(s, after, limit, groups, workloads, deadline).await)
     }
     #[allow(clippy::too_many_arguments)]
     async fn admin_live_handle(

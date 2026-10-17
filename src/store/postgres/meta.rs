@@ -101,6 +101,11 @@ impl PgMetaTx<'_> {
         self.run(self.tx.query_opt(sql, params)).map_err(super::pg)
     }
 
+    /// Required events inside this transaction (outbox, feed positions).
+    pub fn record(&self, events: &[crate::event::types::Event]) -> StoreResult<()> {
+        self.run(self.store.insert_events(self.tx, events))
+    }
+
     /// The administrator fence (ADR-0016) inside this transaction.
     pub fn fence(&self, actor: &Actor, policy: &ActorPolicy) -> StoreResult<()> {
         self.run(super::admin::fence(

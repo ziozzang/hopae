@@ -3,6 +3,7 @@
 //! the portal, in the portal modules.
 
 pub mod admin;
+pub mod admin_tls;
 pub mod gateway;
 
 pub mod csrf;
@@ -11,6 +12,7 @@ pub mod denials;
 pub mod hooks;
 pub mod portal;
 pub mod security;
+pub mod tls;
 
 use axum::Router;
 use axum::http::StatusCode;

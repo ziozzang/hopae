@@ -778,6 +778,30 @@ impl Service {
         Ok((actor, row, snapshot.generation))
     }
 
+    /// The level a step-up transaction must reach: the highest step-up rule
+    /// of its application matching its return target (ADR-0008), at least
+    /// AAL 2. AAL 3 (ADR-0018) can be reached only with a high-assurance
+    /// passkey, so the portal offers nothing else for it.
+    pub(crate) fn stepup_requirement(&self, row: &TransactionRow) -> crate::session::types::Aal {
+        use crate::session::types::Aal;
+        let snapshot = self.snapshot.load_full();
+        let Ok(host) = host_of(&row.return_target) else {
+            return Aal::Two;
+        };
+        let Ok(app) = crate::policy::apps::resolve(&snapshot, &host) else {
+            return Aal::Two;
+        };
+        // The gateway's canonical form when the path has one; the raw path
+        // otherwise (a rule then matches at most as the gateway would).
+        let raw = row.return_target.path();
+        let path = crate::gateway::canonical::canonical_path(raw)
+            .map(|p| p.as_str().to_owned())
+            .unwrap_or_else(|_| raw.to_owned());
+        crate::policy::step_up::required_level(&app.step_up, &path)
+            .unwrap_or(Aal::Two)
+            .max(Aal::Two)
+    }
+
     /// Record portal activity on the handle and its session, coalesced like
     /// verify's touches (at most one write per `touch_coalesce`). Best effort:
     /// a lost touch only makes the next visit retry it.

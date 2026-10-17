@@ -92,6 +92,12 @@ effect in the store.
   starting with the same policy does not move the shared generation, so the
   other replica's prepared native owners stay current.
 
+### S610-3 Configuration-authoritative profiles converge on every replica
+
+- Given: both replicas with `authentication.source = config` (reload every 200 ms) and the same file: a profile with two API keys.
+- When: both start; only A's file drops one key; then B's file drops it too; then both files restore it at once.
+- Then: the second start finds the store equal and publishes nothing (one audit row); B refuses the dropped key within the follower bound although its own file is unchanged; B's identical file publishes nothing; the joint change converges on exactly one new revision and one `authentication.reconciled` (a replica that loses the race finds the store equal); both replicas allow the restored key.
+
 ## Abuse cases
 
 | Category | Case | Applies |
@@ -117,6 +123,7 @@ effect in the store.
 | --- | --- | --- | --- | --- |
 | S610-1 | `s610_1_two_replicas_share_logins_handoffs_fences_and_survive_a_killed_replica` | `tests/scenarios/s610_postgres_replicas.rs` | integration | passing |
 | S610-2 | `s610_2_replicas_differing_only_in_placement_share_the_configuration_digest` | `src/app.rs` | unit | passing |
+| S610-3 | `s610_3_configuration_authoritative_profiles_converge_on_every_replica` | `tests/scenarios/s610_postgres_replicas.rs` | integration | passing |
 
 ## Live verification
 

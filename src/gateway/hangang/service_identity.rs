@@ -94,6 +94,21 @@ pub fn response(evidence: Option<&VerifiedEvidence>, request_id: &str) -> Respon
         );
         headers.insert("x-hopae-principal-kind", HeaderValue::from_static(kind));
         headers.insert("x-hopae-aal", HeaderValue::from_static("0"));
+        // Kubernetes workload identity (Hangang ADR 0021/0022): the
+        // ServiceAccount-scoped principal and its SPIFFE ID, shared with
+        // Hangang's workload mTLS. Outputs of verification, never inputs.
+        if let Some(workload) = evidence.workload() {
+            if let Ok(value) = HeaderValue::from_str(&workload.principal) {
+                headers.insert("x-hopae-principal", value);
+            }
+            if let Some(value) = workload
+                .spiffe_id
+                .as_deref()
+                .and_then(|id| HeaderValue::from_str(id).ok())
+            {
+                headers.insert("x-hopae-workload-spiffe-id", value);
+            }
+        }
     } else {
         headers.insert(
             http::header::WWW_AUTHENTICATE,
@@ -170,5 +185,57 @@ mod tests {
         assert_eq!(expired.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(!expired.headers().contains_key("x-forwarded-user"));
         assert!(!expired.headers().contains_key("x-hopae-evidence-ttl-ms"));
+    }
+    /// S900-10: workload responses carry the ServiceAccount principal, its
+    /// SPIFFE ID and the unchanged canonical wire subject.
+    #[tokio::test]
+    async fn s900_10_workload_response_carries_principal_and_spiffe_id() {
+        use crate::auth_gateway::workload::fixture;
+        let key = fixture::ec_key("static-1");
+        let jwks = fixture::jwks(&[&key]);
+        let config = serde_json::from_value(serde_json::json!({"authority_id":"owned","profiles":[{"service_id":"orders","host":"orders.example.test","ports":[443],"realm":"example-cluster","kubernetes_workload":{"issuer":"https://kubernetes.default.svc.cluster.local","cluster_id":"example-cluster","trust_domain":"cluster.example.test","audience":fixture::AUDIENCE,"namespaces":["blue"],"keys":{"source":"static","jwks_env":"OWNED_JWKS"},"token_prefix":"k8s:"}}]})).unwrap();
+        let runtime = crate::auth_gateway::runtime::Runtime::compile(&config, &|name| {
+            (name == "OWNED_JWKS").then(|| jwks.clone())
+        })
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let token = fixture::mint(
+            &key,
+            &fixture::claims(
+                "https://kubernetes.default.svc.cluster.local",
+                (now / 1000) as i64,
+                "worker-pod",
+                "pod-uid-1",
+            ),
+        );
+        let evidence = runtime
+            .authenticate_async(
+                "orders.example.test",
+                443,
+                Some(&format!("k8s:{token}")),
+                "192.0.2.1".parse().unwrap(),
+                now,
+            )
+            .await
+            .unwrap();
+        let reply = response_at(Some(&evidence), "req-1", now);
+        let h = reply.headers();
+        let w = evidence.workload().unwrap();
+        assert_eq!(h["x-forwarded-user"], w.subject_ref.as_str());
+        assert!(h["x-forwarded-user"].to_str().unwrap().starts_with("s_"));
+        assert_eq!(h["x-hopae-principal-kind"], "workload");
+        assert_eq!(h["x-hopae-aal"], "0");
+        assert_eq!(h["x-hopae-principal"], w.principal.as_str());
+        assert_eq!(
+            h["x-hopae-workload-spiffe-id"],
+            "spiffe://cluster.example.test/ns/blue/sa/worker"
+        );
+        // Pod facts are audit attributes only: never on the wire.
+        assert!(
+            !format!("{h:?}").contains("worker-pod") && !format!("{h:?}").contains("pod-uid-1")
+        );
     }
 }

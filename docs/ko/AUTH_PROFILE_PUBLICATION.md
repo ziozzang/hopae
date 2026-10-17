@@ -1,6 +1,6 @@
 # 인증 프로필 게시
 
-<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=10 status=current -->
+<!-- translation-status: source=../AUTH_PROFILE_PUBLICATION.md source-rev=13 status=current -->
 
 [문서](README.md) · [English](../AUTH_PROFILE_PUBLICATION.md)
 
@@ -49,6 +49,32 @@ PUT은 If-Match를 요구하며 충돌은 409, 잘못된 후보는 422, 저장 �
 동시 CAS·commit 전후 취소·영속화 실패·스냅샷 설치 실패·열린 stream 회수를 검증합니다.
 실제 호패/Hangang 프로세스로 기존 provider 세션 보존도 확인합니다. DB 분산 follower의
 서명/revision 스냅샷 lease는 별도 설계이며 이 단일 소유자 계약에서 구현하지 않습니다.
+
+콘솔 게시는 게시 자신의 트랜잭션 안에서 `admin.profiles_publish`(`revision`,
+`enabled` 또는 `disabled`인 `status`, `note`로 남는 선택적 `reason`, 행위자)를
+씁니다. 따라서 거부되거나 충돌한 게시는 아무것도 기록하지 않습니다([관리](ADMIN.md#감사-이벤트)).
+
+## 게시 없는 검증
+
+`{"configuration": …}`을 담은 `POST /v1/authentication/profiles/validate`는 게시가
+실행할 검사를 실행하되 아무것도 게시하지 않습니다. 응답은 `200`과
+`{"valid": bool, "errors": [{"path", "code", "message"}]}`입니다. `path`는 보낸 설정
+안의 위치(`profiles[0].ports[1]`, 문서 전체는 `""`)를 가리킵니다. 검사가 실행되는
+순서대로 코드는 다음과 같습니다.
+
+| 코드 | 의미 |
+| --- | --- |
+| `invalid_document` | 형태가 틀림(알 수 없는 필드, 잘못된 타입, 빠진 필드). 첫 불일치만 보고 |
+| `undeclared_reference` | 설정 파일이 선언하지 않은 API 키 변수, 또는 검증 키·CA 파일·사설 엔드포인트가 있는 릴레이 |
+| `invalid_profile` | 프로필이 런타임 규칙(식별자, 한도, 커넥터, 네트워크)을 어김 |
+| `configuration_rule` | 설정 전체의 규칙. 예를 들어 어떤 애플리케이션 호스트와 포트에도 맞지 않는 프로필 |
+| `invalid_configuration` | 어느 한 프로필로 설명되지 않는 규칙(프로필 사이의 중복) |
+| `compile_failed` | 프로필을 컴파일할 수 없음. 예를 들어 참조한 변수가 환경에 없음 |
+
+`null`(게이트웨이 비활성화)은 언제나 유효합니다. 부여가 있으면 누구나 검증할 수 있고,
+요청은 콘솔의 JSON API 규칙을 따르며 행위자별로 속도가 제한되고(30회, 2초마다 1회
+보충) 응답 전에 `admin.read`(목적 `profiles.validate`, 본문 다이제스트, 발견 수)를
+씁니다. 메시지에는 비밀 값이 절대 들어가지 않습니다.
 
 ## 구현된 저장 기초 계층
 
@@ -133,3 +159,65 @@ credential digest를 포함하므로 비밀이나 보안 옵션이 바뀌면 재
 않습니다. 시간 기준은 프로세스 로컬이며 재시작 watermark는 아닙니다. 삭제 후 재생성
 커넥터·프로세스 교체의 영속 circuit/quarantine 수명주기는 남아 있습니다. 소스 검증된
 변경이며 현재 내부 바이너리에는 이 연속성 수정이 아직 들어가지 않았습니다.
+
+
+## 설정 권위 모드
+
+`authentication.source`는 인증 프로필(`authentication_gateway`)과 자격 증명 투영
+계획(`credential_projection`)의 소유자를 정합니다.
+
+| `authentication.source` | 소유자 | 시작 | 콘솔·API 편집 |
+| --- | --- | --- | --- |
+| `store`(기본값) | 저장소 | 파일은 빈 저장소만 초기화하며, 저장된 문서(또는 tombstone)가 바뀐 파일보다 우선합니다 | 허용(`PUT /v1/authentication/profiles`, `/projections`) |
+| `config` | 파일 | 시작할 때마다 저장소를 파일에 맞춥니다 | 거부: `409 config_authoritative` |
+
+`config` 모드의 시작은 먼저 파일의 프로필을 게시와 같은 검사로 검증하고 컴파일합니다.
+파일이 잘못되었으면 명확한 오류로 시작을 멈추고 저장소는 건드리지 않습니다. 저장된
+문서가 파일과 다르면 CAS 게시로 파일을 게시합니다. 다음 리비전, actor가 `config`인 감사
+행, 파일에 없으면 비활성 tombstone, 그리고 필수 이벤트 `authentication.reconciled`
+(`attrs.kind` = `profiles` 또는 `projections`, `previous_revision`, `revision`,
+`actor`)가 남습니다. 같은 문서는 리비전을 유지하고 아무것도 쓰지 않습니다. 투영 계획은
+plans를 비교하고 파일의 plans를 저장소의 다음 리비전으로 게시합니다(이 모드에서는 파일의
+`revision`을 무시합니다). `GET /v1/authentication/profiles`는 `source`를 알려 줍니다.
+
+Kubernetes 패키지가 필요로 하는 선언적 모드입니다. Helm values가 파일을 바꾸면 재시작
+없이도 저장소가 따라갑니다(아래).
+
+### 실행 중 맞춤
+
+`config` 모드에서 Hopae는 실행 중에도 설정 파일을 주기적으로 확인합니다
+(`authentication.reload_interval_ms`, 기본 1000, `0`이면 끄며 시작할 때만 맞춥니다).
+파일 내용의 다이제스트를 비교하며 파일 시스템 알림은 쓰지 않습니다. ConfigMap 볼륨은
+심볼릭 링크(`..data`)를 바꾸는데 파일에 건 inotify 감시는 이를 놓치기 때문입니다. 바뀐
+파일은 시작과 똑같은 과정(크기 한도, 파싱, 설정 전체 검증, 참조한 환경 변수 확인, 프로필
+컴파일)을 모두 거친 뒤에야 같은 CAS 게시(다음 리비전, actor가 `config`인 감사 행)로
+저장소에 반영되고 실행 중 스냅숏이 교체됩니다. 기록은 `attrs.cause = reload`인
+`authentication.reconciled`입니다. 폐기한 API 키나 제거한 프로필은 교체 직후 요청부터
+인증되지 않습니다.
+
+| 바뀐 파일 | 결과 |
+| --- | --- |
+| 유효하고 프로필이나 투영 계획이 다름 | 실행 중 반영: 새 리비전, 기록, `hopae_config_reloads_total{result="reconciled"}` |
+| 유효하고 프로필과 계획이 같음 | 아무것도 쓰지 않음 |
+| 잘못됨(파싱 불가, 잘못된 프로필, 없는 변수 등) | 아무것도 바뀌지 않음: 현재 프로필이 유지되고, 유효한 파일이 올 때까지 `hopae_config_reload_failing` = `1`, 경고, `GET /v1/status`의 `reload.config.failing`과 `error` |
+| 다른 키가 바뀜(리스너, 제공자, `authentication.source` 등) | 적용하지 않음: `reload.config.restart_required = true`, `result="restart_required"`, 경고. 다음 시작에서 적용 |
+| 프로필 없이 시작했는데 프로필이 생김 | 잘못됨으로 보고: 인증 게이트웨이를 시작하려면 재시작이 필요 |
+
+**시간.** 기본 1초 주기에서 폐기는 컨테이너 안의 파일이 바뀐 뒤 약 1초 안에(확인 주기와
+검증, 저장소 트랜잭션 한 번) 적용됩니다. ConfigMap 객체를 고친 뒤 파일이 바뀌기까지의
+시간은 Hopae 밖의 일입니다. kubelet은 동기화 주기와 캐시 TTL에 따라(기본 최대 약 1분)
+ConfigMap 볼륨을 갱신하며 `subPath` 마운트는 갱신하지 않습니다. 더 빠른 폐기가 필요하면
+ConfigMap을 디렉터리째(`subPath` 아님) 마운트하고, kubelet의
+`configMapAndSecretChangeDetectionStrategy`나 동기화 주기를 낮추거나, API를 지켜보며
+파일을 직접 쓰는 사이드카(config-reloader 등)가 채우는 projected 볼륨을 쓰거나, `store`
+모드에서 콘솔로 폐기하세요. Hopae 쪽 지연은 `authentication.reload_interval_ms`로
+제한됩니다.
+
+이전 절차:
+
+- **store → config:** 현재 문서(`GET /v1/authentication/profiles`와 `/projections`)를
+  파일에 옮기고 `authentication.source = "config"`로 설정한 뒤 재시작합니다. 같은 문서는
+  리비전을 유지하고, 다른 부분은 다음 리비전으로 게시되고 기록됩니다.
+- **config → store:** `authentication.source = "store"`로 설정(또는 제거)하고
+  재시작합니다. 저장소는 마지막으로 맞춘 문서를 유지하고 콘솔 편집이 다시 동작합니다.
+  이후 파일 변경은 적용되지 않으며 파일은 빈 저장소만 초기화합니다.

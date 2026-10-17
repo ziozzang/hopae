@@ -321,6 +321,16 @@ pub async fn collect(st: &AdminState) -> Result<StatusData, StoreError> {
             "contract": CONTRACT,
             "started_at": st.started_at.secs(),
         },
+        "portal": {
+            "public_url": st.profile_config.portal.public_url,
+            "passkeys": st.profile_config.webauthn.is_some(),
+            "passwordless": st.profile_config.webauthn.as_ref().is_some_and(|w| w.passwordless),
+        },
+        "console": {
+            "public_url": st.cfg.origin.ascii_serialization(),
+            "authority": authority_json(st),
+        },
+        "reload": st.reload.to_json(),
         "config": {
             "generation": snap.generation,
             "digest": st.config_digest,
@@ -402,6 +412,21 @@ pub async fn data(State(st): State<Arc<AdminState>>, ctx: Ctx) -> Response {
             StatusCode::SERVICE_UNAVAILABLE,
             unavailable(&e),
         ),
+    }
+}
+
+/// Who decides console access (ADR-0016, Hangang delegation): `local` — the
+/// native grant table (directly or through mapped Hangang actors), or
+/// `hangang` — the Hangang console is the authority and every request carries
+/// its signed assertion.
+fn authority_json(st: &AdminState) -> serde_json::Value {
+    use crate::admin::delegation::Authority;
+    match &st.delegation {
+        None => json!({"mode": "local", "delegation": "none"}),
+        Some(d) if d.authority == Authority::Hangang => {
+            json!({"mode": "hangang", "delegation": "hangang"})
+        }
+        Some(_) => json!({"mode": "local", "delegation": "mapped"}),
     }
 }
 

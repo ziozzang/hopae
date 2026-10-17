@@ -20,8 +20,10 @@ pub(crate) mod primary_owner;
 #[allow(dead_code)]
 pub(crate) mod provider_owner;
 mod rows;
+pub mod service_credentials;
 mod sessions;
 pub(crate) mod subject_directory;
+pub mod workloads;
 // Provenance infrastructure; actual native Human candidate integration is queued.
 #[cfg(test)]
 mod tests;
@@ -119,6 +121,16 @@ const MIGRATIONS: &[(u32, &str, &str)] = &[
         14,
         "0014_groups",
         include_str!("../migrations/0014_groups.sql"),
+    ),
+    (
+        15,
+        "0015_service_credentials",
+        include_str!("../migrations/0015_service_credentials.sql"),
+    ),
+    (
+        16,
+        "0016_workload_principals",
+        include_str!("../migrations/0016_workload_principals.sql"),
     ),
 ];
 
@@ -501,6 +513,16 @@ impl Store {
             .rng
             .write()
             .unwrap_or_else(|p| p.into_inner()) = rng;
+    }
+
+    /// Record required events on the caller's already-open publication
+    /// transaction (they commit or roll back with it).
+    pub(crate) fn record_in(
+        &self,
+        connection: &Connection,
+        events: &[crate::event::types::Event],
+    ) -> crate::store::StoreResult<()> {
+        events::insert_events(connection, self.shared(), events)
     }
 
     /// Check administrator authority on the caller's already-open publication transaction.

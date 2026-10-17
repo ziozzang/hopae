@@ -27,6 +27,8 @@ const IP: &str = "192.0.2.10";
 const SVC: &str = "svc.example.test";
 const SERVICE_KEY_ENV: &str = "HOPAE_QUALIFY_SERVICE_KEY";
 const SERVICE_KEY: &str = "qualify-service-credential-0123456789abcdef";
+const SERVICE_KEY2_ENV: &str = "HOPAE_QUALIFY_SERVICE_KEY2";
+const SERVICE_KEY2: &str = "qualify-second-credential-0123456789abcdef";
 /// The dedicated key of the native Human compiled-material owner: with it,
 /// every login records its native primary provenance (ADR-0020 slice 5).
 const MATERIAL_KEY_ENV: &str = "HOPAE_QUALIFY_MATERIAL_KEY";
@@ -132,7 +134,12 @@ fn rt() -> tokio::runtime::Runtime {
 impl Database {
     fn create() -> Option<Database> {
         let admin_url = std::env::var("HOPAE_TEST_POSTGRES_URL").ok()?;
-        let name = format!("hopae_q_{}", std::process::id());
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let name = format!(
+            "hopae_q_{}_{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
         rt().block_on(async {
             let (c, conn) = tokio_postgres::connect(&admin_url, tokio_postgres::NoTls)
                 .await
@@ -263,34 +270,41 @@ struct Stack {
 
 impl Stack {
     fn start() -> Option<Stack> {
+        Self::start_with(json!({}))
+    }
+
+    /// As [`Stack::start`], with top-level configuration keys replaced.
+    fn start_with(extra: serde_json::Value) -> Option<Stack> {
         let db = Database::create()?;
         let idp = MockIdp::start("auth_time_present");
         let key = "qualify-gateway-key-0123456789abcdef0123456789abcdef".to_string();
         let secret = "qualify-mock-secret-0123456789abcdef".to_string();
         let fixture = || {
-            Fixture::with(
-                "m4-admin",
-                json!({
-                    "store": {"kind": "postgres", "postgres": {"url_env": "HOPAE_QUALIFY_PG", "pool_size": 8}},
-                    "apps": [
-                        {"app_id": "app", "display_name": "app", "hosts": [APP], "ports": [443],
-                         "session": {"idle": "12h", "absolute": "7d"},
-                         "binding": {"ip": "strict", "ua": "off", "on_mismatch": "terminate_session"},
-                         "on_authz_change": "refresh", "verify_cache_seconds": 0},
-                        {"app_id": "svc", "display_name": "svc", "hosts": [SVC], "ports": [443]},
-                        {"app_id": "default", "display_name": "default"}
-                    ],
-                    "authentication_gateway": profiles(),
-                    "human_material_key_env": MATERIAL_KEY_ENV,
-                    "credential_projection": plans(1),
-                }),
-            )
+            let mut overrides = json!({
+                "store": {"kind": "postgres", "postgres": {"url_env": "HOPAE_QUALIFY_PG", "pool_size": 8}},
+                "apps": [
+                    {"app_id": "app", "display_name": "app", "hosts": [APP], "ports": [443],
+                     "session": {"idle": "12h", "absolute": "7d"},
+                     "binding": {"ip": "strict", "ua": "off", "on_mismatch": "terminate_session"},
+                     "on_authz_change": "refresh", "verify_cache_seconds": 0},
+                    {"app_id": "svc", "display_name": "svc", "hosts": [SVC], "ports": [443]},
+                    {"app_id": "default", "display_name": "default"}
+                ],
+                "authentication_gateway": profiles(),
+                "human_material_key_env": MATERIAL_KEY_ENV,
+                "credential_projection": plans(1),
+            });
+            for (k, v) in extra.as_object().unwrap() {
+                overrides[k] = v.clone();
+            }
+            Fixture::with("m4-admin", overrides)
         };
         let env = [
             (KEY_ENV, key.as_str()),
             (MOCK_SECRET_ENV, secret.as_str()),
             ("HOPAE_QUALIFY_PG", db.url.as_str()),
             (SERVICE_KEY_ENV, SERVICE_KEY),
+            (SERVICE_KEY2_ENV, SERVICE_KEY2),
             (MATERIAL_KEY_ENV, MATERIAL_KEY),
         ];
         let a = Hopae::spawn(fixture(), &idp, &env);
@@ -721,4 +735,84 @@ fn s610_1_two_replicas_share_logins_handoffs_fences_and_survive_a_killed_replica
         "two replicas publishing the same material leave one revision"
     );
     s.a.kill();
+}
+
+/// S610-3: `authentication.source = config` on two replicas. The file
+/// reconciles the store through the PostgreSQL publication; a changed file
+/// on one replica is enforced by the other (through the publication
+/// follower), the other's later identical file changes nothing, and both
+/// files changing together converge on one new revision.
+#[test]
+fn s610_3_configuration_authoritative_profiles_converge_on_every_replica() {
+    let two_keys = || {
+        let mut p = profiles();
+        p["profiles"][0]["api_keys"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"token_env": SERVICE_KEY2_ENV, "subject": "batch"}));
+        p
+    };
+    let Some(mut s) = Stack::start_with(json!({
+        "authentication": {"source": "config", "reload_interval_ms": 200},
+        "authentication_gateway": two_keys(),
+    })) else {
+        eprintln!("skip: HOPAE_TEST_POSTGRES_URL not set");
+        return;
+    };
+    let (ga, gb) = (s.a.gateway, s.b.gateway);
+    assert!(
+        s.service_allowed(ga) && s.service_allowed(gb),
+        "both replicas start on the file"
+    );
+    let audits = |s: &Stack| {
+        s.db.query_i64(
+            "SELECT count(*) FROM meta WHERE key LIKE 'authentication_profile_publication_audit:%'",
+        )
+    };
+    assert_eq!(
+        audits(&s),
+        1,
+        "the second start found the store equal to its file"
+    );
+    // Only A's file changes (a ConfigMap reaching one pod first).
+    let revoke = |v: &mut serde_json::Value| {
+        v["authentication_gateway"]["profiles"][0]["api_keys"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|k| k["subject"] != "worker");
+    };
+    s.a.reconfigure(revoke);
+    let took = s.converge(gb, false);
+    assert!(
+        took < Duration::from_secs(3),
+        "B enforced A's file in {took:?}"
+    );
+    assert!(!s.service_allowed(ga));
+    assert_eq!(audits(&s), 2);
+    // B's file catches up: already equal, nothing is published again.
+    s.b.reconfigure(revoke);
+    std::thread::sleep(Duration::from_millis(1200));
+    assert_eq!(audits(&s), 2, "an equal file publishes nothing");
+    // Both files change at once: one new revision, both replicas allow.
+    let restore = |v: &mut serde_json::Value| {
+        v["authentication_gateway"]["profiles"][0]["api_keys"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"token_env": SERVICE_KEY_ENV, "subject": "worker"}));
+    };
+    s.a.reconfigure(restore);
+    s.b.reconfigure(restore);
+    s.converge(ga, true);
+    s.converge(gb, true);
+    std::thread::sleep(Duration::from_millis(1200));
+    assert_eq!(
+        audits(&s),
+        3,
+        "the two replicas' reloads converge on one publication"
+    );
+    assert_eq!(
+        s.db.query_i64("SELECT count(*) FROM events WHERE kind = 'authentication.reconciled' AND attrs->>'kind' = 'profiles'"),
+        3,
+        "one reconciliation per publication: A's start, A's reload, the joint reload"
+    );
 }

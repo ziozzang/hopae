@@ -86,7 +86,13 @@ pub(super) async fn fence(
                AND h.created_at <= $3::bigint + $4::bigint
                AND $3::bigint < LEAST(h.absolute_expires_at, h.created_at + $11::bigint)
                AND $3::bigint < h.last_seen_at + $12::bigint
-               AND h.issued_aal >= $13::integer
+               AND h.issued_aal >= LEAST($13::integer, 2)
+               AND ($13::integer < 3 OR EXISTS (
+                     SELECT 1 FROM session_webauthn_provenance p
+                     JOIN webauthn_credentials w ON w.credential_id = p.credential_id AND w.user_id = p.user_id
+                     WHERE p.session_id = s.session_id AND p.credential_generation = s.cred_gen
+                       AND s.aal = 2 AND p.assurance = 'aal3' AND w.assurance = 'aal3'
+                       AND w.state = 'active' AND NOT w.backup_eligible AND NOT w.backup_state))
                AND u.status = 'active'
                AND u.authz_version = s.authz_version_at_auth
                AND g.revoked_at IS NULL

@@ -271,6 +271,20 @@ impl Configuration {
     }
 }
 impl Prepared {
+    /// Use new mTLS material (CA, client certificate, key) for every later
+    /// call of every projection authority client ([`crate::reload`]).
+    pub fn reload_tls(&self, ca: &[u8], certificate: &[u8], key: &[u8]) -> Result<(), Refused> {
+        self.client
+            .reload_tls(ca, certificate, key)
+            .map_err(|_| Refused)?;
+        if let Some(c) = &self.workload_client {
+            c.reload_tls(ca, certificate, key).map_err(|_| Refused)?;
+        }
+        if let Some(c) = &self.human_client {
+            c.reload_tls(ca, certificate, key).map_err(|_| Refused)?;
+        }
+        Ok(())
+    }
     pub(crate) fn permits_workload(&self, service: &str, audience: &str) -> bool {
         self.workload_scopes
             .iter()
@@ -376,7 +390,7 @@ mod tests {
         assert!(crate::config::parse(&value.to_string()).is_err());
         value["receipt_issuer"]["workload_receipts"] =
             serde_json::json!({"scopes":[scope.clone()],"capacity":8});
-        value["authentication_gateway"]["profiles"][0]["kubernetes_tokenreview"] = serde_json::json!({"connection":{"api_origin":"https://kubernetes.example.test","issuer":"https://issuer.example.test","cluster_id":"services","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_KUBE_CA","reviewer_token_env":"OWNED_KUBE_REVIEWER","token_prefix":"k8s:"});
+        value["authentication_gateway"]["profiles"][0]["kubernetes_tokenreview"] = serde_json::json!({"connection":{"api_origin":"https://kubernetes.example.test","issuer":"https://issuer.example.test","cluster_id":"services","audience":"orders-workload","namespaces":["blue"],"timeout_ms":500},"ca_pem_env":"OWNED_KUBE_CA","reviewer_token_env":"OWNED_KUBE_REVIEWER","token_prefix":"k8s:","subject":"service_account"});
         crate::config::parse(&value.to_string()).unwrap();
         for scopes in [
             serde_json::json!([scope.clone(), scope]),

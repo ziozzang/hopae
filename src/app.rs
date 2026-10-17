@@ -237,6 +237,10 @@ pub struct Services {
     /// Keys every replica must share (PostgreSQL): the portal CSRF key and
     /// the console's MAC key. `None` on SQLite: one instance draws its own.
     pub(crate) shared_keys: Option<SharedKeys>,
+    /// What live reloading of TLS material and configuration last did.
+    pub reload_status: Arc<crate::reload::Status>,
+    /// The outbound mTLS material watched by the TLS poller.
+    pub(crate) client_tls: Vec<Arc<crate::reload::ClientTls>>,
 }
 
 impl Services {
@@ -337,6 +341,7 @@ impl Services {
             listeners: self.listeners.get().cloned().unwrap_or_default(),
             peer_warned: std::sync::Mutex::new(std::collections::HashMap::new()),
             delegation: self.config.admin.hangang_delegation.clone(),
+            reload: self.reload_status.clone(),
             delegation_replay: self.delegation_replay(),
         }))
     }
@@ -579,10 +584,10 @@ struct EventWiring {
 
 /// Bound listeners and the open store; call [`Bound::run`] to serve.
 pub struct Bound {
-    admin_tls: Option<Arc<rustls::ServerConfig>>,
-    grpc_gateway: Option<(TcpListener, tonic::transport::ServerTlsConfig)>,
+    admin_tls: Option<Arc<crate::reload::ServerTls>>,
+    grpc_gateway: Option<(TcpListener, http::grpc_gateway::GrpcTls)>,
     native_gateway: Option<(TcpListener, SocketAddr)>,
-    native_gateway_tls: Option<tokio_rustls::TlsAcceptor>,
+    native_gateway_tls: Option<Arc<crate::reload::ServerTls>>,
     portal: TcpListener,
     gateway: TcpListener,
     /// The admin listener, bound after the portal and before the gateway.
@@ -604,6 +609,8 @@ pub struct Bound {
 /// and every policy setting stay in the digest.
 fn config_digest(cfg: &Config) -> String {
     let mut shared = cfg.clone();
+    // The file's location is not part of the configuration either.
+    shared.source_path = None;
     shared.state_dir = std::path::PathBuf::new();
     let listen = &mut shared.listen;
     listen.portal.clear();
@@ -669,6 +676,28 @@ async fn bind_environment(
                 .map_err(|_| anyhow::anyhow!("native projection resources unavailable"))
         })
         .transpose()?;
+    let reload_status = Arc::new(crate::reload::Status::default());
+    let mut client_tls = Vec::new();
+    if let (Some(configuration), Some(prepared)) = (&cfg.projection_receiver, &projection_resources)
+    {
+        let authority = &configuration.authority;
+        let prepared = prepared.clone();
+        client_tls.push(
+            crate::reload::ClientTls::watch(
+                "projection_authority",
+                &authority.ca,
+                &authority.certificate,
+                &authority.key,
+                reload_status.clone(),
+                Box::new(move |ca, certificate, key| {
+                    prepared.reload_tls(ca, certificate, key).map_err(|_| {
+                        anyhow::anyhow!("the projection authority clients refused the material")
+                    })
+                }),
+            )
+            .context("projection receiver mTLS material")?,
+        );
+    }
     let external_verifiers = Arc::new(
         crate::factor::external_registry::Registry::compile(
             &cfg.external_verifiers,
@@ -938,6 +967,11 @@ async fn bind_environment(
         .await
         .context("binding portal listener")?;
     let portal_addr = portal.local_addr()?;
+    let config_authoritative =
+        cfg.authentication.source == crate::config::AuthenticationSource::Config;
+    // `authentication.source = config`: events recording what the start
+    // reconciled (written after the publications commit).
+    let mut reconciled_events = Vec::new();
     let authentication_authority = {
         use crate::store::meta::MetaDb as _;
         let mut connection = store.meta();
@@ -950,25 +984,59 @@ async fn bind_environment(
                     .validate()
                     .map_err(|_| crate::auth_gateway::publication::Error::Invalid)
             };
-            Some(Arc::new(std::sync::Mutex::new(
+            let authority = if config_authoritative {
+                let (authority, done) = crate::auth_gateway::authority::Authority::load_from_config(
+                    &mut connection,
+                    cfg.authentication_gateway.clone(),
+                    &|name| std::env::var(name).ok(),
+                    &validate,
+                )
+                .context("authentication.source = config: the configured authentication profiles are invalid; the store was not changed")?;
+                if done.changed {
+                    tracing::info!(
+                        previous = done.previous,
+                        revision = done.revision,
+                        "authentication profiles reconciled to the configuration"
+                    );
+                    reconciled_events.push(("profiles", done.previous, done.revision));
+                }
+                authority
+            } else {
                 crate::auth_gateway::authority::Authority::load(
                     &mut connection,
                     cfg.authentication_gateway.clone(),
                     &|name| std::env::var(name).ok(),
                     &validate,
-                )?,
-            )))
+                )?
+            };
+            Some(Arc::new(std::sync::Mutex::new(authority)))
         } else {
             None
         }
     };
+    // Kubernetes workload lifecycle signals (ADR 0021/0022) become outbox
+    // events through one pump per process.
+    if let Some(authority) = &authentication_authority {
+        let (sink, rx) = crate::auth_gateway::workload::signals::channel();
+        tokio::spawn(crate::auth_gateway::workload::events::pump(
+            rx,
+            emitter.clone(),
+            store.clone(),
+        ));
+        authority
+            .lock()
+            .map_err(|_| anyhow::anyhow!("authentication authority unavailable"))?
+            .attach_workload_signals(sink);
+    }
     let projection_authority = {
         use crate::store::meta::MetaDb as _;
         let mut connection = store.meta();
         let durable = connection
             .meta_read(|tx| crate::auth_gateway::projection_authority::read(tx))
             .map_err(|_| anyhow::anyhow!("invalid durable credential projection state"))?;
-        if let Some(configuration) = durable.as_ref().and_then(|d| d.configuration.as_ref()) {
+        if !config_authoritative
+            && let Some(configuration) = durable.as_ref().and_then(|d| d.configuration.as_ref())
+        {
             crate::auth_gateway::projection::validate_capabilities(
                 configuration,
                 cfg.credential_projection.as_ref(),
@@ -980,7 +1048,62 @@ async fn bind_environment(
         let mut owner = connection
             .meta_read(|tx| crate::auth_gateway::projection_authority::Authority::load(tx, 0))
             .map_err(|_| anyhow::anyhow!("credential projection owner unavailable"))?;
-        if durable.is_none()
+        if config_authoritative {
+            // The plan's revision is the store's: compare the plans, then
+            // publish the file's plans at the next revision. Replicas
+            // starting together converge: a concurrent publication moves the
+            // revision, so compare again against the store.
+            let plans = |c: &Option<crate::auth_gateway::projection::Configuration>| {
+                serde_json::to_value(c.as_ref().map(|c| &c.plans)).ok()
+            };
+            let mut durable = durable;
+            for attempt in 0.. {
+                let previous = durable.as_ref().map_or(0, |d| d.revision);
+                let current = durable.as_ref().and_then(|d| d.configuration.clone());
+                let same = match &durable {
+                    Some(_) => plans(&current) == plans(&cfg.credential_projection),
+                    None => cfg.credential_projection.is_none(),
+                };
+                if same {
+                    break;
+                }
+                let mut desired = cfg.credential_projection.clone();
+                if let Some(d) = &mut desired {
+                    d.revision = previous + 1;
+                }
+                match owner.publish(&mut connection, previous, desired, "config", &|_| Ok(())) {
+                    Ok(document) => {
+                        tracing::info!(
+                            previous,
+                            revision = document.revision,
+                            "credential projection reconciled to the configuration"
+                        );
+                        reconciled_events.push(("projections", previous, document.revision));
+                        break;
+                    }
+                    Err(_) => {
+                        let moved = connection
+                            .meta_read(|tx| crate::auth_gateway::projection_authority::read(tx))
+                            .map_err(|_| {
+                                anyhow::anyhow!("invalid durable credential projection state")
+                            })?;
+                        if attempt >= 3 || moved.as_ref().map_or(0, |d| d.revision) == previous {
+                            anyhow::bail!(
+                                "authentication.source = config: the configured credential projection is invalid; the store was not changed"
+                            );
+                        }
+                        owner = connection
+                            .meta_read(|tx| {
+                                crate::auth_gateway::projection_authority::Authority::load(tx, 0)
+                            })
+                            .map_err(|_| {
+                                anyhow::anyhow!("credential projection owner unavailable")
+                            })?;
+                        durable = moved;
+                    }
+                }
+            }
+        } else if durable.is_none()
             && let Some(configuration) = &cfg.credential_projection
         {
             owner
@@ -995,6 +1118,29 @@ async fn bind_environment(
         }
         Arc::new(std::sync::Mutex::new(owner))
     };
+    if !reconciled_events.is_empty() {
+        let events = reconciled_events
+            .iter()
+            .map(|(target, previous, revision)| {
+                emitter.required(
+                    EventKind::AuthenticationReconciled,
+                    Outcome::Success,
+                    "startup",
+                    |b| {
+                        b.attr("kind", *target)
+                            .attr("previous_revision", *previous)
+                            .attr("revision", *revision)
+                            .attr("actor", "config")
+                    },
+                )
+            })
+            .collect();
+        store
+            .events()
+            .append_required(events)
+            .await
+            .context("recording the authentication reconciliation")?;
+    }
     let human_owner = crate::verify::human::Owner::new(
         store.clone(),
         registry.clone(),
@@ -1074,6 +1220,8 @@ async fn bind_environment(
         started_at: env.clock.now(),
         listeners: Arc::default(),
         shared_keys,
+        reload_status,
+        client_tls,
     };
     #[cfg(feature = "test-hooks")]
     let hooks = match (&env.hooks_addr, &env.test_clock, &env.store_hooks) {
@@ -1111,7 +1259,12 @@ async fn bind_environment(
         .admin_tls
         .as_ref()
         .map(|tls| {
-            hangang_runtime::tls_config(&tls.certificate, &tls.key, &tls.client_ca, &[b"http/1.1"])
+            crate::reload::ServerTls::load(
+                "admin",
+                tls,
+                &[b"http/1.1"],
+                services.reload_status.clone(),
+            )
         })
         .transpose()
         .context("loading administrator mTLS")?;
@@ -1123,7 +1276,15 @@ async fn bind_environment(
         .listen
         .native_gateway_tls
         .as_ref()
-        .map(http::native_gateway::tls_acceptor)
+        .filter(|_| cfg.listen.native_gateway.is_some())
+        .map(|tls| {
+            crate::reload::ServerTls::load(
+                "native_gateway",
+                tls,
+                &[b"hop1"],
+                services.reload_status.clone(),
+            )
+        })
         .transpose()
         .context("loading native gateway mTLS")?;
     let native_gateway = match &cfg.listen.native_gateway {
@@ -1143,11 +1304,14 @@ async fn bind_environment(
                 .native_gateway_tls
                 .as_ref()
                 .context("gRPC gateway requires mTLS")?;
-            let tls = hangang_runtime::configuration(
-                &settings.certificate,
-                &settings.key,
-                &settings.client_ca,
-            )?;
+            let tls = crate::reload::ServerTls::load(
+                "grpc_gateway",
+                settings,
+                &[b"h2"],
+                services.reload_status.clone(),
+            )
+            .context("loading gRPC gateway mTLS")?;
+            let tls = http::grpc_gateway::GrpcTls::Reloading(tls);
             let listener = TcpListener::bind(value)
                 .await
                 .context("binding gRPC gateway")?;
@@ -1335,6 +1499,28 @@ impl Bound {
             .run(bg_rx.clone()),
         ));
 
+        // Live TLS reload: every listener's and client's material, polled.
+        let mut tls_watch = crate::reload::TlsWatch {
+            servers: Vec::new(),
+            clients: self.services.client_tls.clone(),
+        };
+        tls_watch.servers.extend(self.admin_tls.clone());
+        tls_watch.servers.extend(self.native_gateway_tls.clone());
+        if let Some((_, http::grpc_gateway::GrpcTls::Reloading(tls))) = &self.grpc_gateway {
+            tls_watch.servers.push(tls.clone());
+        }
+        if let Some(interval) = cfg.tls_reload_interval()
+            && !tls_watch.is_empty()
+        {
+            workers.push(tokio::spawn(tls_watch.run(interval, bg_rx.clone())));
+        }
+        // Live reconciliation of the configuration-authoritative profiles.
+        if let Some(interval) = cfg.auth_reload_interval() {
+            workers.push(tokio::spawn(
+                crate::config_reload::Reconciler::new(&self.services).run(interval, bg_rx.clone()),
+            ));
+        }
+
         // Servers.
         tokio::spawn(async move {
             shutdown.await;
@@ -1400,7 +1586,7 @@ impl Bound {
             match (self.admin, routers.admin) {
                 (Some((l, _)), Some(router)) => {
                     if let Some(tls) = self.admin_tls {
-                        hangang_runtime::serve_https(l, tls, router, wait(stop_rx.clone())).await
+                        http::admin_tls::serve(l, tls, router, wait(stop_rx.clone())).await
                     } else {
                         axum::serve(
                             l,
@@ -1674,6 +1860,259 @@ pub enum AdminCommand {
     FactorsReset {
         target: String,
     },
+    /// `hopae admin service-credentials …`.
+    ServiceCredential(ServiceCredentialCommand),
+}
+
+/// `hopae admin service-credentials` actions.
+#[derive(Clone, Debug)]
+pub enum ServiceCredentialCommand {
+    Create {
+        id: String,
+        routes: Vec<String>,
+        /// `pumgye-v2`: the four projection/lifecycle read routes.
+        preset: Option<String>,
+        audiences: Vec<String>,
+        client_spki_sha256: Option<String>,
+        client_san: Option<String>,
+        expires_in_days: u32,
+        rate_per_minute: u32,
+        burst: u32,
+        note: Option<String>,
+    },
+    /// Issue a next secret (current and next are both accepted).
+    Rotate {
+        id: String,
+    },
+    /// Make the next secret current; the old current stops working.
+    Promote {
+        id: String,
+    },
+    Revoke {
+        id: String,
+    },
+    List,
+}
+
+/// `hopae admin service-credentials …`: the secret is printed once and only
+/// its digest is stored; every change commits with `admin.service_credential`.
+async fn service_credential_cli(
+    cfg: &Config,
+    cmd: ServiceCredentialCommand,
+    mut out: AdminCliOutput,
+) -> anyhow::Result<AdminCliOutput> {
+    use crate::admin::service_credentials as sc;
+    use crate::store::sqlite::service_credentials::{Change, ServiceCredentialRow};
+    let id_of = |c: &ServiceCredentialCommand| match c {
+        ServiceCredentialCommand::Create { id, .. }
+        | ServiceCredentialCommand::Rotate { id }
+        | ServiceCredentialCommand::Promote { id }
+        | ServiceCredentialCommand::Revoke { id } => Some(id.clone()),
+        ServiceCredentialCommand::List => None,
+    };
+    if let Some(id) = id_of(&cmd)
+        && !sc::valid_id(&id)
+    {
+        return Ok(out.refuse("credential id: 3-48 lowercase letters, digits and inner '-'"));
+    }
+    let env = env();
+    let audience_default = cfg
+        .admin
+        .service_audience
+        .clone()
+        .or_else(|| cfg.admin_origin().map(|o| o.ascii_serialization()));
+    let mut validated = None;
+    if let ServiceCredentialCommand::Create {
+        id,
+        routes,
+        preset,
+        audiences,
+        client_spki_sha256,
+        client_san,
+        expires_in_days,
+        rate_per_minute,
+        burst,
+        note,
+    } = &cmd
+    {
+        let mut routes = routes.clone();
+        match preset.as_deref() {
+            None => {}
+            Some("pumgye-v2") => routes.extend(sc::PUMGYE_V2_ROUTES.iter().map(|s| s.to_string())),
+            Some(_) => return Ok(out.refuse("--preset: only pumgye-v2 is defined")),
+        }
+        routes.sort();
+        routes.dedup();
+        if routes.is_empty() || routes.len() > sc::MAX_ROUTES {
+            return Ok(out.refuse("--route: 1-32 routes (\"METHOD /path\") or --preset"));
+        }
+        if let Some(bad) = routes.iter().find(|r| !sc::grantable(r)) {
+            return Ok(out.refuse(format!(
+                "--route {bad:?}: not a read route a service credential may hold (mutations are never grantable)"
+            )));
+        }
+        let mut audiences = if audiences.is_empty() {
+            audience_default.clone().into_iter().collect::<Vec<_>>()
+        } else {
+            audiences.clone()
+        };
+        audiences.sort();
+        audiences.dedup();
+        if audiences.is_empty()
+            || audiences.len() > sc::MAX_AUDIENCES
+            || audiences
+                .iter()
+                .any(|a| a.is_empty() || a.len() > 256 || !a.bytes().all(|b| b.is_ascii_graphic()))
+        {
+            return Ok(out.refuse(
+                "--audience: 1-8 audiences of visible ASCII (default the console origin)",
+            ));
+        }
+        let spki = client_spki_sha256.as_ref().map(|s| s.to_ascii_lowercase());
+        if spki
+            .as_ref()
+            .is_some_and(|s| s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Ok(out.refuse("--client-spki-sha256: 64 hex digits"));
+        }
+        if client_san.as_ref().is_some_and(|s| !sc::valid_san(s)) {
+            return Ok(out.refuse("--client-san: 1-512 visible ASCII characters"));
+        }
+        if spki.is_none() && client_san.is_none() {
+            return Ok(
+                out.refuse("an mTLS binding is required: --client-spki-sha256 and/or --client-san")
+            );
+        }
+        let lifetime = i64::from(*expires_in_days) * 86_400;
+        if !(1..=sc::MAX_LIFETIME_SECS).contains(&lifetime) {
+            return Ok(out.refuse("--expires-in-days: 1-400"));
+        }
+        if !(1..=6000).contains(rate_per_minute) || !(1..=1000).contains(burst) {
+            return Ok(out.refuse("--rate-per-minute 1-6000, --burst 1-1000"));
+        }
+        if note.as_ref().is_some_and(|n| n.chars().count() > 256) {
+            return Ok(out.refuse("--note: at most 256 characters"));
+        }
+        if cfg.listen.admin_tls.is_none() {
+            out.warn("listen.admin_tls is not configured: service credentials are refused until the admin listener uses mutual TLS");
+        }
+        let now = env.clock.now().secs();
+        let (token, digest) = crate::admin::service_credentials::mint(env.rng.as_ref(), id);
+        validated = Some((
+            ServiceCredentialRow {
+                credential_id: id.clone(),
+                routes,
+                audiences,
+                client_spki_sha256: spki,
+                client_san: client_san.clone(),
+                current_sha256: digest,
+                current_since: now,
+                next_sha256: None,
+                next_since: None,
+                expires_at: now + lifetime,
+                rate_per_minute: *rate_per_minute,
+                burst: *burst,
+                note: note.clone(),
+                created_at: now,
+                revoked_at: None,
+                revision: 1,
+            },
+            token,
+        ));
+    }
+    let store = open_cli_store(cfg, &env).await?;
+    let event = |change: &'static str, id: &str| {
+        crate::event::types::EventBuilder::new(
+            &*env.clock,
+            &*env.rng,
+            EventKind::AdminServiceCredential,
+            Outcome::Success,
+            "admin-cli",
+        )
+        .attr("actor", "cli")
+        .attr("change", change)
+        .attr("credential_id", id)
+        .build()
+    };
+    let iso = |t: i64| preflight::iso_datetime(t);
+    let result: crate::store::StoreResult<()> = async {
+        match cmd {
+            ServiceCredentialCommand::Create { id, .. } => {
+                let (row, token) = validated.take().expect("validated");
+                let expires = row.expires_at;
+                store
+                    .service_credential_create(row, vec![event("created", &id)])
+                    .await?;
+                out.out(token.expose());
+                out.stderr.push_str(&format!(
+                    "created service credential {id} (expires {}); the token above is shown once and only its digest is stored\n",
+                    iso(expires)
+                ));
+            }
+            ServiceCredentialCommand::Rotate { id } => {
+                let (token, digest) = crate::admin::service_credentials::mint(env.rng.as_ref(), &id);
+                store
+                    .service_credential_change(id.clone(), Change::Rotate, Some(digest), vec![event("rotated", &id)])
+                    .await?;
+                out.out(token.expose());
+                out.stderr.push_str(&format!(
+                    "issued the next secret of {id}: current and next are both accepted until `promote`\n"
+                ));
+            }
+            ServiceCredentialCommand::Promote { id } => {
+                store
+                    .service_credential_change(id.clone(), Change::Promote, None, vec![event("promoted", &id)])
+                    .await?;
+                out.out(format!("promoted the next secret of {id}; the previous secret no longer works"));
+            }
+            ServiceCredentialCommand::Revoke { id } => {
+                store
+                    .service_credential_change(id.clone(), Change::Revoke, None, vec![event("revoked", &id)])
+                    .await?;
+                out.out(format!("revoked service credential {id}"));
+            }
+            ServiceCredentialCommand::List => {
+                out.out("ID  STATE  ROUTES  AUDIENCES  BINDING  EXPIRES_AT  ROTATION  RATE");
+                let now = env.clock.now().secs();
+                for r in store.service_credential_list().await? {
+                    let state = if r.revoked_at.is_some() {
+                        "revoked"
+                    } else if r.expires_at <= now {
+                        "expired"
+                    } else {
+                        "active"
+                    };
+                    let binding = [
+                        r.client_spki_sha256.as_ref().map(|s| format!("spki:{}", &s[..16])),
+                        r.client_san.as_ref().map(|s| format!("san:{s}")),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join("+");
+                    out.out(format!(
+                        "{}  {}  {}  {}  {}  {}  {}  {}/min burst {}",
+                        r.credential_id,
+                        state,
+                        r.routes.join(","),
+                        r.audiences.join(","),
+                        binding,
+                        iso(r.expires_at),
+                        if r.next_sha256.is_some() { "pending" } else { "-" },
+                        r.rate_per_minute,
+                        r.burst
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => Ok(out),
+        Err(crate::store::StoreError::Conflict(why)) => Ok(out.refuse(why)),
+        Err(e) => store_failure(&e, out),
+    }
 }
 
 /// Operator-facing text for a store failure; a database error is never echoed.
@@ -1867,6 +2306,9 @@ pub async fn admin_cli_with(
         live,
         ..AdminCliOutput::default()
     };
+    if let AdminCommand::ServiceCredential(c) = cmd {
+        return service_credential_cli(cfg, c, out).await;
+    }
     // Validation first.
     let parsed_target = match &cmd {
         AdminCommand::Grant { target, .. }
@@ -1907,6 +2349,7 @@ pub async fn admin_cli_with(
     let dl = || Deadline::after(Duration::from_secs(30));
     let result: crate::store::StoreResult<()> = async {
         match cmd {
+            AdminCommand::ServiceCredential(_) => unreachable!("handled above"),
             AdminCommand::Grant {
                 role,
                 note,

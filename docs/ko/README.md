@@ -1,6 +1,6 @@
 # 문서
 
-<!-- translation-status: source=../README.md source-rev=13 status=current -->
+<!-- translation-status: source=../README.md source-rev=14 status=current -->
 
 [English](../README.md)
 
@@ -27,6 +27,7 @@
 - [관리](ADMIN.md) — 관리 콘솔과 `/v1` API(M4-min, 명세됨): 콘솔 호스트와 라우트, 부여와 역할, 페이지, 엔드포인트, 감사 이벤트, 제한
 - [주체 디렉터리](SUBJECT_DIRECTORY.md) — 콘솔과 정책 기관을 위한 주체 해석, 검색, 생명주기 피드, 대조 스냅숏
 - [그룹](GROUPS.md) — 로컬·LDAP·OIDC 그룹, 제공자 동기화 규칙, 그룹 API, Pumgye를 위한 서명된 멤버십 투영
+- [서비스 자격 증명](SERVICE_CREDENTIALS.md) — 관리 리스너의 기계 호출자를 위한 경로 범위·읽기 전용·mTLS 바인딩 자격 증명(Pumgye 정책 v2)
 - [인증 설명](AUTHENTICATION_EXPLAIN.md) — URL과 주체에 대해 인증 검사가 무엇을 왜 답할지, 부작용 없이
 - [배포 템플릿](../../deploy/README.md) — 강화된 Docker Compose 서비스와 게이트웨이 라우트 예시
 
