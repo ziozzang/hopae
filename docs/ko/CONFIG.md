@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=43 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=44 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -337,6 +337,47 @@ route는 404입니다. 등록만으로 AAL이 올라가지는 않습니다. 인�
 통해 portal을 노출해야 합니다.
 
 AAL 1의 1차 인증 신선도 규칙은 keyring 없이도 제공자 재인증으로 처리합니다.
+
+## 위험 기반 단계 상승
+
+선택 항목 `risk`는 verify 요청에서 게이트웨이가 서명한 네트워크 증거를 받고
+([ADR-0023](../adr/0023-risk-based-step-up.md), [계약](GATEWAY_CONTRACT.md#위험-컨텍스트)),
+`apps[].risk`는 그것을 단계 상승이나 거부로 바꿉니다.
+
+```json
+{"risk": {"context_key_env": "HOPAE_RISK_CONTEXT_KEY", "max_skew_secs": 30,
+          "memory": {"max_sessions": 100000, "session_ttl_secs": 86400, "max_users": 100000, "user_ttl_secs": 2592000, "countries_per_user": 8}},
+ "apps": [{"app_id": "app", "risk": {"missing": "ignore", "rules": [
+   {"path_prefix": "/admin", "when": {"level_at_least": "elevated"}, "then": {"step_up": {"aal": 2, "max_age_secs": 600}}},
+   {"when": {"country_changed": true}, "then": {"step_up": {"aal": 2, "max_age_secs": 300}}},
+   {"when": {"outside_zones": ["corp-vpn"], "country_not_in": ["KR"]}, "then": {"step_up": {"aal": 2, "max_age_secs": 900}}},
+   {"when": {"level_at_least": "high"}, "then": "deny"}]}}]}
+```
+
+| 키 | 기본값 | 제약 |
+| --- | --- | --- |
+| `risk.context_key_env` | 필수 | 게이트웨이가 컨텍스트에 서명하는 HMAC 키(32–4,096바이트)를 담은 변수. 전용 키이며 호출자 키가 아님 |
+| `risk.context_key_next_env` | 미설정 | 키 교체 중의 다음 키(둘 다 받음) |
+| `risk.max_skew_secs` | `30` | 5–120: `iat`와 Hopae 시계 사이에 허용하는 차이 |
+| `risk.memory.max_sessions`, `max_users` | `100000` | 1–1,000,000개. 가장 오래된 항목부터 지움 |
+| `risk.memory.session_ttl_secs` | `86400` | 60초–30일: 세션의 마지막 국가와 ASN을 두는 기간 |
+| `risk.memory.user_ttl_secs` | `2592000` | 1시간–365일: 사용자의 국가 목록을 두는 기간 |
+| `risk.memory.countries_per_user` | `8` | 최근 국가 1–32개 |
+| `apps[].risk.missing` | `ignore` | 컨텍스트가 없을 때: `ignore`, `deny`(`risk_context_missing`), `{"step_up": {...}}` |
+| `apps[].risk.rules[]` | 없음 | 최대 32개. `path_prefix`(선택, 단계 상승 규칙과 같음), `when`(조건을 모두 만족해야 하며 하나 이상), `then` |
+| `when.level_at_least` | — | `low`, `elevated`, `high` |
+| `when.country_in`, `country_not_in` | — | ISO 3166-1 alpha-2 대문자 코드(1–256개). `country_not_in`은 국가를 알 때만 만족 |
+| `when.zone_in`, `outside_zones` | — | Sumunjang 영역 ID(1–64개). `outside_zones`는 어느 것도 일치하지 않을 때 만족 |
+| `when.reason_in` | — | Sumunjang 사유 코드(1–64개) |
+| `when.country_changed`, `asn_changed` | — | `true`: 이 세션의 마지막 허용 요청과 다름(세션 메모리) |
+| `when.new_country` | — | `true`: TTL 안의 사용자 국가 목록에 없음(목록이 있을 때) |
+| `then` | 필수 | `deny`(`403 risk_denied`), `ignore`, `{"step_up": {"aal": 2 또는 3, "max_age_secs": 30..86400}}`. AAL 3은 `webauthn.high_assurance` 필요 |
+
+일치한 단계 상승 규칙은 그 요청의 애플리케이션 단계 상승 규칙에 더해져 함께 평가됩니다.
+신선도가 항상 요구되므로 AAL 2 세션도 인증 요소가 오래되었으면 다시 단계 상승합니다. 세션
+조건이 없는 규칙은 인증 전에도 적용되어 `high` 컨텍스트는 로그인이 시작되기 전에 거부됩니다.
+메모리는 프로세스별이고 국가와 ASN만 두며 허용된 요청만 갱신합니다. `apps[].risk`에는
+`risk`가 필요하고, `hopae --check`는 키 변수를 검사합니다.
 
 ## WebAuthn 패스키
 

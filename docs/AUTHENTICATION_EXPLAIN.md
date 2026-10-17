@@ -1,6 +1,6 @@
 # Authentication explain API
 
-<!-- doc-rev: 4 -->
+<!-- doc-rev: 5 -->
 
 [Documentation](README.md) · [한국어](ko/AUTHENTICATION_EXPLAIN.md)
 
@@ -50,6 +50,7 @@ only, beside the rest of the [administration API](ADMIN.md).
 | `client_ip`, `user_agent` | The request's client; without `client_ip` the session binding and profile networks are reported as not evaluated |
 | `at` | Unix seconds to evaluate at, at most 30 days from now (default now) |
 | `hypothetical` | The session a sign-in would create: `aal` (1 or 2, default 1), `factors` (factor kinds such as `totp`, `webauthn`, `external`), `auth_age_seconds`, `provider_id` (default the subject's first linked provider, else the first enabled provider), `auth_time_source` (`hopae_completion` default, `provider_claim`) |
+| `risk` | A hypothetical risk context ([ADR-0023](adr/0023-risk-based-step-up.md)): `context` (the claims the gateway would sign, as in the [contract](GATEWAY_CONTRACT.md#risk-context); absent: no context), `session_country`, `session_asn`, `user_countries` (what the session memory would know). Only for an application with `apps[].risk` |
 | `privacy_profile` | `standard` or `strict`, for the subject's display data; raised to `admin.directory_privacy` when that is stricter |
 
 `session_id` and `subject` are mutually exclusive; with neither the request is
@@ -122,7 +123,7 @@ the live session itself when the portal would hand it over (`basis:
 | `session` | The evaluated session: provider, `aal`, `handle_aal`, factors, `auth_time` and its source |
 | `providers` | The configured providers in chooser order, with `enabled`, `reauth` capability and `linked` for the subject |
 | `assurance` | `current_aal`, `required_aal`, `achievable_aal` and the configured second factors (`totp_configured`, `totp_enrolled`, `external`) |
-| `step_up` | `matched_rules`, `deciding_rule` (index), `required_aal`, `verdict` |
+| `step_up` | `matched_rules`, `deciding_rule` (index), `required_aal`, `verdict`; with risk rules also `risk`: `context`, `memory`, `missing`, `matched_rules`, `deciding_rule`, `action` (the trace has a `risk` check; risk step-up rules are added to the step-up rules evaluated) |
 | `freshness` | `max_auth_age_seconds`, `auth_age_seconds`, `auth_time_source`, `provider_capability`, `fresh` |
 | `after_login` | The post-sign-in evaluation described above, with its own `trace` |
 | `trace` | Every check made: `check`, `result` (`pass`, `fail`, `skip`, `info`), `reason`, `detail` |
@@ -156,6 +157,8 @@ default); a console with its own catalogue uses `message_key`. The catalogue:
 | `authz_change` | The user's authorization changed since sign-in and this application ends such sessions. |
 | `step_up_required` | A step-up rule requires a higher assurance level or a fresher second factor. |
 | `step_up_unavailable` | A step-up is required but no second factor is configured, so the request is refused. |
+| `risk_denied` | A risk rule denies requests in this network context. |
+| `risk_context_missing` | The gateway sent no risk context and this application refuses requests without one. |
 | `reauth_required` | The sign-in is too old for this path; the user must sign in again. |
 | `subject_unknown` | The subject is not known to Hopae; a sign-in creates or links an account. |
 | `subject_deleted` | The subject was deleted; a new sign-in creates a different subject. |

@@ -1,6 +1,6 @@
 # Gateway contract
 
-<!-- doc-rev: 17 -->
+<!-- doc-rev: 18 -->
 
 [Documentation](README.md) · [한국어](ko/GATEWAY_CONTRACT.md)
 
@@ -185,6 +185,7 @@ Request headers consumed, in the order Hopae evaluates them:
 | `x-forwarded-proto` | Gateway | yes | `https` required to plant `__Host-` cookies. |
 | `x-forwarded-for` or `x-real-ip` | Gateway (trusted-proxy resolved) | yes | Client IP for binding, throttling and events. Hangang sets both to the single resolved client IP. |
 | `x-original-method` | Gateway | no | Logged; method-dependent rules are later work. |
+| `x-hopae-risk-context` | Gateway (ADR-0023) | no | With `risk`: the signed network evidence of the request ([risk context](#risk-context)); read only for an application with risk rules. Never a client header. |
 | `cookie` | Client (listed) | no | The Hopae cookies only (`__Host-hopae`, `__Host-hopae_bind`); other cookies are ignored. ≤ 8 KiB total. With HC-12 the gateway removes these two names from the `cookie` header it sends upstream, after this call. |
 | `user-agent` | Client (listed) | no | UA binding (`sha256`), events. ≤ 1 KiB, truncated for storage. |
 | `sec-fetch-dest`, `sec-fetch-mode`, `sec-fetch-site`, `accept` | Client (listed) | no | Decides `302` versus `401` for unauthenticated requests. |
@@ -221,6 +222,89 @@ timers → binding policy → user status and `authz_version` → application
 policy (enabled, blocks, groups) → step-up rule → identity headers. All of
 it runs inside the verify budget (`gateway.verify_budget_ms`, default
 400 ms); exhaustion answers `503`.
+
+### Risk context
+
+With `risk` configured ([ADR-0023](adr/0023-risk-based-step-up.md)), the
+gateway adds its network evidence for the request to the verify call. This is
+the gateway side of the contract: Hangang produces it from Sumunjang's
+`NetworkEvidence`.
+
+**Header.** The gateway sends `x-hopae-risk-context` once on the verify call,
+over HTTP or HOP1. The header is not sent to the upstream, and the gateway
+removes any client-supplied header of this name before the request reaches
+the route. Its value is
+
+```text
+v1.<P>.<T>
+P = base64url-nopad(UTF-8 JSON claims)
+T = base64url-nopad(HMAC-SHA256(K, "hopae-risk-context.v1\n" || P || "\n" || M || "\n" || IP || "\n" || U))
+```
+
+The whole value is at most 1,024 bytes.
+
+| Input | Value |
+| --- | --- |
+| `K` | Hopae's `risk.context_key_env` (or `risk.context_key_next_env` during a rotation). 32 to 4,096 bytes, dedicated, never the caller key. |
+| `M` | `x-original-method` of the same verify call, or `GET` when the gateway does not send it. |
+| `IP` | The client address the same call carries in `x-forwarded-for`/`x-real-ip`, in canonical text form (Rust `IpAddr` display: `192.0.2.10`, `2001:db8::1`). |
+| `U` | The exact `x-original-url` byte string of the same call, including any handoff parameter. |
+
+**Claims.** JSON object; unknown members are refused.
+
+| Claim | Required | Value |
+| --- | --- | --- |
+| `iat` | yes | Unix seconds when the evidence was taken; Hopae accepts `|now − iat| ≤ risk.max_skew_secs` (default 30). |
+| `level` | yes | `low`, `elevated` or `high` (mapping below) |
+| `source` | yes | `sumunjang` |
+| `mode` | yes | `enforce` or `observe`: Sumunjang's mode for this request |
+| `reason` | yes | Sumunjang's reason code, `[a-z0-9._-]{1,64}` (for example `sumunjang.allowed`, `sumunjang.asn_reputation`) |
+| `score` | no | 0 to 100, the evidence score bucketed to tens |
+| `asn` | no | The client's ASN (u32) |
+| `country` | no | ISO 3166-1 alpha-2 upper case, `XX` when unknown |
+| `zones` | no | Up to 8 matched zone ids, `[a-z0-9._-]{1,64}` |
+| `rev` | no | Sumunjang's policy revision (u64) |
+
+**Level mapping (gateway).**
+
+| Evidence | `level` |
+| --- | --- |
+| Allowed, no reputation or challenge reason, score below the gateway's threshold | `low` |
+| A challenge, a reputation or anomaly reason, or a score at or above the threshold (in `enforce` the request was let through) | `elevated` |
+| What `enforce` would deny, evaluated in `observe` mode, or the top score bucket | `high` |
+
+An enforced denial never reaches Hopae: the gateway refuses the request first.
+
+**Hopae's checks.**
+
+- For an application with `apps[].risk`, a present but invalid context
+  (malformed, oversized, repeated header, unknown claim, wrong MAC, another
+  method, client or URL, stale `iat`) is `403` with
+  `x-hopae-reason: risk_context_invalid`.
+- An absent context follows the application's `risk.missing`: `ignore` (the
+  default), `deny` (`403 risk_context_missing`), or a step-up.
+- Applications without risk rules ignore the header. Without `risk` Hopae
+  does not read it.
+
+**Gateway behaviour.**
+
+- A `403` with `risk_denied`, `risk_context_invalid` or
+  `risk_context_missing` is relayed like any other `403`.
+- A step-up required by a risk rule is the ordinary step-up answer (`302` or
+  `401 step_up_required`).
+- When Sumunjang cannot be reached, the gateway omits the header rather than
+  inventing a level, so `risk.missing` applies.
+
+**Test vector.** Key `risk-context-key-0123456789abcdef-current`, `M` =
+`GET`, `IP` = `192.0.2.10`, `U` = `https://app.example.test/admin/x`, claims
+`{"iat":1800000000,"level":"elevated","source":"sumunjang","mode":"enforce","reason":"sumunjang.asn_reputation","score":70,"asn":64500,"country":"KR","zones":["corp-vpn"],"rev":418}` (that exact byte string), accepted at `iat` ± 30 s:
+
+```text
+v1.eyJpYXQiOjE4MDAwMDAwMDAsImxldmVsIjoiZWxldmF0ZWQiLCJzb3VyY2UiOiJzdW11bmphbmciLCJtb2RlIjoiZW5mb3JjZSIsInJlYXNvbiI6InN1bXVuamFuZy5hc25fcmVwdXRhdGlvbiIsInNjb3JlIjo3MCwiYXNuIjo2NDUwMCwiY291bnRyeSI6IktSIiwiem9uZXMiOlsiY29ycC12cG4iXSwicmV2Ijo0MTh9.oIlJD45LbUbFg80GNO6g_delXTIQ_7m2lVOgtIPcDZQ
+```
+
+The reference signer is `hopae::policy::risk::Keys::sign`; `policy::risk::tests`
+checks this vector.
 
 ### Identity headers
 

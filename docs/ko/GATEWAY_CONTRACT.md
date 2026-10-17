@@ -1,6 +1,6 @@
 # 게이트웨이 계약
 
-<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=17 status=current -->
+<!-- translation-status: source=../GATEWAY_CONTRACT.md source-rev=18 status=current -->
 
 [문서 목차](README.md) · [English](../GATEWAY_CONTRACT.md)
 
@@ -181,6 +181,7 @@ M2)는 이 필드가 없는 애플리케이션 호스트 라우트를 `strip_req
 | `x-forwarded-proto` | 게이트웨이 | 예 | `__Host-` 쿠키를 심으려면 `https`여야 합니다. |
 | `x-forwarded-for` 또는 `x-real-ip` | 게이트웨이(신뢰 프록시로 해석) | 예 | 바인딩, 제한, 이벤트에 쓰는 클라이언트 IP. Hangang은 둘 다 해석된 단일 클라이언트 IP로 설정합니다. |
 | `x-original-method` | 게이트웨이 | 아니요 | 로그에 남깁니다. 메서드에 따른 규칙은 이후 작업입니다. |
+| `x-hopae-risk-context` | 게이트웨이(ADR-0023) | 아니요 | `risk`가 있을 때 요청의 서명된 네트워크 증거([위험 컨텍스트](#위험-컨텍스트)). 위험 규칙이 있는 애플리케이션에서만 읽음. 클라이언트 헤더가 아님 |
 | `cookie` | 클라이언트(나열됨) | 아니요 | Hopae 쿠키(`__Host-hopae`, `__Host-hopae_bind`)만 사용하고 다른 쿠키는 무시합니다. 전체 8 KiB 이하. HC-12가 있으면 게이트웨이는 이 호출 뒤에 업스트림으로 보내는 `cookie` 헤더에서 이 두 이름을 제거합니다. |
 | `user-agent` | 클라이언트(나열됨) | 아니요 | UA 바인딩(`sha256`), 이벤트. 1 KiB 이하, 저장 시 잘라냅니다. |
 | `sec-fetch-dest`, `sec-fetch-mode`, `sec-fetch-site`, `accept` | 클라이언트(나열됨) | 아니요 | 인증되지 않은 요청에 `302`와 `401` 중 무엇으로 답할지 결정합니다. |
@@ -215,6 +216,85 @@ Hopae 내부의 결정 순서는 다음과 같습니다. 호출자 키 → 계�
 정책(활성화, 차단, 그룹) → 단계 상승 규칙 → 신원 헤더. 이 모든 과정은 verify
 예산(`gateway.verify_budget_ms`, 기본값 400 ms) 안에서 실행되며, 예산을 다
 쓰면 `503`으로 답합니다.
+
+### 위험 컨텍스트
+
+`risk`가 설정되면([ADR-0023](../adr/0023-risk-based-step-up.md)) 게이트웨이는 요청에
+대한 네트워크 증거를 verify 호출에 덧붙입니다. 아래는 게이트웨이 쪽 계약이며, Hangang은
+Sumunjang의 `NetworkEvidence`로 이 값을 만듭니다.
+
+**헤더.** 게이트웨이는 HTTP 또는 HOP1 verify 호출에 `x-hopae-risk-context`를 한 번
+보냅니다. 이 헤더는 업스트림으로 보내지 않으며, 같은 이름의 클라이언트 헤더는 라우트에 닿기
+전에 게이트웨이가 지웁니다. 값은 다음과 같습니다.
+
+```text
+v1.<P>.<T>
+P = base64url-nopad(UTF-8 JSON 클레임)
+T = base64url-nopad(HMAC-SHA256(K, "hopae-risk-context.v1\n" || P || "\n" || M || "\n" || IP || "\n" || U))
+```
+
+값 전체는 최대 1,024바이트입니다.
+
+| 입력 | 값 |
+| --- | --- |
+| `K` | Hopae의 `risk.context_key_env`(키 교체 중에는 `risk.context_key_next_env`). 32–4,096바이트, 전용 키이며 호출자 키가 아님 |
+| `M` | 같은 verify 호출의 `x-original-method`. 게이트웨이가 보내지 않으면 `GET` |
+| `IP` | 같은 호출이 `x-forwarded-for`/`x-real-ip`로 전하는 클라이언트 주소의 표준 텍스트 형식(Rust `IpAddr` 표시: `192.0.2.10`, `2001:db8::1`) |
+| `U` | 같은 호출의 `x-original-url` 바이트 그대로(핸드오프 매개변수 포함) |
+
+**클레임.** JSON 객체이며 알 수 없는 멤버는 거부합니다.
+
+| 클레임 | 필수 | 값 |
+| --- | --- | --- |
+| `iat` | 예 | 증거를 얻은 유닉스 초. Hopae는 `|now − iat| ≤ risk.max_skew_secs`(기본 30)만 받음 |
+| `level` | 예 | `low`, `elevated`, `high`(아래 대응표) |
+| `source` | 예 | `sumunjang` |
+| `mode` | 예 | 이 요청에 대한 Sumunjang 모드 `enforce` 또는 `observe` |
+| `reason` | 예 | Sumunjang 사유 코드 `[a-z0-9._-]{1,64}`(예: `sumunjang.allowed`, `sumunjang.asn_reputation`) |
+| `score` | 아니요 | 0–100, 10 단위로 묶은 증거 점수 |
+| `asn` | 아니요 | 클라이언트 ASN(u32) |
+| `country` | 아니요 | ISO 3166-1 alpha-2 대문자, 모르면 `XX` |
+| `zones` | 아니요 | 일치한 영역 ID 최대 8개, `[a-z0-9._-]{1,64}` |
+| `rev` | 아니요 | Sumunjang 정책 리비전(u64) |
+
+**수준 대응(게이트웨이).**
+
+| 증거 | `level` |
+| --- | --- |
+| 허용, 평판·챌린지 사유 없음, 점수가 게이트웨이 임계값 미만 | `low` |
+| 챌린지, 평판·이상 사유, 또는 임계값 이상 점수(`enforce`에서 통과된 요청) | `elevated` |
+| `observe` 모드에서 평가했을 때 `enforce`라면 거부되었을 요청, 또는 최고 점수 구간 | `high` |
+
+`enforce`에서 실제로 거부된 요청은 게이트웨이가 먼저 거부하므로 Hopae에 오지 않습니다.
+
+**Hopae의 검사.**
+
+- `apps[].risk`가 있는 애플리케이션에서는 컨텍스트가 있지만 잘못되었으면 `403`과
+  `x-hopae-reason: risk_context_invalid`로 답합니다. 형식 오류, 크기 초과, 반복된 헤더,
+  알 수 없는 클레임, 틀린 MAC, 다른 메서드·클라이언트·URL, 오래된 `iat`가 여기에 해당합니다.
+- 컨텍스트가 없으면 애플리케이션의 `risk.missing`을 따릅니다. `ignore`(기본), `deny`
+  (`403 risk_context_missing`), 또는 단계 상승입니다.
+- 위험 규칙이 없는 애플리케이션은 헤더를 무시합니다. `risk`가 없으면 Hopae는 헤더를 읽지
+  않습니다.
+
+**게이트웨이 동작.**
+
+- `risk_denied`, `risk_context_invalid`, `risk_context_missing`이 담긴 `403`은 다른 `403`과
+  같이 전달합니다.
+- 위험 규칙이 요구한 단계 상승은 일반 단계 상승 응답(`302` 또는 `401 step_up_required`)입니다.
+- Sumunjang에 닿지 못하면 게이트웨이는 수준을 지어내지 않고 헤더를 생략하므로
+  `risk.missing`이 적용됩니다.
+
+**테스트 벡터.** 키 `risk-context-key-0123456789abcdef-current`, `M` = `GET`,
+`IP` = `192.0.2.10`, `U` = `https://app.example.test/admin/x`, 클레임
+`{"iat":1800000000,"level":"elevated","source":"sumunjang","mode":"enforce","reason":"sumunjang.asn_reputation","score":70,"asn":64500,"country":"KR","zones":["corp-vpn"],"rev":418}`(이 바이트열 그대로)이면 `iat` ± 30초 안에서 다음 값이 받아들여집니다.
+
+```text
+v1.eyJpYXQiOjE4MDAwMDAwMDAsImxldmVsIjoiZWxldmF0ZWQiLCJzb3VyY2UiOiJzdW11bmphbmciLCJtb2RlIjoiZW5mb3JjZSIsInJlYXNvbiI6InN1bXVuamFuZy5hc25fcmVwdXRhdGlvbiIsInNjb3JlIjo3MCwiYXNuIjo2NDUwMCwiY291bnRyeSI6IktSIiwiem9uZXMiOlsiY29ycC12cG4iXSwicmV2Ijo0MTh9.oIlJD45LbUbFg80GNO6g_delXTIQ_7m2lVOgtIPcDZQ
+```
+
+참조 서명 구현은 `hopae::policy::risk::Keys::sign`이며 `policy::risk::tests`가 이 벡터를
+검사합니다.
 
 ### 신원 헤더
 

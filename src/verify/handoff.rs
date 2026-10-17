@@ -416,6 +416,7 @@ mod tests {
                     which: KeySlot::Current,
                 },
                 request_id: "req".into(),
+                risk_context: Default::default(),
             }
         }
 

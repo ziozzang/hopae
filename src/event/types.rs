@@ -115,6 +115,8 @@ pub enum EventKind {
     /// `hopae providers import --force` (required, `admin.*`).
     AdminProvidersImport,
     VerifyDenied,
+    /// A risk rule required a step-up (ADR-0023, diagnostic).
+    RiskStepUpRequired,
     ProviderError,
     TxnEvicted,
     EventsDropped,
@@ -202,6 +204,7 @@ impl EventKind {
         EventKind::ConfigLoaded,
         EventKind::AdminProvidersImport,
         EventKind::VerifyDenied,
+        EventKind::RiskStepUpRequired,
         EventKind::ProviderError,
         EventKind::TxnEvicted,
         EventKind::EventsDropped,
@@ -240,6 +243,7 @@ impl EventKind {
         !matches!(
             self,
             EventKind::VerifyDenied
+                | EventKind::RiskStepUpRequired
                 | EventKind::ProviderError
                 | EventKind::TxnEvicted
                 | EventKind::EventsDropped
@@ -283,6 +287,7 @@ impl EventKind {
             EventKind::ConfigLoaded => "config.loaded",
             EventKind::AdminProvidersImport => "admin.providers_import",
             EventKind::VerifyDenied => "verify.denied",
+            EventKind::RiskStepUpRequired => "risk.step_up_required",
             EventKind::ProviderError => "provider.error",
             EventKind::TxnEvicted => "txn.evicted",
             EventKind::EventsDropped => "events.dropped",
@@ -392,6 +397,10 @@ pub mod reasons {
         CLOCK_SKEW = "clock_skew",
         LOGIN_REQUIRED = "login_required",
         STEP_UP_REQUIRED = "step_up_required",
+        // Risk-based step-up (ADR-0023)
+        RISK_DENIED = "risk_denied",
+        RISK_CONTEXT_INVALID = "risk_context_invalid",
+        RISK_CONTEXT_MISSING = "risk_context_missing",
         UNKNOWN_HANDLE = "unknown_handle",
         MALFORMED_HANDLE = "malformed_handle",
         HANDLE_HOST_MISMATCH = "handle_host_mismatch",
@@ -513,6 +522,13 @@ pub mod reasons {
 /// [`EventBuilder::attr`]; add keys here (a minor change, ADR-0009), never
 /// token-like names.
 pub const ATTR_ALLOWLIST: &[&str] = &[
+    // Risk-based step-up (ADR-0023): coarse network facts only.
+    "level",
+    "risk_reason",
+    "country",
+    "asn",
+    "rule",
+    "missing",
     "credential_id",
     "credential_slot",
     // Kubernetes workload identity (identifiers only, ADR 0021/0022).
@@ -766,6 +782,7 @@ mod tests {
             optional,
             [
                 &EventKind::VerifyDenied,
+                &EventKind::RiskStepUpRequired,
                 &EventKind::ProviderError,
                 &EventKind::TxnEvicted,
                 &EventKind::EventsDropped,
