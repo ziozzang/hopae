@@ -144,6 +144,7 @@ impl Service {
             .await?
         {
             Admission::OverCap => {
+                crate::telemetry::metrics::RATE_LIMITED.inc(["login"]);
                 return Err(SessionError::RateLimited {
                     retry_after: COUNTER_WINDOW,
                 });

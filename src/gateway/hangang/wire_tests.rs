@@ -18,6 +18,7 @@ const KEY: &str = "unit-test-caller-key";
 
 struct Fixture {
     base: String,
+    router: axum::Router,
     hooks: Arc<StoreHooks>,
     counts: Arc<Mutex<Vec<String>>>,
     _dir: tempfile::TempDir,
@@ -66,9 +67,12 @@ async fn serve(max_concurrent: u32) -> Fixture {
     let state = GatewayState::new(gw, ctx, callers, max_concurrent, Some(counters), None);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, router(state)).await });
+    let app = router(state);
+    let served = app.clone();
+    tokio::spawn(async move { axum::serve(listener, served).await });
     Fixture {
         base: format!("http://{addr}"),
+        router: app,
         hooks,
         counts,
         _dir: dir,
@@ -200,4 +204,35 @@ async fn only_get_on_the_verify_path_is_served() {
     assert_eq!(post.status(), 405);
     let other = c.get(format!("{}/healthz", f.base)).send().await.unwrap();
     assert_eq!(other.status(), 404);
+}
+
+/// Decisions and latency are recorded by surface: the HTTP forward-auth
+/// listener, and the HOP1/gRPC adapters' private extension (never a header).
+#[tokio::test]
+async fn decisions_and_latency_are_recorded_by_surface() {
+    use crate::telemetry::metrics::{self, AUTH_OUTCOMES, Surface};
+    use tower::ServiceExt;
+    let f = serve(8).await;
+    let labels = |s: Surface| [s.name(), "none", "deny", "caller_unauthorized"];
+    let (http0, hop0) = (
+        AUTH_OUTCOMES.get(labels(Surface::ForwardAuth)),
+        AUTH_OUTCOMES.get(labels(Surface::Hop1)),
+    );
+    let latency0 = metrics::latency_count(Surface::Hop1);
+    let resp = verify_request(&client(), &f, Some("wrong"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    assert_eq!(AUTH_OUTCOMES.get(labels(Surface::ForwardAuth)), http0 + 1);
+    let mut request = axum::http::Request::builder()
+        .uri(VERIFY_PATH)
+        .header("x-hopae-gateway-key", "wrong")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(Surface::Hop1);
+    let resp = f.router.clone().oneshot(request).await.unwrap();
+    assert_eq!(resp.status(), 403);
+    assert_eq!(AUTH_OUTCOMES.get(labels(Surface::Hop1)), hop0 + 1);
+    assert!(metrics::latency_count(Surface::Hop1) > latency0);
 }

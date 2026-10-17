@@ -89,10 +89,12 @@ fn roots(pem: &[u8]) -> anyhow::Result<RootCertStore> {
 
 /// `sha256:<hex>` of the leaf certificate's DER.
 pub fn fingerprint(leaf: &CertificateDer<'_>) -> String {
-    format!(
+    let print = format!(
         "sha256:{}",
         data_encoding::HEXLOWER.encode(&Sha256::digest(leaf.as_ref()))
-    )
+    );
+    crate::telemetry::metrics::note_leaf(&print, leaf.as_ref());
+    print
 }
 
 /// A certificate chain and its key, checked to belong together.

@@ -10,6 +10,25 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- Prometheus metrics (scenario 600,
+  [operations](docs/OPERATIONS.md#counters)):
+  - `GET /metrics` on the admin listener serves the OpenMetrics text format
+    over mTLS. Scrapers authenticate as an administrator or with a
+    `--preset metrics` service credential; `GET /metrics` alone may omit
+    `x-hopae-audience`.
+  - New series:
+    - authentication outcomes by surface, provider, outcome and reason
+    - verify latency histograms for forward-auth, HOP1 and gRPC
+    - gRPC calls by profile and status code
+    - logins, sessions created, revoked and active
+    - step-up results by factor, passkey ceremonies
+    - rate-limit rejections, store failures and busy errors
+    - event relay backlog, projection and lifecycle feed sizes
+    - workload JWKS last success, provider state
+    - TLS leaf expiry and the configuration generation
+  - Hot-path recording is lock-free and allocation-free in fixed-capacity
+    tables. No label carries a subject, a user id, an email or an address.
+  - Existing counters are exposed under their names.
 - Live reload without a restart (scenario 320,
   [operations](docs/OPERATIONS.md#tls-certificate-renewal)):
   - TLS: the administrator listener, the native and gRPC gateways and the

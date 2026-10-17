@@ -1,6 +1,6 @@
 # 관리 리스너용 서비스 자격 증명
 
-<!-- translation-status: source=../SERVICE_CREDENTIALS.md source-rev=1 status=current -->
+<!-- translation-status: source=../SERVICE_CREDENTIALS.md source-rev=2 status=current -->
 
 [문서](README.md) · [English](../SERVICE_CREDENTIALS.md)
 
@@ -68,8 +68,11 @@ application/json`, `x-hopae-admin-request: 1`), 해당 읽기의 행위자별 �
 | `POST /v1/groups/search`, `POST /v1/groups/get` | 그룹 읽기 |
 | `POST /v1/explain/authentication` | [인증 설명](AUTHENTICATION_EXPLAIN.md) |
 | `GET /v1/status` | 상태 |
+| `GET /metrics` | OpenMetrics 노출([운영](OPERATIONS.md#카운터)) |
 
-프리셋 `pumgye-v2`는 처음 네 경로만 정확히 부여합니다.
+프리셋 `pumgye-v2`는 처음 네 경로만 정확히 부여합니다. 프리셋 `metrics`는 `GET /metrics`
+하나만 부여합니다. 이 경로는 `admin.read` 기록을 남기지 않으며 `x-hopae-audience`를 생략할 수
+있고, 생략하면 audience는 이 인스턴스의 `admin.service_audience`가 됩니다.
 
 ### 비밀값, 교체, 폐기
 
@@ -88,7 +91,7 @@ application/json`, `x-hopae-admin-request: 1`), 해당 읽기의 행위자별 �
 
 | 명령 | 효과 |
 | --- | --- |
-| `hopae admin service-credentials create <id> (--preset pumgye-v2 \| --route "METHOD /path"…) [--audience A…] (--client-spki-sha256 HEX \| --client-san SAN)… [--expires-in-days 90] [--rate-per-minute 120] [--burst 30] [--note TEXT] --config <path>` | 생성하고 토큰을 한 번만 출력(stdout). 부여할 수 없는 경로, mTLS 바인딩 없음, 400일을 넘는 수명, 범위 밖의 비율(분당 1~6,000)과 버스트(1~1,000), 이미 있는 id는 거부 |
+| `hopae admin service-credentials create <id> (--preset pumgye-v2\|metrics \| --route "METHOD /path"…) [--audience A…] (--client-spki-sha256 HEX \| --client-san SAN)… [--expires-in-days 90] [--rate-per-minute 120] [--burst 30] [--note TEXT] --config <path>` | 생성하고 토큰을 한 번만 출력(stdout). 부여할 수 없는 경로, mTLS 바인딩 없음, 400일을 넘는 수명, 범위 밖의 비율(분당 1~6,000)과 버스트(1~1,000), 이미 있는 id는 거부 |
 | `hopae admin service-credentials rotate <id>` | next 비밀값을 발급해 출력 |
 | `hopae admin service-credentials promote <id>` | next를 current로 |
 | `hopae admin service-credentials revoke <id>` | 폐기(묘비) |

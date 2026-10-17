@@ -55,6 +55,9 @@ pub(super) fn insert_event(
             attrs,
         ],
     )?;
+    if changed == 1 {
+        crate::telemetry::metrics::event(ev);
+    }
     if changed == 1 && ev.kind.is_required() {
         for sink in sinks {
             conn.execute(
@@ -347,6 +350,7 @@ impl Events for Store {
             {
                 let mut q = shared.diag.lock().unwrap_or_else(|p| p.into_inner());
                 if q.len() >= DIAGNOSTIC_QUEUE_CAP {
+                    crate::telemetry::metrics::STORE_FAILURES.inc(["queue_full"]);
                     return Err(StoreError::Busy);
                 }
                 q.push_back(event);

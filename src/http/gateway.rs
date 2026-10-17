@@ -20,7 +20,7 @@ use crate::event::bus::Emitter;
 use crate::event::types::{Reason, reasons};
 use crate::gateway::hangang::{self, GatewayConfig, RenderEnv};
 use crate::http::denials::{self, DenialCounters};
-use crate::telemetry::counters;
+use crate::telemetry::{counters, metrics};
 use crate::verify::types::{Decision, DenyKind, Navigation, VerifyContext};
 
 /// Increment a named counter with labels. The default does nothing; the
@@ -176,6 +176,23 @@ impl GatewayState {
 
     fn count_decision(&self, decision: &Decision) {
         let (name, reason) = hangang::decision_label(decision);
+        let surface = SURFACE
+            .try_with(|s| *s)
+            .unwrap_or(metrics::Surface::ForwardAuth);
+        let provider = match decision {
+            Decision::Allow { identity, .. } => identity.provider_id.as_str(),
+            _ => "none",
+        };
+        metrics::AUTH_OUTCOMES.inc([surface.name(), provider, name, reason]);
+        if matches!(
+            decision,
+            Decision::Deny {
+                kind: DenyKind::RateLimited { .. },
+                ..
+            }
+        ) {
+            metrics::RATE_LIMITED.inc(["verify"]);
+        }
         self.count(
             counters::VERIFY_DECISIONS_TOTAL,
             &[("decision", name), ("reason", reason)],
@@ -216,7 +233,33 @@ pub fn router(state: Arc<GatewayState>) -> Router {
         .with_state(state)
 }
 
+tokio::task_local! {
+    /// The surface of the verify being decided (set by [`verify`]).
+    static SURFACE: metrics::Surface;
+}
+
+/// Records the surface (a private extension set by the HOP1 and gRPC
+/// adapters; never a client header) and the latency around [`decide`].
 async fn verify(
+    state: State<Arc<GatewayState>>,
+    surface: Option<axum::extract::Extension<metrics::Surface>>,
+    workload: Option<axum::extract::Extension<Arc<crate::auth_gateway::workload_owner::Attempt>>>,
+    human: Option<axum::extract::Extension<crate::verify::human::Capture>>,
+    headers: HeaderMap,
+) -> Response {
+    let surface = surface.map_or(metrics::Surface::ForwardAuth, |e| e.0);
+    let started = std::time::Instant::now();
+    let response = SURFACE
+        .scope(surface, decide(state, workload, human, headers))
+        .await;
+    // gRPC latency is the whole call, recorded by the gRPC layer.
+    if surface != metrics::Surface::Grpc {
+        metrics::observe(surface, started);
+    }
+    response
+}
+
+async fn decide(
     State(st): State<Arc<GatewayState>>,
     workload: Option<axum::extract::Extension<Arc<crate::auth_gateway::workload_owner::Attempt>>>,
     human: Option<axum::extract::Extension<crate::verify::human::Capture>>,

@@ -1792,7 +1792,8 @@ async fn service_credential_cli(
         match preset.as_deref() {
             None => {}
             Some("pumgye-v2") => routes.extend(sc::PUMGYE_V2_ROUTES.iter().map(|s| s.to_string())),
-            Some(_) => return Ok(out.refuse("--preset: only pumgye-v2 is defined")),
+            Some("metrics") => routes.extend(sc::METRICS_ROUTES.iter().map(|s| s.to_string())),
+            Some(_) => return Ok(out.refuse("--preset: pumgye-v2 or metrics")),
         }
         routes.sort();
         routes.dedup();

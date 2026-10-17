@@ -33,6 +33,16 @@ pub(crate) fn jwks_fetch(service: &str, result: &str) {
         counters::WORKLOAD_JWKS_FETCH_TOTAL,
         &[("service", service), ("result", result)],
     );
+    if matches!(result, "ok" | "rotated") {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        counters::set(
+            counters::WORKLOAD_JWKS_LAST_SUCCESS,
+            &[("service", service)],
+            now,
+        );
+    }
 }
 
 pub(crate) fn jwks_keys(service: &str, keys: usize) {

@@ -57,6 +57,7 @@ pub const READABLE: &[(&str, &str)] = &[
     ("POST", "/v1/groups/get"),
     ("POST", "/v1/explain/authentication"),
     ("GET", "/v1/status"),
+    ("GET", "/metrics"),
 ];
 
 /// The routes Pumgye policy v2 needs (`--route` default of the CLI preset).
@@ -66,6 +67,9 @@ pub const PUMGYE_V2_ROUTES: &[&str] = &[
     "POST /v1/subjects/lifecycle",
     "POST /v1/subjects/lifecycle/snapshot",
 ];
+
+/// The route a Prometheus scraper needs (`--preset metrics`).
+pub const METRICS_ROUTES: &[&str] = &["GET /metrics"];
 
 /// The verified client certificate of an admin mTLS connection, inserted by
 /// the admin listener's TLS server (never from a header).
@@ -339,7 +343,14 @@ async fn check(
         return Err(Refusal::Binding);
     }
     let mut audiences = headers.get_all(AUDIENCE_HEADER).iter();
-    let audience = audiences.next().and_then(|v| v.to_str().ok());
+    let mut audience = audiences.next().and_then(|v| v.to_str().ok());
+    // A scraper cannot always add request headers (a Prometheus Operator
+    // ServiceMonitor has no header field): `GET /metrics` alone may omit the
+    // audience, which then defaults to this instance's. The credential must
+    // still allow that audience, and its mTLS binding and secret still apply.
+    if audience.is_none() && *method == Method::GET && path == "/metrics" {
+        audience = Some(st.cfg.service_audience.as_str());
+    }
     if audiences.next().is_some()
         || audience
             .is_none_or(|a| a != st.cfg.service_audience || !row.audiences.iter().any(|x| x == a))
@@ -356,7 +367,10 @@ async fn check(
         row.rate_per_minute,
         row.burst,
     )
-    .map_err(Refusal::RateLimited)?;
+    .map_err(|retry| {
+        crate::telemetry::metrics::RATE_LIMITED.inc(["service_credential"]);
+        Refusal::RateLimited(retry)
+    })?;
     let principal = Principal {
         authority: None,
         user_id: crate::identity::types::UserId::new(format!("service:{id}")),

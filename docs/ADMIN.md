@@ -1,6 +1,6 @@
 # Administration
 
-<!-- doc-rev: 9 -->
+<!-- doc-rev: 10 -->
 
 [Documentation](README.md) · [한국어](ko/ADMIN.md)
 
@@ -322,6 +322,7 @@ identifiers are the `u_`, `s_`, `e_` forms.
 | `POST /v1/sessions/{session_id}/terminate` | admin | `{changed}` |
 | `GET /v1/events?kind=&kind_prefix=&outcome=&user_id=&session_id=&client_ip=&since=&until=&limit=&cursor=` | viewer | `{items: [event JSON as the log sink writes it], next_cursor}` newest first |
 | `GET /v1/status` | viewer | See [status](#status) |
+| `GET /metrics` | viewer, or a `metrics` service credential | OpenMetrics text; see [operations](OPERATIONS.md#counters) |
 | `POST /v1/subjects/resolve` | viewer | Up to 100 subject references to display data; see [subject directory](SUBJECT_DIRECTORY.md) |
 | `POST /v1/subjects/search` | viewer | People or service principals for a picker; see [subject directory](SUBJECT_DIRECTORY.md) |
 | `POST /v1/subjects/lifecycle` | viewer | Subject creations and status changes after a durable cursor; see [subject directory](SUBJECT_DIRECTORY.md) |
@@ -461,7 +462,7 @@ operator sees that the configuration file no longer owns the row.
 | `hopae_admin_grants_imported_total` | `outcome` (`inserted`, `updated`, `revoked`, `unchanged`, `skipped`) | Grants applied by the import at start |
 | `hopae_store_interrupts_total` | none | Store jobs interrupted inside SQLite at their deadline |
 
-Exposition is M7; a `test-hooks` build exposes them meanwhile (see
+They are exposed by `GET /metrics` on this listener (see
 [operations](OPERATIONS.md#counters)).
 
 ### Hangang console routes
