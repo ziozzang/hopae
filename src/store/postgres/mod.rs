@@ -152,6 +152,8 @@ pub struct PgStore {
     handle: tokio::runtime::Handle,
     /// How to open the dedicated `LISTEN` connection (outside the pool).
     listen: Listen,
+    /// Whether that connection is listening now (metrics).
+    listening: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// The connection settings of the publication listener.
@@ -170,12 +172,20 @@ fn pg(e: tokio_postgres::Error) -> StoreError {
         let code = db.code().code();
         return match code {
             "23505" | "23503" | "23514" | "23502" | "P0001" => {
+                crate::telemetry::metrics::STORE_FAILURES.inc(["conflict"]);
                 StoreError::Conflict("constraint violated")
             }
-            "40001" | "40P01" | "55P03" => StoreError::Busy,
-            _ => StoreError::Unavailable(format!("postgres sqlstate {code}")),
+            "40001" | "40P01" | "55P03" => {
+                crate::telemetry::metrics::STORE_FAILURES.inc(["busy"]);
+                StoreError::Busy
+            }
+            _ => {
+                crate::telemetry::metrics::STORE_FAILURES.inc(["other"]);
+                StoreError::Unavailable(format!("postgres sqlstate {code}"))
+            }
         };
     }
+    crate::telemetry::metrics::STORE_FAILURES.inc(["other"]);
     if e.is_closed() {
         StoreError::Unavailable("postgres connection closed".into())
     } else {
@@ -289,6 +299,7 @@ impl PgStore {
             )),
             handle: tokio::runtime::Handle::current(),
             listen,
+            listening: Arc::default(),
         };
         if let Some(schema) = &options.search_path {
             let client = store.pool.get().await.map_err(pool_err)?;
@@ -455,6 +466,8 @@ impl PgStore {
             )
             .await
             .map_err(pg)?;
+            // As SQLite: counted when the row is written in its transaction.
+            crate::telemetry::metrics::event(ev);
             if events::in_feed(ev.kind) {
                 // Feed positions in commit order: only these writes take the lock.
                 tx.execute(ADVISORY_XACT_LOCK, &[&events::FEED_LOCK])
@@ -1300,6 +1313,29 @@ impl PgStore {
     }
 }
 
+/// Pool and listener facts for `/metrics`.
+#[derive(Clone, Copy, Debug)]
+pub struct PoolMetrics {
+    pub max: usize,
+    pub open: usize,
+    pub idle: usize,
+    pub waiting: usize,
+    pub listening: bool,
+}
+
+impl PgStore {
+    pub fn pool_metrics(&self) -> PoolMetrics {
+        let s = self.pool.status();
+        PoolMetrics {
+            max: s.max_size,
+            open: s.size,
+            idle: s.available,
+            waiting: s.waiting,
+            listening: self.listening.load(std::sync::atomic::Ordering::Acquire),
+        }
+    }
+}
+
 /// Wait on the publication channel (ADR-0020 slice 5).
 impl PgStore {
     /// Follow `NOTIFY` on the publication channel over a dedicated
@@ -1315,9 +1351,15 @@ impl PgStore {
     ) {
         loop {
             let result = match &self.listen {
-                Listen::Plain(cfg) => listen_once(cfg, tokio_postgres::NoTls, &wake).await,
-                Listen::Tls(cfg, tls) => listen_once(cfg, tls.clone(), &wake).await,
+                Listen::Plain(cfg) => {
+                    listen_once(cfg, tokio_postgres::NoTls, &wake, &self.listening).await
+                }
+                Listen::Tls(cfg, tls) => {
+                    listen_once(cfg, tls.clone(), &wake, &self.listening).await
+                }
             };
+            self.listening
+                .store(false, std::sync::atomic::Ordering::Release);
             if let Err(e) = result {
                 tracing::warn!(
                     "publication listener disconnected ({}); polling until it reconnects",
@@ -1333,6 +1375,7 @@ async fn listen_once<T>(
     cfg: &tokio_postgres::Config,
     tls: T,
     wake: &tokio::sync::Notify,
+    listening: &std::sync::atomic::AtomicBool,
 ) -> Result<(), tokio_postgres::Error>
 where
     T: tokio_postgres::tls::MakeTlsConnect<tokio_postgres::Socket>,
@@ -1361,6 +1404,7 @@ where
         driver.abort();
         return Err(e);
     }
+    listening.store(true, std::sync::atomic::Ordering::Release);
     wake.notify_one();
     while rx.recv().await.is_some() {
         wake.notify_one();

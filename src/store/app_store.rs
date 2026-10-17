@@ -533,6 +533,9 @@ impl Sessions for AppStore {
     async fn session_aal3_evidence(&self, session: &SessionId, cred_gen: u64) -> StoreResult<bool> {
         on!(self, s => Sessions::session_aal3_evidence(s, session, cred_gen).await)
     }
+    async fn user_has_passkey(&self, user: &UserId) -> StoreResult<bool> {
+        on!(self, s => Sessions::user_has_passkey(s, user).await)
+    }
     #[allow(clippy::too_many_arguments)]
     async fn sweep(
         &self,

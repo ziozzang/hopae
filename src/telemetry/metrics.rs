@@ -279,7 +279,7 @@ pub static RATE_LIMITED: LazyLock<Family<1>> = LazyLock::new(|| {
 pub static STORE_FAILURES: LazyLock<Family<1>> = LazyLock::new(|| {
     Family::new(
         "hopae_store_failures_total",
-        "SQLite store failures by kind (busy = database locked past the busy timeout).",
+        "Store failures by kind (busy = SQLite locked past the busy timeout, or a PostgreSQL serialization failure or deadlock).",
         ["kind"],
         16,
     )

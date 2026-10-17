@@ -100,6 +100,34 @@ pub async fn get(State(st): State<Arc<AdminState>>, _ctx: Ctx) -> Response {
         }
     }
 
+    #[cfg(feature = "postgres")]
+    if let Some(pg) = st.profile_store.postgres() {
+        let p = pg.pool_metrics();
+        let n = |v: usize| i64::try_from(v).unwrap_or(i64::MAX);
+        gauge(
+            &mut out,
+            "hopae_store_pool_connections",
+            "PostgreSQL pool connections by state (in_use, idle) and the pool's limit (max).",
+            &[
+                ("state=\"in_use\"".into(), n(p.open.saturating_sub(p.idle))),
+                ("state=\"idle\"".into(), n(p.idle)),
+                ("state=\"max\"".into(), n(p.max)),
+            ],
+        );
+        gauge(
+            &mut out,
+            "hopae_store_pool_waiting",
+            "Requests waiting for a PostgreSQL pool connection.",
+            &[(String::new(), n(p.waiting))],
+        );
+        gauge(
+            &mut out,
+            "hopae_store_publication_listener_up",
+            "1 while the publication LISTEN connection is open (0: the follower polls only).",
+            &[(String::new(), i64::from(p.listening))],
+        );
+    }
+
     if let Ok(rows) = st.directory.providers().await {
         let mut up = Vec::new();
         for row in &rows {

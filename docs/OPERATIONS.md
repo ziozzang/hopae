@@ -1,6 +1,6 @@
 # Operations
 
-<!-- doc-rev: 9 -->
+<!-- doc-rev: 10 -->
 
 [Documentation](README.md) · [한국어](ko/OPERATIONS.md)
 
@@ -373,6 +373,10 @@ CLI default). The certificate binding and the secret still apply.
 | `hopae_projection_feed_rows` | gauge | — | Rows of the group projection change feed |
 | `hopae_lifecycle_feed_head` | gauge | `source` (`ledger`, `outbox`) | Head positions of the subject lifecycle feed |
 | `hopae_workload_principals` | gauge | — | Workload principals in the store |
+| `hopae_store_pool_connections` | gauge | `state` (`in_use`, `idle`, `max`) | PostgreSQL store only: pool connections and the pool limit |
+| `hopae_store_pool_waiting` | gauge | — | PostgreSQL store only: requests waiting for a pool connection |
+| `hopae_store_publication_listener_up` | gauge | — | PostgreSQL store only: `1` while the publication `LISTEN` connection is open (`0`: the follower polls every second) |
+| `hopae_publication_follows_total` | counter | `owner` (`profiles`, `projections`) | PostgreSQL store only: publications made by another replica and installed here |
 | `hopae_workload_jwks_last_success_timestamp_seconds` | gauge | `service` | Last successful signing-key fetch (staleness = `time()` minus it) |
 | `hopae_provider_state` | gauge | `provider`, `kind`, `state` (`ok`, `degraded`, `disabled`) | `1` for each provider's current state |
 | `hopae_config_generation` | gauge | — | Configuration snapshot generation |

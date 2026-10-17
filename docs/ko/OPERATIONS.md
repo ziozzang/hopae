@@ -1,6 +1,6 @@
 # 운영
 
-<!-- translation-status: source=../OPERATIONS.md source-rev=9 status=current -->
+<!-- translation-status: source=../OPERATIONS.md source-rev=10 status=current -->
 
 [문서 목차](README.md) · [English](../OPERATIONS.md)
 
@@ -331,6 +331,10 @@ ServiceMonitor는 요청 헤더를 넣을 수 없으므로 `GET /metrics`에 한
 | `hopae_projection_feed_rows` | gauge | — | 그룹 projection 변경 피드의 행 |
 | `hopae_lifecycle_feed_head` | gauge | `source`(`ledger`, `outbox`) | 주체 lifecycle 피드의 head 위치 |
 | `hopae_workload_principals` | gauge | — | 저장소의 workload 주체 |
+| `hopae_store_pool_connections` | gauge | `state`(`in_use`, `idle`, `max`) | PostgreSQL 저장소 전용: 풀 연결 수와 풀 한도 |
+| `hopae_store_pool_waiting` | gauge | — | PostgreSQL 저장소 전용: 풀 연결을 기다리는 요청 수 |
+| `hopae_store_publication_listener_up` | gauge | — | PostgreSQL 저장소 전용: 게시 `LISTEN` 연결이 열려 있으면 `1`(`0`이면 follower가 1초마다 폴링만 함) |
+| `hopae_publication_follows_total` | counter | `owner`(`profiles`, `projections`) | PostgreSQL 저장소 전용: 다른 복제본이 게시하고 이 복제본이 설치한 게시 수 |
 | `hopae_workload_jwks_last_success_timestamp_seconds` | gauge | `service` | 마지막 서명 키 조회 성공(staleness는 `time()`에서 이 값을 뺀 것) |
 | `hopae_provider_state` | gauge | `provider`, `kind`, `state`(`ok`, `degraded`, `disabled`) | 각 제공자의 현재 상태에 `1` |
 | `hopae_config_generation` | gauge | — | 설정 스냅샷 세대 |

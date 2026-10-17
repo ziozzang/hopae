@@ -15,6 +15,8 @@ use super::Services;
 
 /// The fallback poll period: the bound on how stale a replica can be.
 pub const POLL: Duration = Duration::from_secs(1);
+/// Publications another replica made that this one installed, by owner.
+pub const FOLLOWS_TOTAL: &str = "hopae_publication_follows_total";
 /// The pause before reopening a dropped listener connection.
 pub const LISTEN_RETRY: Duration = Duration::from_secs(5);
 
@@ -71,6 +73,11 @@ pub fn refresh(services: &Services) -> Refreshed {
             }
         }
         Err(_) => tracing::warn!("projection owner unavailable for refresh"),
+    }
+    for (owner, installed) in [("profiles", out.profiles), ("projections", out.projections)] {
+        if installed {
+            crate::telemetry::counters::inc(FOLLOWS_TOTAL, &[("owner", owner)]);
+        }
     }
     if out.profiles || out.projections {
         tracing::info!(

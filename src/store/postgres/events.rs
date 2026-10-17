@@ -768,11 +768,10 @@ impl Events for PgStore {
             ));
         }
         // As SQLite's bounded queue: a full one refuses at once (the caller counts a drop).
-        let _permit = self
-            .diag
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| StoreError::Busy)?;
+        let _permit = self.diag.clone().try_acquire_owned().map_err(|_| {
+            crate::telemetry::metrics::STORE_FAILURES.inc(["queue_full"]);
+            StoreError::Busy
+        })?;
         let attrs = serde_json::to_string(&serde_json::Value::Object(ev.attrs.clone()))
             .map_err(|_| corrupt("events.attrs"))?;
         let client = self.client().await?;
@@ -993,7 +992,11 @@ impl Events for PgStore {
                     "SELECT (SELECT count(*) FROM users), (SELECT count(*) FROM events), \
                             (SELECT count(*) FROM sessions WHERE terminated_at IS NULL AND absolute_expires_at > $1), \
                             (SELECT value FROM meta WHERE key = 'last_prune_at'), \
-                            (SELECT COALESCE(max(version), 0) FROM schema_migrations)",
+                            (SELECT COALESCE(max(version), 0) FROM schema_migrations), \
+                            (SELECT count(*) FROM group_changes), \
+                            (SELECT COALESCE(max(position), 0) FROM human_user_ids), \
+                            (SELECT COALESCE(max(pos), 0) FROM outbox_feed), \
+                            (SELECT count(*) FROM workload_principals)",
                     &[&now],
                 )
                 .await
@@ -1022,6 +1025,11 @@ impl Events for PgStore {
                     .get::<_, Option<String>>(3)
                     .and_then(|s| s.parse::<i64>().ok())
                     .map(Timestamp::from_secs),
+                projection_changes: count(r.get(5)),
+                lifecycle_ledger_head: count(r.get(6)),
+                // The lifecycle feed's own positions (SQLite: the events rowid).
+                outbox_head: count(r.get(7)),
+                workload_principals: count(r.get(8)),
             })
         }
         .await;

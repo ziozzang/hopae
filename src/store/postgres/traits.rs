@@ -1139,6 +1139,18 @@ impl Sessions for PgStore {
             .is_some())
     }
 
+    async fn user_has_passkey(&self, user: &UserId) -> StoreResult<bool> {
+        let client = self.client().await?;
+        Ok(client
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM webauthn_credentials WHERE user_id = $1 AND state = 'active')",
+                &[&user.as_str()],
+            )
+            .await
+            .map_err(pg)?
+            .get(0))
+    }
+
     async fn sweep(&self, now: Timestamp, retention: Duration) -> StoreResult<SweepReport> {
         super::retry(|| async {
             let mut client = self.client().await?;
