@@ -1056,7 +1056,10 @@ impl AppStore {
                     .await
             }
             #[cfg(feature = "postgres")]
-            AppStore::Postgres(_) => Err(unported("native provider owners")),
+            AppStore::Postgres(p) => {
+                p.prepare_registry_providers(expected_generation, deadline)
+                    .await
+            }
         }
     }
 
@@ -1068,7 +1071,7 @@ impl AppStore {
         match self {
             AppStore::Sqlite(s) => s.require_prepared_providers(prepared, deadline).await,
             #[cfg(feature = "postgres")]
-            AppStore::Postgres(_) => Err(unported("native provider owners")),
+            AppStore::Postgres(p) => p.require_prepared_providers(prepared, deadline).await,
         }
     }
 
@@ -1081,7 +1084,7 @@ impl AppStore {
         match self {
             AppStore::Sqlite(s) => s.require_prepared_provider(prepared, id, deadline).await,
             #[cfg(feature = "postgres")]
-            AppStore::Postgres(_) => Err(unported("native provider owners")),
+            AppStore::Postgres(p) => p.require_prepared_provider(prepared, id, deadline).await,
         }
     }
 
@@ -1094,7 +1097,7 @@ impl AppStore {
         match self {
             AppStore::Sqlite(s) => s.publish_materials(prepared, desired, deadline).await,
             #[cfg(feature = "postgres")]
-            AppStore::Postgres(_) => Err(unported("native material owners")),
+            AppStore::Postgres(p) => p.publish_materials(prepared, desired, deadline).await,
         }
     }
 

@@ -13,6 +13,7 @@ mod groups;
 mod handoff;
 pub mod import;
 pub mod meta;
+mod owners;
 mod passkeys;
 mod traits;
 mod write;

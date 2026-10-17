@@ -32,7 +32,7 @@ pub(super) const GRANTS_LOCK: i64 = 7060;
 
 const PROVIDER_COLS: &str = "provider_id, kind, display_name, enabled, managed_by, deleted_at, sort_order, config, client_secret_env, allowed_email_domains, authoritative_domains, auto_link, trust_email";
 
-fn provider_row(r: &Row) -> StoreResult<ProviderRow> {
+pub(super) fn provider_row(r: &Row) -> StoreResult<ProviderRow> {
     Ok(ProviderRow {
         provider_id: ProviderId::new(r.get::<_, String>(0)),
         kind: ProviderKind::parse(&r.get::<_, String>(1))

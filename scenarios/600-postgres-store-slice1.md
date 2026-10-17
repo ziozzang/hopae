@@ -175,7 +175,7 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 ### S600-27 The application store handle dispatches (slice 5)
 
 - Given: the application's `Store` handle over either backend.
-- When: providers are imported, a user and a session are read, an event is appended and counted through the handle and through the trait objects it hands out; a native owner operation not yet ported is asked for.
+- When: providers are imported, a user and a session are read, an event is appended and counted through the handle and through the trait objects it hands out; an operation not available on PostgreSQL (the delivery dump) is asked for.
 - Then: every answer comes from the backend it wraps; on PostgreSQL the unported operation is refused by name (no fallback).
 
 ### S600-28 The native meta owners agree (slice 5)
@@ -183,6 +183,12 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 - Given: the store's meta handle on either backend.
 - When: the receipt key history is published, published again on a stale revision, read under a higher minimum, and published with a guard that refuses after the writes; the receipt key owner reconciles an unchanged and a changed set; a profile is published, republished on a stale revision and published with a late refusing guard; a projection tombstone is published; six publishers race on one revision; eight consumers race to admit one receipt (PostgreSQL, next to the replay code).
 - Then: revision 1, the stale one refused, the minimum refused, the late refusal rolls back; 1 then 2 with a live verifier; revision 1, `Conflict`, `Denied` with no audit row; revision 1 disabled; exactly one publisher and exactly one consumer win.
+
+### S600-29 Provider and compiled-material owners agree (slice 5)
+
+- Given: providers `mock` and `two` imported through the application handle.
+- When: providers are prepared for a generation that is not in force, then for the current one; the preparation is required whole and per provider; compiled material fingerprints are published twice; `mock`'s configuration changes; the generation moves; another store is asked to accept the preparation.
+- Then: `Conflict`; both rows in order; both requirements pass; both fingerprints recorded and the republish stable; the stale preparation is refused whole, for `mock` and for a material publication while `two` still passes; refused after the new generation; refused by the foreign store.
 
 ### S600-5 PostgreSQL ledger, migrations and newer schema
 
@@ -247,6 +253,7 @@ guaranteed; a PostgreSQL configuration is never served by an incomplete binary.
 | S600-27 | `s600_27_the_application_store_handle_dispatches_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-28 | `s600_28_native_meta_owners_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-28 | `s600_28_postgres_connections_admit_exactly_one_concurrent_consumer` | `src/auth_gateway/receipt_replay.rs` | unit | passing |
+| S600-29 | `s600_29_provider_and_material_owners_agree_on_both_backends` | `src/store/conformance.rs` | unit | passing |
 | S600-5 | `s600_5_postgres_ledger_migrations_and_newer_schema` | `src/store/conformance.rs` | unit | passing |
 | S600-6 | `s600_6_postgres_store_configuration_is_validated` | `src/config/mod.rs` | unit | passing |
 | S600-6 | `s600_6_serving_refuses_the_incomplete_postgres_backend` | `src/app.rs` | unit | passing |

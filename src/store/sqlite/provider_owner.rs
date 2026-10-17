@@ -137,13 +137,30 @@ mod tests;
 /// Exact actual DB rows and incarnations read under one storage snapshot.
 /// Only the Store constructs this; public Registry::from_snapshot is unqualified.
 pub(crate) struct PreparedProviders {
-    pub(super) store: Weak<Inner>,
+    pub(crate) store: crate::store::owner_ref::OwnerRef,
     rows: Vec<crate::store::ProviderRow>,
-    pub(super) owners: std::collections::BTreeMap<String, i64>,
-    pub(super) materials: super::material_owner::Ledger,
-    pub(super) generation: u64,
+    pub(crate) owners: std::collections::BTreeMap<String, i64>,
+    pub(crate) materials: super::material_owner::Ledger,
+    pub(crate) generation: u64,
 }
 impl PreparedProviders {
+    /// A preparation read from another backend's store (PostgreSQL).
+    #[cfg(feature = "postgres")]
+    pub(crate) fn from_parts(
+        store: crate::store::owner_ref::OwnerRef,
+        rows: Vec<crate::store::ProviderRow>,
+        owners: std::collections::BTreeMap<String, i64>,
+        materials: super::material_owner::Ledger,
+        generation: u64,
+    ) -> Self {
+        Self {
+            store,
+            rows,
+            owners,
+            materials,
+            generation,
+        }
+    }
     pub(crate) fn rows(&self) -> &[crate::store::ProviderRow] {
         &self.rows
     }
@@ -155,7 +172,7 @@ impl PreparedProviders {
         store: &Store,
         provider: &crate::provider::types::ProviderId,
     ) -> StoreResult<(u64, i64)> {
-        if !Weak::ptr_eq(&self.store, &Arc::downgrade(&store.inner)) {
+        if !self.store.is_sqlite(&store.inner) {
             return Err(StoreError::Conflict("provider store changed"));
         }
         Ok((
@@ -231,7 +248,7 @@ impl Store {
             )
             .await?;
         Ok(PreparedProviders {
-            store: Arc::downgrade(&self.inner),
+            store: crate::store::owner_ref::OwnerRef::sqlite(&self.inner),
             rows,
             owners,
             materials,
@@ -243,7 +260,7 @@ impl Store {
         prepared: &PreparedProviders,
         deadline: Deadline,
     ) -> StoreResult<()> {
-        if !Weak::ptr_eq(&prepared.store, &Arc::downgrade(&self.inner)) {
+        if !prepared.store.is_sqlite(&self.inner) {
             return Err(StoreError::Conflict("provider store owner changed"));
         }
         let generation = prepared.generation;
@@ -265,7 +282,7 @@ impl Store {
         id: &crate::provider::types::ProviderId,
         deadline: Deadline,
     ) -> StoreResult<()> {
-        if !Weak::ptr_eq(&prepared.store, &Arc::downgrade(&self.inner)) {
+        if !prepared.store.is_sqlite(&self.inner) {
             return Err(StoreError::Conflict("provider store owner changed"));
         }
         let expected = prepared

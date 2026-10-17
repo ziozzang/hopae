@@ -12,6 +12,7 @@ pub mod conformance;
 pub mod core;
 pub mod hooks;
 pub mod meta;
+pub(crate) mod owner_ref;
 pub mod passkeys;
 #[cfg(feature = "postgres")]
 pub mod postgres;

@@ -307,7 +307,7 @@ fn commit_inner(
     Ok(())
 }
 
-struct Inner {
+pub(crate) struct Inner {
     shared: Arc<Shared>,
     tx: mpsc::Sender<Job>,
     path: PathBuf,
@@ -318,7 +318,7 @@ struct Inner {
 /// The SQLite store. Cheap to clone; clones share the writer thread.
 #[derive(Clone)]
 pub struct Store {
-    inner: Arc<Inner>,
+    pub(crate) inner: Arc<Inner>,
 }
 
 impl Store {

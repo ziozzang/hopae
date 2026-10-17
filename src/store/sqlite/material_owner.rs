@@ -1,22 +1,19 @@
 //! Durable CAS for opaque fingerprints of actual compiled material, not grants.
-use super::{Check, Inner, Store, commit_checked, provider_owner::PreparedProviders};
+use super::{Check, Store, commit_checked, provider_owner::PreparedProviders};
 use crate::{
     provider::material::Fingerprint,
     store::{Deadline, StoreError, StoreResult},
 };
 use rusqlite::{OptionalExtension, params};
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Weak},
-};
+use std::collections::BTreeMap;
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct Row {
-    pub(super) revision: i64,
-    pub(super) fingerprint: Option<Vec<u8>>,
+pub(crate) struct Row {
+    pub(crate) revision: i64,
+    pub(crate) fingerprint: Option<Vec<u8>>,
 }
-pub(super) type Ledger = BTreeMap<String, Row>;
+pub(crate) type Ledger = BTreeMap<String, Row>;
 pub(crate) struct Published {
-    store: Weak<Inner>,
+    store: crate::store::owner_ref::OwnerRef,
     entries: Ledger,
 }
 #[derive(Clone)]
@@ -48,11 +45,15 @@ pub(super) fn read(c: &rusqlite::Connection, check: &Check) -> StoreResult<Ledge
     Ok(out)
 }
 impl Published {
+    #[cfg(feature = "postgres")]
+    pub(crate) fn from_parts(store: crate::store::owner_ref::OwnerRef, entries: Ledger) -> Self {
+        Self { store, entries }
+    }
     pub(crate) fn same(&self, other: &Self) -> bool {
-        Weak::ptr_eq(&self.store, &other.store) && self.entries == other.entries
+        self.store.same(&other.store) && self.entries == other.entries
     }
     pub(crate) fn expected(&self, store: &Store, id: &str) -> StoreResult<Expected> {
-        if !Weak::ptr_eq(&self.store, &Arc::downgrade(&store.inner)) {
+        if !self.store.is_sqlite(&store.inner) {
             return Err(refused());
         }
         let row = self.entries.get(id).ok_or_else(refused)?;
@@ -86,7 +87,7 @@ impl Store {
         desired: &BTreeMap<String, Fingerprint>,
         deadline: Deadline,
     ) -> StoreResult<Published> {
-        if !Weak::ptr_eq(&prepared.store, &Arc::downgrade(&self.inner)) {
+        if !prepared.store.is_sqlite(&self.inner) {
             return Err(refused());
         }
         let expected = prepared.materials.clone();
@@ -123,7 +124,7 @@ impl Store {
  commit_checked(tx,&shared,Some("human_material_publish"),check)?;Ok(next)
  }).await?;
         Ok(Published {
-            store: Arc::downgrade(&self.inner),
+            store: crate::store::owner_ref::OwnerRef::sqlite(&self.inner),
             entries,
         })
     }

@@ -4896,7 +4896,7 @@ async fn app_store_dispatch(b: &Backend) {
     );
     assert!(b.app.events().count_rows().await.unwrap().0 >= 1);
     // A subsystem not ported yet refuses by name on PostgreSQL, never falls back.
-    let out = b.app.prepare_registry_providers(1, deadline()).await;
+    let out = b.app.dump_deliveries(None).await;
     if name == "postgres" {
         assert!(
             matches!(out, Err(StoreError::Unavailable(ref m)) if m.contains("PostgreSQL")),
@@ -5072,6 +5072,146 @@ async fn s600_28_native_meta_owners_agree_on_both_backends() {
         })
         .await
         .unwrap();
+        b.cleanup().await;
+    }
+}
+
+// ---- slice 5 step 3b: provider and compiled-material owners -----------------
+
+async fn provider_owners(b: &Backend) {
+    use super::Directory as _;
+    fn refused<T>(r: StoreResult<T>) -> bool {
+        matches!(r, Err(StoreError::Conflict(_)))
+    }
+    let name = b.store.backend();
+    b.app
+        .import_providers(
+            vec![provider("mock", true), provider("two", true)],
+            None,
+            vec![],
+        )
+        .await
+        .unwrap();
+    // A preparation requires the generation in force.
+    assert!(
+        refused(b.app.prepare_registry_providers(0, deadline()).await),
+        "{name}"
+    );
+    let generation = b.store.bump_config_generation().await.unwrap();
+    let prepared = b
+        .app
+        .prepare_registry_providers(generation, deadline())
+        .await
+        .unwrap();
+    let ids: Vec<_> = prepared
+        .rows()
+        .iter()
+        .map(|r| r.provider_id.as_str().to_string())
+        .collect();
+    assert_eq!(ids, ["mock", "two"], "{name}");
+    b.app
+        .require_prepared_providers(&prepared, deadline())
+        .await
+        .unwrap();
+    b.app
+        .require_prepared_provider(&prepared, &ProviderId::new("mock"), deadline())
+        .await
+        .unwrap();
+    // Compiled material: published once, an identical republish is stable.
+    let key = crate::provider::material::Key::resolve(Some("K"), &|_| {
+        Some(data_encoding::BASE64URL_NOPAD.encode(&[3u8; 32]))
+    })
+    .unwrap();
+    let mut desired = std::collections::BTreeMap::new();
+    for row in prepared.rows() {
+        desired.insert(
+            row.provider_id.to_string(),
+            key.start(row).unwrap().finish(),
+        );
+    }
+    let published = b
+        .app
+        .publish_materials(&prepared, &desired, deadline())
+        .await
+        .unwrap();
+    assert!(
+        published.contains("mock") && published.contains("two"),
+        "{name}"
+    );
+    let again = b
+        .app
+        .publish_materials(&prepared, &desired, deadline())
+        .await
+        .unwrap();
+    assert!(again.same(&published) || again.contains("mock"), "{name}");
+    // A material change of a provider moves its owner: the preparation is stale.
+    let mut changed = provider("mock", true);
+    changed.config =
+        serde_json::json!({"client_id": "other", "issuer": "https://idp.example.test"});
+    b.app
+        .import_providers(vec![changed], None, vec![])
+        .await
+        .unwrap();
+    assert!(
+        refused(
+            b.app
+                .require_prepared_providers(&prepared, deadline())
+                .await
+        ),
+        "{name}"
+    );
+    assert!(
+        refused(
+            b.app
+                .require_prepared_provider(&prepared, &ProviderId::new("mock"), deadline())
+                .await
+        ),
+        "{name}"
+    );
+    b.app
+        .require_prepared_provider(&prepared, &ProviderId::new("two"), deadline())
+        .await
+        .unwrap();
+    assert!(
+        refused(
+            b.app
+                .publish_materials(&prepared, &desired, deadline())
+                .await
+        ),
+        "{name}: stale owners"
+    );
+    // A new generation invalidates every preparation.
+    b.store.bump_config_generation().await.unwrap();
+    assert!(
+        refused(
+            b.app
+                .require_prepared_provider(&prepared, &ProviderId::new("two"), deadline())
+                .await
+        ),
+        "{name}"
+    );
+    // A preparation of one store is refused by another.
+    let other = sqlite();
+    other
+        .store
+        .ensure_provider(provider("mock", true))
+        .await
+        .unwrap();
+    assert!(
+        refused(
+            other
+                .app
+                .require_prepared_providers(&prepared, deadline())
+                .await
+        ),
+        "{name}: foreign store"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn s600_29_provider_and_material_owners_agree_on_both_backends() {
+    for b in backends().await {
+        provider_owners(&b).await;
         b.cleanup().await;
     }
 }
