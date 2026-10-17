@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=43 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=44 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -63,7 +63,10 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `listen.portal` | 문자열, 소켓 주소 | `127.0.0.1:8700` | 포털 리스너(로그인, 콜백, 로그아웃, `/healthz`). 게이트웨이의 포털 라우트가 프록시합니다. |
 | `listen.gateway` | 문자열, 소켓 주소 | `127.0.0.1:8701` | 게이트웨이 리스너(`/_hopae/verify`). `listen.portal`과 달라야 합니다. 루프백이 아닌 주소는 경고를 냅니다. 이 리스너는 공개적으로 접근할 수 있어서는 안 됩니다([게이트웨이 계약](GATEWAY_CONTRACT.md#전제-조건과-설정)). |
 | `state_dir` | 문자열, 경로 | 필수 | 런타임 상태(데이터베이스, 인스턴스 잠금, 백업)를 위한 쓰기 가능한 디렉터리이며 모드 `0700`으로 생성됩니다. 비어 있으면 안 됩니다. |
-| `store.kind` | `sqlite` | `sqlite` | 기본 저장소 백엔드([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)). `postgres`는 M2에서 제공합니다. |
+| `store.kind`(별칭 `store.backend`) | `sqlite`, `postgres` | `sqlite` | 기본 저장소 백엔드([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md), [ADR-0020](../adr/0020-postgresql-store-backend.md)). `postgres`는 `postgres` feature로 빌드한 바이너리와 `store.postgres`가 필요합니다. 검증되고 `hopae store migrate-to-postgres`가 사용합니다. `serve`와 다른 저장소 명령은 ADR-0020 슬라이스 5 전까지 거부합니다(SQLite로 대체하지 않음). |
+| `store.postgres.url_env` | 환경 변수 이름 | — | 연결 문자열(libpq URL 또는 key/value). 파일이 아니라 환경에서 읽습니다 |
+| `store.postgres.ca_file` | 절대 경로 | 없음 | TLS용 PEM CA 묶음. 없으면 루프백이나 Unix 소켓만 허용합니다 |
+| `store.postgres.pool_size`, `connect_timeout_ms`, `statement_timeout_ms` | 정수 | `16`, `5000`, `2000` | 풀 크기 1~128, 연결 제한 시간 100~60,000 ms, 트랜잭션별 문장 제한 시간 10~600,000 ms |
 | `store.path` | 문자열, 경로 | `<state_dir>/hopae.db` | SQLite 데이터베이스 파일. 지정했다면 비어 있으면 안 됩니다. |
 | `log.level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | stderr 프로세스 로그의 상세도. |
 | `log.verify_allow` | 불리언 | `false` | 허용된 verify를 하나하나 기록합니다(거부는 항상 집계되고 샘플링됩니다). |
@@ -238,7 +241,7 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `gateway.rate_limit_status` | HC-8 이후 | `403` | 게이트웨이가 중계하면 `429`([ADR-0005](../adr/0005-gateway-contract-and-versioning.md)) |
 | `oidc` 또는 `ldap`가 아닌 `providers[].kind` | M3 | — | 카카오, 네이버, 이메일 링크, 비밀번호([ADR-0010](../adr/0010-provider-abstraction.md)) |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, 없음, 없음 | 로컬 캐시와 Redis 버스([ADR-0006](../adr/0006-verify-caching-and-invalidation.md)) |
-| `store.kind = postgres`, `store.url_env` | M2 | — | 공유 기본 저장소([ADR-0002](../adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
+| `store.kind = postgres`로 서비스 | ADR-0020 슬라이스 5(M2) | — | 공유 기본 저장소. 슬라이스 1~4는 저장소 계약, PostgreSQL 스키마, 양쪽 백엔드 적합성 테스트, SQLite 이전 명령, 복제본 2개 저장소 검증을 제공합니다 |
 
 ## 동작
 

@@ -94,15 +94,52 @@ struct Mapping {
     #[serde(default)]
     user_agent: Option<String>,
 }
-pub struct Replay {
-    path: std::path::PathBuf,
+/// Delegation nonce admission. A single replica keeps its ledger in a
+/// private file under `state_dir`; replicas sharing a PostgreSQL store use the
+/// store's replay ledger instead (ADR-0020 slice 2b), so a nonce admitted by
+/// one replica is refused by every other.
+pub enum Replay {
+    File(std::path::PathBuf),
+    Store(std::sync::Arc<dyn crate::store::core::NonceStore>),
 }
+/// A nonce stays recorded for 30 seconds after it is seen.
+const NONCE_WINDOW_SECS: u64 = 30;
+const NONCE_CAPACITY: u32 = 2048;
+pub(crate) const NONCE_SCOPE: &str = "delegation";
 impl Replay {
     pub fn new(path: std::path::PathBuf) -> Self {
-        Self { path }
+        Self::File(path)
     }
-    fn admit(&self, nonce: &str, now: u64) -> bool {
-        admit_nonce(&self.path, nonce, now).unwrap_or(false)
+    pub fn shared(store: std::sync::Arc<dyn crate::store::core::NonceStore>) -> Self {
+        Self::Store(store)
+    }
+    /// Fail closed: any error is a refusal.
+    pub(crate) async fn admit(&self, nonce: &str, now: u64) -> bool {
+        match self {
+            Self::File(path) => {
+                let (path, nonce) = (path.clone(), nonce.to_string());
+                tokio::task::spawn_blocking(move || admit_nonce(&path, &nonce, now))
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false)
+            }
+            Self::Store(store) => {
+                let now = i64::try_from(now).unwrap_or(i64::MAX);
+                // Recorded while `seen + 30 >= now`, as the file ledger keeps it.
+                let expires = now.saturating_add(NONCE_WINDOW_SECS as i64 + 1);
+                store
+                    .admit_nonce(
+                        NONCE_SCOPE,
+                        nonce,
+                        crate::crypto::Timestamp::from_secs(expires),
+                        crate::crypto::Timestamp::from_secs(now),
+                        NONCE_CAPACITY,
+                    )
+                    .await
+                    .unwrap_or(false)
+            }
+        }
     }
 }
 fn admit_nonce(path: &Path, nonce: &str, now: u64) -> Option<bool> {
@@ -135,13 +172,13 @@ fn admit_nonce(path: &Path, nonce: &str, now: u64) -> Option<bool> {
         .ok()?;
     tx.execute(
         "DELETE FROM delegation_nonces WHERE seen < ?1",
-        [now.saturating_sub(30)],
+        [now.saturating_sub(NONCE_WINDOW_SECS)],
     )
     .ok()?;
     let n: u64 = tx
         .query_row("SELECT count(*) FROM delegation_nonces", [], |r| r.get(0))
         .ok()?;
-    if n >= 2048 {
+    if n >= u64::from(NONCE_CAPACITY) {
         return Some(false);
     }
     let inserted = tx
@@ -504,12 +541,7 @@ pub async fn middleware(
         _ => return denied(),
     };
     // Durable bounded nonce admission rejects replay across process restarts.
-    let state = st.clone();
-    let nonce = assertion.nonce.clone();
-    if !matches!(
-        tokio::task::spawn_blocking(move || state.delegation_replay.admit(&nonce, now)).await,
-        Ok(true)
-    ) {
+    if !st.delegation_replay.admit(&assertion.nonce, now).await {
         return denied();
     }
     let listing = original_path.ends_with("/query") || get_request;
@@ -623,6 +655,26 @@ mod tests {
         assert_eq!(admit_nonce(&p, "operation", 100), Some(true));
         assert_eq!(admit_nonce(&p, "operation", 100), Some(false));
         assert_eq!(admit_nonce(&p, "operation", 131), Some(true));
+    }
+    /// The store-backed ledger keeps the file ledger's window, and two
+    /// replicas sharing one store refuse each other's nonces.
+    #[tokio::test]
+    async fn s600_11_store_backed_delegation_nonces_match_the_file_window_across_replicas() {
+        let d = tempfile::tempdir().unwrap();
+        let clock = std::sync::Arc::new(crate::crypto::TestClock::new(crate::crypto::Timestamp(0)));
+        let store = std::sync::Arc::new(
+            crate::store::sqlite::Store::open(&d.path().join("hopae.db"), clock, vec![], None)
+                .unwrap(),
+        );
+        let (a, b) = (Replay::shared(store.clone()), Replay::shared(store));
+        assert!(a.admit("operation", 100).await);
+        assert!(!b.admit("operation", 100).await);
+        assert!(!a.admit("operation", 130).await);
+        assert!(b.admit("operation", 131).await);
+        let file = Replay::new(d.path().join("nonce.db"));
+        assert!(file.admit("operation", 100).await);
+        assert!(!file.admit("operation", 130).await);
+        assert!(file.admit("operation", 131).await);
     }
     #[cfg(unix)]
     #[test]

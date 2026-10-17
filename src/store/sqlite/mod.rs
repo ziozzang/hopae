@@ -6,8 +6,9 @@
 //! so a state change and its audit record commit or vanish together.
 
 mod admin;
+mod core_impl;
 mod directory;
-mod events;
+pub(crate) mod events;
 mod factors;
 pub(crate) mod groups;
 pub(crate) mod human_owner;

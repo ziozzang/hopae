@@ -151,7 +151,7 @@ pub(super) fn flush_diagnostics(env: &mut WriterEnv) {
 
 /// Kinds whose event must commit with the mutation it describes
 /// (`session.*`, `handle.*`, `identity.*`, `session.handoff`).
-fn travels_with_state(kind: EventKind) -> bool {
+pub(crate) fn travels_with_state(kind: EventKind) -> bool {
     matches!(
         kind,
         EventKind::SessionCreated

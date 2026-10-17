@@ -1,6 +1,6 @@
 # Configuration reference
 
-<!-- doc-rev: 43 -->
+<!-- doc-rev: 44 -->
 
 [Documentation](README.md) · [한국어](ko/CONFIG.md)
 
@@ -66,7 +66,10 @@ table, [Management console](#management-console).
 | `listen.portal` | string, socket address | `127.0.0.1:8700` | Portal listener (login, callback, logout, `/healthz`). Proxied by the gateway's portal route. |
 | `listen.gateway` | string, socket address | `127.0.0.1:8701` | Gateway listener (`/_hopae/verify`). Must differ from `listen.portal`. A non-loopback address produces a warning: the listener must never be publicly reachable ([gateway contract](GATEWAY_CONTRACT.md#prerequisites-and-configuration)). |
 | `state_dir` | string, path | required | Writable directory for runtime state (database, instance lock, backups), created with mode `0700`. Must not be empty. |
-| `store.kind` | `sqlite` | `sqlite` | Primary store backend ([ADR-0002](adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)). `postgres` arrives in M2. |
+| `store.kind` (alias `store.backend`) | `sqlite`, `postgres` | `sqlite` | Primary store backend ([ADR-0002](adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md), [ADR-0020](adr/0020-postgresql-store-backend.md)). `postgres` needs a binary built with the `postgres` feature and `store.postgres`; it is validated and `hopae store migrate-to-postgres` uses it; `serve` and the other store commands still refuse it until ADR-0020 slice 5 (no fallback to SQLite). |
+| `store.postgres.url_env` | environment variable name | — | Connection string (libpq URL or key/value), read from the environment, never from the file |
+| `store.postgres.ca_file` | absolute path | none | PEM CA bundle for TLS; without it only loopback or a Unix socket is allowed |
+| `store.postgres.pool_size`, `connect_timeout_ms`, `statement_timeout_ms` | integers | `16`, `5000`, `2000` | Pool size 1–128; connect timeout 100–60,000 ms; per-transaction statement timeout 10–600,000 ms |
 | `store.path` | string, path | `<state_dir>/hopae.db` | SQLite database file. Must not be empty when set. |
 | `log.level` | `error`, `warn`, `info`, `debug`, `trace` | `info` | Verbosity of the process log on stderr. |
 | `log.verify_allow` | boolean | `false` | Log every allowed verify individually (denials are always counted and sampled). |
@@ -245,7 +248,7 @@ the milestone shown. Until then `hopae --check` rejects them as unknown.
 | `gateway.rate_limit_status` | after HC-8 | `403` | `429` once the gateway relays it ([ADR-0005](adr/0005-gateway-contract-and-versioning.md)) |
 | `providers[].kind` other than `oidc` or `ldap` | M3 | — | Kakao, Naver, email link, password ([ADR-0010](adr/0010-provider-abstraction.md)) |
 | `cache.local_ttl_ms`, `cache.op_timeout_ms`, `cache.redis_url_env`, `cache.namespace` | M2 | `0`, `50`, none, none | Local cache and Redis bus ([ADR-0006](adr/0006-verify-caching-and-invalidation.md)) |
-| `store.kind = postgres`, `store.url_env` | M2 | — | Shared primary store ([ADR-0002](adr/0002-primary-store-sqlite-with-postgres-for-shared-deployments.md)) |
+| Serving on `store.kind = postgres` | ADR-0020 slice 5 (M2) | — | Shared primary store; slices 1–4 ship the store contracts, the PostgreSQL schema, the dual-backend conformance tests, the SQLite migration command and a two-replica store qualification |
 
 ## Behavior
 

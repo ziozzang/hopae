@@ -45,11 +45,28 @@ enum Command {
         #[command(subcommand)]
         action: ProviderAction,
     },
+    /// Store maintenance.
+    Store {
+        #[command(subcommand)]
+        action: StoreAction,
+    },
     /// Administrator grants for the management console, straight against the
     /// store (safe while an instance runs).
     Admin {
         #[command(subcommand)]
         action: AdminAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum StoreAction {
+    /// Copy the SQLite store into the empty PostgreSQL store of
+    /// `store.postgres` (ADR-0020). One way; Hopae must be stopped; the
+    /// SQLite file is only read and stays as the rollback artefact.
+    MigrateToPostgres {
+        /// The SQLite file (default: `<state_dir>/hopae.db`).
+        #[arg(long, value_name = "PATH")]
+        from: Option<PathBuf>,
     },
 }
 
@@ -224,6 +241,7 @@ fn main() -> ExitCode {
             action: ProviderAction::Import { force },
         }) => providers_import(&cfg, force.as_deref()),
         Some(Command::Admin { action }) => admin(&cfg, action),
+        Some(Command::Store { action }) => store_command(&cfg, action),
         Some(Command::Run) | None => serve(cfg),
     }
 }
@@ -469,4 +487,43 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         println!("hooks listening on {h}");
     }
     bound.run(signals.shutdown()).await
+}
+
+fn store_command(cfg: &Config, action: StoreAction) -> ExitCode {
+    match action {
+        StoreAction::MigrateToPostgres { from } => migrate_to_postgres(cfg, from.as_deref()),
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn migrate_to_postgres(cfg: &Config, from: Option<&Path>) -> ExitCode {
+    telemetry::init(&cfg.log.level);
+    let result = runtime()
+        .map_err(anyhow::Error::from)
+        .and_then(|rt| rt.block_on(app::pg::migrate_to_postgres(cfg, from)));
+    match result {
+        Ok((source, report)) => {
+            println!("store migrated: {} -> postgres", source.display());
+            println!("  source schema: v{}", report.source_schema);
+            for t in &report.tables {
+                println!("  {:<32} {:>10} rows  sha256 {}", t.table, t.rows, t.digest);
+            }
+            println!("  replay entries: {}", report.nonces);
+            println!("  digest: {}", report.summary_digest());
+            println!(
+                "the SQLite file was not changed; keep it as the rollback artefact until the PostgreSQL deployment is qualified"
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(feature = "postgres"))]
+fn migrate_to_postgres(_cfg: &Config, _from: Option<&Path>) -> ExitCode {
+    eprintln!("error: this binary was built without the postgres feature");
+    ExitCode::FAILURE
 }

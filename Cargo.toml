@@ -53,6 +53,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
+# ADR-0020 (optional): PostgreSQL backend for shared/HA deployments.
+tokio-postgres = { version = "0.7", optional = true }
+deadpool-postgres = { version = "0.14", optional = true }
+tokio-postgres-rustls = { version = "0.14", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
@@ -81,6 +85,8 @@ argon2 = "0.5"
 serde_cbor_2 = "0.13"
 
 [features]
+# PostgreSQL primary store (ADR-0020), slice 1: library and conformance tests.
+postgres = ["dep:tokio-postgres", "dep:deadpool-postgres", "dep:tokio-postgres-rustls"]
 # Loopback-only test control surface (clock, stall, commit gate, crash points,
 # deterministic RNG). Never enabled in a release build.
 test-hooks = []
@@ -115,3 +121,7 @@ ldap3 = { path = "vendor/ldap3" }
 [workspace]
 members = ["crates/hopae-grpc"]
 resolver = "2"
+
+[[example]]
+name = "qualify_postgres_replicas"
+required-features = ["postgres"]
