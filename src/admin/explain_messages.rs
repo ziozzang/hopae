@@ -124,6 +124,16 @@ pub const MESSAGES: &[(&str, &str, &str)] = &[
         "단계 상향이 필요하지만 2단계 인증이 설정되어 있지 않아 요청을 거부합니다.",
     ),
     (
+        "risk_denied",
+        "A risk rule denies requests in this network context.",
+        "위험 규칙이 이 네트워크 상황의 요청을 거부합니다.",
+    ),
+    (
+        "risk_context_missing",
+        "The gateway sent no risk context and this application refuses requests without one.",
+        "게이트웨이가 위험 컨텍스트를 보내지 않았고 이 애플리케이션은 그런 요청을 거부합니다.",
+    ),
+    (
         "reauth_required",
         "The sign-in is too old for this path; the user must sign in again.",
         "이 경로에 비해 로그인이 오래되어 다시 로그인해야 합니다.",

@@ -172,6 +172,8 @@ pub struct AppPolicy {
     /// Highest level verify and receipts present for this application
     /// (ADR-0018): `Two` (default) or `Three`.
     pub max_emitted_aal: crate::session::types::Aal,
+    /// Risk-based step-up rules (ADR-0023); `None`: risk is not consulted.
+    pub risk: Option<crate::policy::risk::Policy>,
 }
 
 impl AppPolicy {
@@ -191,6 +193,7 @@ impl AppPolicy {
             step_up: Vec::new(),
             max_auth_age: None,
             max_emitted_aal: crate::session::types::Aal::Two,
+            risk: None,
         }
     }
 }

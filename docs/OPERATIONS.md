@@ -1,6 +1,6 @@
 # Operations
 
-<!-- doc-rev: 8 -->
+<!-- doc-rev: 9 -->
 
 [Documentation](README.md) · [한국어](ko/OPERATIONS.md)
 
@@ -249,13 +249,13 @@ Hopae writes to **stderr**; stdout carries only the startup lines above.
 Event kinds: `login.started`, `login.succeeded`, `login.failed`,
 `session.created`, `session.handoff`, `handoff.rejected`, `session.terminated`,
 `handle.revoked`, `identity.linked`, `identity.conflict`, `csrf.rejected`,
-`config.loaded`, `admin.providers_import`, `verify.denied`, `provider.error`,
+`config.loaded`, `admin.providers_import`, `verify.denied`, `risk.step_up_required`, `provider.error`,
 `txn.evicted`, `events.dropped`, `sink.backlog_overflow`, and the console's
 `admin.grant`, `admin.revoke`, `admin.user_disable`, `admin.user_enable`,
 `admin.session_terminate`, `admin.sessions_terminate`, `admin.denied`. State-changing kinds
 are written to the database in the same transaction as the change they
 describe and then delivered to the log sink at least once (a line can repeat
-after a crash; `event_id` identifies it). `verify.denied`, `provider.error`,
+after a crash; `event_id` identifies it). `verify.denied`, `risk.step_up_required`, `provider.error`,
 `txn.evicted`, `events.dropped` and `sink.backlog_overflow` are diagnostics:
 best effort, sampled under load, and summarized by `events.dropped` when
 dropped. Allowed verify calls are not logged unless `log.verify_allow` is `true`.
@@ -396,6 +396,9 @@ The older counters keep their names and are exposed as they are
 | `hopae_tls_reloads_total` | `name` (`admin`, `native_gateway`, `grpc_gateway`, `projection_authority`, `provider:<id>`, `provider:<id>:client_assertion`), `result` (`reloaded`, `invalid`) | TLS material changes found by the poller |
 | `hopae_tls_reload_failing` | `name` | Gauge, `1` while the newest material of `name` is invalid and the previous one is still served |
 | `hopae_provider_tls_trust` | `provider`, `source` (`ca_file`, `system`) | Gauge, `1` for the trust source an OIDC provider's client uses |
+| `hopae_risk_decisions_total` | `app`, `level` (`low`, `elevated`, `high`, `absent`, `invalid`), `action` (`allow`, `step_up`, `deny`, `invalid`) | Risk evaluations that decided ([ADR-0023](adr/0023-risk-based-step-up.md)) |
+| `hopae_risk_context_invalid_total` | `reason` (`malformed`, `oversized`, `duplicate`, `signature`, `stale`) | Refused risk contexts; a rise means a broken gateway, a key mismatch, clock skew or tampering |
+| `hopae_risk_memory_entries` | `store` (`sessions`, `users`) | Gauge, entries in the coarse network memory |
 | `hopae_config_reloads_total` | `result` (`reconciled`, `invalid`, `restart_required`) | Changes of the configuration file seen in `authentication.source = config` |
 | `hopae_config_reload_failing` | none | Gauge, `1` while the newest configuration file is invalid and the previous profiles stay in force |
 

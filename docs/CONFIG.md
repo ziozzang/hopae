@@ -372,6 +372,49 @@ with a passkey ([ADR-0021](adr/0021-console-operator-assurance.md)):
 The policy adds two step-up rules to the application; `apps[].step_up[]` of the
 same application still apply.
 
+## Risk-based step-up
+
+Optional `risk` accepts the gateway's signed network evidence on verify
+([ADR-0023](adr/0023-risk-based-step-up.md), [contract](GATEWAY_CONTRACT.md#risk-context)),
+and `apps[].risk` turns it into a step-up or a denial:
+
+```json
+{"risk": {"context_key_env": "HOPAE_RISK_CONTEXT_KEY", "max_skew_secs": 30,
+          "memory": {"max_sessions": 100000, "session_ttl_secs": 86400, "max_users": 100000, "user_ttl_secs": 2592000, "countries_per_user": 8}},
+ "apps": [{"app_id": "app", "risk": {"missing": "ignore", "rules": [
+   {"path_prefix": "/admin", "when": {"level_at_least": "elevated"}, "then": {"step_up": {"aal": 2, "max_age_secs": 600}}},
+   {"when": {"country_changed": true}, "then": {"step_up": {"aal": 2, "max_age_secs": 300}}},
+   {"when": {"outside_zones": ["corp-vpn"], "country_not_in": ["KR"]}, "then": {"step_up": {"aal": 2, "max_age_secs": 900}}},
+   {"when": {"level_at_least": "high"}, "then": "deny"}]}}]}
+```
+
+| Key | Default | Constraint |
+| --- | --- | --- |
+| `risk.context_key_env` | required | Variable holding the HMAC key (32 to 4,096 bytes) the gateway signs contexts with; dedicated, not the caller key |
+| `risk.context_key_next_env` | unset | The next key during a rotation (both are accepted) |
+| `risk.max_skew_secs` | `30` | 5 to 120: the accepted distance between `iat` and Hopae's clock |
+| `risk.memory.max_sessions`, `max_users` | `100000` | 1 to 1,000,000 entries; the oldest is evicted |
+| `risk.memory.session_ttl_secs` | `86400` | 60 s to 30 days: how long a session's last country and ASN are kept |
+| `risk.memory.user_ttl_secs` | `2592000` | 1 hour to 365 days: how long a user's countries are kept |
+| `risk.memory.countries_per_user` | `8` | 1 to 32 most recent countries |
+| `apps[].risk.missing` | `ignore` | Without a context: `ignore`, `deny` (`risk_context_missing`) or `{"step_up": {...}}` |
+| `apps[].risk.rules[]` | none | At most 32. `path_prefix` (optional, as for step-up rules), `when` (all conditions must hold, at least one), `then` |
+| `when.level_at_least` | — | `low`, `elevated`, `high` |
+| `when.country_in`, `country_not_in` | — | ISO 3166-1 alpha-2 upper-case codes (1 to 256); `country_not_in` needs a known country |
+| `when.zone_in`, `outside_zones` | — | Sumunjang zone ids (1 to 64, `[A-Za-z0-9_.:-]{1,128}`, case-sensitive); `outside_zones` holds when none of them matched |
+| `when.reason_in` | — | Sumunjang reason codes (1 to 64) |
+| `when.country_changed`, `asn_changed` | — | `true`: differs from this session's last allowed request (session memory) |
+| `when.new_country` | — | `true`: not among the user's countries within the TTL (and the user has some) |
+| `then` | required | `deny` (`403 risk_denied`), `ignore`, or `{"step_up": {"aal": 2 or 3, "max_age_secs": 30..86400}}`; AAL 3 needs `webauthn.high_assurance` |
+
+A matching step-up rule is added to the application's step-up rules for the
+request and evaluated with them; the freshness is always required, so an AAL 2
+session steps up again when its factor is older. Rules without session
+conditions also apply before authentication (a `high` context is refused
+before a sign-in starts). The memory is per process, keeps only the country and
+ASN, and is updated only by allowed requests. `apps[].risk` needs `risk`, and
+`hopae --check` checks the key variables.
+
 ## WebAuthn passkeys
 
 Optional `webauthn` enables passkeys ([ADR-0017](adr/0017-webauthn-passkeys.md),

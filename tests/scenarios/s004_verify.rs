@@ -464,6 +464,7 @@ pub(crate) mod fx {
                     which: KeySlot::Current,
                 },
                 request_id: "req-test".to_string(),
+                risk_context: Default::default(),
             }
         }
     }

@@ -149,6 +149,23 @@ pub struct VerifyInput {
     pub contract: u8,
     pub caller: CallerAuth,
     pub request_id: String,
+    /// The gateway's risk context header as received (ADR-0023); verified
+    /// by the engine against the request it is bound to.
+    pub risk_context: RiskHeader,
+}
+
+/// `x-hopae-risk-context` on a verify request.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum RiskHeader {
+    #[default]
+    Absent,
+    /// More than one header: never a context.
+    Duplicate,
+    /// The value and the `x-original-url` exactly as received (the MAC binds it).
+    Value {
+        value: Vec<u8>,
+        original_url: String,
+    },
 }
 
 pub struct Identity {
@@ -311,6 +328,10 @@ pub struct VerifyContext {
     pub events: Option<Arc<dyn crate::store::Events>>,
     /// The console operator policy (ADR-0021), when configured.
     pub operator: Option<Arc<super::operator::OperatorRuntime>>,
+    /// The keys risk contexts are accepted under (`risk`, ADR-0023).
+    pub risk_keys: Option<Arc<crate::policy::risk::Keys>>,
+    /// Per-session and per-user coarse network memory (ADR-0023).
+    pub risk_memory: Arc<crate::policy::risk::Memory>,
 }
 
 impl VerifyContext {
@@ -333,6 +354,8 @@ impl VerifyContext {
             emitter: None,
             events: None,
             operator: None,
+            risk_keys: None,
+            risk_memory: Arc::new(crate::policy::risk::Memory::default()),
         }
     }
 
@@ -342,6 +365,18 @@ impl VerifyContext {
         operator: Option<Arc<super::operator::OperatorRuntime>>,
     ) -> Self {
         self.operator = operator;
+        self
+    }
+
+    /// The same context accepting risk contexts under `keys`, remembering
+    /// networks in `memory`.
+    pub fn with_risk(
+        mut self,
+        keys: Option<Arc<crate::policy::risk::Keys>>,
+        memory: Arc<crate::policy::risk::Memory>,
+    ) -> Self {
+        self.risk_keys = keys;
+        self.risk_memory = memory;
         self
     }
 

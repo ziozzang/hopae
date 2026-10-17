@@ -39,6 +39,20 @@ const APP: Node = Obj(&[
     ("logout_confirm", Leaf),
     ("max_emitted_aal", Leaf),
     ("step_up", Arr(&STEP_UP)),
+    (
+        "risk",
+        Obj(&[
+            ("missing", Leaf),
+            (
+                "rules",
+                Arr(&Obj(&[
+                    ("path_prefix", Leaf),
+                    ("when", Leaf),
+                    ("then", Leaf),
+                ])),
+            ),
+        ]),
+    ),
 ]);
 
 const PROVIDER: Node = Obj(&[
@@ -223,6 +237,24 @@ pub(super) const ROOT: Node = Obj(&[
             ("assertion_seed_env", Leaf),
             ("assertion_public_key", Leaf),
             ("assertion_key_id", Leaf),
+        ]),
+    ),
+    (
+        "risk",
+        Obj(&[
+            ("context_key_env", Leaf),
+            ("context_key_next_env", Leaf),
+            ("max_skew_secs", Leaf),
+            (
+                "memory",
+                Obj(&[
+                    ("max_sessions", Leaf),
+                    ("session_ttl_secs", Leaf),
+                    ("max_users", Leaf),
+                    ("user_ttl_secs", Leaf),
+                    ("countries_per_user", Leaf),
+                ]),
+            ),
         ]),
     ),
     (

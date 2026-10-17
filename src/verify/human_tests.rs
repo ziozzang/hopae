@@ -149,6 +149,7 @@ impl Fx {
                 which: KeySlot::Current,
             },
             request_id: "native-capture-test".into(),
+            risk_context: Default::default(),
         }
     }
     async fn login(&self) -> (Secret, HandleView) {

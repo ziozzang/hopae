@@ -235,6 +235,9 @@ pub struct Services {
     pub reload_status: Arc<crate::reload::Status>,
     /// The outbound mTLS material watched by the TLS poller.
     pub(crate) client_tls: Vec<Arc<crate::reload::ClientTls>>,
+    /// Risk contexts' keys and the coarse network memory (ADR-0023).
+    pub risk_keys: Option<Arc<crate::policy::risk::Keys>>,
+    pub risk_memory: Arc<crate::policy::risk::Memory>,
 }
 
 impl Services {
@@ -282,6 +285,7 @@ impl Services {
             &self.config,
             |n| std::env::var(n).ok(),
         ))
+        .with_risk(self.risk_keys.clone(), self.risk_memory.clone())
     }
 
     /// The session service (portal flows) for this process.
@@ -1092,6 +1096,17 @@ async fn bind_environment(
         listeners: Arc::default(),
         reload_status,
         client_tls,
+        risk_keys: cfg.risk.as_ref().map(|r| {
+            let keys = [Some(&r.context_key_env), r.context_key_next_env.as_ref()]
+                .into_iter()
+                .flatten()
+                .filter_map(|name| std::env::var(name).ok())
+                .filter(|v| (32..=4096).contains(&v.len()))
+                .map(String::into_bytes)
+                .collect();
+            Arc::new(crate::policy::risk::Keys::new(keys, r.max_skew()))
+        }),
+        risk_memory: Arc::new(cfg.risk.as_ref().map(|r| r.memory()).unwrap_or_default()),
     };
     #[cfg(feature = "test-hooks")]
     let hooks = match (&env.hooks_addr, &env.test_clock, &env.store_hooks) {

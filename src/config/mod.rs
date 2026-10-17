@@ -82,6 +82,9 @@ pub struct Config {
     /// assertion verify answers with.
     #[serde(default)]
     pub console_operators: Option<ConsoleOperatorsCfg>,
+    /// The gateway's signed risk context (ADR-0023).
+    #[serde(default)]
+    pub risk: Option<crate::policy::risk::RiskCfg>,
     /// The file this configuration was read from (set by [`load`]; never
     /// configured). Live reconciliation polls it.
     #[serde(skip)]
@@ -691,6 +694,9 @@ pub struct AppEntry {
     /// `2` (default) or `3`. `3` needs `webauthn.high_assurance`.
     #[serde(default)]
     pub max_emitted_aal: Option<u8>,
+    /// Risk-based step-up rules (ADR-0023); needs the top-level `risk`.
+    #[serde(default)]
+    pub risk: Option<crate::policy::risk::AppRiskCfg>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1190,6 +1196,9 @@ impl Config {
         }
         self.validate_cookie(&mut errs);
         self.validate_apps(&mut errs);
+        if let Some(r) = &self.risk {
+            r.validate(&mut errs, valid_env_name);
+        }
         self.validate_admin(&mut errs);
         self.validate_providers(&mut errs);
         self.validate_bounds(&mut errs);
@@ -1559,6 +1568,12 @@ impl Config {
                         errs.push(format!("{at}.binding.{name} must be between 1 and {max}"));
                     }
                 }
+            }
+            if let Some(r) = &a.risk {
+                if self.risk.is_none() {
+                    errs.push(format!("{at}.risk needs the top-level risk section"));
+                }
+                r.compile(&at, high_assurance, errs);
             }
             for (k, rule) in a.step_up.iter().enumerate() {
                 match rule.require.aal {
@@ -2009,6 +2024,7 @@ impl Config {
             max_auth_age: Some(limits.max_auth_age),
             // The console never presents AAL 3 (ADR-0018).
             max_emitted_aal: Aal::Two,
+            risk: None,
         })
     }
 
@@ -2274,6 +2290,10 @@ fn resolve_app(entry: Option<&AppEntry>, base: &AppPolicy, cfg: &Config, id: &st
             Some(3) => Aal::Three,
             _ => Aal::Two,
         },
+        risk: match &a.risk {
+            Some(r) => Some(r.compile(id, true, &mut Vec::new())),
+            None => base.risk.clone(),
+        },
     }
 }
 
@@ -2391,6 +2411,20 @@ pub fn check_env(cfg: &Config, lookup: impl Fn(&str) -> Option<String>) -> Vec<S
             && let Err(e) = crate::provider::oidc::trust::load(&files)
         {
             out.push(format!("provider {} tls: {e}", p.provider_id));
+        }
+    }
+    if let Some(r) = &cfg.risk {
+        for (key, name) in [
+            ("risk.context_key_env", Some(&r.context_key_env)),
+            ("risk.context_key_next_env", r.context_key_next_env.as_ref()),
+        ] {
+            if let Some(name) = name
+                && lookup(name).is_none_or(|v| !(32..=4096).contains(&v.len()))
+            {
+                out.push(format!(
+                    "environment variable {name} ({key}) is not set or is not 32 to 4096 bytes"
+                ));
+            }
         }
     }
     if !cfg.gateway.allow_unauthenticated_caller {

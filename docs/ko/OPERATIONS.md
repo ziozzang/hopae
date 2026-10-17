@@ -1,6 +1,6 @@
 # 운영
 
-<!-- translation-status: source=../OPERATIONS.md source-rev=8 status=current -->
+<!-- translation-status: source=../OPERATIONS.md source-rev=9 status=current -->
 
 [문서 목차](README.md) · [English](../OPERATIONS.md)
 
@@ -225,12 +225,12 @@ Hopae는 **stderr**에 기록하며 stdout에는 위의 시작 줄만 나갑니�
 이벤트 종류: `login.started`, `login.succeeded`, `login.failed`,
 `session.created`, `session.handoff`, `handoff.rejected`, `session.terminated`,
 `handle.revoked`, `identity.linked`, `identity.conflict`, `csrf.rejected`,
-`config.loaded`, `admin.providers_import`, `verify.denied`, `provider.error`,
+`config.loaded`, `admin.providers_import`, `verify.denied`, `risk.step_up_required`, `provider.error`,
 `txn.evicted`, `events.dropped`, `sink.backlog_overflow`, 그리고 콘솔의
 `admin.grant`, `admin.revoke`, `admin.user_disable`, `admin.user_enable`,
 `admin.session_terminate`, `admin.sessions_terminate`, `admin.denied`. 상태를 바꾸는 종류는 그
 변경과 같은 트랜잭션으로 데이터베이스에 기록된 뒤 로그 싱크에 최소 한 번 전달됩니다
-(충돌 후 줄이 반복될 수 있으며 `event_id`로 식별합니다). `verify.denied`,
+(충돌 후 줄이 반복될 수 있으며 `event_id`로 식별합니다). `verify.denied`, `risk.step_up_required`,
 `provider.error`, `txn.evicted`, `events.dropped`, `sink.backlog_overflow`는
 진단 이벤트입니다. 최선 노력이고, 부하 시 샘플링되며, 버려지면 `events.dropped`로
 요약됩니다. 허용된 verify 호출은 `log.verify_allow`가 `true`가 아니면 기록하지
@@ -365,6 +365,9 @@ gauge).
 | `hopae_tls_reloads_total` | `name`(`admin`, `native_gateway`, `grpc_gateway`, `projection_authority`, `provider:<id>`, `provider:<id>:client_assertion`), `result`(`reloaded`, `invalid`) | 확인 작업이 찾은 TLS 자료 변경 |
 | `hopae_tls_reload_failing` | `name` | 게이지, `name`의 최신 자료가 잘못되어 이전 자료를 계속 쓰는 동안 `1` |
 | `hopae_provider_tls_trust` | `provider`, `source`(`ca_file`, `system`) | 게이지, OIDC 제공자 클라이언트가 쓰는 신뢰 출처에서 `1` |
+| `hopae_risk_decisions_total` | `app`, `level`(`low`, `elevated`, `high`, `absent`, `invalid`), `action`(`allow`, `step_up`, `deny`, `invalid`) | 결정에 영향을 준 위험 평가([ADR-0023](../adr/0023-risk-based-step-up.md)) |
+| `hopae_risk_context_invalid_total` | `reason`(`malformed`, `oversized`, `duplicate`, `signature`, `stale`) | 거부한 위험 컨텍스트. 늘어나면 게이트웨이 고장, 키 불일치, 시계 차이, 변조 중 하나 |
+| `hopae_risk_memory_entries` | `store`(`sessions`, `users`) | 게이지, 거친 네트워크 메모리의 항목 수 |
 | `hopae_config_reloads_total` | `result`(`reconciled`, `invalid`, `restart_required`) | `authentication.source = config`에서 본 설정 파일 변경 |
 | `hopae_config_reload_failing` | 없음 | 게이지, 최신 설정 파일이 잘못되어 이전 프로필이 유지되는 동안 `1` |
 

@@ -63,6 +63,15 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
   key file with `key_id`, algorithm allowlist intersected with discovery,
   60-second assertions with a random `jti`, `aud` = token endpoint or issuer,
   key hot reload, and `hopae providers jwk <id>` to print the public JWK set.
+- Risk-based step-up ([ADR-0023](docs/adr/0023-risk-based-step-up.md),
+  scenario 495): with `risk`, the gateway sends its network evidence
+  (Sumunjang level, reason, ASN, country, zones, mode) as an HMAC-signed
+  `x-hopae-risk-context` bound to the request's method, client and URL;
+  `apps[].risk.rules` add a step-up with freshness or deny (`risk_denied`) on
+  level, country, zone, reason, a change of country or ASN within the session
+  or a new country for the user (bounded in-process memory of coarse values);
+  invalid contexts are `risk_context_invalid`; explain shows the inputs;
+  `risk.step_up_required` events and `hopae_risk_*` metrics.
 
 - Live reload without a restart (scenario 320,
   [operations](docs/OPERATIONS.md#tls-certificate-renewal)):
