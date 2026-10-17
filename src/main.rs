@@ -180,6 +180,45 @@ enum ProviderAction {
         #[arg(long, value_name = "PROVIDER_ID")]
         force: Option<String>,
     },
+    /// Print the public key of a provider's `client_assertion`
+    /// (`private_key_jwt`) as a JWK set, to register at the identity provider.
+    Jwk {
+        #[arg(value_name = "PROVIDER_ID")]
+        provider: String,
+    },
+}
+
+/// `hopae providers jwk <id>`: the public JWK set of the provider's
+/// client assertion key, on standard output.
+fn providers_jwk(cfg: &Config, id: &str) -> ExitCode {
+    let Some(p) = cfg.providers.iter().find(|p| p.provider_id == id) else {
+        eprintln!("error: no provider {id} in the configuration file");
+        return ExitCode::from(EXIT_CONFIG);
+    };
+    let Some(a) = &p.client_assertion else {
+        eprintln!("error: provider {id} has no client_assertion");
+        return ExitCode::from(EXIT_CONFIG);
+    };
+    let parsed = hopae::provider::oidc::assertion::AssertionCfg::of_config(
+        &serde_json::json!({ "client_assertion": a }),
+    );
+    match parsed
+        .map_err(anyhow::Error::msg)
+        .and_then(|c| c.ok_or_else(|| anyhow::anyhow!("no client_assertion")))
+        .and_then(|c| hopae::provider::oidc::assertion::jwks_of(&c))
+    {
+        Ok(jwks) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&jwks).unwrap_or_default()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::from(EXIT_CONFIG)
+        }
+    }
 }
 
 fn config_failure(msg: impl std::fmt::Display) -> ExitCode {
@@ -224,6 +263,9 @@ fn main() -> ExitCode {
         Some(Command::Providers {
             action: ProviderAction::Import { force },
         }) => providers_import(&cfg, force.as_deref()),
+        Some(Command::Providers {
+            action: ProviderAction::Jwk { provider },
+        }) => providers_jwk(&cfg, &provider),
         Some(Command::Admin { action }) => admin(&cfg, action),
         Some(Command::Run) | None => serve(cfg),
     }

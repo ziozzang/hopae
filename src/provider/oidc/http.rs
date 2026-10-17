@@ -110,7 +110,9 @@ impl Resolve for VettingResolver {
 
 #[derive(Clone)]
 pub struct Fetcher {
-    client: reqwest::Client,
+    /// Swapped when the provider's TLS material is reloaded; a request is
+    /// executed by the client current when it is sent.
+    client: Arc<arc_swap::ArcSwap<reqwest::Client>>,
     ready: bool,
     allow_private: bool,
     circuits: Arc<Circuits>,
@@ -122,10 +124,31 @@ impl Fetcher {
     pub fn new(allow_private: bool) -> Fetcher {
         // A failed TLS/client initialization fences every send. The fallback
         // only constructs request builders; it must never perform an exchange.
+        let (client, ready) = match Self::provider_client(allow_private, None) {
+            Ok(client) => (client, true),
+            Err(_) => (reqwest::Client::default(), false),
+        };
+        Fetcher {
+            client: Arc::new(arc_swap::ArcSwap::from_pointee(client)),
+            ready,
+            allow_private,
+            circuits: Arc::new(Circuits {
+                started: Instant::now(),
+                by_origin: Mutex::new(HashMap::new()),
+            }),
+        }
+    }
+
+    /// The OIDC provider client: no environment proxy (a proxy resolves the
+    /// destination itself, which would bypass the address vetting,
+    /// G7-IDP-03), no redirects, the hard timeout; with `material`, only its
+    /// CA (when it has one) is trusted and its client certificate is
+    /// presented. Certificate and host-name verification always stay on.
+    fn provider_client(
+        allow_private: bool,
+        material: Option<&super::trust::Material>,
+    ) -> reqwest::Result<reqwest::Client> {
         let mut builder = reqwest::Client::builder()
-            // No automatic environment proxy (HTTP_PROXY, HTTPS_PROXY, ALL_PROXY):
-            // a proxy resolves the destination itself, which would bypass the
-            // address vetting below (G7-IDP-03).
             .no_proxy()
             .redirect(Policy::none())
             .timeout(REQUEST_TIMEOUT)
@@ -134,19 +157,42 @@ impl Fetcher {
         if !allow_private {
             builder = builder.dns_resolver(std::sync::Arc::new(VettingResolver));
         }
-        let (client, ready) = match builder.build() {
-            Ok(client) => (client, true),
-            Err(_) => (reqwest::Client::default(), false),
-        };
-        Fetcher {
-            client,
-            ready,
-            allow_private,
-            circuits: Arc::new(Circuits {
-                started: Instant::now(),
-                by_origin: Mutex::new(HashMap::new()),
-            }),
+        if let Some(m) = material {
+            if !m.roots.is_empty() {
+                builder = builder.tls_built_in_root_certs(false);
+                for root in &m.roots {
+                    builder = builder.add_root_certificate(root.clone());
+                }
+            }
+            if let Some(identity) = &m.identity {
+                builder = builder.identity(identity.clone());
+            }
         }
+        builder.build()
+    }
+
+    /// A provider client with its own TLS material (a private CA, a client
+    /// certificate). An unusable material is an error, never a fallback to
+    /// the built-in roots.
+    pub fn with_material(
+        allow_private: bool,
+        material: &super::trust::Material,
+    ) -> anyhow::Result<Fetcher> {
+        let client = Self::provider_client(allow_private, Some(material))
+            .map_err(|_| anyhow::anyhow!("the provider TLS client could not be built"))?;
+        let mut f = Fetcher::new(allow_private);
+        f.client = Arc::new(arc_swap::ArcSwap::from_pointee(client));
+        f.ready = true;
+        Ok(f)
+    }
+
+    /// Swap in a client built from reloaded material; new requests use it,
+    /// requests in flight finish on the previous one.
+    pub fn install(&self, material: &super::trust::Material) -> anyhow::Result<()> {
+        let client = Self::provider_client(self.allow_private, Some(material))
+            .map_err(|_| anyhow::anyhow!("the provider TLS client could not be built"))?;
+        self.client.store(Arc::new(client));
+        Ok(())
     }
 
     /// Dedicated HTTPS verifier client. Caller admission bounds active requests;
@@ -173,9 +219,11 @@ impl Fetcher {
             builder = builder.add_root_certificate(root);
         }
         Ok(Self {
-            client: builder
-                .build()
-                .map_err(|_| ProviderError::ProviderUnavailable)?,
+            client: Arc::new(arc_swap::ArcSwap::from_pointee(
+                builder
+                    .build()
+                    .map_err(|_| ProviderError::ProviderUnavailable)?,
+            )),
             ready: true,
             allow_private,
             circuits: Arc::new(Circuits {
@@ -186,11 +234,11 @@ impl Fetcher {
     }
 
     pub fn get(&self, url: &url::Url) -> reqwest::RequestBuilder {
-        self.client.get(url.clone())
+        self.client.load().get(url.clone())
     }
 
     pub fn post(&self, url: &url::Url) -> reqwest::RequestBuilder {
-        self.client.post(url.clone())
+        self.client.load().post(url.clone())
     }
 
     /// Send and read at most [`MAX_BODY_BYTES`]. A 3xx answer is returned as
@@ -219,7 +267,8 @@ impl Fetcher {
             return Err(ProviderError::ProviderUnavailable);
         }
         let exchange = self.circuits.admit(request.url())?;
-        let mut resp = self.client.execute(request).await.map_err(classify)?;
+        let client = self.client.load_full();
+        let mut resp = client.execute(request).await.map_err(classify)?;
         let status = resp.status().as_u16();
         let content_type = resp
             .headers()

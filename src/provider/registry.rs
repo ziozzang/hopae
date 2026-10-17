@@ -758,6 +758,8 @@ mod tests {
             scope: String::new(),
             endpoint_hosts: vec![],
             allow_private_endpoints: None,
+            tls: None,
+            client_assertion: None,
             allowed_email_domains: vec![],
             authoritative_domains: vec![],
             auto_link: false,

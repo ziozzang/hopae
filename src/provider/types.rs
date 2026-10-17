@@ -262,6 +262,11 @@ pub trait Provider: Send + Sync {
     }
     /// Origin of the authorization endpoint from the discovery already held
     /// (never fetched here), for the portal's per-page CSP `form-action`.
+    /// The outbound TLS trust of the provider (OIDC: its CA source and client
+    /// certificate), for the admin status. `None` for kinds without one.
+    fn tls_status(&self) -> Option<serde_json::Value> {
+        None
+    }
     fn authorization_origin(&self) -> Option<url::Origin> {
         None
     }

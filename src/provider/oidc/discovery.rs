@@ -39,6 +39,13 @@ pub struct Discovery {
     /// implements (RS256 when the document is silent).
     pub algs: Vec<Algorithm>,
     pub token_auth: TokenAuth,
+    /// `mtls_endpoint_aliases.token_endpoint` (RFC 8705 section 5), used
+    /// when the provider presents a client certificate.
+    pub mtls_token_endpoint: Option<url::Url>,
+    /// `token_endpoint_auth_methods_supported`, when listed.
+    pub token_auth_methods: Option<Vec<String>>,
+    /// `token_endpoint_auth_signing_alg_values_supported`, when listed.
+    pub token_auth_signing_algs: Option<Vec<String>>,
 }
 
 /// `<issuer>/.well-known/openid-configuration` (OpenID Connect Discovery 4).
@@ -119,7 +126,32 @@ impl Discovery {
             None | Some(Value::Null) => None,
             Some(_) => Some(endpoint(&doc, "userinfo_endpoint", policy)?),
         };
+        let mtls_token_endpoint = match doc.get("mtls_endpoint_aliases") {
+            None | Some(Value::Null) => None,
+            Some(aliases @ Value::Object(_)) => match aliases.get("token_endpoint") {
+                None | Some(Value::Null) => None,
+                Some(_) => Some(endpoint(aliases, "token_endpoint", policy)?),
+            },
+            Some(_) => return Err(ProviderError::ProviderResponseInvalid),
+        };
+        let strings = |key: &str| -> Result<Option<Vec<String>>, ProviderError> {
+            match doc.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::Array(a)) if a.len() <= 64 => a
+                    .iter()
+                    .map(|v| v.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>()
+                    .map(Some)
+                    .ok_or(ProviderError::ProviderResponseInvalid),
+                Some(_) => Err(ProviderError::ProviderResponseInvalid),
+            }
+        };
+        let token_auth_methods = strings("token_endpoint_auth_methods_supported")?;
+        let token_auth_signing_algs = strings("token_endpoint_auth_signing_alg_values_supported")?;
         Ok(Discovery {
+            mtls_token_endpoint,
+            token_auth_methods,
+            token_auth_signing_algs,
             issuer: configured_issuer.to_string(),
             authorization_endpoint: endpoint(&doc, "authorization_endpoint", policy)?,
             token_endpoint: endpoint(&doc, "token_endpoint", policy)?,
@@ -237,6 +269,51 @@ mod tests {
 
     fn parse(v: &Value) -> Result<Discovery, ProviderError> {
         Discovery::parse(v.to_string().as_bytes(), ISS, &policy(&[]))
+    }
+
+    #[test]
+    fn the_mtls_token_alias_is_read_and_held_to_the_endpoint_policy() {
+        let policy = EndpointPolicy::new("https://idp.example.test", &[], false);
+        let doc = |aliases: serde_json::Value| {
+            serde_json::to_vec(&serde_json::json!({
+                "issuer": "https://idp.example.test",
+                "authorization_endpoint": "https://idp.example.test/a",
+                "token_endpoint": "https://idp.example.test/t",
+                "jwks_uri": "https://idp.example.test/j",
+                "mtls_endpoint_aliases": aliases,
+            }))
+            .unwrap()
+        };
+        let d = Discovery::parse(
+            &doc(serde_json::json!({"token_endpoint": "https://idp.example.test/mtls/t"})),
+            "https://idp.example.test",
+            &policy,
+        )
+        .unwrap();
+        assert_eq!(d.mtls_token_endpoint.unwrap().path(), "/mtls/t");
+        let d = Discovery::parse(
+            &doc(serde_json::json!({})),
+            "https://idp.example.test",
+            &policy,
+        )
+        .unwrap();
+        assert!(d.mtls_token_endpoint.is_none());
+        assert!(
+            Discovery::parse(
+                &doc(serde_json::json!({"token_endpoint": "https://elsewhere.example.test/t"})),
+                "https://idp.example.test",
+                &policy
+            )
+            .is_err()
+        );
+        assert!(
+            Discovery::parse(
+                &doc(serde_json::json!("x")),
+                "https://idp.example.test",
+                &policy
+            )
+            .is_err()
+        );
     }
 
     #[test]
