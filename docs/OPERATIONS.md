@@ -1,6 +1,6 @@
 # Operations
 
-<!-- doc-rev: 6 -->
+<!-- doc-rev: 8 -->
 
 [Documentation](README.md) · [한국어](ko/OPERATIONS.md)
 
@@ -208,6 +208,18 @@ a directory (not `subPath`) and point the configuration at `tls.crt`,
 - A rotated client CA admits the clients it signs on their next handshake and
   refuses the old ones; rotate a CA by publishing a bundle with both
   certificates first.
+- An OIDC provider's own trust (`providers[].tls`: a private CA, a client
+  certificate) follows its files the same way, every `reload.tls_interval_secs`
+  (`0` turns it off), under the name `provider:<id>` (`hopae_tls_reloads_total`,
+  `hopae_tls_reload_failing`); a `private_key_jwt` key file
+  (`providers[].client_assertion`) under `provider:<id>:client_assertion`.
+  Rotate an assertion key by registering the new public key at the provider
+  first (`hopae providers jwk <id>` prints it), then replacing the file. A
+  valid change rebuilds the provider's client; requests in flight finish on
+  the previous one. `GET /v1/status` → `providers[].tls` shows the trust source
+  (`ca_file` or `system`), the CA and client certificate fingerprints,
+  `reloads`, `failing` and `error`; `hopae_provider_tls_trust{provider,source}`
+  is `1` for the source in use. `hopae --check` reads and checks the files.
 
 ### Provider secret rotation
 
@@ -309,8 +321,9 @@ protected routes). The counter names, fixed for the later exposition:
 | `hopae_event_deliveries_failed_total` | `sink`, `reason` | Deliveries given up (`retries_exhausted`, `backlog_overflow`, `pruned`) |
 | `hopae_build_info` | `version` | Gauge, always `1` |
 | `hopae_config_loaded_timestamp` | none | Gauge, unix seconds of the last configuration load |
-| `hopae_tls_reloads_total` | `name` (`admin`, `native_gateway`, `grpc_gateway`, `projection_authority`), `result` (`reloaded`, `invalid`) | TLS material changes found by the poller |
+| `hopae_tls_reloads_total` | `name` (`admin`, `native_gateway`, `grpc_gateway`, `projection_authority`, `provider:<id>`, `provider:<id>:client_assertion`), `result` (`reloaded`, `invalid`) | TLS material changes found by the poller |
 | `hopae_tls_reload_failing` | `name` | Gauge, `1` while the newest material of `name` is invalid and the previous one is still served |
+| `hopae_provider_tls_trust` | `provider`, `source` (`ca_file`, `system`) | Gauge, `1` for the trust source an OIDC provider's client uses |
 | `hopae_config_reloads_total` | `result` (`reconciled`, `invalid`, `restart_required`) | Changes of the configuration file seen in `authentication.source = config` |
 | `hopae_config_reload_failing` | none | Gauge, `1` while the newest configuration file is invalid and the previous profiles stay in force |
 

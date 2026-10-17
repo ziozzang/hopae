@@ -10,6 +10,22 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- OIDC providers behind a private CA (`providers[].tls`): `ca_file` replaces
+  the built-in roots for that provider (discovery, JWKS, token, user-info;
+  host-name verification kept), and `client_certificate_file` +
+  `client_key_file` present a client certificate (mutual TLS, RFC 8705
+  `tls_client_auth`, `mtls_endpoint_aliases.token_endpoint` honoured). The
+  files are re-read every `reload.tls_interval_secs` by content digest (invalid material keeps the
+  previous client, `hopae_tls_reload_failing{name="provider:<id>"}`), checked
+  by `hopae --check`, and shown in `GET /v1/status` (`providers[].tls`) and
+  `hopae_provider_tls_trust{provider,source}`. Configuration-file providers
+  only.
+- `private_key_jwt` client authentication for OIDC providers
+  (`providers[].client_assertion`, RFC 7523): RSA, EC P-256/P-384 or Ed25519
+  key file with `key_id`, algorithm allowlist intersected with discovery,
+  60-second assertions with a random `jti`, `aud` = token endpoint or issuer,
+  key hot reload, and `hopae providers jwk <id>` to print the public JWK set.
+
 - Live reload without a restart (scenario 320,
   [operations](docs/OPERATIONS.md#tls-certificate-renewal)):
   - TLS: the administrator listener, the native and gRPC gateways and the

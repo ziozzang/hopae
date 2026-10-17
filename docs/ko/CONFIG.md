@@ -1,6 +1,6 @@
 # 설정 참조
 
-<!-- translation-status: source=../CONFIG.md source-rev=43 status=current -->
+<!-- translation-status: source=../CONFIG.md source-rev=45 status=current -->
 
 [문서 목차](README.md) · [English](../CONFIG.md)
 
@@ -147,6 +147,9 @@ ADR에서 결정되었지만 지금은 알 수 없는 키로 거부되는 키를
 | `providers[].scope` | 문자열 | `openid email profile` | 비어 있으면 안 됩니다. |
 | `providers[].endpoint_hosts` | 호스트 배열 | `[]` | 발급자 자신의 호스트 외에 제공자의 디스커버리 문서가 가리킬 수 있는 호스트(인가, 토큰, 사용자 정보, 키 엔드포인트는 `https`여야 하고 발급자의 호스트이거나 여기 나열된 호스트여야 하며, 스킴과 포트 없는 호스트 이름 또는 IP 주소). `google` 프리셋은 자신의 목록을 가집니다. |
 | `providers[].allow_private_endpoints` | 불리언 | 미설정(`false`) | 개발용 및 사설 인증 제공자 전용: 루프백, 사설, 링크 로컬, CGNAT, 멀티캐스트 주소에 대한 연결 시점 거부를 해제하고 루프백 발급자에 대한 `http://`를 허용합니다. 설정하지 않으면 그런 주소는 거부되며 연결은 검증된 주소로만 갑니다. 명시적 `false`는 `test-hooks` 빌드에서도 항상 우선합니다. 제공자 요청은 `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`를 사용하지 않습니다. |
+| `providers[].tls.ca_file` | 문자열, 절대 경로 | 미설정(기본 제공 루트) | OIDC 전용, 설정 파일에서만(관리 API로 만든 제공자는 파일을 지정할 수 없음). 사내 PKI 뒤의 내부 인증 제공자(Keycloak, Authentik, ADFS) 인증서에 서명하는 사설 CA의 PEM 묶음(인증서 1–64개). 이 제공자에 대해 기본 제공 루트를 **대체**하며, 인증서와 호스트 이름 검증은 그대로 유지됩니다. discovery, JWKS, 토큰, user-info 요청 모두 이를 씁니다. `reload.tls_interval_secs`(기본 10초, `0`이면 끔)마다 내용 다이제스트로 다시 읽습니다([TLS 인증서 갱신](OPERATIONS.md#tls-인증서-갱신)). 시작할 때 파일을 읽을 수 없거나 잘못되었으면 제공자를 끄며(`tls_invalid`) 기본 제공 루트로 돌아가지 않습니다. |
+| `providers[].tls.client_certificate_file`, `providers[].tls.client_key_file` | 문자열, 절대 경로 | 미설정 | 함께 지정: 제공자에게 제시하는 클라이언트 인증서 체인과 키(상호 TLS, RFC 8705 `tls_client_auth`. `client_secret_env`를 생략하면 토큰 요청에는 `client_id`만 실립니다). discovery가 `mtls_endpoint_aliases.token_endpoint`를 알리면 토큰 요청에 그것을 씁니다. 키는 인증서와 맞아야 합니다. `ca_file`처럼 다시 읽습니다. |
+| `providers[].client_assertion` | 객체 | 미설정 | OIDC 전용, 설정 파일에서만, `client_secret_env`와 함께 쓸 수 없음. `private_key_jwt` 클라이언트 인증(RFC 7523): 토큰 요청에 `key_file`(절대 경로, PEM: 2048비트 이상 RSA PKCS#1/PKCS#8, EC P-256/P-384 PKCS#8, Ed25519 PKCS#8)로 서명하고 헤더에 `key_id`(인쇄 가능한 문자 1–128자)를 담은 JWT를 싣습니다. 클레임: `iss` = `sub` = `client_id`, `aud` = 토큰 엔드포인트(`audience: "token_endpoint"`, 기본) 또는 발급자(`audience: "issuer"`), `iat`, `exp` = `iat` + 60초, 요청마다 무작위 128비트 `jti`. `algorithms`(`RS256`, `PS256`, `ES256`, `ES384`, `EdDSA`. 기본은 키가 서명할 수 있는 것)는 discovery의 `token_endpoint_auth_signing_alg_values_supported`가 있으면 순서대로 그것과 교집합을 냅니다. 공통 알고리즘이 없거나 discovery의 `token_endpoint_auth_methods_supported`에 `private_key_jwt`가 없으면 요청을 거부합니다. 키 파일은 TLS 파일처럼 다시 읽습니다. `hopae --config … providers jwk <provider_id>`는 제공자에 등록할 공개 키를 JWK 집합으로 출력합니다. 키를 쓸 수 없으면 제공자를 끕니다(`client_assertion_invalid`). |
 | `providers[].allowed_email_domains` | 도메인 배열 | `[]` | 평범한 도메인 이름. 비어 있지 않으면 그 이메일 도메인으로만 로그인을 제한합니다. 신원 계층이 강제하며 검증된 이메일 주소만 고려합니다. |
 | `providers[].authoritative_domains` | 도메인 배열 | `[]` | 이 제공자가 이메일에 대해 권위를 갖는 도메인([ADR-0011](../adr/0011-account-linking-policy.md)). |
 | `providers[].auto_link` | 불리언 | `false` | 정책이 허용하면 확인 없이 로그인을 기존 사용자에 연결합니다. |

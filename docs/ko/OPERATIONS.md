@@ -1,6 +1,6 @@
 # 운영
 
-<!-- translation-status: source=../OPERATIONS.md source-rev=6 status=current -->
+<!-- translation-status: source=../OPERATIONS.md source-rev=8 status=current -->
 
 [문서 목차](README.md) · [English](../OPERATIONS.md)
 
@@ -188,6 +188,16 @@ mTLS 클라이언트는 자기 파일을 따라갑니다. Hopae는 `reload.tls_i
   만료 전에 갱신되지 않는 인증서에 경보를 거세요.
 - 교체한 클라이언트 CA는 다음 핸드셰이크부터 자신이 서명한 클라이언트를 받아들이고 이전
   클라이언트를 거부합니다. CA를 교체할 때는 두 인증서를 모두 담은 묶음을 먼저 게시하세요.
+- OIDC 제공자 자체의 신뢰(`providers[].tls`: 사설 CA, 클라이언트 인증서)도 같은 방식으로
+  `reload.tls_interval_secs`(`0`이면 끔)마다 파일을 따라가며 이름은 `provider:<id>`입니다
+  (`hopae_tls_reloads_total`, `hopae_tls_reload_failing`). `private_key_jwt` 키 파일
+  (`providers[].client_assertion`)의 이름은 `provider:<id>:client_assertion`입니다.
+  assertion 키를 바꿀 때는 새 공개 키를 먼저 제공자에 등록하고(`hopae providers jwk <id>`가
+  출력) 그다음 파일을 교체합니다. 유효한 변경은 제공자의 클라이언트를 새로 만들고, 진행 중인
+  요청은 이전 클라이언트로 끝납니다. `GET /v1/status`의 `providers[].tls`는 신뢰 출처
+  (`ca_file` 또는 `system`), CA와 클라이언트 인증서 지문, `reloads`, `failing`, `error`를
+  보여 주며, `hopae_provider_tls_trust{provider,source}`는 사용 중인 출처에서 `1`입니다.
+  `hopae --check`는 파일을 읽어 검사합니다.
 
 ### 제공자 비밀 값 교체
 
@@ -284,8 +294,9 @@ Hopae는 프로세스 내 카운터를 유지합니다. M7 이전에는 **운영
 | `hopae_event_deliveries_failed_total` | `sink`, `reason` | 포기한 전달(`retries_exhausted`, `backlog_overflow`, `pruned`) |
 | `hopae_build_info` | `version` | 게이지, 항상 `1` |
 | `hopae_config_loaded_timestamp` | 없음 | 게이지, 마지막 설정 로드의 유닉스 초 |
-| `hopae_tls_reloads_total` | `name`(`admin`, `native_gateway`, `grpc_gateway`, `projection_authority`), `result`(`reloaded`, `invalid`) | 확인 작업이 찾은 TLS 자료 변경 |
+| `hopae_tls_reloads_total` | `name`(`admin`, `native_gateway`, `grpc_gateway`, `projection_authority`, `provider:<id>`, `provider:<id>:client_assertion`), `result`(`reloaded`, `invalid`) | 확인 작업이 찾은 TLS 자료 변경 |
 | `hopae_tls_reload_failing` | `name` | 게이지, `name`의 최신 자료가 잘못되어 이전 자료를 계속 쓰는 동안 `1` |
+| `hopae_provider_tls_trust` | `provider`, `source`(`ca_file`, `system`) | 게이지, OIDC 제공자 클라이언트가 쓰는 신뢰 출처에서 `1` |
 | `hopae_config_reloads_total` | `result`(`reconciled`, `invalid`, `restart_required`) | `authentication.source = config`에서 본 설정 파일 변경 |
 | `hopae_config_reload_failing` | 없음 | 게이지, 최신 설정 파일이 잘못되어 이전 프로필이 유지되는 동안 `1` |
 

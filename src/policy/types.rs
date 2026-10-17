@@ -205,6 +205,33 @@ impl Default for SessionPolicy {
     }
 }
 
+/// `providers[].tls`: absolute paths of a private CA bundle (replacing the
+/// built-in roots) and of a client certificate and key presented to the
+/// provider (mutual TLS); reloaded when they change.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderTls {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_file: Option<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_certificate_file: Option<std::path::PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key_file: Option<std::path::PathBuf>,
+}
+
+/// `providers[].client_assertion`: `private_key_jwt` client authentication
+/// (RFC 7523) with a key file instead of a client secret.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderClientAssertion {
+    pub key_file: std::path::PathBuf,
+    pub key_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub algorithms: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+}
+
 /// A provider as written in the configuration file (`providers[]`); mirrored
 /// into the `providers` table by the import rule of ADR-0010.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -225,6 +252,10 @@ pub struct ProviderConfig {
     pub endpoint_hosts: Vec<String>,
     /// `None` = unset (the build default applies).
     pub allow_private_endpoints: Option<bool>,
+    /// `providers[].tls`: a private CA and a client certificate (OIDC).
+    pub tls: Option<ProviderTls>,
+    /// `providers[].client_assertion`: `private_key_jwt` (OIDC).
+    pub client_assertion: Option<ProviderClientAssertion>,
     pub allowed_email_domains: Vec<String>,
     pub authoritative_domains: Vec<String>,
     pub auto_link: bool,
