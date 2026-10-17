@@ -80,6 +80,10 @@ pub fn evaluate(
 ) -> StepUpVerdict {
     for rule in rules.iter().filter(|r| rule_matches(r, canonical_path)) {
         let satisfied_at = match rule.aal {
+            // A factor-kind rule (ADR-0021): only that factor meets it.
+            Aal::One | Aal::Two if rule.factor.is_some() => {
+                latest_of(factors, &[rule.factor.expect("checked")], now)
+            }
             // A recovery code is AAL 1 evidence only: it never satisfies or
             // refreshes an AAL 2 rule (ADR-0017 decision 9).
             Aal::Two => latest_of(
@@ -92,7 +96,7 @@ pub fn evaluate(
             _ => (auth_time <= now).then_some(auth_time),
         };
         // The stored level a rule needs: AAL 3 is a qualified AAL 2 session.
-        let stored = if rule.aal == Aal::One {
+        let stored = if rule.aal == Aal::One && rule.factor.is_none() {
             Aal::One
         } else {
             Aal::Two
@@ -118,6 +122,8 @@ mod tests {
             path_prefix: prefix.map(str::to_string),
             aal,
             max_age: max_age.map(Duration::from_secs),
+            factor: None,
+            enrollment_grace: false,
         }
     }
 
@@ -223,6 +229,39 @@ mod tests {
         ));
         assert_eq!(required_level(&rules, "/vault/x"), Some(Aal::Three));
         assert_eq!(required_level(&rules, "/x"), None);
+    }
+
+    #[test]
+    fn a_factor_rule_is_met_only_by_that_factor() {
+        let mut r = rule(None, Aal::Two, Some(600));
+        r.factor = Some(FactorKind::Webauthn);
+        let rules = [r];
+        let t0 = Timestamp(1_000_000);
+        let now = t0.add(Duration::from_secs(60));
+        let f = |kind| FactorEntry {
+            kind,
+            provider: None,
+            at: t0,
+        };
+        let totp = [f(FactorKind::Totp)];
+        let passkey = [f(FactorKind::Webauthn)];
+        let later = t0.add(Duration::from_secs(601));
+        assert!(matches!(
+            evaluate(&rules, "/x", Aal::Two, false, t0, &totp, now),
+            StepUpVerdict::Required { .. }
+        ));
+        assert_eq!(
+            evaluate(&rules, "/x", Aal::Two, false, t0, &passkey, now),
+            StepUpVerdict::NotRequired
+        );
+        assert!(matches!(
+            evaluate(&rules, "/x", Aal::One, false, t0, &passkey, now),
+            StepUpVerdict::Required { .. }
+        ));
+        assert!(matches!(
+            evaluate(&rules, "/x", Aal::Two, false, t0, &passkey, later),
+            StepUpVerdict::Required { .. }
+        ));
     }
 
     #[test]

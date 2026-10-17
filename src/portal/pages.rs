@@ -571,12 +571,19 @@ pub struct StepUpPasskeyPage<'a> {
     /// The page needs a high-assurance security key (an AAL 3 rule,
     /// ADR-0018): only such keys are offered and no other method is listed.
     pub high_assurance: bool,
+    /// Only passkeys are offered (ADR-0021).
+    pub passkey_only: bool,
 }
 
-/// An AAL 3 step-up for a user without a qualifying security key.
+/// A step-up only a passkey can satisfy, for a user without a qualifying
+/// one: a high-assurance key (AAL 3) or any passkey (ADR-0021).
 #[derive(Template)]
 #[template(path = "stepup_high_assurance.html")]
 pub struct StepUpHighAssurancePage<'a> {
     pub t: &'a Strings,
     pub request_id: &'a str,
+    pub title_key: &'a str,
+    pub body_key: &'a str,
+    pub setup_key: &'a str,
+    pub setup_href: &'a str,
 }

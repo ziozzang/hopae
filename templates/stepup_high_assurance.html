@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}{{ t.get("stepup.high_assurance_title") }}{% endblock %}
+{% block title %}{{ t.get(title_key) }}{% endblock %}
 {% block content %}
-<h1>{{ t.get("stepup.high_assurance_title") }}</h1>
-<p class="error" role="alert">{{ t.get("stepup.high_assurance_missing") }}</p>
+<h1>{{ t.get(title_key) }}</h1>
+<p class="error" role="alert">{{ t.get(body_key) }}</p>
 <ul class="links">
-<li><a href="/security/passkeys">{{ t.get("stepup.high_assurance_setup") }}</a></li>
+<li><a href="{{ setup_href }}">{{ t.get(setup_key) }}</a></li>
 </ul>
 {% endblock %}

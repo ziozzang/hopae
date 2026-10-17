@@ -164,6 +164,8 @@ pub struct Identity {
     pub aal: Aal,
     pub factors: Vec<FactorEntry>,
     pub generations: Generations,
+    /// `x-hopae-operator-assertion` for the console operator application.
+    pub operator_assertion: Option<String>,
 }
 
 pub enum Cacheability {
@@ -307,6 +309,8 @@ pub struct VerifyContext {
     pub emitter: Option<crate::event::bus::Emitter>,
     /// For required events with no state change (a rate-limited redemption).
     pub events: Option<Arc<dyn crate::store::Events>>,
+    /// The console operator policy (ADR-0021), when configured.
+    pub operator: Option<Arc<super::operator::OperatorRuntime>>,
 }
 
 impl VerifyContext {
@@ -328,7 +332,17 @@ impl VerifyContext {
             deadline: None,
             emitter: None,
             events: None,
+            operator: None,
         }
+    }
+
+    /// The same context applying the console operator policy (ADR-0021).
+    pub fn with_operator(
+        mut self,
+        operator: Option<Arc<super::operator::OperatorRuntime>>,
+    ) -> Self {
+        self.operator = operator;
+        self
     }
 
     /// The same context counting its required events through `emitter` and

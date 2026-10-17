@@ -617,6 +617,7 @@ fn identity() -> Identity {
             provider: Some(ProviderId::new("mock")),
             at: Timestamp(1_800_000_000_000),
         }],
+        operator_assertion: None,
         generations: Generations {
             session: 2,
             user: 3,
