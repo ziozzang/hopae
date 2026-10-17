@@ -1,6 +1,6 @@
 # Administration
 
-<!-- doc-rev: 9 -->
+<!-- doc-rev: 10 -->
 
 [Documentation](README.md) · [한국어](ko/ADMIN.md)
 
@@ -467,7 +467,7 @@ Exposition is M7; a `test-hooks` build exposes them meanwhile (see
 ### Hangang console routes
 
 With `admin.hangang_delegation`, the Hangang console broker calls these routes
-of the console package (`plugins/hopae/manifest.json`, version 0.1.10) as
+of the console package (`plugins/hopae/manifest.json`, version 0.1.11) as
 signed `POST`s; the adapter checks the signature, the replay window and the
 body, then forwards the request to the native endpoint, where the grant (or
 the Hangang authority), the JSON API rule, the role and the write fence apply
@@ -489,7 +489,7 @@ answer (`400 invalid_filter`, …).
 | `authentication/profiles`, `authentication/projections` | no | none (`GET`) | `GET /v1/authentication/profiles`, `/projections` |
 | `authentication/profiles/publish`, `authentication/projections/publish` | yes | `{revision, configuration, reason}` | `PUT …` with `If-Match` |
 | `authentication/profiles/validate` | no | `{configuration}` | `POST /v1/authentication/profiles/validate` |
-| `subjects/resolve`, `subjects/search`, `subjects/lifecycle`, `subjects/lifecycle/snapshot`, `explain/authentication` | no | as the native endpoint | the same path |
+| `subjects/resolve`, `subjects/search`, `subjects/lifecycle`, `subjects/lifecycle/snapshot`, `subjects/workloads/snapshot`, `explain/authentication` | no | as the native endpoint | the same path |
 | `groups/search`, `groups/get`, `subjects/groups` | no | as the native endpoint | the same path |
 | `groups/create`, `groups/update`, `groups/delete`, `groups/members/add`, `groups/members/remove` | yes | as the native endpoint | the same path |
 

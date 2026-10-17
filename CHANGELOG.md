@@ -10,6 +10,9 @@ project adheres to [Semantic Versioning 2.0.0](https://semver.org/).
 
 ### Added
 
+- Console package 0.1.11 declares `subjects/workloads/snapshot` (`POST`,
+  not a mutation) for the console's Workloads section; the delegation
+  adapter already forwarded it to `POST /v1/subjects/workloads/snapshot`.
 - Live reload without a restart (scenario 320,
   [operations](docs/OPERATIONS.md#tls-certificate-renewal)):
   - TLS: the administrator listener, the native and gRPC gateways and the
